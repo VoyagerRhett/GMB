@@ -119,7 +119,7 @@ std::string session_of(const Response &response) {
 }
 std::unique_ptr<::flutter::Plugin> attach(Messenger &messenger,
                                          const std::shared_ptr<csf::test::FakeTransport> &native) {
-  return csf::register_plugin(&messenger, nullptr, [] { return csf::OpenEnvironment{}; },
+  return csf::register_plugin(&messenger, nullptr, [](uint32_t) { return csf::OpenEnvironment{}; },
       [native](const citizen_sdk::Config &) { return native; });
 }
 void exactly(const std::shared_ptr<Response> &response, bool success, const char *code = "") {
@@ -130,13 +130,47 @@ void exactly(const std::shared_ptr<Response> &response, bool success, const char
 
 int main() {
   const auto initial_dispatchers = csf::plugin_dispatcher_count();
+  {
+    Messenger messenger;
+    int environments = 0;
+    int transports = 0;
+    auto plugin = csf::register_plugin(&messenger, nullptr,
+        [&](uint32_t) { ++environments; return csf::OpenEnvironment{}; },
+        [&](const citizen_sdk::Config &) {
+          ++transports; return std::make_shared<csf::test::FakeTransport>();
+        });
+    csf::Value::Bytes signature(64);
+    signature.back() = 0x80;
+    const auto verified = messenger.call(csf::kMethodChannel, "verifySignature",
+        csf::test::list({csf::Value::integer(1), csf::Value::string("0x2afba9278e30ccf6a6ceb3a8b6e336b70068f045c666f2e7f4f9cc5f47db8972"),
+                        csf::Value::bytes(signature), csf::Value::bytes({})}));
+    exactly(verified, true);
+    const auto result = csf::from_encodable_value(verified->value);
+    assert(csf::test::items(result).size() == 2 &&
+           !std::get<bool>(csf::test::items(result)[1].data));
+    signature.pop_back();
+    const auto rejected = messenger.call(csf::kMethodChannel, "verifySignature",
+        csf::test::list({csf::Value::integer(1), csf::Value::string("0x2afba9278e30ccf6a6ceb3a8b6e336b70068f045c666f2e7f4f9cc5f47db8972"),
+                        csf::Value::bytes(signature), csf::Value::bytes({})}));
+    exactly(rejected, false, "citizensdk.invalidArgument");
+    const auto error = csf::from_encodable_value(rejected->value);
+    assert(std::holds_alternative<std::monostate>(csf::test::items(error)[1].data));
+    assert(std::holds_alternative<std::monostate>(csf::test::items(error)[2].data));
+    // 未 open 或 listen；验证路径不得创建环境/Host，亦不得发布会话事件。
+    assert(environments == 0 && transports == 0 && messenger.events.empty());
+    assert(csf::plugin_pending_reply_count(*plugin) == 0);
+    plugin.reset();
+    pump();
+  }
+  assert(csf::plugin_dispatcher_count() == initial_dispatchers);
   const auto subscription = csf::test::list({csf::Value::integer(1)});
+  const auto open_request = csf::test::list({csf::Value::integer(1), csf::Value::integer(63)});
   {
     Messenger messenger;
     auto native = std::make_shared<csf::test::FakeTransport>();
     auto plugin = attach(messenger, native);
     assert(messenger.handlers.size() == 2);
-    const auto opened = messenger.call(csf::kMethodChannel, "open", subscription);
+    const auto opened = messenger.call(csf::kMethodChannel, "open", open_request);
     const auto session = session_of(*opened);
     assert(csf::plugin_pending_reply_count(*plugin) == 0);
     exactly(messenger.call(csf::kEventChannel, "listen", subscription), true);
@@ -192,7 +226,7 @@ int main() {
     auto native = std::make_shared<csf::test::FakeTransport>();
     native->defer_wallet = true;
     auto plugin = attach(messenger, native);
-    const auto session = session_of(*messenger.call(csf::kMethodChannel, "open", subscription));
+    const auto session = session_of(*messenger.call(csf::kMethodChannel, "open", open_request));
     const auto pending = messenger.call(csf::kMethodChannel, "createWallet",
         csf::test::list({csf::Value::integer(1), csf::Value::string(session),
                          csf::Value::integer(1), csf::Value::integer(12)}));
@@ -229,7 +263,7 @@ int main() {
     auto native = std::make_shared<csf::test::FakeTransport>();
     native->defer_profile = true;
     auto plugin = attach(messenger, native);
-    const auto session = session_of(*messenger.call(csf::kMethodChannel, "open", subscription));
+    const auto session = session_of(*messenger.call(csf::kMethodChannel, "open", open_request));
     const auto pending = messenger.call(csf::kMethodChannel, "getWalletProfile", request(session, 1));
     int replacement_calls = 0;
     messenger.SetMessageHandler(csf::kMethodChannel,
@@ -262,12 +296,12 @@ int main() {
     Messenger messenger;
     auto first_native = std::make_shared<csf::test::FakeTransport>();
     auto first = attach(messenger, first_native);
-    (void)session_of(*messenger.call(csf::kMethodChannel, "open", subscription));
+    (void)session_of(*messenger.call(csf::kMethodChannel, "open", open_request));
     auto second_native = std::make_shared<csf::test::FakeTransport>();
     auto second = attach(messenger, second_native);
     pump();
     assert(messenger.handlers.size() == 2 && first_native->retired == 1);
-    (void)session_of(*messenger.call(csf::kMethodChannel, "open", subscription));
+    (void)session_of(*messenger.call(csf::kMethodChannel, "open", open_request));
     first.reset();
     assert(messenger.handlers.size() == 2);
     second.reset();
@@ -278,10 +312,10 @@ int main() {
   {
     Messenger messenger;
     auto plugin = csf::register_plugin(&messenger, nullptr,
-        []() -> csf::OpenEnvironment {
+        [](uint32_t) -> csf::OpenEnvironment {
           throw csf::ContractFailure(CITIZENSDK_ERROR_UNAVAILABLE, "injected native environment failure");
         }, {});
-    exactly(messenger.call(csf::kMethodChannel, "open", subscription), false, "citizensdk.unavailable");
+    exactly(messenger.call(csf::kMethodChannel, "open", open_request), false, "citizensdk.unavailable");
     assert(csf::plugin_pending_reply_count(*plugin) == 0);
     plugin.reset();
     pump();

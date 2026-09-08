@@ -1,5 +1,18 @@
 # CitizenSDK 安全模型
 
+当前安全边界按 wallet、signing、chain、transactions、history、qr 六模块装配，未选功能失败关闭。
+钱包管理和签名彼此独立；签名模块仅使用同宿主已由 SDK 安全建立的账户归属资料与设备金库，
+首次 provision 仍走钱包安全流程；任何模式都不向宿主公开 API、业务层或 Flutter 返回种子、
+私钥或 child secret。SDK 自有原生查看界面的受控显示边界见下文，不等于公开秘密导出。
+无实例纯验签只处理公开值，不创建链、数据库或金库。QR-only 也不创建钱包、金库、链数据库或轻节点；
+它仅处理公开文档和响应验签，不解锁或导出私钥。ZXing-C++ 层只接受有界的单平面亮度图，拒绝多码、无效 UTF-8、超大图像和过长文本。
+链调用审阅复用已验证链 metadata，完整解码 SCALE 参数并核对链身份和 runtime context。
+原生确认只消费 Core 持有、绑定实例且不可更改的一次性审阅结果；不能由宿主换入另一组字节。
+签名前再次检查期限、账户及当前链上下文，复用现有设备金库授权与 SigningService。
+取消、真实后台、锁屏或窗口销毁永久终止此次交互，已进入的设备授权仍须真实排空后释放上下文。
+这些界面与句柄边界不构成对恶意同进程宿主的硬隔离，也不改变现有普通签名功能。
+模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
+
 ## CitizenChain 随包信任资产
 
 `assets/README.md` 规定随包静态资产不得混入设备数据库、缓存或秘密；
@@ -24,7 +37,7 @@ checkpoint、manifest 或链资产摘要覆盖。本版本没有在线链资产�
 
 `native/contracts` 已经把 `ChainSigner` 与 `SecretVault` 分开：前者负责 sr25519 派生、签名与
 验签，后者只负责设备密文、硬件保护、解锁和用户认证。Android Keystore、Apple Secure
-Enclave 以及未来其它平台金库都是 `SecretVault` provider，不冒充能够原生执行 sr25519 的
+Enclave 及 Windows/Linux 金库都是 `SecretVault` provider，不冒充能够原生执行 sr25519 的
 硬件 signer。
 
 合同层的 `SecretBuffer` 由 `Zeroizing` 持有字节，不实现 `Clone` 或序列化，`Debug` 始终
@@ -45,15 +58,15 @@ profile 是 target 账户列表的严格前缀，既有字段逐项不变，计�
 `bip39` 显式启用 `zeroize`，NFKD password 临时值及 Engine 持有的 password 使用
 `Zeroizing<String>`。
 `native/signer/src/sr25519.rs` 是唯一算法实现，legacy FFI 与类型化 `ChainSigner` 都调用它。
-Rust Core 没有私钥导出方法。
+Rust Core 没有公开私钥返回接口；内部原生显示只提供本次查看的同步敏感借用，不形成普通结果。
 
-产品级 `citizensdk_*` C ABI v1 同时保留原有 chain-only 构造和完整
-`citizensdk_create_with_host` 构造。后者只接受职责分离的链数据库、Runtime cache、钱包公开
-资料、交易历史、设备密文和 KEK/DEK 金库合同；宿主不能注入 signer、任意 RPC 或 nonce
-来源。钱包创建/导入/多账户、通用载荷签名和高层转账/历史入口都经同一个 Rust Engine，
-钱包模式下原始 signed-extrinsic submit/watch 在触达 provider 前失败关闭。
-legacy `citizensdk_create` 路径原 36 个 ABI 符号、数值、布局和单请求功能语义保持不变，新增
-37 个符号，总计 73 个。
+产品级 `citizensdk_*` C ABI v1 保留既有构造的默认行为，新增显式模块构造
+`citizensdk_create_with_modules`，全部进入同一 Rust 私有装配逻辑。
+宿主只能补齐所选模块需要的具名 store 与 KEK/DEK 金库，不能注入 signer、任意 RPC 或 nonce。
+Rust 在平台资源创建前统一校验 modules；wallet/signing 各有独立门禁，不因共享 secure
+store/Vault 而开放钱包 UI。chain 未选择时不构造 provider、读取链资产或创建链数据库；
+history 未选择时不初始化历史服务。完整本地转账保持先持久化 pending 再广播。
+既有非 QR ABI 结构与数值保持；模块校验、模块构造、无实例验签、四个公开链查询/结果入口及九个 QR 入口使当前闭集为 89 个。
 
 Apple 绑定为 Core 借用的 HostBridge、callback、store 和 vault context 保留显式 ABI +1。
 关闭只能沿 `live -> monitorStopped -> destroyOnly -> closed` 单调前进；callback clear
@@ -69,8 +82,11 @@ SDK-owned prepared handle 为明确备份 UI 临时输出，并同时校验 owne
 不能读取、释放或消费。import/add 只接收用户显式输入。C ABI 只接收或返回临时字节缓冲区；
 public binding 不得把它转换成日志、返回值或持久缓存。SDK-owned 原生 UI 是唯一展示/输入例外，
 流程终态必须 best-effort 清空平台控件和可清零缓冲区。
-已经持久化或解锁的 child mini-secret、展开私钥不经过 Dart/Swift/Kotlin；产品 ABI 不提供私钥
-或 child secret 导出。Android 恢复词/password 仅进入非导出、`FLAG_SECURE` 的 SDK-owned
+已经持久化或解锁的 child mini-secret、展开私钥不进入宿主公开 Swift/Kotlin API 或 Dart；
+公开产品 ABI 不提供秘密 getter。账户私钥查看仅允许 Rust 将 32 字节 child mini-secret
+同步借用给 SDK 原生显示组件，组件只复制到自身可清零缓冲区；不经过普通 JNI 返回值、
+Flutter、事件、业务回调、剪贴板或可选文本控件。关闭清屏与实际设备认证排空必须同时完成，
+公开操作才结束。展开私钥不进入该显示路径。Android 恢复词/password 仅进入非导出、`FLAG_SECURE` 的 SDK-owned
 Activity。Apple 使用共享 Darwin native 边界；Security framework 解封 DEK 时返回不可变
 `CFData`，只在对应 `autoreleasepool` 内短暂存活。桥接层避免生成 Swift `Data`/COW 副本，
 在不能可靠原地清零的边界下立即把精确 32 字节复制到 Rust-owned buffer，并由 pool 排空释放；
@@ -79,6 +95,14 @@ Rust-owned 输出在使用后清零。
 Flutter tuple 位置。旧 Dart 硬件秘密通道与装配已删除，归档差分源码不是正式平台运行路径。
 
 ## 设备机密与受信任宿主
+
+账户私钥查看使用钱包模块和原有设备金库，不启动链或公开签名服务。Core 统一校验账户归属、
+钱包代际和解锁后公钥；平台只实现设备认证、原生绘制与窗口保护。原生认证窗口必须与本次
+查看的真实宿主认证操作精确关联，不能用请求编号、任意认证窗口或短暂时间窗口代替。
+真实后台、锁屏、窗口销毁会永久撤销本次查看，晚到认证不得恢复展示。用户关闭后仍有认证
+借用时保留上下文至真实回调结束，不以提前取消通知冒充资源排空。
+内部链接声明不安装给消费者；隐藏声明和禁止复制不构成对恶意同进程宿主、系统管理员、
+外部拍摄或所有截图机制的绝对隔离。
 
 助记词、母种子、child mini-secret 和私钥不得上传到 TuyuServe、TuyuBooking、Cloudflare、
 GitHub、TataConsole 或任何远端服务。标准移动装配只在用户设备硬件金库保存 child 密文，并在
@@ -265,7 +289,7 @@ challenge 的受限密码学原语。
 锚，拒绝高度回退及同高度异哈希，并以 CAS 保存 exact 导入状态；写后抛错只在回读事实完全
 相同时收敛为成功。跨 Engine 或进程防回退仅在 store adapter 提供共享、耐久、强原子 CAS
 时成立；旧 `citizensdk_create` 的进程内 chain session store 和 legacy Dart Preferences store
-都不因此获得跨进程保证。Android 与共享 Darwin 的 `citizensdk_create_with_host` adapter 负责
+都不因此获得跨进程保证。当前官方绑定的模块化持久 store adapter 负责
 满足这些合同；Apple 以分离的 typed public/secure SQLite 落实相同 store 语义。导入数据库导致
 启动失败时当前
 Provider/Engine 组合进入
@@ -305,7 +329,7 @@ host completion 被 claim 后仍计为 outstanding，直到 SDK
 
 根产品 C ABI/头文件不导出低层 signer、private-key 或 child-secret 原语；高层
 `citizensdk_sign_wallet_payload` 只返回签名结果。Android AAR/Flutter 双投影禁止
-`libsmoldot`，只带产品 Core 与薄 JNI bridge；Apple XCFramework 只导出根产品头的 73 个
+`libsmoldot`，只带产品 Core 与薄 JNI bridge；Apple XCFramework 只导出根产品头的 89 个
 `citizensdk_*` 符号，并拒绝 `smoldot_*`、`citizen_sr25519_*` 与 `account_crypto_*`。legacy
 smoldot/signer 符号只允许存在于源码树外的 macOS `arm64` 差分测试宿主库，绝不进入候选。
 
@@ -314,7 +338,7 @@ Linux C/C++ Host 同样只能加载唯一 `libcitizensdk.so`。`libcitizensdk_ho
 mini-secret 和 private key 穿过公共 C++/Flutter 边界。第 7.1 步只提交这套源码与测试合同，
 没有构建 `.so`，也没有取得 LinuxARM/LinuxAMD 或实体 TPM 的运行证据。
 第 7.4 步把双平台安装投影、默认公开入口和 Hosted 过滤纳入同版本候选合同，不改变上述秘密
-边界。Hosted 只保留 38 项 Linux 运行输入，不携带 Host 私有源码或从系统位置替换 Core/Host；
+边界。Hosted 只保留 39 项 Linux 运行输入，不携带 Host 私有源码或从系统位置替换 Core/Host；
 plugin 固定 `$ORIGIN`，不借助测试 runner 修补路径。同版产物缺失或重叠文件漂移时拒绝
 候选。CMake 全部指令采用闭集校验，阻断追加命令覆盖导入路径。当前 ELF 结构/禁止依赖
 检查不能证明实际构建提交或静态依赖来源；真实依赖、许可证和运行证据不齐不得正式分发，
@@ -327,14 +351,14 @@ plugin 固定 `$ORIGIN`，不借助测试 runner 修补路径。同版产物缺�
 
 - SDK 源码树不得接收构建缓存、原生库或 Release 产物。
 - 本机 Linux 合同测试必须由 CMake/CTest 以 `CITIZENSDK_TEST_WORK_DIR` 注入
-  `/Users/rhett/TATA/tataconsole/target/.work/GMB/citizensdk/SDK` 下有效 UID 所有、`0700`、任务独占的现有
+  `/Users/rhett/TATA/tataconsole/work/gmb/citizensdk` 下有效 UID 所有、`0700`、任务独占的现有
   绝对目录。测试 helper 逐级 no-follow 验证后，以 CSPRNG 随机名称和 `mkdirat` 只在已验证
   目录 fd 下创建子目录，不回退 `/tmp`、当前目录或用户目录，也不递归删除未经 fd 与 inode
   复核的路径。
 - 原生构建和 Release 在首次建目录前校验绝对规范路径及每一级既存祖先，拒绝路径穿越、
   符号链接祖先和非目录祖先；工作目录与产物目录必须成对通过预检，任一无效时保持零写入。
-- 本机发布器只接受 `/Users/rhett/TATA/tataconsole/target/GMB/citizensdk/SDK` 和
-  `/Users/rhett/TATA/tataconsole/target/.work/GMB/citizensdk/SDK` 的严格后代；永久根本身、
+- 本机发布器只接受 `/Users/rhett/TATA/tataconsole/target/gmb/citizensdk` 和
+  `/Users/rhett/TATA/tataconsole/work/gmb/citizensdk` 的严格后代；永久根本身、
   旧根、邻产品/仓库/平台、伪前缀和最终链接均拒绝。只核验匹配根存在且为普通目录，
   未使用根缺失不影响本次请求。GitHub 隔离分支不变。该门禁不替代执行方对 UID、权限、
   任务归属和清理范围的检查；永久容器不得删除，不能清理别的任务内容。
@@ -419,7 +443,7 @@ Core 均未在本步修改。Windows/MSVC、真实消息泵与 TPM 验收仍待�
 检查 Value 大小，也不能让截断载荷被零填充后进入签名或交易。预检不替代官方 codec，
 合法消息仍由 StandardMethodCodec 解码；保留合法整数宽度、长度表示及内嵌 NUL。
 
-第 8.4 步的公开入口和安装投影不改变上述安全实现。候选与 Hosted 仅接受同版 21 项
+第 8.4 步的公开入口和安装投影不改变上述安全实现。当前候选与 Hosted 仅接受同版 22 项
 安装件和 12 项插件输入，额外 DLL、路径、修改过的公开头或链资产均失败关闭。正式消费者
 必须经原始包声明与自动注册，不允许内部平台注入或通过临时修改 SDK 副本规避来源检查。
 

@@ -431,6 +431,7 @@ fn finalized_execution_retry_keeps_one_body_read_and_the_same_exact_block() {
 }
 
 #[test]
+#[cfg(feature = "history")]
 fn engine_history_lease_rejects_stop_and_dispose_until_the_future_is_dropped() {
     let store: Arc<dyn TransactionHistoryStore> = Arc::new(MemoryHistoryStore::default());
     let engine = running_engine(store, 7);
@@ -451,6 +452,7 @@ fn engine_history_lease_rejects_stop_and_dispose_until_the_future_is_dropped() {
 }
 
 #[test]
+#[cfg(feature = "history")]
 fn engine_history_lease_fences_the_complete_cas_await_window() {
     let (release, receiver) = oneshot::channel();
     let store = Arc::new(PausedHistoryStore::new(receiver));
@@ -483,6 +485,7 @@ fn engine_history_lease_fences_the_complete_cas_await_window() {
 }
 
 #[test]
+#[cfg(feature = "history")]
 fn monitor_cancel_does_not_drop_a_store_cas_that_already_started() {
     use futures::FutureExt;
     let (release, receiver) = oneshot::channel();
@@ -910,8 +913,16 @@ pub(crate) fn running_engine_with_read_counter(
         running,
         block_requests,
     });
-    let components =
-        EngineComponents::new(client, None, None, None, None, None, Some(history), None);
+    let components = EngineComponents::new(
+        Some(client),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(history),
+        None,
+    );
     let engine = CitizenEngine::new(components);
     engine
         .update_capabilities(

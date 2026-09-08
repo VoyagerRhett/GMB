@@ -36,12 +36,13 @@ class FlutterEnvironment final {
   FlutterEnvironment(const FlutterEnvironment &) = delete;
   FlutterEnvironment &operator=(const FlutterEnvironment &) = delete;
 
-  OpenEnvironment open() const;
+  OpenEnvironment open(uint32_t modules = CITIZENSDK_MODULE_FULL) const;
   void detach() noexcept;
 
   // The same validation used by open(), separated only so contract tests can
   // supply native process fixtures without altering global environment state.
-  static Config resolve(const NativeEnvironmentInputs &inputs);
+  static Config resolve(const NativeEnvironmentInputs &inputs,
+                        uint32_t modules = CITIZENSDK_MODULE_FULL);
 
  private:
   GWeakRef view_{};

@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <vector>
 #include "citizen_sdk/citizensdk_host.h"
 #include "citizen_sdk/citizen_sdk_error.hpp"
@@ -24,6 +25,22 @@ struct WalletFlowResult {
 };
 
 using WalletFlowCompletion = std::function<void(WalletFlowResult)>;
+
+struct QrImage {
+  uint32_t width{}, height{};
+  std::vector<uint8_t> luminance;
+};
+struct QrFlowResult {
+  citizensdk_error_code_t error_code{CITIZENSDK_OK};
+  std::string document;
+  std::string canonical_text;
+  std::string request_id;
+  std::string signer_account_id;
+  std::string sign_request;
+  std::vector<uint8_t> signature;
+  QrImage qr_image;
+};
+using QrFlowCompletion = std::function<void(QrFlowResult)>;
 
 class WalletFlow final {
  public:

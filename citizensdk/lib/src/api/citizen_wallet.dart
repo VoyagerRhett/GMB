@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import '../models/citizen_wallet.dart';
 
 /// CitizenSDK 无根热钱包的公开控制面。
@@ -8,6 +6,10 @@ import '../models/citizen_wallet.dart';
 /// password 参数，也不会收到 prepared/native/result handle。
 abstract interface class CitizenWallet {
   Future<CitizenWalletProfile?> getProfile();
+
+  /// 在 SDK 原生安全窗口查看指定账户私钥；确认、设备认证和清屏均由 SDK 管理。
+  /// 只等待真实流程结束，绝不向 Dart 返回私钥、显示回调或内部句柄。
+  Future<void> viewAccountPrivateKey(String accountId);
 
   /// 打开 SDK 安全界面；wordCount 是初始选择，用户可选 12／18／24 词。
   ///
@@ -36,9 +38,4 @@ abstract interface class CitizenWallet {
   Future<void> delete();
 
   Future<CitizenWalletProfile?> reconcileCleanup();
-
-  Future<CitizenWalletSignature> sign({
-    required String accountId,
-    required Uint8List payload,
-  });
 }

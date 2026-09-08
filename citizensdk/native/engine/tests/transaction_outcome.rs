@@ -1,3 +1,5 @@
+#![cfg(feature = "chain")]
+
 use citizen_sdk_contracts::{
     ExecutionConclusion, Hash32, RuntimeContext, RuntimeVersion, SignedExtrinsic, UnverifiedReason,
     VerifiedBlockRef,

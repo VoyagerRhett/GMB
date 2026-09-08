@@ -1,5 +1,20 @@
 import Foundation
 
+/// 同一 Rust 核心的模块集合；这里只投影位值，组合合法性由核心统一校验。
+public struct CitizenSDKModules: OptionSet, Sendable {
+    public let rawValue: UInt32
+    public init(rawValue: UInt32) { self.rawValue = rawValue }
+    public static let wallet = Self(rawValue: 1)
+    public static let signing = Self(rawValue: 2)
+    public static let chain = Self(rawValue: 4)
+    public static let transactions = Self(rawValue: 8)
+    public static let history = Self(rawValue: 16)
+    public static let qr = Self(rawValue: 32)
+    public static let full: Self = [.wallet, .signing, .chain, .transactions, .history, .qr]
+
+    internal var usesSecrets: Bool { !intersection([.wallet, .signing]).isEmpty }
+}
+
 public enum CitizenSDKLifecycle: UInt32, Sendable {
     case created = 1
     case importingState = 2

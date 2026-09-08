@@ -1,6 +1,11 @@
+#![cfg(feature = "chain")]
+
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use citizen_sdk_contracts::{
@@ -14,7 +19,7 @@ use citizen_sdk_engine::{
         decode_best_fee_snapshot, decode_finalized_account_balance, system_account_storage_key,
         AccountStateService,
     },
-    EngineError,
+    CapabilityProbe, CitizenEngine, EngineComponents, EngineError,
 };
 use serde_json::Value as JsonValue;
 use subxt_core::{ext::codec::Decode, Metadata};
@@ -32,6 +37,10 @@ struct TestClient {
     metadata: Vec<u8>,
     values: Mutex<BTreeMap<Vec<u8>, Vec<u8>>>,
     batch_widths: Mutex<Vec<usize>>,
+    reads: AtomicUsize,
+    batch_blocks: Mutex<Vec<VerifiedBlockRef>>,
+    batch_error: Option<ContractErrorCode>,
+    omit_last_batch_value: bool,
 }
 
 impl TestClient {
@@ -44,6 +53,10 @@ impl TestClient {
             metadata: decode_hex(METADATA_HEX),
             values: Mutex::new(BTreeMap::new()),
             batch_widths: Mutex::new(Vec::new()),
+            reads: AtomicUsize::new(0),
+            batch_blocks: Mutex::new(Vec::new()),
+            batch_error: None,
+            omit_last_batch_value: false,
         }
     }
 
@@ -57,16 +70,19 @@ impl TestClient {
 
 impl VerifiedChainClient for TestClient {
     fn identity(&self) -> ContractFuture<'_, ChainIdentity> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
         let identity = self.identity.clone();
         Box::pin(async move { Ok(identity) })
     }
 
     fn get_best_head(&self) -> ContractFuture<'_, VerifiedBlockRef> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
         let best = self.best;
         Box::pin(async move { Ok(best) })
     }
 
     fn get_finalized_head(&self) -> ContractFuture<'_, FinalizedBlockRef> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
         let finalized = self.finalized;
         Box::pin(async move { Ok(finalized) })
     }
@@ -76,6 +92,7 @@ impl VerifiedChainClient for TestClient {
         _block: VerifiedBlockRef,
         key: Vec<u8>,
     ) -> ContractFuture<'_, Option<Vec<u8>>> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
         let value = self
             .values
             .lock()
@@ -87,9 +104,14 @@ impl VerifiedChainClient for TestClient {
 
     fn get_storage_batch_at(
         &self,
-        _block: VerifiedBlockRef,
+        block: VerifiedBlockRef,
         keys: Vec<Vec<u8>>,
     ) -> ContractFuture<'_, Vec<Option<Vec<u8>>>> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.batch_blocks
+            .lock()
+            .unwrap_or_else(|error| panic!("batch block lock poisoned: {error}"))
+            .push(block);
         self.batch_widths
             .lock()
             .unwrap_or_else(|error| panic!("batch lock poisoned: {error}"))
@@ -98,17 +120,27 @@ impl VerifiedChainClient for TestClient {
             .values
             .lock()
             .unwrap_or_else(|error| panic!("values lock poisoned: {error}"));
-        let result = keys
+        let mut result = keys
             .iter()
             .map(|key| values.get(key).cloned())
             .collect::<Vec<_>>();
-        Box::pin(async move { Ok(result) })
+        if self.omit_last_batch_value {
+            result.pop();
+        }
+        let error = self.batch_error;
+        Box::pin(async move {
+            match error {
+                Some(code) => Err(ContractError::new(code, "batch test failure")),
+                None => Ok(result),
+            }
+        })
     }
 
     fn get_runtime_context_at(
         &self,
         block: VerifiedBlockRef,
     ) -> ContractFuture<'_, RuntimeContext> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
         let returned_block = self.runtime_block_override.unwrap_or(block);
         let metadata = self.metadata.clone();
         Box::pin(async move {
@@ -245,12 +277,147 @@ fn finalized_batch_deduplicates_provider_keys_but_preserves_order_and_duplicates
     assert_eq!(balances[0].free_fen(), 123_456);
     assert_eq!(balances[1].account_id(), second);
     assert_eq!(balances[1].total_fen(), 0);
+    assert!(balances.iter().all(|balance| balance.block() == finalized));
+    assert_eq!(
+        *client
+            .batch_blocks
+            .lock()
+            .unwrap_or_else(|error| panic!("batch block lock poisoned: {error}")),
+        vec![VerifiedBlockRef::from(finalized)]
+    );
     assert_eq!(
         *client
             .batch_widths
             .lock()
             .unwrap_or_else(|error| panic!("batch lock poisoned: {error}")),
         vec![2]
+    );
+}
+
+#[test]
+fn finalized_batch_empty_and_limit_are_checked_before_any_chain_access() {
+    let finalized = FinalizedBlockRef::from_parts(Hash32::from_bytes([0xaa; 32]), 77);
+    let client = TestClient::new(
+        VerifiedBlockRef::best(Hash32::from_bytes([0xbb; 32]), 78),
+        finalized,
+    );
+    let service = AccountStateService::new(&client, None);
+    assert!(
+        futures::executor::block_on(service.finalized_account_balances(Vec::new()))
+            .unwrap_or_else(|error| panic!("empty batch failed: {error}"))
+            .is_empty()
+    );
+    let account = AccountId32::from_bytes([0x55; 32]);
+    let error =
+        futures::executor::block_on(service.finalized_account_balances(vec![account; 1991]))
+            .err()
+            .unwrap_or_else(|| panic!("oversized duplicate batch must fail"));
+    assert!(
+        matches!(error, EngineError::Contract(error) if error.code() == ContractErrorCode::InvalidArgument)
+    );
+    assert_eq!(client.reads.load(Ordering::SeqCst), 0);
+    let balances =
+        futures::executor::block_on(service.finalized_account_balances(vec![account; 1990]))
+            .unwrap_or_else(|error| panic!("maximum batch failed: {error}"));
+    assert_eq!(balances.len(), 1990);
+    assert!(balances
+        .iter()
+        .all(|balance| balance.account_id() == account && balance.block() == finalized));
+    assert_eq!(
+        *client
+            .batch_widths
+            .lock()
+            .unwrap_or_else(|error| panic!("batch lock poisoned: {error}")),
+        vec![1]
+    );
+}
+
+#[test]
+fn nonempty_batch_can_progress_after_chain_readiness_without_wallet_or_subscription() {
+    use citizen_sdk_contracts::{CapabilityName, Modules};
+    let finalized = FinalizedBlockRef::from_parts(Hash32::from_bytes([0xaa; 32]), 77);
+    let client = Arc::new(TestClient::new(
+        VerifiedBlockRef::best(Hash32::from_bytes([0xbb; 32]), 78),
+        finalized,
+    ));
+    let chain: Arc<dyn VerifiedChainClient> = client.clone();
+    let engine = CitizenEngine::new(
+        EngineComponents::new(Some(chain), None, None, None, None, None, None, None).with_modules(
+            Modules::try_new(Modules::CHAIN)
+                .unwrap_or_else(|error| panic!("modules failed: {error}")),
+        ),
+    );
+    engine
+        .update_capabilities(
+            CapabilityName::ALL
+                .into_iter()
+                .map(CapabilityProbe::ready)
+                .collect(),
+        )
+        .unwrap_or_else(|error| panic!("capability setup failed: {error}"));
+    engine
+        .update_chain_readiness(false)
+        .unwrap_or_else(|error| panic!("chain not-ready setup failed: {error}"));
+    engine
+        .begin_provider_start()
+        .unwrap_or_else(|error| panic!("start failed: {error}"));
+    futures::executor::block_on(engine.complete_provider_start())
+        .unwrap_or_else(|error| panic!("start completion failed: {error}"));
+    let accounts = vec![AccountId32::from_bytes([0x55; 32])];
+    let before = client.reads.load(Ordering::SeqCst);
+    assert!(
+        futures::executor::block_on(engine.finalized_account_balances(accounts.clone())).is_err()
+    );
+    assert_eq!(client.reads.load(Ordering::SeqCst), before);
+    // provider readiness 是绑定层的真实输入；这里验证 Core 转换，不伪称真实网络验收。
+    engine
+        .update_chain_readiness(true)
+        .unwrap_or_else(|error| panic!("chain-ready setup failed: {error}"));
+    let balances = futures::executor::block_on(engine.finalized_account_balances(accounts))
+        .unwrap_or_else(|error| panic!("batch failed after readiness: {error}"));
+    assert_eq!(balances.len(), 1);
+    assert_eq!(balances[0].block(), finalized);
+    assert_eq!(balances[0].total_fen(), 0);
+}
+
+#[test]
+fn finalized_batch_rejects_provider_failure_wrong_count_and_overflow_without_partial_result() {
+    let finalized = FinalizedBlockRef::from_parts(Hash32::from_bytes([0xaa; 32]), 77);
+    let best = VerifiedBlockRef::best(Hash32::from_bytes([0xbb; 32]), 78);
+    let account = AccountId32::from_bytes([0x55; 32]);
+    let mut client = TestClient::new(best, finalized);
+    client.batch_error = Some(ContractErrorCode::Timeout);
+    let error = futures::executor::block_on(
+        AccountStateService::new(&client, None).finalized_account_balances(vec![account]),
+    )
+    .err()
+    .unwrap_or_else(|| panic!("provider failure must fail batch"));
+    assert!(
+        matches!(error, EngineError::Contract(error) if error.code() == ContractErrorCode::Timeout)
+    );
+
+    client.batch_error = None;
+    client.omit_last_batch_value = true;
+    assert_integrity(futures::executor::block_on(
+        AccountStateService::new(&client, None).finalized_account_balances(vec![account]),
+    ));
+
+    client.omit_last_batch_value = false;
+    let mut raw = vec![0_u8; 48];
+    raw[16..32].copy_from_slice(&u128::MAX.to_le_bytes());
+    raw[32..48].copy_from_slice(&1_u128.to_le_bytes());
+    client.insert(
+        system_account_storage_key(&decode_metadata(&client.metadata), account)
+            .unwrap_or_else(|error| panic!("storage key failed: {error}")),
+        raw,
+    );
+    let result = futures::executor::block_on(
+        AccountStateService::new(&client, None)
+            .finalized_account_balances(vec![AccountId32::from_bytes([0x44; 32]), account]),
+    );
+    assert!(
+        result.is_err(),
+        "one overflow must reject the complete batch"
     );
 }
 

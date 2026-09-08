@@ -16,38 +16,45 @@ internal enum CitizenSdkFlutterCodec {
     static let eventTypes: Set<String> = ["lifecycleChanged", "capabilitiesChanged", "transferProgress", "historyChanged"]
     static let methods: Set<String> = [
         "open", "start", "stop", "close", "getCapabilities", "getFinalizedHead",
-        "getAccountBalance", "getAccountNonce", "getFeeSnapshot", "getWalletProfile",
+        "getGenesisHash", "getAccountBalance", "getAccountBalances", "getAccountNonce", "getFeeSnapshot", "getWalletProfile", "viewAccountPrivateKey",
         "createWallet", "importWallet", "addWalletAccounts", "setActiveWalletAccount",
         "renameWalletAccount", "deleteWalletAccount", "deleteWallet", "reconcileWalletCleanup",
-        "signWalletPayload", "transferWithRemark", "initializeFinalizedHistory", "syncFinalizedHistory",
+        "signWalletPayload", "verifySignature", "transferWithRemark", "initializeFinalizedHistory", "syncFinalizedHistory",
+        "qrParse", "qrCreateSignRequest", "qrConsumeSignResponse", "qrCancelSignRequest", "qrEncodeAccountId",
+        "qrEncodeUserTransfer", "qrDecodeLuminance", "qrEncode", "qrScan", "signQrRequest",
     ]
 
     enum Request {
-        case open
+        case open(modules: CitizenSDKModules)
         case empty(method: String, session: String, sequence: Int64)
         case account(method: String, session: String, sequence: Int64, accountID: Data)
+        case balances(session: String, sequence: Int64, accountIDs: [Data])
         case create(session: String, sequence: Int64, wordCount: UInt32)
         case addAccounts(session: String, sequence: Int64, indices: [UInt32])
         case rename(session: String, sequence: Int64, accountID: Data, name: String)
         case sign(session: String, sequence: Int64, accountID: Data, payload: Data)
+        case verify(accountID: Data, signature: Data, payload: Data)
         case transfer(session: String, sequence: Int64, source: Data, destination: Data,
                       amount: CitizenU128, remark: Data)
         case history(method: String, session: String, sequence: Int64, accountIDs: [Data])
+        case qr(method: String, session: String, sequence: Int64, fields: [Any])
 
         var sessionID: String? {
             switch self {
-            case .open: return nil
+            case .open, .verify: return nil
             case let .empty(_, value, _), let .account(_, value, _, _), let .create(value, _, _),
                  let .addAccounts(value, _, _), let .rename(value, _, _, _), let .sign(value, _, _, _),
-                 let .transfer(value, _, _, _, _, _), let .history(_, value, _, _): return value
+                 let .balances(value, _, _), let .transfer(value, _, _, _, _, _), let .history(_, value, _, _),
+                 let .qr(_, value, _, _): return value
             }
         }
         var sequence: Int64? {
             switch self {
-            case .open: return nil
+            case .open, .verify: return nil
             case let .empty(_, _, value), let .account(_, _, value, _), let .create(_, value, _),
                  let .addAccounts(_, value, _), let .rename(_, value, _, _), let .sign(_, value, _, _),
-                 let .transfer(_, value, _, _, _, _), let .history(_, _, value, _): return value
+                 let .balances(_, value, _), let .transfer(_, value, _, _, _, _), let .history(_, _, value, _),
+                 let .qr(_, _, value, _): return value
             }
         }
     }
@@ -66,8 +73,20 @@ internal enum CitizenSdkFlutterCodec {
             throw failure(.unsupported, "Unsupported protocol version")
         }
         if method == "open" {
-            guard tuple.count == 1 else { throw failure(.invalidArgument, "Unexpected open arguments") }
-            return .open
+            guard tuple.count == 2 else { throw failure(.invalidArgument, "Unexpected open arguments") }
+            let modules = try integer(tuple[1], "modules")
+            guard modules >= 0, modules <= Int64(UInt32.max) else {
+                throw failure(.invalidArgument, "modules must be uint32")
+            }
+            return .open(modules: CitizenSDKModules(rawValue: UInt32(modules)))
+        }
+        if method == "verifySignature" {
+            // 公开验签没有会话或序号；必须先拒绝旧会话形状，不能误读账户为会话。
+            guard tuple.count == 4 else { throw failure(.invalidArgument, "Invalid verification tuple length") }
+            let signature = try bytes(tuple[2], maximum: 64)
+            guard signature.count == 64 else { throw failure(.invalidArgument, "signature must contain 64 bytes") }
+            return .verify(accountID: try hash32(tuple[1]), signature: signature,
+                           payload: try bytes(tuple[3], maximum: 16 * 1_024 * 1_024))
         }
         guard tuple.count >= 3 else { throw failure(.invalidArgument, "Truncated request") }
         let session = try string(tuple[1], "sessionId", 1...128)
@@ -78,12 +97,19 @@ internal enum CitizenSdkFlutterCodec {
         }
         do {
             switch method {
-            case "start", "stop", "close", "getCapabilities", "getFinalizedHead", "getFeeSnapshot",
+            case "start", "stop", "close", "getCapabilities", "getFinalizedHead", "getGenesisHash", "getFeeSnapshot",
                  "getWalletProfile", "importWallet", "deleteWallet", "reconcileWalletCleanup":
                 try length(3); return .empty(method: method, session: session, sequence: sequence)
-            case "getAccountBalance", "getAccountNonce", "setActiveWalletAccount", "deleteWalletAccount":
+            case "getAccountBalance", "getAccountNonce", "setActiveWalletAccount", "deleteWalletAccount", "viewAccountPrivateKey":
                 try length(4); return .account(method: method, session: session, sequence: sequence,
                                                accountID: try hash32(tuple[3]))
+            case "getAccountBalances":
+                try length(4)
+                guard let raw = tuple[3] as? [Any?], raw.count <= 1_990 else {
+                    throw failure(.invalidArgument, "accountIds must contain 0...1990 accounts")
+                }
+                // 批量查询必须保留顺序和重复项，不能套用历史订阅的唯一性约束。
+                return .balances(session: session, sequence: sequence, accountIDs: try raw.map(hash32))
             case "createWallet":
                 try length(4)
                 let words = try integer(tuple[3], "wordCount")
@@ -129,6 +155,59 @@ internal enum CitizenSdkFlutterCodec {
                 let values = try raw.map(hash32)
                 guard Set(values).count == values.count else { throw failure(.invalidArgument, "accountIds must be unique") }
                 return .history(method: method, session: session, sequence: sequence, accountIDs: values)
+            case "qrParse", "qrConsumeSignResponse", "signQrRequest":
+                try length(4)
+                return .qr(method: method, session: session, sequence: sequence,
+                           fields: [try qrText(tuple[3], "QR text")])
+            case "qrScan":
+                try length(3)
+                return .qr(method: method, session: session, sequence: sequence, fields: [])
+            case "qrCreateSignRequest":
+                try length(7)
+                let action = try integer(tuple[3], "action")
+                let ttl = try integer(tuple[6], "ttlSeconds")
+                guard (1...65_535).contains(action), (1...300).contains(ttl) else {
+                    throw failure(.invalidArgument, "Invalid QR action or TTL")
+                }
+                let payload = try bytes(tuple[5], maximum: 1_920)
+                guard !payload.isEmpty else { throw failure(.invalidArgument, "QR payload is empty") }
+                return .qr(method: method, session: session, sequence: sequence,
+                           fields: [action, try hash32(tuple[4]), payload, ttl])
+            case "qrCancelSignRequest":
+                try length(4)
+                return .qr(method: method, session: session, sequence: sequence,
+                           fields: [try string(tuple[3], "requestID", 16...128)])
+            case "qrEncodeAccountId":
+                try length(4)
+                return .qr(method: method, session: session, sequence: sequence,
+                           fields: [try hash32(tuple[3])])
+            case "qrEncodeUserTransfer":
+                try length(10)
+                let expires = try integer(tuple[4], "expiresAt")
+                guard expires > 0 else { throw failure(.invalidArgument, "expiresAt must be positive") }
+                return .qr(method: method, session: session, sequence: sequence, fields: [
+                    try string(tuple[3], "requestID", 16...128), expires, try hash32(tuple[5]),
+                    try utf8Text(tuple[6], "amount", 1...64), try utf8Text(tuple[7], "symbol", 1...16),
+                    try utf8Text(tuple[8], "memo", 0...256), try utf8Text(tuple[9], "bankCIDNumber", 1...32),
+                ])
+            case "qrDecodeLuminance":
+                try length(7)
+                let pixels = try bytes(tuple[3], maximum: 16 * 1_024 * 1_024)
+                let width = try integer(tuple[4], "width")
+                let height = try integer(tuple[5], "height")
+                let stride = try integer(tuple[6], "rowStride")
+                guard (1...4_096).contains(width), (1...4_096).contains(height), stride >= width,
+                      stride <= 4_096, Int64(pixels.count) >= (height - 1) * stride + width else {
+                    throw failure(.invalidArgument, "Invalid QR luminance dimensions")
+                }
+                return .qr(method: method, session: session, sequence: sequence,
+                           fields: [pixels, width, height, stride])
+            case "qrEncode":
+                try length(5)
+                let scale = try integer(tuple[4], "scale")
+                guard (1...16).contains(scale) else { throw failure(.invalidArgument, "Invalid QR scale") }
+                return .qr(method: method, session: session, sequence: sequence,
+                           fields: [try qrText(tuple[3], "QR text"), scale])
             default: throw failure(.unsupported, "Unsupported method")
             }
         } catch let error as ContractFailure {
@@ -294,6 +373,15 @@ internal enum CitizenSdkFlutterCodec {
             throw failure(.invalidArgument, "Invalid \(label)")
         }
         return value
+    }
+    private static func utf8Text(_ raw: Any?, _ label: String,
+                                 _ range: ClosedRange<Int>) throws -> String {
+        let value = try string(raw, label, 0...max(range.upperBound, 1))
+        guard range.contains(value.utf8.count) else { throw failure(.invalidArgument, "Invalid \(label) UTF-8 length") }
+        return value
+    }
+    private static func qrText(_ raw: Any?, _ label: String) throws -> String {
+        try utf8Text(raw, label, 1...2_331)
     }
     private static func integer(_ raw: Any?, _ label: String) throws -> Int64 {
         guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),

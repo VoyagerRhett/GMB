@@ -7,8 +7,8 @@ import 'package:path/path.dart' as p;
 
 /// sr25519 原生签名（schnorrkel）的 Dart 侧唯一入口。
 ///
-/// 实现来自 `shared/citizen-signer`，与 CitizenApp 热端**共用同一份
-/// 源码**（冷热派生口径一旦分叉，同一助记词会算出不同账户）。冷钱包永久离线，
+/// 实现来自 `citizenwallet/rust/src/sr25519.rs`，由钱包独立维护。
+/// 派生语义保持迁移前一致。冷钱包永久离线，
 /// 只把这份签名实现编成独立小库 `libcitizenwallet_signer`（几百 KB），不引入链。
 ///
 /// **为什么必须原生**：纯 Dart `sr25519` 走 BigInt 软算标量乘，真机实测一次
@@ -37,17 +37,23 @@ class NativeSr25519 {
   /// - iOS：静态库 `.a` 经 podspec 的 `-force_load` 直接链进 App 二进制，符号就在
   ///   本进程里，用 [DynamicLibrary.process] 取（iOS 不用 dylib：裸 dylib 要嵌入
   ///   加签名，且 App Store 要求动态库必须包在 .framework 里）；
-  /// - macOS / Linux（`flutter test` 宿主）：找 `rust/target/release` 下的构建产物，
+  /// - macOS / Linux（`flutter test` 宿主）：找 `CARGO_TARGET_DIR/release` 下的构建产物，
   ///   由 `scripts/build-signer-native.sh host` 产出；扩展名按宿主平台取
   ///   （macOS `.dylib`、Linux `.so`），CI 在 Linux runner 上跑测试同样要能加载。
+  static String _hostTargetDirectory() {
+    final target = Platform.environment['CARGO_TARGET_DIR'];
+    if (target == null || target.isEmpty || !p.isAbsolute(target)) {
+      throw StateError('宿主测试必须由塔塔控制台提供 CARGO_TARGET_DIR');
+    }
+    return target;
+  }
+
   static DynamicLibrary _open() {
     if (Platform.isAndroid) return DynamicLibrary.open('$_libBase.so');
     if (Platform.isIOS) return DynamicLibrary.process();
     final hostExt = Platform.isMacOS ? 'dylib' : 'so';
     final hostPath = p.join(
-      Directory.current.path,
-      'rust',
-      'target',
+      _hostTargetDirectory(),
       'release',
       '$_libBase.$hostExt',
     );

@@ -1,4 +1,4 @@
-// 本文件由 shared/qr-protocol/registry/kinds.yaml 生成，禁止手改。
+// 本文件由 citizenchain/crates/qr-protocol/registry/kinds.yaml 生成，禁止手改。
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

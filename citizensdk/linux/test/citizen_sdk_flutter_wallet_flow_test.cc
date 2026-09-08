@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "citizen_sdk_flutter_wallet_flow.hpp"
+#include "citizen_sdk_flutter_test_support.hpp"
 #include "citizen_sdk_host_record.hpp"
 #include "citizen_sdk_wallet_validation.hpp"
 
@@ -77,7 +78,8 @@ int main() {
   // Deliberately complete before the presenter returns. The production bridge
   // must have preallocated the route and must settle it exactly once.
   flows.launch(create,
-    [](const auto &request, auto completion) {
+    [](const auto &decoded, auto completion) {
+      const auto request = FlutterWalletFlows::contract(decoded);
       assert(request.kind == WalletFlowKind::Create);
       assert(validate_contract(request).word_count == CITIZENSDK_WALLET_WORDS_24);
       completion({WalletFlowStatus::Completed, CITIZENSDK_OK});
@@ -100,7 +102,8 @@ int main() {
   bool cancelled = false;
   citizen_sdk::WalletFlowCompletion late;
   flows.launch(imported,
-    [&](const auto &request, auto completion) {
+    [&](const auto &decoded, auto completion) {
+      const auto request = FlutterWalletFlows::contract(decoded);
       assert(request.kind == WalletFlowKind::Import);
       assert(request.word_count == 0 && request.account_indices.empty());
       assert(validate_contract(request).kind == CITIZENSDK_WALLET_FLOW_IMPORT);
@@ -154,6 +157,30 @@ int main() {
         [&] { (void)FlutterWalletFlows::contract(invalid); },
         CITIZENSDK_ERROR_INVALID_ARGUMENT);
   }
+
+  // 查看只传公开账户并复用同一排空路由；取消先于晚回调不算已结束。
+  DecodedRequest viewing;
+  viewing.method = Method::view_account_private_key;
+  viewing.session = "private-view"; viewing.sequence = 1;
+  viewing.account_id.bytes[0] = 7;
+  citizen_sdk::WalletFlowCompletion view_done;
+  int view_cancelled = 0, view_completed = 0;
+  flows.launch(viewing, [&](const auto &request, auto completion) {
+    assert(request.method == Method::view_account_private_key && request.account_id.bytes[0] == 7);
+    assert(request.payload.empty() && request.indices.empty());
+    view_done = std::move(completion);
+    return [&] { ++view_cancelled; };
+  }, [&](WalletFlowResult result) {
+    assert(result.status == WalletFlowStatus::Cancelled);
+    ++view_completed;
+  });
+  flows.cancel_session(viewing.session);
+  assert(view_cancelled == 1 && view_completed == 0 && flows.active_count() == 1);
+  view_done({WalletFlowStatus::Cancelled, CITIZENSDK_ERROR_CANCELLED});
+  flows.drain();
+  view_done({WalletFlowStatus::Completed, CITIZENSDK_OK});
+  flows.drain();
+  assert(view_completed == 1 && flows.active_count() == 0);
 
   // No secret-bearing field exists in either the decoded public request or
   // wallet contract; import receives all secrets only inside Host-owned GTK.

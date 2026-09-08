@@ -1,5 +1,15 @@
 # CitizenSDK Windows 原生 Host
 
+当前 C++ Config 只有 `modules` 作为模块选择真源，默认 full；薄 Host 通过新增
+`citizensdk_host_create_with_modules` 进入同一装配逻辑。既有 C Host ABI v1 的
+`enable_wallet` 布局与含义保持，不能把其内存重解释为模块位；显式入口检查它与安全资源选择一致。
+Rust 先验证模块，chain/history 才创建 public store，wallet/signing 才创建配套 secure store/Vault；
+签名-only 不开放钱包 UI，只使用同宿主既有 SDK 安全账户，首次建立仍须钱包流程。
+现有正式包装仍为 full 并含链资产，运行期未选链不加载资产或创建链数据库。
+第4步新增独立 qr=32，full=63。Windows 只将亮度帧交给 SDK 内唯一 ZXing-C++ 3.1.1 图像层，
+`QR_V1` 协议与扫码签名会话由同一 Rust QR 模块实现，不设兼容或回退识别器。
+本次第 2 步仅更新源码、注释、合同和测试，尚未执行新的真实构建、平台测试或硬件验收；下文旧分步运行记录保留为历史证据，不代表本次变更已验证。
+
 本目录是同一个 CitizenSDK 的 Windows 系统适配，不是另一个钱包或轻节点实现。
 最低 Windows 11，机器目标 `x86_64-pc-windows-msvc`；公开平台名只有 **Windows**。
 本步新增源码与原生构建合同，尚未在 Windows 实际编译、运行或分发。macOS 验收不能
@@ -11,7 +21,7 @@
 原生安装包含 `citizensdk_host.dll`、`citizensdk.dll`、对应 MSVC import libraries、七个
 Host 公开头、两个 Core 公开头、可重定位 CMake 配置与同一 CitizenChain 资产。
 原生入口不依赖 Flutter，不复制 signer、交易或 smoldot。第 8.4 步接入默认 Dart 注册和
-同版候选运行投影，Flutter 运行包仅保留 21 项安装件与 12 项插件输入，不携带 Host 私有
+同版候选运行投影，Flutter 运行包仅保留 22 项安装件与 12 项插件输入，不携带 Host 私有
 源码或测试。源码注册不是已经在 Hosted 发布；Windows 实际平台运行仍待统一验收。
 
 ```cmake
@@ -27,7 +37,7 @@ config.storage_root = state_directory;  // 绝对路径，当前用户私有目�
 config.asset_root = asset_directory;    // 安装包 share/citizensdk/citizenchain。
 config.application_id = "org.example.application";
 config.hwnd = nullptr;                  // 关闭钱包时必须为空，不创建钱包窗口。
-config.enable_wallet = false;           // 只读链可不创建任何钱包 UI。
+config.modules = CITIZENSDK_MODULE_CHAIN; // 只读链不创建钱包 UI 或金库。
 citizen_sdk::Host host(config);
 host.open();                            // 返回的 native_handle 由 Host 唯一持有。
 // Core 尚未 start；运行后必须先异步 stop 完成 checkpoint，再关闭。
@@ -56,11 +66,19 @@ TataConsole/runner checkout 外中央目录，源码目录禁止任何编译缓�
 和真实 Flutter Release 消费者，全部成功后才同卷导出安装目录；
 输出已存在或跨卷则失败，不覆盖既有成功结果。Windows 实际执行仍须统一平台验收。
 
+第 3 步安全查看复用既有自绘敏感控件、WDA_EXCLUDEFROMCAPTURE 和原生主线程，
+用系统 wtsapi32 监督当前会话锁屏、断开与注销；注册失败或状态无法确认时不显示秘密。
+私有 40 字节回调表的 `authorizing` 贯通真实 Host 解包操作号，只有同 Host、同操作号的
+SDK 认证窗口可临时获得焦点；认证窗口再次失焦会取消，晚到结果不能恢复显示。
+私钥不进入窗口文本消息、剪贴板、Flutter 或通用 result。完整安全流程和真实 Win32/TPM
+验收尚未完成。生成私有头仅通过 `CITIZENSDK_INTERNAL_INCLUDE_DIR` 给内部目标使用，不安装。
+
 ## Flutter 适配源码
 
 `citizen_sdk_plugin` 通过官方 `flutter`、`flutter_wrapper_plugin` 连接包内同版
 `CitizenSDK::Host/Core`，不重新编译核心。使用官方 StandardMethodCodec 和已有双 channel、
-22 方法；钱包交互只接本目录现有 Win32 安全流程。
+36 方法；钱包交互只接本目录现有 Win32 安全流程。无会话 verifySignature 在环境/Host 创建前
+直接调用公共 Core；Dart 使用静态 CitizenSigning.verify，无需 open 或事件订阅。
 
 Windows 宿主须在顶层 CMake 引入 generated_plugins.cmake 之前声明一次：
 

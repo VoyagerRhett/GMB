@@ -4,6 +4,52 @@ use std::collections::BTreeSet;
 
 use crate::{ContractError, ContractErrorCode, ContractResult};
 
+/// 实例启用模块集合；位值与中央 CitizenSDK 字典保持一致。
+///
+/// 模块选择与设备能力不同：未选模块不得装配资源；交易和历史必须显式选择链。
+/// 钱包与签名分别启用，钱包内部派生所需的密码学实现不代表开放公开签名入口。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Modules(u32);
+
+impl Modules {
+    pub const WALLET: u32 = 1;
+    pub const SIGNING: u32 = 2;
+    pub const CHAIN: u32 = 4;
+    pub const TRANSACTIONS: u32 = 8;
+    pub const HISTORY: u32 = 16;
+    pub const QR: u32 = 32;
+    pub const ALL: u32 = 63;
+
+    pub fn try_new(bits: u32) -> ContractResult<Self> {
+        if bits == 0 || bits & !Self::ALL != 0 {
+            return Err(ContractError::new(
+                ContractErrorCode::InvalidArgument,
+                "modules 必须是非空且仅包含已登记模块位的集合",
+            ));
+        }
+        if bits & (Self::TRANSACTIONS | Self::HISTORY) != 0 && bits & Self::CHAIN == 0 {
+            return Err(ContractError::new(
+                ContractErrorCode::InvalidArgument,
+                "交易或历史模块必须同时启用链模块",
+            ));
+        }
+        Ok(Self(bits))
+    }
+
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// 判断请求的全部位，不能将任意一位相交误判为依赖已满足。
+    pub const fn contains(self, bits: u32) -> bool {
+        self.0 & bits == bits
+    }
+
+    pub const fn full() -> Self {
+        Self(Self::ALL)
+    }
+}
+
 /// CitizenSDK 唯一正式能力名；不得增加近义别名制造第二套能力语义。
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum CapabilityName {

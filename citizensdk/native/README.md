@@ -1,5 +1,8 @@
 # CitizenSDK 原生核心
 
+当前 Core 为 88 个公开 C 函数；六模块由统一 Rust 装配与门禁决定。
+运行期模块选择不裁剪现有正式 full 包或链资产。模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
+
 本目录承载同一 CitizenSDK 产品的统一原生核心：`contracts` 固定类型化依赖语义，`engine`
 负责产品无关的能力、runtime、状态导入与交易执行协调，`ffi` 是唯一产品 C ABI，`signer`
 提供 sr25519，`smoldot/provider` 实现类型化链合同，`smoldot/ffi` 只保留归档
@@ -13,10 +16,11 @@ Dart/smoldot macOS `arm64` 差分测试所需的 legacy 入口，`smoldot/pow` �
 ```
 
 `native/ffi` 与根 `include` 已建立产品级唯一 C ABI，并让其经 Engine 调用真实 smoldot
-provider。ABI v1 保留原有 36 个符号不变并追加 34 个账户、钱包、签名、转账和历史符号，
-总计 70 个。`citizensdk_create` 仍构造 chain-only session；
-`citizensdk_create_with_host` 通过五类具名 typed stores 与 KEK/DEK Vault 构造完整平台无关
-组合。ABI 不开放任意 RPC、private key、child secret、低层 signer 或钱包裸 signed
+provider。ABI v1 保持既有结构、数值及默认构造行为，当前共 88 个函数。
+`citizensdk_validate_modules` 在平台资源创建前统一验证选择；
+`citizensdk_create_with_modules` 按选择装配同一 Core；
+`citizensdk_verify_signature` 是无实例纯验签，不需要金库、链或事件订阅。
+ABI 不开放任意 RPC、private key、child secret、低层 signer 或钱包裸 signed
 extrinsic。
 
 host 组合还固定公开链数据库生命周期：start 在 provider 启动前自动 restore，显式 export 在
@@ -37,12 +41,11 @@ finalized 流水拒绝自转，对业务/Balances 双事件精确一对一去重
 认领发送方 outgoing；同一原始块重放不能恢复已消费 pending。底层 watch 是
 submit-and-watch，组合钱包组件后会在 provider 前关闭 raw 入口。终态 metadata 直接从
 provider 的准确 finalized 块取得，持久 runtime cache 只用于性能，不能充当执行证据。第 4.2 步
-新增的 Rust 内部 `ProductComposition` 固定 smoldot、准确 Runtime nonce 与唯一 sr25519 signer，
-并只接受宿主注入的 typed Vault/stores。五类 store 分别是 chain database、runtime cache、
-wallet profile、transaction history 与 encrypted secret blob；secure store/Vault
-all-or-none。旧构造准确报告 chain-only 能力，host 构造则组合真实钱包/历史能力；不能再把
-旧构造的 unsupported 快照写成整个产品 ABI 尚未投影。根 Dart、Android 与共享 Darwin
-绑定及 Linux、Windows Host 均已使用 host 产品组合。
+新增的 Rust 内部 `ProductComposition` 仍固定唯一 provider、准确 Runtime nonce 与 sr25519 实现。
+当前模块化构造只装配已选服务：wallet 管理与 SigningService 独立，history 也独立于 transactions。
+chain/history 按选择使用 public store，wallet/signing 才需要配套 secure store 与 Vault；
+签名只读同宿主已安全建立的账户归属元数据，不开放钱包 UI，也不建立第二份账户或秘密仓库。
+首次 provision 仍须钱包流程；未启用模块明确拒绝。五个平台只投影同一 Core 规则。
 
 创建准备会话的助记词仅经绑定 owner instance handle 的 SDK-owned handle 提供给明确备份 UI；
 import/add 的恢复词是用户显式输入。Rust 以随机 DEK/nonce 和完整 `SecretRef` AAD 执行
@@ -71,7 +74,7 @@ future，不占用短操作池。只有 canonical finalized body、准确块 met
 原生轻节点源码闭包、FFI、Dart smoldot 包、来源测试与锁文件已经迁入；当前不存在通过
 CitizenApp 或 `shared` 相对路径取得运行时源码的依赖。`android/`、`darwin/`、`linux/` 与
 `windows/` 平台目录只负责链接、装载、typed stores 和设备安全能力，不复制链或签名实现。
-Linux Host 通过根 `citizensdk_create_with_host` 注入分离的 public/secure SQLite 和 TPM 2.0
+Linux Host 通过根 `citizensdk_create_with_modules` 按选择注入分离的 public/secure SQLite 和 TPM 2.0
 KEK/DEK Vault；其 C++ convenience API 只是根 C ABI 的 header-only RAII 包装。
 Linux 的 SQLite 文件身份由 Host 自有 openat VFS 绑定，不经过 `/proc/self/fd` 路径；既有
 schema/PRAGMA 与 transaction commit 点必须精确失败关闭。Host closing lease、同步早完成无损
@@ -129,8 +132,8 @@ no-codesign、iOS 模拟器变体（Rust target `aarch64-apple-ios-sim`）和 ma
 Kotlin/Java 单元测试 Gradle 17 个 task 成功。
 
 任何编译状态和原生产物都必须写入源码树外的中央目录。本机成功产物容器是
-`/Users/rhett/TATA/tataconsole/target/GMB/citizensdk/SDK`，工作状态容器是
-`/Users/rhett/TATA/tataconsole/target/.work/GMB/citizensdk/SDK`；永久容器保留，只清理本次
+`/Users/rhett/TATA/tataconsole/target/gmb/citizensdk`，工作状态容器是
+`/Users/rhett/TATA/tataconsole/work/gmb/citizensdk`；永久容器保留，只清理本次
 有明确归属的子项，不能在产品源码内生成构建记录。
 
 ## Windows Host 与同一 Core
@@ -140,7 +143,7 @@ Kotlin/Java 单元测试 Gradle 17 个 task 成功。
 provider。TPM 只保护 KEK/DEK，sr25519、链协议和交易实现保持字节不变。
 
 第 8.2 步 Windows Flutter adapter 只消费已安装的同版 Host/Core，不在 native 新增绑定、
-算法或平台分支。固定 22 方法、秘密不跨 Flutter、关闭 BUSY 可重试；一次性原生
+算法或平台分支。当时固定22方法，第3步扩展为26方法，第4步加入 QR 后五端统一为36方法；秘密不跨Flutter、关闭BUSY可重试；一次性原生
 application_id 声明只固定数据命名空间，不改变 Core 身份或 chain ID。第 8.4 步已把
 Windows 纳入默认公开平台与唯一候选。唯一构建器在原生及 C/C++ 消费通过后，执行六项
 Flutter adapter CTest 与真实公开 Release 消费者，全部通过才复验并导出；本机 macOS

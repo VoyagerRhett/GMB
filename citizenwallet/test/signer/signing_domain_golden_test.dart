@@ -27,7 +27,7 @@ import 'package:citizenwallet/security/account_data_key_provision.dart';
 // 契约:被签消息 = blake2_256( GMB(3B) || op_tag(1B) || payload )
 
 const String _vectorsPath =
-    '../citizenchain/runtime/primitives/tests/fixtures/signing_domain_vectors.json';
+    'test/signer/fixtures/signing_domain_vectors.json';
 
 /// 测试签名公钥占位:哈希域摘要不含 b.u,取值不影响被签字节。
 const String _testSignerPublicKeyHex =

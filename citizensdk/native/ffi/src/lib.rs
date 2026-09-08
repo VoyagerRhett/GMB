@@ -17,15 +17,16 @@ use std::{
 
 use citizen_sdk_contracts::{
     BlockFinality, ChainIdentity, ExecutionConclusion, ExportedChainState, ExtrinsicWatchEvent,
-    Hash32, SignedExtrinsic, UnverifiedReason, VerifiedBlockRef,
+    Hash32, Modules, SignedExtrinsic, UnverifiedReason, VerifiedBlockRef,
 };
 use futures_util::{FutureExt, StreamExt};
 
 mod abi;
 mod assets;
 mod capabilities;
+#[cfg(feature = "chain")]
 mod chain_monitor;
-#[cfg(test)]
+#[cfg(all(test, feature = "chain"))]
 mod chain_monitor_tests;
 mod composition;
 #[cfg(test)]
@@ -38,6 +39,7 @@ mod host_codec;
 mod host_codec_tests;
 mod host_providers;
 mod ownership;
+mod qr_abi;
 mod requests;
 mod runtime;
 mod wallet_abi;
@@ -52,6 +54,7 @@ pub use host_providers::{
     validate_secure_store_v1, validate_status_result_v1, validate_vault_availability_result_v1,
     HostCompletionKind, HostDispatchOutcome, HostOperationTracker,
 };
+pub use qr_abi::*;
 
 use error::{clear_last_error, last_error, set_last_error, FfiError, FfiResult};
 use ownership::ResultPayload;
@@ -156,8 +159,53 @@ pub unsafe extern "C" fn citizensdk_create(
     out_handle: *mut CitizenSdkHandle,
 ) -> i32 {
     ffi_status(|| {
+        let options = read_versioned(options, "create options")?;
+        let modules = composition::validate_modules(Modules::CHAIN | Modules::TRANSACTIONS)?;
+        create_instance(&options, None, modules, out_handle)
+    })
+}
+
+/// 模块校验是无状态操作，平台必须在读取链资产或创建安全资源之前调用。
+#[no_mangle]
+pub extern "C" fn citizensdk_validate_modules(modules: u32) -> i32 {
+    ffi_status(|| composition::validate_modules(modules).map(|_| ()))
+}
+
+/// 按固定模块集合创建实例；完整使用与按模块使用共用唯一装配实现。
+///
+/// # Safety
+/// Options and every supplied host vtable must be readable; output must be
+/// writable. Copied host callbacks must live through successful destruction.
+#[no_mangle]
+pub unsafe extern "C" fn citizensdk_create_with_modules(
+    options: *const CitizenSdkCreateOptions,
+    host_services: *const CitizenSdkHostServicesV1,
+    modules: u32,
+    out_handle: *mut CitizenSdkHandle,
+) -> i32 {
+    ffi_status(|| {
+        let modules = composition::validate_modules(modules)?;
         require_output(out_handle, "out_handle")?;
         let options = read_versioned(options, "create options")?;
+        let services = if host_services.is_null() {
+            None
+        } else {
+            Some(read_versioned(host_services, "host services")?)
+        };
+        create_instance(&options, services.as_ref(), modules, out_handle)
+    })
+}
+
+/// 构造阶段仅复制和校验输入，不调用需要主线程完成的金库或存储回调。
+unsafe fn create_instance(
+    options: &CitizenSdkCreateOptions,
+    services: Option<&CitizenSdkHostServicesV1>,
+    modules: Modules,
+    out_handle: *mut CitizenSdkHandle,
+) -> FfiResult<()> {
+    require_output(out_handle, "out_handle")?;
+    composition::validate_modules(modules.bits())?;
+    let combined_chain_spec = if modules.contains(Modules::CHAIN) {
         let manifest = copy_view(
             options.asset_manifest,
             "asset_manifest",
@@ -169,19 +217,77 @@ pub unsafe extern "C" fn citizensdk_create(
             "light_sync_state",
             MAX_ABI_INPUT_BYTES,
         )?;
-        let system_name = optional_utf8(options.system_name, "system_name", "CitizenSDK")?;
-        let system_version = optional_utf8(options.system_version, "system_version", "1.0.0")?;
-        let assets = assets::verify_assets(&manifest, &chain_spec, &light_state)?;
-        let handle = handles::reserve_handle()?;
-        let runtime = NativeRuntime::new(
-            handle,
-            assets.combined_chain_spec,
-            system_name,
-            system_version,
-        )?;
-        handles::insert(runtime)?;
-        ptr::write(out_handle, handle);
-        Ok(())
+        Some(assets::verify_assets(&manifest, &chain_spec, &light_state)?.combined_chain_spec)
+    } else {
+        for view in [
+            options.asset_manifest,
+            options.chain_spec,
+            options.light_sync_state,
+        ] {
+            if view.len != 0 {
+                return Err(FfiError::invalid(
+                    "chain assets must be empty when chain is disabled",
+                ));
+            }
+        }
+        None
+    };
+    let system_name = optional_utf8(options.system_name, "system_name", "CitizenSDK")?;
+    let system_version = optional_utf8(options.system_version, "system_version", "1.0.0")?;
+    let handle = handles::reserve_handle()?;
+    let runtime = NativeRuntime::new_with_modules(
+        handle,
+        combined_chain_spec,
+        system_name,
+        system_version,
+        services,
+        modules,
+    )?;
+    handles::insert(runtime)?;
+    ptr::write(out_handle, handle);
+    Ok(())
+}
+
+/// 纯验签复用既有 sr25519 实现，无实例、金库或链资源，也不开放原始签名密钥。
+///
+/// # Safety
+/// Account and byte views must be readable; out_valid must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn citizensdk_verify_signature(
+    account_id: *const CitizenSdkAccountId,
+    signature: CitizenSdkBytesView,
+    message: CitizenSdkBytesView,
+    out_valid: *mut u8,
+) -> i32 {
+    ffi_status(|| {
+        require_output(out_valid, "out_valid")?;
+        #[cfg(not(feature = "signing"))]
+        {
+            let _ = (account_id, signature, message);
+            Err(FfiError::new(
+                CitizenSdkErrorCode::Unsupported,
+                "signing is not compiled into this build",
+            ))
+        }
+        #[cfg(feature = "signing")]
+        {
+            use citizen_sdk_contracts::{ChainSigner, Sr25519PublicKey, Sr25519Signature};
+            if account_id.is_null() {
+                return Err(FfiError::invalid("account_id is null"));
+            }
+            let public_key = Sr25519PublicKey::from_bytes(ptr::read(account_id).bytes);
+            let signature: [u8; 64] = copy_view(signature, "signature", 64)?
+                .try_into()
+                .map_err(|_| FfiError::invalid("signature must be exactly 64 bytes"))?;
+            let message = copy_view(message, "message", MAX_ABI_INPUT_BYTES)?;
+            let valid = futures_executor::block_on(citizen_signer::Sr25519SoftwareSigner.verify(
+                public_key,
+                message,
+                Sr25519Signature::from_bytes(signature),
+            ))?;
+            ptr::write(out_valid, u8::from(valid));
+            Ok(())
+        }
     })
 }
 
@@ -199,6 +305,8 @@ pub unsafe extern "C" fn citizensdk_destroy(handle: CitizenSdkHandle) -> i32 {
         // joined callbacks. Only after that commit point may teardown discard
         // uncommitted recovery-phrase sessions owned by this instance.
         wallet_abi::drop_prepared_for_owner(handle);
+        #[cfg(feature = "qr")]
+        qr_abi::drop_sessions_for_owner(handle);
         handles::remove(handle, &runtime)
     })
 }
@@ -288,90 +396,97 @@ pub unsafe extern "C" fn citizensdk_start(
     handle: CitizenSdkHandle,
     out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
-    ffi_status(|| {
-        let runtime = handles::get(handle)?;
-        accept_and_write_lifecycle(runtime, out_request_id, |runtime, _, _| {
-            // Host-composed instances own a typed public chain-database store.
-            // Restore it before `begin_provider_start` and, critically, before
-            // the provider's start operation can have any side effect. Legacy
-            // `citizensdk_create` instances retain their original startup path.
-            run_start_lifecycle_policy(
-                runtime.uses_host_services(),
-                || -> FfiResult<()> {
-                    match runtime
-                        .provider()
-                        .drive(runtime.engine().restore_state_from_store())
-                    {
-                        Ok(Ok(_)) => Ok(()),
-                        Ok(Err(error)) => Err(error.into()),
-                        Err(error) => Err(error.into()),
-                    }
-                },
-                // A provider import followed by failed CAS is already one-way
-                // StartFailed; a pre-provider validation error remains Created.
-                // Publish either exact lifecycle without replacing its cause.
-                || runtime.converge_failed_start(),
-                || {
-                    runtime
-                        .engine()
-                        .begin_provider_start()
-                        .map_err(FfiError::from)
-                },
-                || {
-                    runtime.publish_capabilities()?;
-                    runtime.publish_lifecycle()
-                },
-                || -> FfiResult<()> {
-                    match runtime.provider().drive(runtime.provider().start()) {
-                        Ok(Ok(())) => Ok(()),
-                        Ok(Err(error)) | Err(error) => {
-                            runtime.converge_failed_start();
-                            Err(error.into())
-                        }
-                    }
-                },
-            )?;
-
-            // Status refresh is part of startup validation. Once provider
-            // start has had side effects, every later failure converges to a
-            // stopped provider and one-way Engine StartFailed state.
-            if let Err(error) = runtime.refresh_provider_capabilities() {
-                runtime.converge_failed_start();
-                return Err(error);
-            }
-
-            match runtime
-                .provider()
-                .drive(runtime.engine().complete_provider_start())
-            {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => {
-                    runtime.converge_failed_start();
-                    return Err(error.into());
-                }
-                Err(error) => {
-                    runtime.converge_failed_start();
-                    return Err(error.into());
-                }
-            }
-
-            // `complete_provider_start` applies the already sampled provider
-            // readiness through the Engine lifecycle gate.
-            if let Err(error) = runtime.start_product_services() {
-                runtime.converge_failed_start();
-                return Err(error);
-            }
-            if let Err(error) = runtime
-                .publish_capabilities()
-                .and_then(|_| runtime.publish_lifecycle())
-            {
-                // 自有 monitor 已启动；末尾事件入队失败也必须排空，不能留后台孤儿。
-                runtime.converge_failed_start();
-                return Err(error);
-            }
-            Ok(ResultPayload::Empty)
+    #[cfg(not(feature = "chain"))]
+    {
+        ffi_status(|| {
+            Err(FfiError::new(
+                CitizenSdkErrorCode::Unsupported,
+                "chain is not compiled into this build",
+            ))
         })
-    })
+    }
+    #[cfg(feature = "chain")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            runtime.provider()?;
+            accept_and_write_lifecycle(runtime, out_request_id, |runtime, _, _| {
+                // Host-composed instances own a typed public chain-database store.
+                // Restore it before `begin_provider_start` and, critically, before
+                // the provider's start operation can have any side effect. Legacy
+                // `citizensdk_create` instances retain their original startup path.
+                run_start_lifecycle_policy(
+                    runtime.uses_host_services(),
+                    || -> FfiResult<()> {
+                        match runtime.drive(runtime.engine().restore_state_from_store()) {
+                            Ok(Ok(_)) => Ok(()),
+                            Ok(Err(error)) => Err(error.into()),
+                            Err(error) => Err(error.into()),
+                        }
+                    },
+                    // A provider import followed by failed CAS is already one-way
+                    // StartFailed; a pre-provider validation error remains Created.
+                    // Publish either exact lifecycle without replacing its cause.
+                    || runtime.converge_failed_start(),
+                    || {
+                        runtime
+                            .engine()
+                            .begin_provider_start()
+                            .map_err(FfiError::from)
+                    },
+                    || {
+                        runtime.publish_capabilities()?;
+                        runtime.publish_lifecycle()
+                    },
+                    || -> FfiResult<()> {
+                        match runtime.provider()?.drive(runtime.provider()?.start()) {
+                            Ok(Ok(())) => Ok(()),
+                            Ok(Err(error)) | Err(error) => {
+                                runtime.converge_failed_start();
+                                Err(error.into())
+                            }
+                        }
+                    },
+                )?;
+
+                // Status refresh is part of startup validation. Once provider
+                // start has had side effects, every later failure converges to a
+                // stopped provider and one-way Engine StartFailed state.
+                if let Err(error) = runtime.refresh_provider_capabilities() {
+                    runtime.converge_failed_start();
+                    return Err(error);
+                }
+
+                match runtime.drive(runtime.engine().complete_provider_start()) {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        runtime.converge_failed_start();
+                        return Err(error.into());
+                    }
+                    Err(error) => {
+                        runtime.converge_failed_start();
+                        return Err(error.into());
+                    }
+                }
+
+                // `complete_provider_start` applies the already sampled provider
+                // readiness through the Engine lifecycle gate.
+                if let Err(error) = runtime.start_product_services() {
+                    runtime.converge_failed_start();
+                    return Err(error);
+                }
+                if let Err(error) = runtime
+                    .publish_capabilities()
+                    .and_then(|_| runtime.publish_lifecycle())
+                {
+                    // 自有 monitor 已启动；末尾事件入队失败也必须排空，不能留后台孤儿。
+                    runtime.converge_failed_start();
+                    return Err(error);
+                }
+                Ok(ResultPayload::Empty)
+            })
+        })
+    }
 }
 
 #[no_mangle]
@@ -384,45 +499,57 @@ pub unsafe extern "C" fn citizensdk_stop(
     handle: CitizenSdkHandle,
     out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
-    ffi_status(|| {
-        let runtime = handles::get(handle)?;
-        accept_and_write_lifecycle(runtime, out_request_id, |runtime, request_id, _| {
-            // A host-composed graceful stop persists one exact exported
-            // snapshot while every provider/service dependency is still live.
-            // Direct destroy is intentionally not a graceful persistence API.
-            run_stop_lifecycle_policy(
-                runtime.uses_host_services(),
-                || -> FfiResult<()> {
-                    runtime
-                        .provider()
-                        .drive(runtime.engine().export_and_persist_state())
-                        .map_err(FfiError::from)?
-                        .map(|_| ())
-                        .map_err(FfiError::from)
-                },
-                || {
-                    if runtime.uses_host_services() {
-                        runtime.stop_capability_subscription_for_exclusive_request(request_id)
-                    } else {
-                        runtime.stop_capability_subscription()
-                    }
-                },
-                // 任何已组合的产品 history/background 服务必须先 stop + drain；
-                // provider 是依赖图中最后停止的一层。
-                || runtime.stop_product_services(),
-                || runtime.provider().stop().map_err(FfiError::from),
-                || {
-                    runtime
-                        .engine()
-                        .mark_provider_stopped()
-                        .map_err(FfiError::from)
-                },
-            )?;
-            runtime.publish_capabilities()?;
-            runtime.publish_lifecycle()?;
-            Ok(ResultPayload::Empty)
+    #[cfg(not(feature = "chain"))]
+    {
+        ffi_status(|| {
+            Err(FfiError::new(
+                CitizenSdkErrorCode::Unsupported,
+                "chain is not compiled into this build",
+            ))
         })
-    })
+    }
+    #[cfg(feature = "chain")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            runtime.provider()?;
+            accept_and_write_lifecycle(runtime, out_request_id, |runtime, request_id, _| {
+                // A host-composed graceful stop persists one exact exported
+                // snapshot while every provider/service dependency is still live.
+                // Direct destroy is intentionally not a graceful persistence API.
+                run_stop_lifecycle_policy(
+                    runtime.uses_host_services(),
+                    || -> FfiResult<()> {
+                        runtime
+                            .drive(runtime.engine().export_and_persist_state())
+                            .map_err(FfiError::from)?
+                            .map(|_| ())
+                            .map_err(FfiError::from)
+                    },
+                    || {
+                        if runtime.uses_host_services() {
+                            runtime.stop_capability_subscription_for_exclusive_request(request_id)
+                        } else {
+                            runtime.stop_capability_subscription()
+                        }
+                    },
+                    // 任何已组合的产品 history/background 服务必须先 stop + drain；
+                    // provider 是依赖图中最后停止的一层。
+                    || runtime.stop_product_services(),
+                    || runtime.provider()?.stop().map_err(FfiError::from),
+                    || {
+                        runtime
+                            .engine()
+                            .mark_provider_stopped()
+                            .map_err(FfiError::from)
+                    },
+                )?;
+                runtime.publish_capabilities()?;
+                runtime.publish_lifecycle()?;
+                Ok(ResultPayload::Empty)
+            })
+        })
+    }
 }
 
 #[no_mangle]
@@ -467,14 +594,27 @@ pub unsafe extern "C" fn citizensdk_get_best_head(
     handle: CitizenSdkHandle,
     out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
-    ffi_status(|| {
-        let runtime = handles::get(handle)?;
-        accept_and_write(runtime, out_request_id, |runtime, _, _| {
-            runtime.refresh_provider_capabilities()?;
-            let block = runtime.provider().drive(runtime.engine().best_head())??;
-            Ok(ResultPayload::Block(block))
+    #[cfg(not(feature = "chain"))]
+    {
+        ffi_status(|| {
+            Err(FfiError::new(
+                CitizenSdkErrorCode::Unsupported,
+                "chain is not compiled into this build",
+            ))
         })
-    })
+    }
+    #[cfg(feature = "chain")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            runtime.provider()?;
+            accept_and_write(runtime, out_request_id, |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let block = runtime.drive(runtime.engine().best_head())??;
+                Ok(ResultPayload::Block(block))
+            })
+        })
+    }
 }
 
 #[no_mangle]
@@ -487,16 +627,27 @@ pub unsafe extern "C" fn citizensdk_get_finalized_head(
     handle: CitizenSdkHandle,
     out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
-    ffi_status(|| {
-        let runtime = handles::get(handle)?;
-        accept_and_write(runtime, out_request_id, |runtime, _, _| {
-            runtime.refresh_provider_capabilities()?;
-            let block = runtime
-                .provider()
-                .drive(runtime.engine().finalized_head())??;
-            Ok(ResultPayload::Block(block.into()))
+    #[cfg(not(feature = "chain"))]
+    {
+        ffi_status(|| {
+            Err(FfiError::new(
+                CitizenSdkErrorCode::Unsupported,
+                "chain is not compiled into this build",
+            ))
         })
-    })
+    }
+    #[cfg(feature = "chain")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            runtime.provider()?;
+            accept_and_write(runtime, out_request_id, |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let block = runtime.drive(runtime.engine().finalized_head())??;
+                Ok(ResultPayload::Block(block.into()))
+            })
+        })
+    }
 }
 
 #[no_mangle]
@@ -511,18 +662,29 @@ pub unsafe extern "C" fn citizensdk_get_storage_at(
     key: CitizenSdkBytesView,
     out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
-    ffi_status(|| {
-        let runtime = handles::get(handle)?;
-        let block = block_from_abi(read_versioned(block, "block")?)?;
-        let key = copy_view(key, "storage key", MAX_ABI_INPUT_BYTES)?;
-        accept_and_write(runtime, out_request_id, move |runtime, _, _| {
-            runtime.refresh_provider_capabilities()?;
-            let value = runtime
-                .provider()
-                .drive(runtime.engine().storage_at(block, key))??;
-            Ok(ResultPayload::Storage(value))
+    #[cfg(not(feature = "chain"))]
+    {
+        ffi_status(|| {
+            Err(FfiError::new(
+                CitizenSdkErrorCode::Unsupported,
+                "chain is not compiled into this build",
+            ))
         })
-    })
+    }
+    #[cfg(feature = "chain")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            runtime.provider()?;
+            let block = block_from_abi(read_versioned(block, "block")?)?;
+            let key = copy_view(key, "storage key", MAX_ABI_INPUT_BYTES)?;
+            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let value = runtime.drive(runtime.engine().storage_at(block, key))??;
+                Ok(ResultPayload::Storage(value))
+            })
+        })
+    }
 }
 
 #[no_mangle]
@@ -538,35 +700,46 @@ pub unsafe extern "C" fn citizensdk_get_storage_batch_at(
     key_count: u32,
     out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
-    ffi_status(|| {
-        let runtime = handles::get(handle)?;
-        let block = block_from_abi(read_versioned(block, "block")?)?;
-        if key_count == 0 || key_count > 1024 || keys.is_null() {
-            return Err(FfiError::invalid(
-                "storage batch must contain between 1 and 1024 keys",
-            ));
-        }
-        let views = std::slice::from_raw_parts(keys, key_count as usize);
-        let mut copied = Vec::with_capacity(views.len());
-        let mut total = 0_usize;
-        for (index, view) in views.iter().copied().enumerate() {
-            let key = copy_view(view, &format!("storage key {index}"), MAX_ABI_INPUT_BYTES)?;
-            total = total
-                .checked_add(key.len())
-                .ok_or_else(|| FfiError::invalid("storage batch is too large"))?;
-            if total > MAX_ABI_INPUT_BYTES {
-                return Err(FfiError::invalid("storage batch is too large"));
-            }
-            copied.push(key);
-        }
-        accept_and_write(runtime, out_request_id, move |runtime, _, _| {
-            runtime.refresh_provider_capabilities()?;
-            let values = runtime
-                .provider()
-                .drive(runtime.engine().storage_batch_at(block, copied))??;
-            Ok(ResultPayload::StorageBatch(values))
+    #[cfg(not(feature = "chain"))]
+    {
+        ffi_status(|| {
+            Err(FfiError::new(
+                CitizenSdkErrorCode::Unsupported,
+                "chain is not compiled into this build",
+            ))
         })
-    })
+    }
+    #[cfg(feature = "chain")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            runtime.provider()?;
+            let block = block_from_abi(read_versioned(block, "block")?)?;
+            if key_count == 0 || key_count > 1024 || keys.is_null() {
+                return Err(FfiError::invalid(
+                    "storage batch must contain between 1 and 1024 keys",
+                ));
+            }
+            let views = std::slice::from_raw_parts(keys, key_count as usize);
+            let mut copied = Vec::with_capacity(views.len());
+            let mut total = 0_usize;
+            for (index, view) in views.iter().copied().enumerate() {
+                let key = copy_view(view, &format!("storage key {index}"), MAX_ABI_INPUT_BYTES)?;
+                total = total
+                    .checked_add(key.len())
+                    .ok_or_else(|| FfiError::invalid("storage batch is too large"))?;
+                if total > MAX_ABI_INPUT_BYTES {
+                    return Err(FfiError::invalid("storage batch is too large"));
+                }
+                copied.push(key);
+            }
+            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let values = runtime.drive(runtime.engine().storage_batch_at(block, copied))??;
+                Ok(ResultPayload::StorageBatch(values))
+            })
+        })
+    }
 }
 
 #[no_mangle]
@@ -580,17 +753,28 @@ pub unsafe extern "C" fn citizensdk_get_runtime_context_at(
     block: *const CitizenSdkBlockRef,
     out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
-    ffi_status(|| {
-        let runtime = handles::get(handle)?;
-        let block = block_from_abi(read_versioned(block, "block")?)?;
-        accept_and_write(runtime, out_request_id, move |runtime, _, _| {
-            runtime.refresh_provider_capabilities()?;
-            let context = runtime
-                .provider()
-                .drive(runtime.engine().runtime_context_at(block))??;
-            Ok(ResultPayload::RuntimeContext(context))
+    #[cfg(not(feature = "chain"))]
+    {
+        ffi_status(|| {
+            Err(FfiError::new(
+                CitizenSdkErrorCode::Unsupported,
+                "chain is not compiled into this build",
+            ))
         })
-    })
+    }
+    #[cfg(feature = "chain")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            runtime.provider()?;
+            let block = block_from_abi(read_versioned(block, "block")?)?;
+            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let context = runtime.drive(runtime.engine().runtime_context_at(block))??;
+                Ok(ResultPayload::RuntimeContext(context))
+            })
+        })
+    }
 }
 
 #[no_mangle]
@@ -604,17 +788,29 @@ pub unsafe extern "C" fn citizensdk_submit_extrinsic(
     extrinsic: CitizenSdkBytesView,
     out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
-    ffi_status(|| {
-        let runtime = handles::get(handle)?;
-        let extrinsic = signed_extrinsic(extrinsic)?;
-        accept_and_write(runtime, out_request_id, move |runtime, _, _| {
-            runtime.refresh_provider_capabilities()?;
-            let submitted = runtime
-                .provider()
-                .drive(runtime.engine().submit_signed_extrinsic(extrinsic))??;
-            Ok(ResultPayload::Hash(submitted.hash()))
+    #[cfg(not(feature = "chain"))]
+    {
+        ffi_status(|| {
+            Err(FfiError::new(
+                CitizenSdkErrorCode::Unsupported,
+                "chain is not compiled into this build",
+            ))
         })
-    })
+    }
+    #[cfg(feature = "chain")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            runtime.provider()?;
+            let extrinsic = signed_extrinsic(extrinsic)?;
+            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let submitted =
+                    runtime.drive(runtime.engine().submit_signed_extrinsic(extrinsic))??;
+                Ok(ResultPayload::Hash(submitted.hash()))
+            })
+        })
+    }
 }
 
 #[no_mangle]
@@ -629,46 +825,61 @@ pub unsafe extern "C" fn citizensdk_watch_extrinsic(
     extrinsic: CitizenSdkBytesView,
     out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
-    ffi_status(|| {
-        let runtime = handles::get(handle)?;
-        let extrinsic = signed_extrinsic(extrinsic)?;
-        accept_and_write_watch(
-            runtime,
-            out_request_id,
-            move |runtime, request_id, cancellation| {
-                runtime.refresh_provider_capabilities()?;
-                let mut stream = runtime.engine().watch_signed_extrinsic(extrinsic)?;
-                futures_executor::block_on(async {
-                    let cancellation = cancellation
-                        .ok_or_else(|| FfiError::internal("watch cancellation channel is missing"))?
-                        .fuse();
-                    futures_util::pin_mut!(cancellation);
-                    loop {
-                        futures_util::select! {
-                            event = stream.next().fuse() => match event {
-                                Some(Ok(event)) => {
-                                    let terminal = watch_is_terminal(&event);
-                                    runtime.publish_watch_update(request_id, event)?;
-                                    if terminal {
-                                        return Ok(ResultPayload::Empty);
+    #[cfg(not(feature = "chain"))]
+    {
+        ffi_status(|| {
+            Err(FfiError::new(
+                CitizenSdkErrorCode::Unsupported,
+                "chain is not compiled into this build",
+            ))
+        })
+    }
+    #[cfg(feature = "chain")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            runtime.provider()?;
+            let extrinsic = signed_extrinsic(extrinsic)?;
+            accept_and_write_watch(
+                runtime,
+                out_request_id,
+                move |runtime, request_id, cancellation| {
+                    runtime.refresh_provider_capabilities()?;
+                    let mut stream = runtime.engine().watch_signed_extrinsic(extrinsic)?;
+                    futures_executor::block_on(async {
+                        let cancellation = cancellation
+                            .ok_or_else(|| {
+                                FfiError::internal("watch cancellation channel is missing")
+                            })?
+                            .fuse();
+                        futures_util::pin_mut!(cancellation);
+                        loop {
+                            futures_util::select! {
+                                event = stream.next().fuse() => match event {
+                                    Some(Ok(event)) => {
+                                        let terminal = watch_is_terminal(&event);
+                                        runtime.publish_watch_update(request_id, event)?;
+                                        if terminal {
+                                            return Ok(ResultPayload::Empty);
+                                        }
                                     }
-                                }
-                                Some(Err(error)) => return Err(error.into()),
-                                None => return Err(FfiError::new(
-                                    CitizenSdkErrorCode::Unavailable,
-                                    "extrinsic watch ended without a terminal event",
+                                    Some(Err(error)) => return Err(error.into()),
+                                    None => return Err(FfiError::new(
+                                        CitizenSdkErrorCode::Unavailable,
+                                        "extrinsic watch ended without a terminal event",
+                                    )),
+                                },
+                                _ = cancellation => return Err(FfiError::new(
+                                    CitizenSdkErrorCode::Cancelled,
+                                    "extrinsic watch was cancelled",
                                 )),
-                            },
-                            _ = cancellation => return Err(FfiError::new(
-                                CitizenSdkErrorCode::Cancelled,
-                                "extrinsic watch was cancelled",
-                            )),
+                            }
                         }
-                    }
-                })
-            },
-        )
-    })
+                    })
+                },
+            )
+        })
+    }
 }
 
 #[no_mangle]
@@ -684,24 +895,34 @@ pub unsafe extern "C" fn citizensdk_verify_transaction_at(
     submitted_hash: *const u8,
     out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
-    ffi_status(|| {
-        let runtime = handles::get(handle)?;
-        let block = block_from_abi(read_versioned(block, "block")?)?;
-        let extrinsic = signed_extrinsic(extrinsic)?;
-        let submitted_hash = copy_fixed_32(submitted_hash, "submitted_hash")?;
-        accept_and_write(runtime, out_request_id, move |runtime, _, _| {
-            runtime.refresh_provider_capabilities()?;
-            let conclusion =
-                runtime
-                    .provider()
-                    .drive(runtime.engine().verify_transaction_at(
-                        block,
-                        extrinsic,
-                        Hash32::from_bytes(submitted_hash),
-                    ))??;
-            Ok(ResultPayload::Execution(conclusion))
+    #[cfg(not(feature = "chain"))]
+    {
+        ffi_status(|| {
+            Err(FfiError::new(
+                CitizenSdkErrorCode::Unsupported,
+                "chain is not compiled into this build",
+            ))
         })
-    })
+    }
+    #[cfg(feature = "chain")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            runtime.provider()?;
+            let block = block_from_abi(read_versioned(block, "block")?)?;
+            let extrinsic = signed_extrinsic(extrinsic)?;
+            let submitted_hash = copy_fixed_32(submitted_hash, "submitted_hash")?;
+            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let conclusion = runtime.drive(runtime.engine().verify_transaction_at(
+                    block,
+                    extrinsic,
+                    Hash32::from_bytes(submitted_hash),
+                ))??;
+                Ok(ResultPayload::Execution(conclusion))
+            })
+        })
+    }
 }
 
 #[no_mangle]
@@ -714,22 +935,31 @@ pub unsafe extern "C" fn citizensdk_export_state(
     handle: CitizenSdkHandle,
     out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
-    ffi_status(|| {
-        let runtime = handles::get(handle)?;
-        accept_and_write(runtime, out_request_id, |runtime, _, _| {
-            runtime.refresh_provider_capabilities()?;
-            let state = select_state_export(
-                runtime.uses_host_services(),
-                || runtime.provider().drive(runtime.engine().export_state()),
-                || {
-                    runtime
-                        .provider()
-                        .drive(runtime.engine().export_and_persist_state())
-                },
-            )??;
-            Ok(ResultPayload::ExportedState(state))
+    #[cfg(not(feature = "chain"))]
+    {
+        ffi_status(|| {
+            Err(FfiError::new(
+                CitizenSdkErrorCode::Unsupported,
+                "chain is not compiled into this build",
+            ))
         })
-    })
+    }
+    #[cfg(feature = "chain")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            runtime.provider()?;
+            accept_and_write(runtime, out_request_id, |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let state = select_state_export(
+                    runtime.uses_host_services(),
+                    || runtime.drive(runtime.engine().export_state()),
+                    || runtime.drive(runtime.engine().export_and_persist_state()),
+                )??;
+                Ok(ResultPayload::ExportedState(state))
+            })
+        })
+    }
 }
 
 #[no_mangle]
@@ -746,24 +976,35 @@ pub unsafe extern "C" fn citizensdk_import_state(
     database: CitizenSdkBytesView,
     out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
-    ffi_status(|| {
-        let runtime = handles::get(handle)?;
-        let finalized =
-            block_from_abi(read_versioned(finalized, "finalized block")?)?.require_finalized()?;
-        let database = copy_view(database, "chain database", 256 * 1024)?;
-        let state = ExportedChainState::try_new(
-            ChainIdentity::citizenchain(),
-            format_version,
-            finalized,
-            database,
-        )?;
-        accept_and_write_lifecycle(runtime, out_request_id, move |runtime, _, _| {
-            let receipt = runtime
-                .provider()
-                .drive(runtime.engine().import_state(state))??;
-            Ok(ResultPayload::Block(receipt.finalized().into()))
+    #[cfg(not(feature = "chain"))]
+    {
+        ffi_status(|| {
+            Err(FfiError::new(
+                CitizenSdkErrorCode::Unsupported,
+                "chain is not compiled into this build",
+            ))
         })
-    })
+    }
+    #[cfg(feature = "chain")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            runtime.provider()?;
+            let finalized = block_from_abi(read_versioned(finalized, "finalized block")?)?
+                .require_finalized()?;
+            let database = copy_view(database, "chain database", 256 * 1024)?;
+            let state = ExportedChainState::try_new(
+                ChainIdentity::citizenchain(),
+                format_version,
+                finalized,
+                database,
+            )?;
+            accept_and_write_lifecycle(runtime, out_request_id, move |runtime, _, _| {
+                let receipt = runtime.drive(runtime.engine().import_state(state))??;
+                Ok(ResultPayload::Block(receipt.finalized().into()))
+            })
+        })
+    }
 }
 
 #[no_mangle]

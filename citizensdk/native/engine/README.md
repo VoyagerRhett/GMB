@@ -1,5 +1,9 @@
 # CitizenSDK Core Engine
 
+第 2 步将钱包管理、签名、链、交易和历史显式模块化，所有平台只复用本目录同一业务逻辑。
+`WalletService` 负责账户生命周期，`SigningService` 只经安全金库使用已建立账户的密钥；
+历史有独立服务和门禁。当前模块化与新增链查询仅完成源码、注释、合同和测试用例更新，尚未完成真实构建、平台测试或硬件验收；下文旧分步运行记录仅为历史证据。
+
 `citizen-sdk-engine` is the product-independent Rust coordination layer for the
 single CitizenSDK product. It owns capability resolution, exact-block runtime
 context caching, verified state import, and transaction execution conclusions.
@@ -30,7 +34,7 @@ macOS `arm64` differential-test host artifact and never a product runtime.
   prevents a second local transaction from reusing it.
 - `WalletService` implements English BIP-39 12/24-word create/import,
   `//0..//1989` derivation, add/rename/activate/delete, usability verification,
-  signing and cleanup replay. Public profile CAS and exact
+  and cleanup replay. Public profile CAS and exact
   generation/owner/operation identities are persisted before secret writes;
   write-after-error outcomes are decided by readback. Creation is explicitly
   two-phase: prepare returns a zeroizing in-memory recovery-word session with
@@ -68,16 +72,13 @@ macOS `arm64` differential-test host artifact and never a product runtime.
   the same raw finalized block cannot resurrect a pending record that the
   first commit already consumed.
 
-`native/ffi::ProductComposition` now fixes the smoldot provider, exact Runtime
-nonce source and sole `Sr25519SoftwareSigner`. A host may inject only the typed
-chain database and all-or-none wallet profile, encrypted-secret, history and
-`SecretVault` contracts. The legacy-compatible `citizensdk_create` constructor
-intentionally remains chain-only and session-backed; the new
-`citizensdk_create_with_host` constructor projects the complete typed
-wallet/history surface when the required host contracts are supplied. The root
-Dart, Android and shared Darwin bindings use that constructor with typed stores
-and Vault. Apple maps the public and secure domains to separate typed SQLite
-stores and uses Secure Enclave only as the KEK provider, not as sr25519.
+`native/ffi::ProductComposition` 按已验证 modules 装配同一实现，不为平台或组合复制算法。
+仅 chain 构造 smoldot provider、链数据库与 runtime cache，history 仅在被选择时初始化；
+wallet 与 signing 各自持有独立服务门禁，并共享职责固定的 secure store/Vault 合同。
+签名模块只使用同一宿主已有的 SDK 安全账户资料；首次 provision 必须走 wallet 流程。
+无实例纯验签只调用唯一 sr25519 验证实现，不建立 Engine、链或金库。所有构造入口仍进入
+同一私有装配函数；既有入口保留其默认组合，不能因此把一个组合的能力冒充整个产品边界。
+Apple 的 public/secure SQLite 与其它平台遵守同一数据域合同，Secure Enclave 仅作 KEK，不执行 sr25519。
 
 Finalized history requests one ascending batch of at most 120 blocks. The
 provider proves the range from one verified finalized anchor by exact-hash
@@ -154,7 +155,7 @@ or dispose cannot cross a partially committed history operation.
 
 CitizenChain accounts and transactions, product-independent sr25519/vault
 services, and business-account protocols are separate layers. TUYU or employee
-authentication may ask the wallet to sign a defined payload, but their
+authentication may ask the signing service to sign a defined payload, but their
 challenge, authorization, session and audit semantics do not enter this Engine.
 `sign_wallet_payload` is an advanced trusted-host facility and returns a general
 sr25519 signature; a trusted host can technically reuse that result outside the
@@ -166,4 +167,4 @@ the same trusted-host boundary.
 
 Build and test state must be redirected outside this source tree. For local
 CitizenSDK work, only
-`/Users/rhett/TATA/tataconsole/target/GMB/citizensdk/SDK` is permitted.
+`/Users/rhett/TATA/tataconsole/work/gmb/citizensdk` is permitted.

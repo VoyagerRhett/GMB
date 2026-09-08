@@ -21,6 +21,7 @@
 #endif
 
 int main() {
+
   static_assert(CITIZENSDK_ABI_VERSION == 1);
   static_assert(CITIZENSDK_CAPABILITY_COUNT == 10);
   static_assert(CITIZENSDK_HOST_ABI_VERSION == 1);
@@ -91,10 +92,14 @@ int main() {
       "citizensdk_host_cancel_wallet_flow",
       "citizensdk_host_config_size",
       "citizensdk_host_create",
+      "citizensdk_host_create_with_modules",
       "citizensdk_host_create_sdk",
       "citizensdk_host_destroy",
       "citizensdk_host_last_error_copy",
       "citizensdk_host_present_wallet_flow",
+      "citizensdk_host_view_account_private_key",
+      "citizensdk_host_scan_qr",
+      "citizensdk_host_sign_qr_request",
       "citizensdk_host_sdk",
       "citizensdk_host_set_event_callback",
       "citizensdk_host_set_parent_window",
@@ -236,6 +241,14 @@ int main() {
   // Host 构造只组合平台资源；Core 创建保持显式。这个有效的 chain-only
   // 实例无需真实链资产即可冻结未打开、能力查询和正常销毁的 C 生命周期。
   invalid.asset_root_utf8 = view(assets);
+  assert(citizensdk_host_create_with_modules(&invalid, 0, &host) == CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  assert(host == 0);
+  assert(citizensdk_host_create_with_modules(&invalid, CITIZENSDK_MODULE_HISTORY, &host) ==
+         CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  assert(host == 0);
+  // 未知/缺依赖模块在平台资源创建前被 Rust 拒绝。
+  assert(!std::filesystem::exists(
+      temporary.path() / "state" / application_id / "citizensdk"));
   assert(citizensdk_host_create(&invalid, &host) == CITIZENSDK_OK);
   assert(host != 0);
   assert(std::filesystem::is_directory(
@@ -268,9 +281,46 @@ int main() {
   assert(citizensdk_host_present_wallet_flow(host, nullptr, nullptr, nullptr,
                                              nullptr) ==
          CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  citizensdk_account_id_t viewed_account{};
+  citizensdk_wallet_flow_handle_t viewed_flow = 99;
+  const auto view_complete = +[](void *, const citizensdk_wallet_flow_result_v1_t *) {
+    assert(false);  // 未选择 wallet 的拒绝不得接纳回调或触碰金库。
+  };
+  assert(citizensdk_host_view_account_private_key(host, nullptr, nullptr, view_complete,
+                                                  &viewed_flow) == CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  assert(viewed_flow == 0);
+  assert(citizensdk_host_view_account_private_key(host, &viewed_account, nullptr, view_complete,
+                                                  &viewed_flow) == CITIZENSDK_ERROR_UNSUPPORTED);
+  assert(viewed_flow == 0);
   assert(citizensdk_host_cancel_wallet_flow(host, 1) ==
          CITIZENSDK_ERROR_INVALID_HANDLE);
   assert(citizensdk_host_destroy(host) == CITIZENSDK_OK);
   assert(citizensdk_host_destroy(host) == CITIZENSDK_ERROR_INVALID_HANDLE);
+
+  // 钱包与签名均能脱离链独立创建，空资产根不被读取，也不创建公开链数据库。
+  for (const auto modules : {CITIZENSDK_MODULE_WALLET, CITIZENSDK_MODULE_SIGNING}) {
+    const std::string isolated_id = modules == CITIZENSDK_MODULE_WALLET
+        ? "org.citizen.walletfixture" : "org.citizen.signingfixture";
+    invalid.application_id_utf8 = view(isolated_id);
+    invalid.asset_root_utf8 = {nullptr, 0};
+    invalid.enable_wallet = 1;
+    assert(citizensdk_host_create_with_modules(&invalid, modules, &host) == CITIZENSDK_OK);
+    assert(!std::filesystem::exists(
+        temporary.path() / "state" / isolated_id / "citizensdk" / "v1" / "public"));
+    assert(citizensdk_host_create_sdk(host, &sdk) == CITIZENSDK_OK && sdk != 0);
+    citizensdk_capability_snapshot_t snapshot{};
+    snapshot.struct_size = sizeof(snapshot); snapshot.abi_version = CITIZENSDK_ABI_VERSION;
+    assert(citizensdk_get_capabilities(sdk, &snapshot) == CITIZENSDK_OK);
+    // 金库可用性仍由设备事实报告，不能为通过测试打开软件金库。
+    assert(!std::filesystem::exists(
+        temporary.path() / "state" / isolated_id / "citizensdk" / "v1" / "public"));
+    if (modules == CITIZENSDK_MODULE_SIGNING) {
+      assert(citizensdk_host_view_account_private_key(host, &viewed_account, nullptr, view_complete,
+                                                      &viewed_flow) == CITIZENSDK_ERROR_UNSUPPORTED);
+      assert(viewed_flow == 0);
+    }
+    assert(citizensdk_host_destroy(host) == CITIZENSDK_OK);
+  }
+
   return 0;
 }

@@ -87,7 +87,7 @@ void FlutterEnvironment::detach() noexcept {
   g_weak_ref_set(&view_, nullptr);
 }
 
-Config FlutterEnvironment::resolve(const NativeEnvironmentInputs &inputs) {
+Config FlutterEnvironment::resolve(const NativeEnvironmentInputs &inputs, uint32_t modules) {
   require_absolute_path(inputs.executable);
   require_absolute_path(inputs.user_data);
   require(inputs.application_id.find('\0') == std::string::npos &&
@@ -98,17 +98,18 @@ Config FlutterEnvironment::resolve(const NativeEnvironmentInputs &inputs) {
                       "flutter_assets" / "packages" / "citizen_sdk" /
                       "assets" / "citizenchain";
 
-  preflight_assets(assets);
+  // 未选择链模块时不探测链资产；真正启用链时保留原来的严格预检。
+  if ((modules & CITIZENSDK_MODULE_CHAIN) != 0) preflight_assets(assets);
   Config config;
   config.storage_root = inputs.user_data;
   config.asset_root = assets;
   // Host remains the authority for its stricter lowercase reverse-DNS rule.
   config.application_id = inputs.application_id;
-  config.enable_wallet = true;
+  config.modules = modules;
   return config;
 }
 
-OpenEnvironment FlutterEnvironment::open() const {
+OpenEnvironment FlutterEnvironment::open(uint32_t modules) const {
   require(std::this_thread::get_id() == ui_thread_,
           CITIZENSDK_ERROR_INVALID_STATE,
           "CitizenSDK Flutter environment must be resolved on the UI thread");
@@ -127,11 +128,12 @@ OpenEnvironment FlutterEnvironment::open() const {
           "CitizenSDK user data directory is unavailable");
 
   OpenEnvironment result{
-      resolve({executable_path(), std::filesystem::path(data_root), identifier}),
+      resolve({executable_path(), std::filesystem::path(data_root), identifier}, modules),
       {}};
   g_autoptr(GObject) object =
       static_cast<GObject *>(g_weak_ref_get(const_cast<GWeakRef *>(&view_)));
-  if (object != nullptr && GTK_IS_WIDGET(object)) {
+  if ((modules & (CITIZENSDK_MODULE_WALLET | CITIZENSDK_MODULE_SIGNING | CITIZENSDK_MODULE_QR)) != 0 &&
+      object != nullptr && GTK_IS_WIDGET(object)) {
     // 父窗口临时升级强引用仅跨越 Host 装配；Host 随后仍持有弱引用，不延长窗口生命周期。
     GtkWidget *view = GTK_WIDGET(object);
     GtkWidget *top = gtk_widget_get_toplevel(view);

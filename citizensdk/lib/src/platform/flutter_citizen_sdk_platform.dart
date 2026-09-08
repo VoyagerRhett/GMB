@@ -6,7 +6,7 @@ import 'citizen_sdk_platform.dart';
 
 /// CitizenSDK 官方 binding 共用的唯一 Flutter transport。
 ///
-/// Android、iOS、macOS、Linux 与 Windows 使用相同的 22 个
+/// Android、iOS、macOS、Linux 与 Windows 使用相同的固定
 /// MethodChannel tuple 方法和 EventChannel 事件合同。Linux/Windows 实际平台验证
 /// 由统一 CI/Release 执行；注册不等于已运行。transport 不携带平台分支、
 /// Map、秘密或原生句柄，同版原生插件缺失时返回 unsupported。

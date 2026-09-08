@@ -11,11 +11,11 @@ dependencies:
     sdk: flutter
   # 密钥派生 + 签名
   # sr25519 派生/签名/验签走原生 schnorrkel(lib/wallet/native_sr25519.dart →
-  # shared/citizen-signer，与 CitizenApp 热端同一份源码)。
+  # rust/src/sr25519.rs，由本产品独立维护)。
   # polkadart_keyring 仅用于 SS58 地址编解码(base58 + 校验和，非密码学)。
   # 与 CitizenApp 的 polkadart 0.7.x 生态保持同一 ss58 1.x 依赖图。
   polkadart_keyring: 0.7.1
-  # 与共享派生真源的 substrate_bip39 ^0.7.0 约束一致。
+  # 与产品内派生实现的 substrate_bip39 ^0.7.0 约束一致。
   bip39_mnemonic: 4.0.1
   ffi: ^2.2.0
   path: ^1.9.1
@@ -36,15 +36,10 @@ dependencies:
   # 版本跟随 local_auth 的传递依赖,不单独升级。
   local_auth_android: 2.0.9
   local_auth_darwin: ^2.0.0
-  # 二维码设备统一走共享适配器；本产品只处理签名请求业务。
-  gmb_scanner_flutter:
-    path: ../shared/scanner-flutter
-  # CitizenApp、CitizenWallet、iOS、Android 共用的钱包 password 规则与交互真源。
-  gmb_wallet_password:
-    path: ../shared/wallet-password
-  # 两款移动产品共用的 StrongBox/TEE 与 Secure Enclave 钱包严档金库。
-  gmb_hardware_secretvault:
-    path: ../shared/hardware-secretvault
+  # 二维码设备走本产品内部适配器；本产品只处理签名请求业务。
+  mobile_scanner: ^7.1.4
+  substrate_bip39: ^0.7.0
+  unorm_dart: ^0.3.2
   qr_flutter: ^4.1.0
   # SVG 图标
   flutter_svg: ^2.3.0
@@ -66,4 +61,4 @@ flutter:
     enable-swift-package-manager: false
   uses-material-design: true
   assets:
-    - assets/icons/
+    - resources/icons/

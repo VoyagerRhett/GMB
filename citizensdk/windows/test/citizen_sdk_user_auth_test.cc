@@ -55,7 +55,7 @@ int main() {
     csw::WindowRef inert(nullptr, ui, false);
     csw::UserAuth auth(inert);
     assert(!auth.available());
-    assert(auth.unlock_vault_password().code == CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED);
+    assert(auth.unlock_vault_password(71).code == CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED);
     std::thread worker([&] { assert(inert.retire() == CITIZENSDK_OK); });
     worker.join();
   }
@@ -77,15 +77,20 @@ int main() {
   csw::UserAuth auth(reference);
   // 原生 UI 用例要求 runner 提供交互桌面；不能将未执行的交互算作通过。
   assert(auth.available());
-  assert(auth.unlock_vault_password().code == CITIZENSDK_ERROR_BUSY);
+  assert(auth.unlock_vault_password(71).code == CITIZENSDK_ERROR_BUSY);
   csw::AuthenticationResult cancelled;
   std::atomic<bool> finished{false};
   std::thread unlock([&] {
-    cancelled = auth.unlock_vault_password();
+    cancelled = auth.unlock_vault_password(71);
     finished.store(true);
   });
   HWND dialog{};
   pump_until([&] { dialog = authentication_window(); return dialog != nullptr; });
+  assert(!csw::accept_private_key_authentication_window(dialog, parent, &reference, 72));
+  assert(!csw::accept_private_key_authentication_window(dialog, parent, &auth, 71));
+  assert(csw::accept_private_key_authentication_window(dialog, parent, &reference, 71));
+  // 本次认证已归属安全查看；真实失焦即撤销，晚到确认不能重显。
+  SendMessageW(dialog, WM_ACTIVATE, WA_INACTIVE, 0);
   SendMessageW(dialog, WM_COMMAND, IDCANCEL, 0);
   SendMessageW(dialog, WM_COMMAND, IDOK, 0);  // 晚到确认不能推翻已接纳的取消。
   // 完成一定在退出窗口消息栈、清除窗口和缓冲后发生。

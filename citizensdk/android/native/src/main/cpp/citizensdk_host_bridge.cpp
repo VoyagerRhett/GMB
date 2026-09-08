@@ -671,7 +671,7 @@ CitizenSdkHostBridge::~CitizenSdkHostBridge() {
 bool CitizenSdkHostBridge::create(JNIEnv *env,
                                   const std::vector<uint8_t> &manifest,
                                   const std::vector<uint8_t> &chain_spec,
-                                  const std::vector<uint8_t> &sync_state) {
+                                  const std::vector<uint8_t> &sync_state, uint32_t modules) {
   citizensdk_create_options_t options{};
   options.struct_size = sizeof(options);
   options.abi_version = CITIZENSDK_ABI_VERSION;
@@ -682,7 +682,16 @@ bool CitizenSdkHostBridge::create(JNIEnv *env,
   static constexpr uint8_t kVersion[] = "1.0.0";
   options.system_name = {kName, sizeof(kName) - 1};
   options.system_version = {kVersion, sizeof(kVersion) - 1};
-  const int32_t code = citizensdk_create_with_host(&options, &services_, &handle_);
+  // 只投影所选资源组；模块依赖和编译能力统一由 Rust 校验。
+  const bool secrets = (modules & (CITIZENSDK_MODULE_WALLET | CITIZENSDK_MODULE_SIGNING)) != 0;
+  services_.public_store = (modules & CITIZENSDK_MODULE_CHAIN) != 0 ? &public_store_ : nullptr;
+  services_.secure_store = secrets ? &secure_store_ : nullptr;
+  services_.secret_vault = secrets ? &vault_ : nullptr;
+  if ((modules & CITIZENSDK_MODULE_HISTORY) == 0) {
+    public_store_.transaction_history_load = nullptr;
+    public_store_.transaction_history_compare_and_swap = nullptr;
+  }
+  const int32_t code = citizensdk_create_with_modules(&options, &services_, modules, &handle_);
   if (code != kOk) {
     throw_sdk(env, code, "CitizenSDK Core creation failed");
     return false;
@@ -720,6 +729,13 @@ bool CitizenSdkHostBridge::bind(JNIEnv *env, jobject native_owner) {
 }
 
 bool CitizenSdkHostBridge::destroy(JNIEnv *env) {
+  {
+    std::lock_guard<std::mutex> lock(qr_mutex_);
+    if (!qr_reviews_.empty()) {
+      throw_sdk(env, CITIZENSDK_ERROR_BUSY, "CitizenSDK QR review is still owned by its window");
+      return false;
+    }
+  }
   {
     std::lock_guard<std::mutex> lock(unwrap_mutex_);
     if (!unwraps_.empty()) {
@@ -838,6 +854,17 @@ void CitizenSdkHostBridge::complete_unwrap(uint64_t operation_id,
                   error_code);
 }
 
+bool CitizenSdkHostBridge::has_qr_review(uint64_t result) const {
+  std::lock_guard<std::mutex> lock(qr_mutex_);
+  return qr_reviews_.count(result) != 0;
+}
+
+void CitizenSdkHostBridge::release_qr_review(uint64_t result) {
+  bool owned;
+  { std::lock_guard<std::mutex> lock(qr_mutex_); owned = qr_reviews_.erase(result) != 0; }
+  if (owned) citizensdk_result_release(result);
+}
+
 void CitizenSdkHostBridge::dispatch_event(const citizensdk_event_t &event) {
   if (native_owner_ == nullptr) return;
   ScopedEnv scoped(vm_);
@@ -854,10 +881,15 @@ void CitizenSdkHostBridge::dispatch_event(const citizensdk_event_t &event) {
         result_info.kind == CITIZENSDK_RESULT_PREPARED_WALLET;
     const uint64_t token = is_prepared ? allocate_prepared_token() : 0;
     citizensdk_prepared_wallet_handle_t prepared_handle = 0;
+    bool qr_review = false;
     WireWriter writer;
     const bool encoded = encode_result(event.result, token, &writer,
-                                       &prepared_handle);
-    citizensdk_result_release(event.result);
+                                       &prepared_handle, &qr_review);
+    // 审阅结果本身是 Core 一次性凭证；不能按普通 JSON 结果提前释放。
+    if (qr_review && encoded) {
+      std::lock_guard<std::mutex> lock(qr_mutex_);
+      qr_reviews_.insert(event.result);
+    } else { citizensdk_result_release(event.result); }
     if (!encoded) {
       env->DeleteLocalRef(type);
       return;
@@ -869,12 +901,14 @@ void CitizenSdkHostBridge::dispatch_event(const citizensdk_event_t &event) {
         remember_prepared(token, prepared_handle);
       }
     }
-    jmethodID method = env->GetMethodID(type, "onNativeRequestCompleted", "(J[B)V");
+    jmethodID method = env->GetMethodID(type, "onNativeRequestCompleted", "(J[B)Z");
     jbyteArray bytes = to_byte_array(env, writer.data());
+    jboolean accepted = JNI_FALSE;
     if (method != nullptr && bytes != nullptr) {
-      env->CallVoidMethod(native_owner_, method,
+      accepted = env->CallBooleanMethod(native_owner_, method,
                           static_cast<jlong>(event.request_id), bytes);
     }
+    if (qr_review && (accepted != JNI_TRUE || env->ExceptionCheck())) release_qr_review(event.result);
     if (bytes != nullptr) env->DeleteLocalRef(bytes);
   } else if (event.event_type == CITIZENSDK_EVENT_WATCH_UPDATE) {
     WireWriter writer;

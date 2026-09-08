@@ -52,7 +52,7 @@ struct PendingReply final {
       : session(request.session.empty()
                     ? std::nullopt
                     : std::optional<std::string>(request.session)),
-        sequence(request.method == Method::open
+sequence(request.method == Method::open || request.method == Method::verify_signature
                      ? std::nullopt
                      : std::optional<int64_t>(request.sequence)) {
     call = FL_METHOD_CALL(g_object_ref(value));
@@ -423,7 +423,7 @@ void register_plugin(FlPluginRegistrar *registrar,
     const auto context = std::shared_ptr<GMainContext>(
         g_main_context_ref(state->context), g_main_context_unref);
     if (!environment_factory) {
-      environment_factory = [environment] { return environment->open(); };
+      environment_factory = [environment](uint32_t modules) { return environment->open(modules); };
     }
     state->sessions = Sessions::create(
         std::move(environment_factory),

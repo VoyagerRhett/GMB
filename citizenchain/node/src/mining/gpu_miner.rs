@@ -26,7 +26,7 @@ pub fn gpu_hashrate() -> f64 {
 }
 
 /// OpenCL kernel source embedded at compile time.
-const KERNEL_SRC: &str = include_str!("../../kernels/blake2b_pow.cl");
+const KERNEL_SRC: &str = include_str!("blake2b_pow.cl");
 
 /// Number of nonces to test per GPU batch dispatch.
 /// 2^24 = ~16 million — good balance between GPU utilization and responsiveness.

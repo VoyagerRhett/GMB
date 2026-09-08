@@ -2,7 +2,6 @@ package org.citizen.sdk
 
 import androidx.fragment.app.FragmentActivity
 import org.citizen.sdk.ui.CitizenSdkWalletFlowContract
-import org.citizen.sdk.ui.CitizenSdkWalletFlowCoordinator
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -52,8 +51,57 @@ internal class CitizenSdkFlutterOneShotRegistry<K : Any, H : Any>(
  */
 internal class CitizenSdkFlutterWalletFlow {
     private data class Key(val sessionId: String, val requestSequence: Long)
-    private val active = CitizenSdkFlutterOneShotRegistry<Key, CitizenSdkWalletFlowCoordinator> {
-        it.cancel()
+    private val active = CitizenSdkFlutterOneShotRegistry<Key, () -> Unit> {
+        it()
+    }
+
+    fun qr(sdk: CitizenSdk, activity: FragmentActivity?, request: CitizenSdkFlutterCodec.Request.Qr): CompletableFuture<CitizenQrDocument> {
+        val host = activity ?: return failed(CitizenSdkException(CitizenSdkErrorCode.UNAVAILABLE, "QR 需要前台 FragmentActivity"))
+        val key = Key(request.sessionId, request.requestSequence)
+        val completion = CompletableFuture<CitizenQrDocument>()
+        val owner = active.reserve(key) ?: return failed(CitizenSdkException(CitizenSdkErrorCode.CONFLICT, "QR 请求已存在"))
+        try {
+            val future: CompletableFuture<CitizenQrDocument>
+            if (request.method == "signQrRequest") {
+                val operation = sdk.signQrRequest(host, request.fields[0] as String)
+                active.bind(owner) { operation.cancel(); Unit }
+                future = operation.future.thenApply { it.document }
+            } else {
+                val operation = sdk.qrScan(host)
+                active.bind(owner) { operation.cancel(); Unit }
+                future = operation.future
+            }
+            future.whenComplete { value, error ->
+                if (active.finish(key, owner)) {
+                    if (error == null) completion.complete(value) else completion.completeExceptionally(error)
+                }
+            }
+        } catch (error: Throwable) { if (active.finish(key, owner)) completion.completeExceptionally(error) }
+        return completion
+    }
+
+    /** 私钥查看共享会话取消注册；完成值为空，不把内部 buffer 放入通道。 */
+    fun viewAccountPrivateKey(sdk: CitizenSdk, activity: FragmentActivity?, request: CitizenSdkFlutterCodec.Request.Account): CompletableFuture<Unit> {
+        val host = activity ?: return failed(CitizenSdkException(
+            CitizenSdkErrorCode.UNAVAILABLE, "private key view requires a FragmentActivity",
+        ))
+        val key = Key(request.sessionId, request.requestSequence)
+        val completion = CompletableFuture<Unit>()
+        val owner = active.reserve(key) ?: return failed(CitizenSdkException(
+            CitizenSdkErrorCode.CONFLICT, "wallet flow request already exists",
+        ))
+        try {
+            val operation = sdk.viewAccountPrivateKey(host, request.accountId)
+            active.bind(owner) { operation.cancel(); Unit }
+            operation.future.whenComplete { _, failure ->
+                if (active.finish(key, owner)) {
+                    if (failure == null) completion.complete(Unit) else completion.completeExceptionally(failure)
+                }
+            }
+        } catch (failure: Throwable) {
+            if (active.finish(key, owner)) completion.completeExceptionally(failure)
+        }
+        return completion
     }
 
     fun launch(
@@ -84,7 +132,7 @@ internal class CitizenSdkFlutterWalletFlow {
                     is CitizenSdkWalletFlowContract.Result.Failed -> completion.completeExceptionally(result.error)
                 }
             }
-            active.bind(owner, coordinator)
+            active.bind(owner) { coordinator.cancel() }
         } catch (error: Throwable) {
             if (active.finish(key, owner)) completion.completeExceptionally(error)
         }

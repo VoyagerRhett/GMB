@@ -1,5 +1,15 @@
 # CitizenSDK Linux Host
 
+当前 C++ Config 只有 `modules` 作为模块选择真源，默认 full；薄 Host 通过新增
+`citizensdk_host_create_with_modules` 进入同一装配逻辑。既有 C Host ABI v1 的
+`enable_wallet` 布局与含义保持，不能把其内存重解释为模块位；显式入口检查它与安全资源选择一致。
+Rust 先验证模块，chain/history 才创建 public store，wallet/signing 才创建配套 secure store/Vault；
+签名-only 不开放钱包 UI，只使用同宿主既有 SDK 安全账户，首次建立仍须钱包流程。
+现有正式包装仍为 full 并含链资产，运行期未选链不加载资产或创建链数据库。
+第4步新增独立 qr=32，full=63。Linux 只将亮度帧交给 SDK 内唯一 ZXing-C++ 3.1.1 图像层，
+`QR_V1` 协议与扫码签名会话由同一 Rust QR 模块实现，不设兼容或回退识别器。
+本次第 2 步仅更新源码、注释、合同和测试，尚未执行新的真实构建、平台测试或硬件验收；下文旧分步运行记录保留为历史证据，不代表本次变更已验证。
+
 This directory is the official Linux projection of the platform-independent
 CitizenSDK Core. It adds typed host storage, TPM 2.0 KEK protection, an
 SDK-owned GTK wallet flow, and C/C++ packaging. It never implements chain,
@@ -11,7 +21,7 @@ directory remains lowercase `linux` and is not a third product identity.
 
 ## Runtime boundary
 
-- `libcitizensdk.so` is the single Rust Core and owns the existing 70-function
+- `libcitizensdk.so` is the single Rust Core and owns the current 88-function
   C ABI, smoldot, wallet envelopes, sr25519 signing, and transactions.
 - `libcitizensdk_host.so` owns the Linux host-services vtables, typed stores,
   TPM objects, user authentication, and native wallet flow.
@@ -19,7 +29,7 @@ directory remains lowercase `linux` and is not a third product identity.
   The C++ API is header-only so the stable binary contract remains C.
 - `libcitizen_sdk_plugin.so` is the Step 7.2 Flutter adapter source target. It
   links the exact same-version installed Host/Core pair and maps only the fixed
-  22-method tuple protocol; it neither rebuilds Core/Host nor accepts an
+  36-method tuple protocol; it neither rebuilds Core/Host nor accepts an
   arbitrary RPC method.
 - Secrets never cross a Flutter method or event channel. SDK-owned create,
   import and add-account screens remain in the existing native GTK flow; only
@@ -44,7 +54,7 @@ the compiler's legacy `linux` macro cannot replace an internal namespace.
 
 The source tree must not contain generated libraries, build directories,
 CMake caches, downloaded dependencies, or test reports. Every local generated
-item belongs under `/Users/rhett/TATA/tataconsole/target/GMB/citizensdk/SDK` in a
+item belongs under `/Users/rhett/TATA/tataconsole/work/gmb/citizensdk` in a
 task-exclusive directory selected by TataConsole or the caller. Linux CTest
 configuration requires that existing mode-`0700` directory through
 `-DCITIZENSDK_TEST_WORK_DIR=<absolute-path>`; the test helper rejects a missing,
@@ -160,9 +170,9 @@ GTK, or a second Core.
 安装技术闭集为 19 个普通文件：9 个公开头、同平台 Core/Host 双库、5 个隔离 CMake 包文件和
 3 个链资产。构建器逐字节核对公开头、资产、Core 和依赖合同，并检查安装后 Host 的 `$ORIGIN`
 RUNPATH、双库 ELF/ABI 和 GLIBC 2.31 基线。私有头、plugin 注册头、测试及源码不进入此安装前缀。
-两种平台合并为同一候选 `linux/` 下的 26 项安装投影，9 个公开头与 3 个链资产只留一份且
-重叠字节必须一致。Hosted 在这 26 项之外仅保留 `CMakeLists.txt`、`cmake/CitizenSDKFlutter.cmake`、
-5 个 plugin `.cc`、4 个对应 `.hpp` 和 Flutter 注册头，精确为 38 项；Host 私有源码不进入
+两种平台合并为同一候选 `linux/` 下的 27 项安装投影，10 个公开头与 3 个链资产只留一份且
+重叠字节必须一致。Hosted 在这 27 项之外仅保留 `CMakeLists.txt`、`cmake/CitizenSDKFlutter.cmake`、
+5 个 plugin `.cc`、4 个对应 `.hpp` 和 Flutter 注册头，精确为 39 项；Host 私有源码不进入
 Hosted，也不在 Flutter 应用编译时重建。
 这不是已经验收的正式分发包：真实依赖身份、许可证与两种 Linux 平台运行证据由后续统一
 GitHub CI/Release 验证，不作为等待用户提供环境的当前开发阻塞。
@@ -171,6 +181,14 @@ GitHub CI/Release 验证，不作为等待用户提供环境的当前开发阻�
 后续 Linux 验证须将 12 个 Host 合同目标、6 个 adapter 合同目标和 2 个原生消费者分别精确
 枚举再运行，Flutter Release bundle 还必须限时以 0 退出并输出成功标记。源码/Node 合同不能替代 GTK/实体 TPM
 和实际消费者验证，macOS 编译也不提供这些证据；当前没有通过任何 Linux 实机验收。
+
+第 3 步安全查看通过无秘密 Host 控制复用原 GTK 流程；私钥仅进入可清零自绘缓冲，
+不进入 GtkTextBuffer、剪贴板、Flutter 或通用 result。锁屏监督只使用现有 GLib/GIO 读取
+当前进程真实 logind session，要求可确认 Active/LockedHint 及休眠/关机状态；监督不可用
+则拒绝显示。私有 40 字节回调表的 `authorizing` 只同步登记本视图真实的 Host 解包操作号；
+失焦仅允许同 Host、同操作号的 SDK 认证窗口，该认证窗口再次失焦也会取消。
+Linux 不宣称能够阻止系统截屏。完整安全流程与实际 GTK/TPM 验收尚未完成。
+`CITIZENSDK_INTERNAL_INCLUDE_DIR` 只给 Host/内部测试 PRIVATE include，不进入安装件。
 
 ## Hardware-vault contract
 

@@ -29,12 +29,14 @@ console.log(readCmake(platform).version);
 }.standardOutput.asText.get().trim()
 
 def tataConsoleTargetRoot = file('/Users/rhett/TATA/tataconsole/target').canonicalFile
-def localCitizenSdkRoots = {
-    def roots = [new File(tataConsoleTargetRoot, 'GMB/citizensdk/SDK').canonicalFile]
+def localCitizenSdkRoots = { boolean buildOnly = false ->
+    def roots = [new File(tataConsoleTargetRoot.parentFile, 'work/gmb/citizensdk').canonicalFile]
+    // 编译只能写测试库；验真原件输入仍可消费产物库的正式成功文件。
+    if (!buildOnly) roots.add(new File(tataConsoleTargetRoot, 'gmb/citizensdk').canonicalFile)
     def taskWorkValue = System.getenv('TATA_CONSOLE_WORK_DIR')
     if (taskWorkValue != null && !taskWorkValue.trim().isEmpty()) {
         def taskWork = file(taskWorkValue).canonicalFile
-        def sharedWorkRoot = new File(tataConsoleTargetRoot, '.work').canonicalFile
+        def sharedWorkRoot = new File(tataConsoleTargetRoot.parentFile, 'work').canonicalFile
         if (taskWork.path.startsWith(sharedWorkRoot.path + File.separator)) {
             // 与 Flutter 插件工程使用同一中央目录边界，避免两个 Gradle 工程判断不一致。
             roots.add(new File(taskWork, 'citizensdk').canonicalFile)
@@ -42,8 +44,8 @@ def localCitizenSdkRoots = {
     }
     roots
 }
-def staysInLocalCitizenSdkRoot = { File candidate ->
-    localCitizenSdkRoots().any { File root ->
+def staysInLocalCitizenSdkRoot = { File candidate, boolean buildOnly = false ->
+    localCitizenSdkRoots(buildOnly).any { File root ->
         candidate.path == root.path || candidate.path.startsWith(root.path + File.separator)
     }
 }
@@ -64,8 +66,8 @@ if (configuredBuildDir != null && !configuredBuildDir.trim().isEmpty()) {
             }
         }
     } else {
-        if (!staysInLocalCitizenSdkRoot(normalizedTarget)) {
-            throw new GradleException('CitizenSDK Android output must stay in the CitizenSDK product root or current host task')
+        if (!staysInLocalCitizenSdkRoot(normalizedTarget, true)) {
+            throw new GradleException('CitizenSDK Android build output must stay in its central work directory or current host task')
         }
     }
 }
@@ -77,6 +79,10 @@ def coreDir = coreDirValue == null || coreDirValue.trim().isEmpty()
     ? new File(fallbackRoot, 'arm64-v8a').canonicalFile
     : file(coreDirValue).canonicalFile
 def coreLibrary = new File(coreDir, 'libcitizensdk.so')
+def zxingSourceValue = System.getenv('CITIZENSDK_ZXING_SOURCE_DIR')
+def zxingSource = zxingSourceValue == null || zxingSourceValue.trim().isEmpty()
+    ? new File(fallbackRoot, 'zxing-cpp-3.1.1').canonicalFile
+    : file(zxingSourceValue).canonicalFile
 
 android {
     namespace = 'org.citizen.sdk'
@@ -94,7 +100,9 @@ android {
             cmake {
                 cppFlags '-std=c++17', '-Wall', '-Wextra', '-Werror', '-fvisibility=hidden'
                 arguments '-DANDROID_STL=c++_static',
-                    "-DCITIZENSDK_CORE_DIR=${coreDir.absolutePath}"
+                    "-DCITIZENSDK_CORE_DIR=${coreDir.absolutePath}",
+                    "-DCITIZENSDK_INTERNAL_INCLUDE_DIR=${System.getenv('CITIZENSDK_INTERNAL_INCLUDE_DIR') ?: ''}",
+                    "-DCITIZENSDK_ZXING_SOURCE_DIR=${zxingSource.absolutePath}"
             }
         }
     }
@@ -147,10 +155,14 @@ android {
 }
 
 // 两种分发面保持相同JVM目标与接口默认实现，不重复旧字符串编译参数。
+// apply from 的脚本不另声明插件版本；只复用当前 Kotlin 插件公开枚举。
+def kotlinPluginLoader = extensions.getByName('kotlin').getClass().getClassLoader()
+def kotlinJvmTarget = kotlinPluginLoader.loadClass('org.jetbrains.kotlin.gradle.dsl.JvmTarget')
+def kotlinJvmDefault = kotlinPluginLoader.loadClass('org.jetbrains.kotlin.gradle.dsl.JvmDefaultMode')
 kotlin {
     compilerOptions {
-        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
-        jvmDefault = org.jetbrains.kotlin.gradle.dsl.JvmDefaultMode.NO_COMPATIBILITY
+        jvmTarget = kotlinJvmTarget.JVM_17
+        jvmDefault = kotlinJvmDefault.NO_COMPATIBILITY
     }
 }
 
@@ -170,6 +182,10 @@ tasks.configureEach { task ->
             if (coreDir.name != 'arm64-v8a') {
                 throw new GradleException('CITIZENSDK_ANDROID_CORE_DIR must end in arm64-v8a')
             }
+            if (zxingSourceValue == null || zxingSourceValue.trim().isEmpty() ||
+                !new File(zxingSource, 'core/src/ZXingC.h').isFile()) {
+                throw new GradleException('CITIZENSDK_ZXING_SOURCE_DIR must contain official ZXing-C++ 3.1.1')
+            }
         }
     }
 }
@@ -178,6 +194,9 @@ dependencies {
     implementation 'androidx.biometric:biometric:1.1.0'
     implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'androidx.fragment:fragment-ktx:1.8.9'
+    implementation 'androidx.camera:camera-core:1.5.3'
+    implementation 'androidx.camera:camera-camera2:1.5.3'
+    implementation 'androidx.camera:camera-lifecycle:1.5.3'
 
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test:core:1.6.1'

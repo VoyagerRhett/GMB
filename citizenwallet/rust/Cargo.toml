@@ -17,11 +17,12 @@ crate-type = ["cdylib", "staticlib"]
 name = "citizenwallet_signer"
 
 [dependencies]
-# sr25519 全端唯一真源，与 CitizenApp 热端共用同一份源码。
-# 本 crate 只调用共享导出宏，**不得在此另写任何密码学实现**。
-citizen-signer = { path = "../../shared/citizen-signer" }
-# 账户数据用途钥派生和加密交付与 CitizenApp 共用同一份实现。
-account-crypto = { path = "../../shared/account-crypto" }
+schnorrkel = { version = "0.11.2", default-features = false, features = ["preaudit_deprecated", "alloc", "getrandom"] }
+zeroize = "1.8"
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 [profile.release]
 opt-level = "z"        # 冷钱包体积优先

@@ -1,0 +1,10 @@
+# 本产品独立维护的 Flutter 分析规则。
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  exclude:
+    - "**/*.g.dart"
+
+linter:
+  rules:
+    use_build_context_synchronously: true

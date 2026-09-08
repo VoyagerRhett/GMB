@@ -61,10 +61,29 @@ typedef struct citizensdk_wallet_flow_result_v1 {
 typedef void (*citizensdk_wallet_flow_completion_v1_t)(
     void *context, const citizensdk_wallet_flow_result_v1_t *result);
 
+/* 只借用非秘密的 Core JSON，最多 65536 字节；回调返回前复制。
+ * 完成只发生在相机停止或真实 Core 认证/签名请求排空之后。 */
+typedef void (*citizensdk_qr_completion_v1_t)(
+    void *context, citizensdk_error_code_t error_code,
+    citizensdk_bytes_view_t document);
+CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_scan_qr(
+    citizensdk_host_handle_t host, void *context,
+    citizensdk_qr_completion_v1_t completion, citizensdk_wallet_flow_handle_t *out_flow);
+CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_sign_qr_request(
+    citizensdk_host_handle_t host, citizensdk_bytes_view_t sign_request,
+    void *context, citizensdk_qr_completion_v1_t completion,
+    citizensdk_wallet_flow_handle_t *out_flow);
+
 CITIZENSDK_HOST_API uint32_t citizensdk_host_abi_version(void);
 CITIZENSDK_HOST_API uint32_t citizensdk_host_config_size(void);
 CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_create(
     const citizensdk_host_config_v1_t *config,
+    citizensdk_host_handle_t *out_host);
+
+/* 显式模块创建不改变 ABI1 结构布局。enable_wallet 必须准确投影 wallet/signing
+ * 是否需要设备安全资源；模块依赖由 Rust 唯一校验。 */
+CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_create_with_modules(
+    const citizensdk_host_config_v1_t *config, uint32_t modules,
     citizensdk_host_handle_t *out_host);
 
 /* The Host owns the returned Core instance. Applications may invoke the root
@@ -87,6 +106,12 @@ CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_present_wallet_flow(
     citizensdk_host_handle_t host,
     const citizensdk_wallet_flow_request_v1_t *request, void *context,
     citizensdk_wallet_flow_completion_v1_t completion,
+    citizensdk_wallet_flow_handle_t *out_flow);
+/* 只打开 SDK 自有账户私钥安全视图；完成结果不含任何秘密或显示回调。
+ * 取消及关闭沿用 WalletFlow 的真实排空语义，账户只作为公开控制输入。 */
+CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_view_account_private_key(
+    citizensdk_host_handle_t host, const citizensdk_account_id_t *account_id,
+    void *context, citizensdk_wallet_flow_completion_v1_t completion,
     citizensdk_wallet_flow_handle_t *out_flow);
 CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_cancel_wallet_flow(
     citizensdk_host_handle_t host, citizensdk_wallet_flow_handle_t flow);

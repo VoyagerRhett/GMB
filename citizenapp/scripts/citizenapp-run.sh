@@ -23,7 +23,7 @@ PLATFORM="${1:?缺少目标平台，用法：$0 <ios|android>}"
 if [[ "$PLATFORM" == ios || "$PLATFORM" == android ]]; then
   : "${TATA_CONSOLE_TARGET_ROOT:?本机编译必须由 TataConsole 提供中央产物目录}"
   : "${TATA_CONSOLE_WORK_DIR:?本机编译必须由 TataConsole 提供中央工作目录}"
-  case "$TATA_CONSOLE_WORK_DIR" in "$TATA_CONSOLE_TARGET_ROOT/.work/GMB/citizenapp/$PLATFORM") ;; *)
+  case "$TATA_CONSOLE_WORK_DIR" in "${TATA_CONSOLE_TARGET_ROOT%/target}/work/gmb/citizenapp/$PLATFORM") ;; *)
     echo "公民中央工作目录不合法：$TATA_CONSOLE_WORK_DIR" >&2; exit 1 ;;
   esac
   # 源码根只用于读取输入和调用原生脚本；Flutter 的所有可写配置由控制台在本端生成。
@@ -46,21 +46,23 @@ if [[ "$PLATFORM" == ios || "$PLATFORM" == android ]]; then
     echo 'CitizenApp 中央工作根不得通过符号链接指向其它目录' >&2
     exit 1
   }
-  INCREMENTAL_CACHE_DIR="${TATA_CONSOLE_INCREMENTAL_CACHE_DIR:?缺少TataConsole本机增量缓存目录}"
-  [[ "$INCREMENTAL_CACHE_DIR" == "$TATA_CONSOLE_WORK_DIR/cache" ]] || {
-    echo "CitizenApp本机增量缓存必须位于$TATA_CONSOLE_WORK_DIR/cache" >&2
+  BUILD_WORK_DIR="${TATA_CONSOLE_BUILD_WORK_DIR:?缺少TataConsole本轮编译目录}"
+  DEPENDENCY_WORK_DIR="${TATA_CONSOLE_DEPENDENCY_WORK_DIR:?缺少TataConsole本轮依赖目录}"
+  [[ "$BUILD_WORK_DIR" == "$TATA_CONSOLE_WORK_DIR/build" \
+    && "$DEPENDENCY_WORK_DIR" == "$TATA_CONSOLE_WORK_DIR/dependencies" ]] || {
+    echo "CitizenApp本轮目录身份无效" >&2
     exit 1
   }
-  BUILD_DIR="$INCREMENTAL_CACHE_DIR/flutter-build"
-  ARTIFACT_ROOT="$TATA_CONSOLE_TARGET_ROOT/GMB/citizenapp/$PLATFORM"
+  BUILD_DIR="$BUILD_WORK_DIR/flutter-build"
+  ARTIFACT_ROOT="$TATA_CONSOLE_TARGET_ROOT/gmb/citizenapp/$PLATFORM"
   export TATA_CONSOLE_BUILD_DIR="$BUILD_DIR"
-  export TATA_CONSOLE_NATIVE_ANDROID_DIR="$INCREMENTAL_CACHE_DIR/native/android"
-  export TATA_CONSOLE_NATIVE_IOS_DIR="$INCREMENTAL_CACHE_DIR/native/ios"
-  export CARGO_TARGET_DIR="$INCREMENTAL_CACHE_DIR/cargo-target"
-  export XDG_CONFIG_HOME="$INCREMENTAL_CACHE_DIR/flutter-config"
-  export PUB_CACHE="$INCREMENTAL_CACHE_DIR/dart-pub"
-  export GRADLE_USER_HOME="$INCREMENTAL_CACHE_DIR/gradle"
-  export CP_HOME_DIR="$INCREMENTAL_CACHE_DIR/cocoapods"
+  export TATA_CONSOLE_NATIVE_ANDROID_DIR="$BUILD_WORK_DIR/native/android"
+  export TATA_CONSOLE_NATIVE_IOS_DIR="$BUILD_WORK_DIR/native/ios"
+  export CARGO_TARGET_DIR="$BUILD_WORK_DIR/cargo-target"
+  export XDG_CONFIG_HOME="$DEPENDENCY_WORK_DIR/flutter-config"
+  export PUB_CACHE="$DEPENDENCY_WORK_DIR/dart-pub"
+  export GRADLE_USER_HOME="$DEPENDENCY_WORK_DIR/gradle"
+  export CP_HOME_DIR="$DEPENDENCY_WORK_DIR/cocoapods"
   export TMPDIR="$TATA_CONSOLE_WORK_DIR/"
   export FLUTTER_SUPPRESS_ANALYTICS=true COCOAPODS_DISABLE_STATS=true
   mkdir -p "$XDG_CONFIG_HOME"
@@ -160,7 +162,7 @@ DART_DEFINES=()
 echo "[Build模式] smoldot轻节点 · 目标平台 $PLATFORM"
 
 # ── chainspec.json 是从链端 plain SSOT + 创世状态包派生的轻节点创世 ──
-# 节点 SSOT = citizenchain/node/chainspecs/citizenchain.plain.json;App 资产只保留
+# 节点 SSOT = citizenchain/node/citizenchain.json;App 资产只保留
 # genesis.stateRootHash 轻形态。正式创世请先跑 citizenchain/scripts/bake-chainspec.sh
 # 同步 plain SSOT、App 轻形态和 genesis-state;runtime 升级走链上 system.setCode。
 # 可执行冻结契约由 check-chainspec-frozen.sh 负责。

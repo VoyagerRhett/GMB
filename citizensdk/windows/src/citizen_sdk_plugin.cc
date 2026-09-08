@@ -291,7 +291,8 @@ struct PluginState final : std::enable_shared_from_this<PluginState> {
       if (!call) throw ContractFailure(CITIZENSDK_ERROR_INVALID_ARGUMENT, "CitizenSDK method message is invalid");
       const auto request = decode_request(call->method_name(), call->arguments());
       if (!request.session.empty()) response->session = request.session;
-      if (request.method != Method::open) response->sequence = request.sequence;
+      if (request.method != Method::open && request.method != Method::verify_signature)
+        response->sequence = request.sequence;
       pending.push_back(response);
       const std::weak_ptr<PluginState> weak = shared_from_this();
       const auto current = sessions;
@@ -378,7 +379,7 @@ std::unique_ptr<::flutter::Plugin> register_plugin(::flutter::BinaryMessenger *m
   state->messenger = messenger;
   state->environment = std::make_shared<FlutterEnvironment>(view);
   const auto environment = state->environment;
-  if (!environment_factory) environment_factory = [environment] { return environment->open(); };
+  if (!environment_factory) environment_factory = [environment](uint32_t modules) { return environment->open(modules); };
   const auto queue = state->queue;
   state->sessions = Sessions::create(std::move(environment_factory),
       [queue](std::function<void()> action) { queue->post(std::move(action)); }, std::move(transport_factory));

@@ -19,9 +19,11 @@ endif()
 set(CITIZENSDK_CORE_LIBRARY "" CACHE FILEPATH "Matching citizensdk.dll")
 set(CITIZENSDK_CORE_IMPORT_LIBRARY "" CACHE FILEPATH "Matching citizensdk.dll.lib")
 set(CITIZENSDK_CORE_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/../include" CACHE PATH "Core public headers")
+set(CITIZENSDK_INTERNAL_INCLUDE_DIR "" CACHE PATH "本轮构建生成的 SDK 私有声明目录；不安装")
 set(CITIZENSDK_ASSET_DIR "${CMAKE_CURRENT_LIST_DIR}/../assets/citizenchain" CACHE PATH "Canonical chain assets")
 set(CITIZENSDK_SQLITE_INCLUDE_DIR "" CACHE PATH "Pinned SQLite headers")
 set(CITIZENSDK_SQLITE_ARCHIVE "" CACHE FILEPATH "Pinned MSVC SQLite static archive")
+set(CITIZENSDK_ZXING_SOURCE_DIR "" CACHE PATH "Official complete ZXing-C++ 3.1.1 source directory")
 option(CITIZENSDK_BUILD_TESTS "Build Windows Host contract tests" OFF)
 option(CITIZENSDK_WARNINGS_AS_ERRORS "Treat Windows Host warnings as errors" ON)
 
@@ -29,6 +31,11 @@ option(CITIZENSDK_WARNINGS_AS_ERRORS "Treat Windows Host warnings as errors" ON)
 if(TARGET flutter)
   include(cmake/CitizenSDKFlutter.cmake)
   return()
+endif()
+
+if(NOT IS_ABSOLUTE "${CITIZENSDK_INTERNAL_INCLUDE_DIR}" OR
+   NOT EXISTS "${CITIZENSDK_INTERNAL_INCLUDE_DIR}/citizensdk_internal.h")
+  message(FATAL_ERROR "CITIZENSDK_INTERNAL_INCLUDE_DIR must contain the generated private header")
 endif()
 foreach(_file CITIZENSDK_CORE_LIBRARY CITIZENSDK_CORE_IMPORT_LIBRARY CITIZENSDK_SQLITE_ARCHIVE)
   if(NOT IS_ABSOLUTE "${${_file}}" OR NOT EXISTS "${${_file}}" OR IS_DIRECTORY "${${_file}}")
@@ -62,6 +69,10 @@ set_target_properties(citizensdk_core PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES "${CITIZENSDK_CORE_INCLUDE_DIR}")
 add_library(CitizenSDK::Core ALIAS citizensdk_core)
 
+# Windows 与其它四端使用相同的 SDK 窄包装和完整官方 ZXing-C++ 源码输入。
+add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../native/qr-image"
+                 "${CMAKE_CURRENT_BINARY_DIR}/citizensdk-qr-image")
+
 set(CITIZENSDK_HOST_SOURCES
   src/citizen_sdk_assets.cc
   src/citizen_sdk_host_api.cc
@@ -80,6 +91,8 @@ set(CITIZENSDK_HOST_SOURCES
   src/citizen_sdk_sqlite.cc
   src/citizen_sdk_cng.cc
   src/citizen_sdk_user_auth.cc
+  src/citizen_sdk_qr_camera.cc
+  src/citizen_sdk_qr_flow.cc
   src/citizen_sdk_wallet_flow.cc
   src/citizen_sdk_wallet_validation.cc
   src/citizen_sdk_wallet_window.cc)
@@ -94,10 +107,10 @@ target_include_directories(citizensdk_host PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/include>
   $<BUILD_INTERFACE:${CITIZENSDK_CORE_INCLUDE_DIR}>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-  PRIVATE src "${CITIZENSDK_SQLITE_INCLUDE_DIR}")
+  PRIVATE src "${CITIZENSDK_INTERNAL_INCLUDE_DIR}" "${CITIZENSDK_SQLITE_INCLUDE_DIR}")
 target_link_libraries(citizensdk_host PUBLIC
   "$<BUILD_INTERFACE:citizensdk_core>" "$<INSTALL_INTERFACE:CitizenSDK::Core>"
-  PRIVATE "${CITIZENSDK_SQLITE_ARCHIVE}" ncrypt bcrypt tbs advapi32 user32 gdi32 comctl32 ntdll)
+  PRIVATE CitizenSDK::QrImage "${CITIZENSDK_SQLITE_ARCHIVE}" ncrypt bcrypt tbs advapi32 user32 gdi32 comctl32 ntdll wtsapi32 mfplat mfreadwrite mfuuid ole32)
 target_compile_options(citizensdk_host PRIVATE /W4 /permissive- /utf-8 /EHsc
   $<$<BOOL:${CITIZENSDK_WARNINGS_AS_ERRORS}>:/WX>)
 target_link_options(citizensdk_host PRIVATE /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA)
@@ -110,7 +123,9 @@ install(TARGETS citizensdk_host EXPORT CitizenSDKTargets
 install(FILES "${CITIZENSDK_CORE_LIBRARY}" DESTINATION "${CMAKE_INSTALL_BINDIR}/Windows")
 install(FILES "${CITIZENSDK_CORE_IMPORT_LIBRARY}" DESTINATION "${CMAKE_INSTALL_LIBDIR}/Windows")
 install(FILES "${CITIZENSDK_CORE_INCLUDE_DIR}/citizensdk.h"
-  "${CITIZENSDK_CORE_INCLUDE_DIR}/citizensdk_types.h" DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+  "${CITIZENSDK_CORE_INCLUDE_DIR}/citizensdk_types.h"
+  "${CMAKE_CURRENT_LIST_DIR}/../native/qr-image/citizensdk_qr_image.h"
+  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 # Flutter 注册头只供 generated registrant 使用，不进入纯原生七头安装合同。
 install(DIRECTORY include/citizen_sdk DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
   PATTERN "citizen_sdk_plugin.h" EXCLUDE)

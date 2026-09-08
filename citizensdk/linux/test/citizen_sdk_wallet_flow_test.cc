@@ -1,5 +1,9 @@
 // 验证 Linux SDK-owned 钱包流程严格复用 Core 的 prepare/commit 和输入门禁。
 #include <cassert>
+#include <array>
+#include <thread>
+#include <memory>
+#include "citizen_sdk_wallet_flow.hpp"
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -14,6 +18,56 @@
 #ifdef NDEBUG
 #error "CitizenSDK Linux contract assertions must remain enabled"
 #endif
+
+namespace citizen_sdk::linux {
+struct WalletFlowTestPeer final {
+  static void private_view_buffer_contract() {
+    ValidatedWalletRequest request;
+    request.account_id = citizensdk_account_id_t{};
+    auto make_flow = [&] {
+      return std::make_shared<WalletFlow>(1, nullptr, 0, request, nullptr, nullptr,
+                                          [](citizensdk_wallet_flow_handle_t) {});
+    };
+    auto flow = make_flow();
+    assert(WalletFlow::private_key_authorizing(nullptr, 9, 71) == CITIZENSDK_ERROR_INTEGRITY);
+    assert(WalletFlow::private_key_authorizing(flow.get(), 0, 71) == CITIZENSDK_ERROR_INTEGRITY);
+    assert(WalletFlow::private_key_authorizing(flow.get(), 9, 0) == CITIZENSDK_ERROR_INTEGRITY);
+    flow->private_view_id_ = 9;
+    assert(WalletFlow::private_key_authorizing(flow.get(), 10, 71) == CITIZENSDK_ERROR_INTEGRITY);
+    std::array<uint8_t, 32> synthetic{};
+    synthetic[0] = 7;
+    assert(WalletFlow::display_private_key(flow.get(), 9, {synthetic.data(), 31}) ==
+           CITIZENSDK_ERROR_INTEGRITY);
+    assert(WalletFlow::display_private_key(flow.get(), 9, {nullptr, 32}) ==
+           CITIZENSDK_ERROR_INTEGRITY);
+    assert(WalletFlow::display_private_key(flow.get(), 9, {synthetic.data(), 32}) == CITIZENSDK_OK);
+    synthetic[0] = 0;
+    assert(flow->private_key_.data()[0] == 7);  // 已同步复制，不保存借用指针。
+    assert(WalletFlow::display_private_key(flow.get(), 10, {synthetic.data(), 32}) ==
+           CITIZENSDK_ERROR_INVALID_HANDLE);
+    assert(WalletFlow::display_private_key(flow.get(), 9, {synthetic.data(), 32}) ==
+           CITIZENSDK_ERROR_INVALID_STATE);
+    assert(flow->revoke_private_key_display() == 9);
+    assert(flow->private_key_.empty());
+    assert(WalletFlow::private_key_authorizing(flow.get(), 9, 71) == CITIZENSDK_ERROR_CANCELLED);
+    assert(WalletFlow::display_private_key(flow.get(), 9, {synthetic.data(), 32}) ==
+           CITIZENSDK_ERROR_CANCELLED);
+    // 锁屏/关闭使用相同撤销门：并发认证晚回调与清屏的顺序不影响最终空缓冲。
+    for (unsigned attempt = 0; attempt < 32; ++attempt) {
+      auto racing = make_flow();
+      std::thread late([&] {
+        const auto code = WalletFlow::display_private_key(racing.get(), 11, {synthetic.data(), 32});
+        assert(code == CITIZENSDK_OK || code == CITIZENSDK_ERROR_CANCELLED);
+      });
+      (void)racing->revoke_private_key_display();
+      late.join();
+      assert(racing->private_key_.empty());
+      assert(WalletFlow::display_private_key(racing.get(), 11, {synthetic.data(), 32}) ==
+             CITIZENSDK_ERROR_CANCELLED);
+    }
+  }
+};
+}  // namespace citizen_sdk::linux
 
 namespace {
 
@@ -38,6 +92,7 @@ citizensdk_wallet_flow_request_v1_t request(
 }  // namespace
 
 int main() {
+  citizen_sdk::linux::WalletFlowTestPeer::private_view_buffer_contract();
   assert(citizensdk_validate_wallet_password({nullptr, 0}) == CITIZENSDK_OK);
   const uint8_t prefix[] = {'a', 'b', 'a', 'n'};
   uint64_t required = 0;

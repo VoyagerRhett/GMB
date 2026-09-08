@@ -5,22 +5,62 @@ package org.citizen.sdk.internal
 import android.content.Context
 import androidx.fragment.app.FragmentActivity
 import org.citizen.sdk.CitizenSdkErrorCode
+import org.citizen.sdk.CitizenSdkModules
 import java.io.File
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Private JNI target for five typed stores and the KEK/DEK vault. */
-internal class CitizenSdkHostServices(context: Context) : AutoCloseable {
+/** JNI 私有宿主：按模块延迟创建类型化存储和 KEK/DEK 金库，关闭只释放已创建资源。 */
+internal class CitizenSdkHostServices(context: Context, private val modules: Int = CitizenSdkModules.FULL) : AutoCloseable {
     private val closed = AtomicBoolean(false)
-    private val root = File(context.noBackupFilesDir, "citizensdk/v1")
-    private val publicStore = CitizenSdkPublicStore(File(root, "public"))
-    private val secureStore = CitizenSdkSecureStore(File(root, "secure"))
-    private val vault = CitizenSdkHardwareVault(context, secureStore)
+    // 回调首次使用时才创建资源，核心拒绝非法组合前不得产生数据库或金库副作用。
+    private val usesSecrets = modules and (CitizenSdkModules.WALLET or CitizenSdkModules.SIGNING) != 0
+    private val root by lazy { File(context.noBackupFilesDir, "citizensdk/v1") }
+    private val publicStoreDelegate = lazy {
+        check(modules and CitizenSdkModules.CHAIN != 0) { "chain store is not selected" }
+        CitizenSdkPublicStore(File(root, "public"))
+    }
+    private val secureStoreDelegate = lazy {
+        check(usesSecrets) { "secure store is not selected" }
+        CitizenSdkSecureStore(File(root, "secure"))
+    }
+    private val vaultDelegate = lazy { CitizenSdkHardwareVault(context, secureStore) }
+    private val publicStore by publicStoreDelegate
+    private val secureStore by secureStoreDelegate
+    private val vault by vaultDelegate
+    private val authenticationGate = Any()
+    private val privateKeyAuthentications = HashMap<Long, Boolean>()
 
-    fun attachActivity(activity: FragmentActivity) = vault.attachActivity(activity)
-    fun detachActivity(activity: FragmentActivity) = vault.detachActivity(activity)
-    fun whenActivityReady(callback: () -> Unit): AutoCloseable = vault.whenActivityReady(callback)
-    fun setActivityReadinessListener(listener: (() -> Unit)?) = vault.setReadinessListener(listener)
+    fun registerPrivateKeyAuthentication(operationId: Long): Int = synchronized(authenticationGate) {
+        if (operationId == 0L || privateKeyAuthentications.containsKey(operationId)) {
+            return@synchronized CitizenSdkErrorCode.INTEGRITY.value
+        }
+        privateKeyAuthentications[operationId] = false
+        CitizenSdkErrorCode.OK.value
+    }
+    fun isPrivateKeyAuthenticationActive(operationId: Long, activity: FragmentActivity): Boolean {
+        val allowed = synchronized(authenticationGate) { privateKeyAuthentications[operationId] == false }
+        return allowed && vaultDelegate.isInitialized() && vault.isAuthenticationActive(operationId, activity)
+    }
+    fun cancelPrivateKeyAuthentication(operationId: Long) {
+        synchronized(authenticationGate) {
+            if (!privateKeyAuthentications.containsKey(operationId)) return
+            privateKeyAuthentications[operationId] = true
+            if (vaultDelegate.isInitialized()) vault.cancelAuthentication(operationId)
+        }
+    }
+    fun releasePrivateKeyAuthentication(operationId: Long) {
+        synchronized(authenticationGate) { privateKeyAuthentications.remove(operationId) }
+        if (vaultDelegate.isInitialized()) vault.releasePrivateKeyAuthentication(operationId)
+    }
+
+    fun attachActivity(activity: FragmentActivity) { if (usesSecrets) vault.attachActivity(activity) }
+    fun detachActivity(activity: FragmentActivity) { if (vaultDelegate.isInitialized()) vault.detachActivity(activity) }
+    fun whenActivityReady(callback: () -> Unit): AutoCloseable =
+        if (usesSecrets) vault.whenActivityReady(callback) else AutoCloseable {}
+    fun setActivityReadinessListener(listener: (() -> Unit)?) {
+        if (usesSecrets && (listener != null || vaultDelegate.isInitialized())) vault.setReadinessListener(listener)
+    }
 
     @Suppress("unused")
     fun chainDatabaseLoad(): CitizenSdkHostRecord = protect(CitizenSdkHostDomain.CHAIN_DATABASE) {
@@ -130,8 +170,14 @@ internal class CitizenSdkHostServices(context: Context) : AutoCloseable {
         wrappedDek: ByteArray,
         plaintextDekOut: ByteBuffer,
     ): Int = try {
-        vault.unwrapDek(walletIndex, generation, wrappedDek, plaintextDekOut) { errorCode ->
-            CitizenSdkNative.completeVaultUnwrap(nativeBridge, hostOperationId, errorCode)
+        synchronized(authenticationGate) {
+            if (privateKeyAuthentications[hostOperationId] == true) throw CitizenSdkHardwareVault.VaultFailure(
+                CitizenSdkErrorCode.AUTHENTICATION_CANCELLED, "private key authentication was cancelled",
+            )
+            vault.unwrapDek(hostOperationId, privateKeyAuthentications.containsKey(hostOperationId),
+                walletIndex, generation, wrappedDek, plaintextDekOut) { errorCode ->
+                CitizenSdkNative.completeVaultUnwrap(nativeBridge, hostOperationId, errorCode)
+            }
         }
         CitizenSdkErrorCode.OK.value
     } catch (error: CitizenSdkHardwareVault.VaultFailure) {
@@ -149,9 +195,9 @@ internal class CitizenSdkHostServices(context: Context) : AutoCloseable {
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        vault.setReadinessListener(null)
-        val publicFailure = runCatching { publicStore.close() }.exceptionOrNull()
-        val secureFailure = runCatching { secureStore.close() }.exceptionOrNull()
+        if (vaultDelegate.isInitialized()) vault.setReadinessListener(null)
+        val publicFailure = runCatching { if (publicStoreDelegate.isInitialized()) publicStore.close() }.exceptionOrNull()
+        val secureFailure = runCatching { if (secureStoreDelegate.isInitialized()) secureStore.close() }.exceptionOrNull()
         when {
             publicFailure != null -> {
                 if (secureFailure != null) publicFailure.addSuppressed(secureFailure)

@@ -1,5 +1,5 @@
 // 统一的签名二维码 payload 解析工具。
-// 唯一事实源：shared/qr-protocol/registry.json
+// 唯一事实源：citizenchain/crates/qr-protocol/registry.json
 // 使用 QR_V1 envelope,不支持字段别名。
 
 import { parseQrEnvelope, QrParseError } from '../core/citizenQr';

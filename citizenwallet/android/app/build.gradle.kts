@@ -5,6 +5,9 @@ plugins {
 }
 
 android {
+    // 钱包所有资源统一归属 resources；Android 只读取其中的平台资源。
+    sourceSets.getByName("main").res.setSrcDirs(listOf("../../resources/android"))
+
     namespace = "com.crcfrcn.citizenwallet"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
@@ -63,4 +66,11 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+// 钱包内置硬件金库直接使用宿主依赖。
+dependencies {
+    implementation("androidx.biometric:biometric:1.1.0")
+    implementation("androidx.core:core:1.13.1")
+    testImplementation("junit:junit:4.13.2")
 }

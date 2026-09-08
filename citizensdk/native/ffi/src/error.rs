@@ -58,6 +58,7 @@ impl From<EngineError> for FfiError {
                     }
                     EngineError::BlockContextMismatch(_) => CitizenSdkErrorCode::Integrity,
                     EngineError::CapabilityUnavailable(_) => CitizenSdkErrorCode::NotReady,
+                    EngineError::Cancelled => CitizenSdkErrorCode::Cancelled,
                     EngineError::Contract(_) => unreachable!("handled above"),
                     EngineError::StatePoisoned => CitizenSdkErrorCode::Internal,
                 };

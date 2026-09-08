@@ -1,5 +1,11 @@
 # CitizenSDK Dart/Flutter 公共接口
 
+当前公开门面为 `sdk.wallet`、`sdk.signing`、`sdk.chain`、`sdk.transactions`、
+`sdk.history`、`sdk.qr`。钱包管理与签名独立，QR 也不与 signing 合并；五端功能逻辑统一由 Rust 实现。
+`CitizenSdk.open(modules: CitizenSdkModules.full)` 默认全选；按需使用时组合
+`CitizenSdkModules` 的具名常量，组合依赖与编译支持由 Rust 统一验证，数值以唯一 SDK 字典为准。
+模块选择只改变运行期资源，不裁剪现有 full 包或链资产。模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
+
 ## 当前交付边界
 
 根入口只公开 ABI v1 的类型化 API：
@@ -13,17 +19,26 @@ Android、iOS 与 macOS 已安装正式 binding。iOS 和 macOS 在 `pubspec.yam
 第 7.4 步把 LinuxARM/LinuxAMD 同时纳入候选合同、官方 `linux` plugin 注册及默认
 `CitizenSdk.open()`，直接使用 `CitizenSdkPlugin` 和同一 transport，不注入内部 platform。
 第 8.4 步用同样方式纳入 Windows 默认入口、官方自动注册和同版运行投影。
-WASM 和未支持的 Flutter 平台仍在进入通道前返回 `CitizenSdkErrorCode.unsupported`；
+未支持的 Flutter 平台在进入通道前返回 `CitizenSdkErrorCode.unsupported`；
 已支持平台缺少同版原生插件时同样失败关闭，不用另一套实现冒充 session。
 Linux/Windows 实际编译、CTest、C/C++/Flutter 与平台 UI/TPM 运行仍由后续统一 GitHub
 CI/Release 验证，当前源码注册不是正式发布或这些平台运行通过。
 iOS 模拟器变体可运行产品 ABI 与公开链能力，但没有 Secure Enclave；硬件金库、钱包和
 依赖它们的签名/交易能力必须通过 capability snapshot 报告不可用。
 
-共享 `citizen/sdk/core/v1` 的 22 方法 tuple 从未定义 mnemonic、password、DEK、child secret、
+共享 `citizen/sdk/core/v1` 的 36 方法 tuple 从未定义 mnemonic、password、DEK、child secret、
 private key、prepared/result/native handle 或 signed-extrinsic 位置。Android、Darwin、Linux
 以及第 8.2 步 Windows adapter 源码都遵守同一秘密不跨 Flutter 的合同。Linux 使用长度保持的标准消息 codec，线上仍是
 标准 string tag；内嵌 NUL 的合法备注不得被 GLib 的 NUL 结尾字符串表示截断。
+
+`sdk.qr` 公开严格 `QR_V1` 文本、扫码签名会话、账户/转账编码和亮度图像编解码。
+图像统一由 SDK 内 ZXing-C++ 3.1.1 完成。`sdk.qr.scan()` 打开 SDK 自有相机窗口；
+已有亮度图像仍可使用 `decodeLuminance`，两者都返回 Core 解析的同一种公开文档。
+`CitizenSdkModules.qr` 可单独打开，不启动链、钱包或金库。
+`sdk.signing.signQrRequest(text)` 组合 qr、signing、chain，内部完成可信链审阅、原生确认、
+设备授权、现有 SigningService 签名和响应编码，返回公开结果及 `qrImage`。
+调用方不传时间、待签字节、签名注入或原生审阅句柄。`qr.encode` 是唯一图像生成入口。
+无相机、拒绝权限、设备中断、取消或链未就绪都明确失败，不使用第二识别器或降级签名。
 
 Windows adapter 使用官方 StandardMethodCodec 的长度保持字符串。默认 `CitizenSdk.open()`
 不需要产品侧包装或别名；宿主在 generated_plugins.cmake 前声明一次
@@ -34,11 +49,12 @@ Windows adapter 使用官方 StandardMethodCodec 的长度保持字符串。默�
 `lib/citizen_sdk.dart` 根入口移除，Android、iOS、macOS、Linux 和 Windows 公开绑定均不可达，也不是新宿主的
 公开 API。
 
-Hosted Package 的 Dart 运行时闭包精确为 17 个文件：
+Hosted Package 的 Dart 运行时闭包精确为 18 个文件：
 
 ```text
 lib/citizen_sdk.dart
 lib/src/api/citizen_chain.dart
+lib/src/api/citizen_qr.dart
 lib/src/api/citizen_sdk.dart
 lib/src/api/citizen_sdk_error.dart
 lib/src/api/citizen_sdk_events.dart
@@ -71,6 +87,10 @@ Flutter 对插件 Swift Package Manager 目录的识别警告与 Android built-i
 
 ## 会话与生命周期
 
+`await sdk.wallet.viewAccountPrivateKey(accountId)`启动SDK自有原生安全查看，只需钱包模块。
+用户确认后通过现有设备认证；公开结果只有完成、取消或错误，不返回私钥字符串、字节或内部句柄。
+关闭、真实后台或锁屏永久结束本次查看，恢复前台不会自动展示；Future等待原生清屏与Core真实排空。
+
 ```dart
 final sdk = await CitizenSdk.open();
 await sdk.start();
@@ -79,7 +99,7 @@ await sdk.stop();
 await sdk.close();
 ```
 
-- `open` 只创建独立 Core session，不隐式启动轻节点。
+- `open` 只按 modules 创建独立 Core session，不隐式启动轻节点；未选 chain 不加载链资产或创建链数据库。
 - `start` 和 `stop` 是独占生命周期操作；它们等待较早请求收口，期间不接纳
   新操作。
 - 普通链、钱包和历史请求可并发；request sequence 只用于精确关联，
@@ -95,13 +115,18 @@ await sdk.close();
 `sdk.chain` 只提供 Core 已验证的类型化入口：
 
 ```dart
+final genesisHash = await sdk.chain.getGenesisHash();
 final finalized = await sdk.chain.getFinalizedHead();
 final balance = await sdk.chain.getAccountBalance(accountId);
+final balances = await sdk.chain.getAccountBalances(accountIds);
 final nonce = await sdk.chain.getAccountNonce(accountId);
 final fee = await sdk.chain.getFeeSnapshot();
 ```
 
-- balance 锚定 finalized 块。
+- genesisHash 来自 Core 固定链身份，不要求 start 或联网；必须已选择 chain 模块。
+- balance 锚定 finalized 块；balances 复用同一 Core 批量读取，所有项锚定同一个 finalized 块。
+- 批量输入允许 0..1990 项，保留输入顺序和重复账户；空输入仍送 Core 校验模块、生命周期和链能力。
+- 批量查询不依赖钱包、签名或历史，不返回部分成功；有限读取完成前不能通过取消提前释放原生资源。
 - nonce 锚定同一准确 best runtime snapshot，不是交易池 nonce 租约。
 - fee snapshot 来自同一 best 块的 runtime context。
 - 公开 API 没有 `rpc(method, params)`、RPC URL 或预签名 extrinsic 通道。
@@ -142,8 +167,19 @@ await sdk.wallet.reconcileCleanup();
 ## sr25519 本地签名
 
 ```dart
-final signature = await sdk.wallet.sign(
+final signature = await sdk.signing.sign(
   accountId: accountId,
+  payload: Uint8List.fromList(protocolPayload),
+);
+```
+
+签名仅引用同一宿主已有的 SDK 安全账户与设备金库；首次 provision 仍需钱包安全流程。
+签名-only 不开放钱包管理接口，不增加秘密导出。公开纯验签无需 open 或任何模块实例：
+
+```dart
+final valid = await CitizenSigning.verify(
+  accountId: accountId,
+  signature: signature.bytes,
   payload: Uint8List.fromList(protocolPayload),
 );
 ```
@@ -184,8 +220,8 @@ txHash、`Ready`、`Broadcast`、`InBlock` 或 provider `Finalized` 都不等于
 finalized 历史使用：
 
 ```dart
-final initial = await sdk.transactions.initializeFinalizedHistory(accountIds);
-final next = await sdk.transactions.syncFinalizedHistory(accountIds);
+final initial = await sdk.history.initializeFinalizedHistory(accountIds);
+final next = await sdk.history.syncFinalizedHistory(accountIds);
 ```
 
 `accountIds` 必须包含 1..1990 个规范 AccountId，且整份列表不得重复。Dart 在建立 session 请求前
@@ -205,7 +241,7 @@ MethodChannel  citizen/sdk/core/v1
 EventChannel   citizen/sdk/events/v1
 ```
 
-22 个方法的请求、响应、事件、错误及所有嵌套值都是固定长度、固定位置的
+36 个方法的请求、响应、事件、错误及所有嵌套值都是固定长度、固定位置的
 `List` tuple。任意层级的 `Map`、未知枚举、额外字段、跨 session 响应、request/event
 序号缺口或乱序都失败关闭，没有兼容旁路。该协议是 binding 内部实现细节，
 不是业务应用应直接调用的公共 API。
@@ -213,7 +249,16 @@ EventChannel   citizen/sdk/events/v1
 1..128 个 UTF-16 code units 计算，Dart、Swift 与 Kotlin 使用同一边界，包含代理项的字符串
 不能因语言各自的字符计数方式而分叉。
 
-每个 Flutter engine 只有一个 EventChannel router；它在发出 native `open` 前先订阅，
+open 仅接受 `[1, modules]`。无会话 `verifySignature` 仅接受
+`[1, accountId, signature, payload]`、返回 `[1, bool]`；错误沿用 PlatformException，
+session/sequence 为 null。它直接调用同一 Rust 纯验签，不创建 session、事件订阅、链、数据库
+或金库；不接受旧 session 形状。其余 session 方法保持原请求/响应外壳。
+
+新增的 `getGenesisHash` 使用空 fields 请求，返回一个规范 hash；`getAccountBalances`
+接收一项账户列表，返回一项既有余额 tuple 列表。五端绑定共同验证数量、逐项账户及同块约束，
+不另行查询、合并或计算余额。
+
+需要 session 的调用中，每个 Flutter engine 只有一个 EventChannel router；它在发出 native `open` 前先订阅，
 按 session 隔离有界暂存早到事件。`open` 响应携带该 session 的准确 event baseline，Dart
 建立 session 后才按序排空；不存在“每个 session 在 open 后另订阅一次”的丢事件窗口。
 

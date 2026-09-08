@@ -31,11 +31,13 @@ class FlutterEnvironment final {
   FlutterEnvironment(const FlutterEnvironment &) = delete;
   FlutterEnvironment &operator=(const FlutterEnvironment &) = delete;
 
-  OpenEnvironment open() const;
-  // 私有原生夹具入口，复用同一窗口/路径检查；正式注册只调用无参数 open()。
-  OpenEnvironment open(const NativeEnvironmentInputs &inputs) const;
+  OpenEnvironment open(uint32_t modules = CITIZENSDK_MODULE_FULL) const;
+  // 私有原生夹具入口，复用同一窗口/路径检查；正式注册只传递模块选择。
+  OpenEnvironment open(const NativeEnvironmentInputs &inputs,
+                       uint32_t modules = CITIZENSDK_MODULE_FULL) const;
   void detach() noexcept;
-  static Config resolve(const NativeEnvironmentInputs &inputs);
+  static Config resolve(const NativeEnvironmentInputs &inputs,
+                        uint32_t modules = CITIZENSDK_MODULE_FULL);
 
  private:
   struct State;

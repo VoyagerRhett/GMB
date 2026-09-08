@@ -27,11 +27,17 @@ type RequestOperation = Box<
         + 'static,
 >;
 
-struct RequestJob {
+struct StandardRequestJob {
     runtime: Arc<NativeRuntime>,
     request_id: CitizenSdkRequestId,
     cancellation: Option<RequestCancellation>,
     operation: RequestOperation,
+}
+
+enum RequestJob {
+    Standard(StandardRequestJob),
+    /// 私有查看阶段自行收敛；不把阶段返回误作整个 UI 生命周期完成。
+    PrivateView(Box<dyn FnOnce() + Send + 'static>),
 }
 
 struct RequestExecutor {
@@ -116,12 +122,12 @@ where
     } else {
         runtime.begin_request(cancellable)?
     };
-    let job = RequestJob {
+    let job = RequestJob::Standard(StandardRequestJob {
         runtime: Arc::clone(&runtime),
         request_id,
         cancellation,
         operation: Box::new(operation),
-    };
+    });
     if let Err(error) = executor.sender.try_send(job) {
         runtime.reject_request(request_id);
         let (code, message) = match error {
@@ -144,6 +150,19 @@ fn short_executor() -> FfiResult<&'static RequestExecutor> {
         .get_or_init(|| start_executor(SHORT_WORKER_COUNT, "citizensdk-worker"))
         .as_ref()
         .map_err(|message| FfiError::internal(message.clone()))
+}
+
+/// 共用有界短队列，只执行准备或认证阶段，绝不在作业中等待用户点击或整个 UI 寿命。
+pub(crate) fn execute_private_view(operation: impl FnOnce() + Send + 'static) -> FfiResult<()> {
+    short_executor()?
+        .sender
+        .try_send(RequestJob::PrivateView(Box::new(operation)))
+        .map_err(|error| match error {
+            mpsc::TrySendError::Full(_) => {
+                FfiError::new(CitizenSdkErrorCode::QueueFull, "安全查看阶段队列已满")
+            }
+            mpsc::TrySendError::Disconnected(_) => FfiError::internal("安全查看阶段队列已关闭"),
+        })
 }
 
 fn watch_executor() -> FfiResult<&'static RequestExecutor> {
@@ -177,6 +196,14 @@ fn worker_loop(receiver: Arc<Mutex<mpsc::Receiver<RequestJob>>>) {
         let Ok(job) = job else {
             return;
         };
+        let job = match job {
+            RequestJob::Standard(job) => job,
+            RequestJob::PrivateView(operation) => {
+                // 作业持有会话并自行把 panic 转为受控错误；外层隔离防止单个视图杀死共享 worker。
+                let _ = catch_unwind(AssertUnwindSafe(operation));
+                continue;
+            }
+        };
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             (job.operation)(&job.runtime, job.request_id, job.cancellation)
         }))
@@ -190,7 +217,7 @@ fn worker_loop(receiver: Arc<Mutex<mpsc::Receiver<RequestJob>>>) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "chain", feature = "transactions"))]
 mod tests {
     use std::{
         ffi::c_void,

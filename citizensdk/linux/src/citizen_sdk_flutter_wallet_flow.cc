@@ -101,7 +101,7 @@ void FlutterWalletFlows::launch(const DecodedRequest &request,
   if (!presenter || !completion || request.session.empty() || request.sequence <= 0)
     throw ContractFailure(CITIZENSDK_ERROR_INVALID_ARGUMENT,
                           "wallet flow requires a presenter and session request");
-  const auto native = contract(request);
+  if (request.method != Method::view_account_private_key) (void)contract(request);
   const State::Key key{request.session, request.sequence};
   auto entry = std::make_shared<State::Entry>();
   entry->completion = std::move(completion);
@@ -115,7 +115,7 @@ void FlutterWalletFlows::launch(const DecodedRequest &request,
     // Preallocation precedes the Host accepting call. Completion is allowed
     // before present() returns; admitted prevents early UI-thread settlement.
     const auto state = state_;
-    cancel = presenter(native, [state, key, entry](WalletFlowResult result) {
+    cancel = presenter(request, [state, key, entry](WalletFlowResult result) {
       state->finish(key, entry, result);
     });
   } catch (...) {

@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:gmb_wallet_password/wallet_password.dart';
+import 'package:citizenwallet/wallet/wallet_password.dart';
 
 import '../util/sensitive_page_mixin.dart';
 import '../wallet/wallet_manager.dart';

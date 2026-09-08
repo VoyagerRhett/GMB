@@ -2,6 +2,24 @@ import Foundation
 
 /// Decodes retained Core result handles into secret-free Swift value types.
 internal enum CitizenSDKNativeCodec {
+    static func qr(_ result: UInt64, kind: UInt32) throws -> String {
+        try inspect(result, kind: kind) {
+            var required: UInt64 = 0
+            try CitizenSDKChecks.requireOK(citizensdk_result_copy_qr(result, nil, 0, &required), "Core QR result length is invalid")
+            guard required > 0, required <= 65_536 else { throw CitizenSDKError(.integrity, "Core QR result exceeds its limit") }
+            var output = Data(count: Int(required))
+            let capacity = required
+            let status = output.withUnsafeMutableBytes {
+                citizensdk_result_copy_qr(result, $0.bindMemory(to: UInt8.self).baseAddress, capacity, &required)
+            }
+            try CitizenSDKChecks.requireOK(status, "Core QR result copy failed")
+            guard required == capacity, let json = String(data: output, encoding: .utf8) else {
+                throw CitizenSDKError(.integrity, "Core QR result is not exact UTF-8")
+            }
+            return json
+        }
+    }
+
     static func empty(_ result: UInt64) throws {
         try inspect(result, kind: 0) { () }
     }
@@ -20,14 +38,43 @@ internal enum CitizenSDKNativeCodec {
             var value = citizensdk_account_balance_info_t()
             prepare(&value.struct_size, &value.abi_version, citizensdk_account_balance_info_t.self)
             try CitizenSDKChecks.requireOK(citizensdk_result_get_account_balance(result, &value), "Core balance result is invalid")
-            return CitizenAccountBalance(
-                block: try block(value.block),
-                accountID: fixed(value.account_id.bytes, 32),
-                freeFen: u128(value.free_fen),
-                reservedFen: u128(value.reserved_fen),
-                totalFen: u128(value.total_fen)
-            )
+            return try balance(value)
         }
+    }
+
+    static func balances(_ result: UInt64, accountIDs: [Data]) throws -> [CitizenAccountBalance] {
+        try inspect(result, kind: 18) {
+            var count: UInt32 = 0
+            try CitizenSDKChecks.requireOK(citizensdk_result_get_account_balance_count(result, &count),
+                                           "Core balance count is invalid")
+            guard count <= 1_990, Int(count) == accountIDs.count else {
+                throw CitizenSDKError(.integrity, "Core balance result count differs from the request")
+            }
+            let values = try (0..<count).map { index in
+                var value = citizensdk_account_balance_info_t()
+                prepare(&value.struct_size, &value.abi_version, citizensdk_account_balance_info_t.self)
+                try CitizenSDKChecks.requireOK(citizensdk_result_get_account_balance_at(result, index, &value),
+                                               "Core balance result is invalid")
+                return try balance(value)
+            }
+            return try validateBalances(values, accountIDs: accountIDs)
+        }
+    }
+
+    /// 只校验跨边界的结果完整性；账户解码、同块查询与余额计算仍唯一归 Rust。
+    static func validateBalances(_ values: [CitizenAccountBalance], accountIDs: [Data]) throws -> [CitizenAccountBalance] {
+        guard values.count == accountIDs.count, values.count <= 1_990,
+              zip(values, accountIDs).allSatisfy({ $0.0.accountID == $0.1 }),
+              values.allSatisfy({ $0.block.finality == .finalized && $0.block == values.first?.block }) else {
+            throw CitizenSDKError(.integrity, "Core balance results do not match one finalized request")
+        }
+        return values
+    }
+
+    private static func balance(_ value: citizensdk_account_balance_info_t) throws -> CitizenAccountBalance {
+        CitizenAccountBalance(block: try block(value.block), accountID: fixed(value.account_id.bytes, 32),
+                              freeFen: u128(value.free_fen), reservedFen: u128(value.reserved_fen),
+                              totalFen: u128(value.total_fen))
     }
 
     static func nonce(_ result: UInt64) throws -> CitizenAccountNonce {

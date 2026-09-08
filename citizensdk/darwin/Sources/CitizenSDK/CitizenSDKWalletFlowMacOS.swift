@@ -1,11 +1,29 @@
 #if os(macOS)
 import AppKit
+import CoreText
 
 public extension CitizenSdk {
+    /// 公开结果只有完成状态；私钥只能由 SDK 自有、禁止共享的窗口显示。
+    @MainActor
+    func viewAccountPrivateKey(from parent: NSWindow, accountID: Data) throws -> CitizenSDKOperation<Void> {
+        guard parent.isVisible, NSApp.isActive, parent.attachedSheet == nil else {
+            throw CitizenSDKError(.unavailable, "private key view requires an available foreground window")
+        }
+        let flow = try CitizenSDKPrivateKeyView(sdk: self, accountID: accountID)
+        let controller = CitizenSDKPrivateKeyViewControllerMacOS(flow: flow)
+        let window = NSWindow(contentViewController: controller)
+        window.title = "查看账户私钥"; window.setContentSize(NSSize(width: 500, height: 320))
+        window.styleMask.remove(.closable); window.sharingType = .none
+        controller.attach(parent: parent, window: window)
+        parent.beginSheet(window)
+        return flow.operation
+    }
+
     @MainActor
     func presentWalletFlow(from parent: NSWindow, request: CitizenSDKWalletFlowRequest,
                            completion: @escaping (CitizenSDKWalletFlowResult) -> Void) throws -> CitizenSDKWalletFlow {
         let request = try citizenSDKValidateWalletFlowRequest(request)
+        try citizenSDKRequireWalletUI(capabilities())
         let token = try CitizenSDKWalletFlowRegistry.shared.reserve(self)
         let controller = CitizenSDKWalletViewControllerMacOS(sdk: self, request: request) { [weak self, weak parent] result in
             guard let self else { return }
@@ -25,6 +43,134 @@ public extension CitizenSdk {
             DispatchQueue.main.async { controller?.requestCancel() }
         }
     }
+}
+
+@MainActor
+private final class CitizenSDKPrivateKeyContentMacOS: NSView {
+    let buffer: CitizenSDKPrivateKeyDisplayBuffer
+    var onRemoval: (() -> Void)?
+    private var wasAttached = false
+    init(buffer: CitizenSDKPrivateKeyDisplayBuffer) {
+        self.buffer = buffer; super.init(frame: .zero)
+        setAccessibilityElement(false)
+    }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { wasAttached = true }
+        else if wasAttached { onRemoval?() }
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.windowBackgroundColor.setFill(); bounds.fill()
+        guard !isHidden, let context = NSGraphicsContext.current?.cgContext else { return }
+        let font = CTFontCreateWithName("Menlo" as CFString, 18, nil)
+        context.setFillColor(NSColor.labelColor.cgColor)
+        buffer.withCharacters { characters in
+            var glyphs = [CGGlyph](repeating: 0, count: characters.count)
+            defer { for index in glyphs.indices { glyphs[index] = 0 } }
+            guard CTFontGetGlyphsForCharacters(font, characters.baseAddress!, &glyphs, characters.count) else { return }
+            var positions = (0..<characters.count).map {
+                CGPoint(x: 8 + ($0 % 22) * 11, y: Int(self.bounds.height) - 28 - ($0 / 22) * 28)
+            }
+            CTFontDrawGlyphs(font, &glyphs, &positions, characters.count, context)
+        }
+    }
+}
+
+@MainActor
+private final class CitizenSDKPrivateKeyViewControllerMacOS: NSViewController {
+    private let flow: CitizenSDKPrivateKeyView
+    private let content: CitizenSDKPrivateKeyContentMacOS
+    private var tokens: [(NotificationCenter, NSObjectProtocol)] = []
+    private weak var parentWindow: NSWindow?
+    private weak var ownedWindow: NSWindow?
+    private var ready = false
+    private var ending = false
+    private let reveal = NSButton(title: "已理解风险，验证身份并查看", target: nil, action: nil)
+    private let done = NSButton(title: "关闭并清除", target: nil, action: nil)
+
+    init(flow: CitizenSDKPrivateKeyView) {
+        self.flow = flow; content = CitizenSDKPrivateKeyContentMacOS(buffer: flow.buffer)
+        super.init(nibName: nil, bundle: nil)
+        content.onRemoval = { [weak flow] in flow?.finish(cancelled: true) }
+        flow.onReady = { [weak self] in self?.ready = true; self?.refreshVisibility() }
+        flow.onClear = { [weak self] in
+            self?.ending = true; self?.content.isHidden = true; self?.content.needsDisplay = true
+            self?.reveal.isEnabled = false; self?.done.isEnabled = false
+        }
+        flow.onTerminal = { [weak self] completion in
+            guard let self else { completion(); return }
+            self.tokens.forEach { $0.0.removeObserver($0.1) }; self.tokens.removeAll()
+            self.content.isHidden = true
+            if let window = self.ownedWindow {
+                self.parentWindow?.endSheet(window); window.orderOut(nil)
+                window.contentViewController = nil
+            }
+            completion()
+        }
+    }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func attach(parent: NSWindow, window: NSWindow) {
+        parentWindow = parent; ownedWindow = window
+        let center = NotificationCenter.default
+        func observe(_ name: Notification.Name, object: Any? = nil, action: @escaping @MainActor @Sendable () -> Void) {
+            tokens.append((center, center.addObserver(forName: name, object: object, queue: .main) { _ in
+                MainActor.assumeIsolated { action() }
+            }))
+        }
+        observe(NSApplication.didResignActiveNotification) { [weak self] in
+            guard let self else { return }
+            self.content.isHidden = true
+            if !self.flow.isAuthenticating { self.flow.finish(cancelled: true) }
+        }
+        observe(NSApplication.didBecomeActiveNotification) { [weak self] in self?.refreshVisibility() }
+        observe(NSApplication.didHideNotification) { [weak self] in self?.flow.finish(cancelled: true) }
+        observe(NSWindow.willCloseNotification, object: parent) { [weak self] in self?.flow.finish(cancelled: true) }
+        observe(NSWindow.willCloseNotification, object: window) { [weak self] in self?.flow.finish(cancelled: true) }
+        observe(NSWindow.didMiniaturizeNotification, object: parent) { [weak self] in self?.flow.finish(cancelled: true) }
+        let workspace = NSWorkspace.shared.notificationCenter
+        tokens.append((workspace, workspace.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.flow.finish(cancelled: true) }
+        }))
+        // 切到另一普通应用是真正后台；认证面板的暂时失焦只遮盖，不依赖窗口焦点作终止判断。
+        tokens.append((workspace, workspace.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] notification in
+            let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            if application?.activationPolicy == .regular, application?.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+                MainActor.assumeIsolated { self?.flow.finish(cancelled: true) }
+            }
+        }))
+    }
+
+    override func loadView() {
+        view = NSView()
+        let warning = NSTextField(wrappingLabelWithString: "私钥可控制本账户。确认周围无人、未共享屏幕；不能复制或分享。")
+        content.isHidden = true; content.heightAnchor.constraint(equalToConstant: 120).isActive = true
+        reveal.target = self; reveal.action = #selector(revealPressed)
+        done.target = self; done.action = #selector(donePressed)
+        let stack = NSStackView(views: [warning, content, reveal, done])
+        stack.orientation = .vertical; stack.spacing = 18; stack.alignment = .leading
+        view.addSubview(stack); stack.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
+            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 24),
+            content.widthAnchor.constraint(equalTo: stack.widthAnchor),
+        ])
+    }
+    override func viewDidDisappear() {
+        super.viewDidDisappear()
+        if !ending { flow.finish(cancelled: true) }
+    }
+    private func refreshVisibility() {
+        content.isHidden = ending || !ready || !NSApp.isActive
+        content.needsDisplay = true
+    }
+    @objc private func revealPressed() {
+        guard reveal.isEnabled else { return }
+        reveal.isEnabled = false; flow.reveal()
+    }
+    @objc private func donePressed() { flow.finish(cancelled: !ready) }
 }
 
 @MainActor

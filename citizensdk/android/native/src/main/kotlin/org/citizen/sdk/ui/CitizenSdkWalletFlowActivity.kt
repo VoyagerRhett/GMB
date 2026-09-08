@@ -35,6 +35,7 @@ internal class CitizenSdkWalletFlowActivity : FragmentActivity() {
     private var terminalResult: CitizenSdkWalletFlowContract.Result? = null
     private val secretInputs = LinkedHashSet<EditText>()
     private var inputRetry: ((Throwable) -> Unit)? = null
+    private var privateKeyHadFocus = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -55,6 +56,10 @@ internal class CitizenSdkWalletFlowActivity : FragmentActivity() {
         owner.attach(this)
         if (isFinishing) return
         owner.sdk.attachActivity(this)
+        owner.privateKeyView?.let {
+            if (savedInstanceState != null) it.end(cancelled = true) else showPrivateKeyView(it)
+            return
+        }
         if (savedInstanceState != null) {
             // Recover the existing coordinator before cancelling. Secrets are
             // never saved, but the original caller must still receive exactly
@@ -67,11 +72,21 @@ internal class CitizenSdkWalletFlowActivity : FragmentActivity() {
             is CitizenSdkWalletFlowContract.Request.Create -> showCreate(request.wordCount)
             is CitizenSdkWalletFlowContract.Request.Import -> showRecoveryInput(null)
             is CitizenSdkWalletFlowContract.Request.AddAccounts -> showRecoveryInput(request.indices.toIntArray())
+            null -> finishCancelled()
         }
     }
 
     override fun onDestroy() {
         val owner = coordinator
+        if (owner?.privateKeyView != null) {
+            recoveryContent?.close(); recoveryContent = null
+            owner.privateKeyView.buffer.clear()
+            runCatching { owner.sdk.detachActivity(this) }
+            super.onDestroy()
+            // 配置改变和外部销毁同样终止，绝不复用旧显示会话。
+            owner.activityDestroyed(this, isChangingConfigurations)
+            return
+        }
         var cleanupFailure: Throwable? = null
         // EditText owns a mutable Editable that otherwise survives with the
         // destroyed View until GC. Wipe every registered secret input on Back,
@@ -107,6 +122,70 @@ internal class CitizenSdkWalletFlowActivity : FragmentActivity() {
         }
         super.onDestroy()
         if (result != null) owner?.completeAfterTeardown(result)
+    }
+
+    override fun onPause() {
+        coordinator?.privateKeyView?.let {
+            recoveryContent?.visibility = android.view.View.INVISIBLE
+            if (!it.isAuthenticating()) it.end(cancelled = true)
+        }
+        super.onPause()
+    }
+
+    override fun onStop() {
+        // BiometricPrompt 的临时焦点变化不等于 onStop；真正后台永久撤销查看。
+        coordinator?.privateKeyView?.end(cancelled = true)
+        super.onStop()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        privateKeyReady()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (coordinator?.privateKeyView != null) {
+            if (hasFocus) { privateKeyHadFocus = true; privateKeyReady() }
+            else {
+                recoveryContent?.visibility = android.view.View.INVISIBLE
+                if (privateKeyHadFocus && coordinator?.privateKeyView?.isAuthenticating() != true) {
+                    coordinator?.privateKeyView?.end(cancelled = true)
+                }
+            }
+        }
+    }
+
+    private fun showPrivateKeyView(owner: CitizenSdkPrivateKeyView) {
+        val content = CitizenSdkRecoveryContent(this, owner.buffer)
+        recoveryContent = content; content.visibility = android.view.View.INVISIBLE
+        val warning = TextView(this).apply {
+            text = "私钥可控制本账户。请确认周围无人、未共享屏幕；不能复制或分享。"
+        }
+        val reveal = Button(this).apply {
+            text = "已理解风险，验证身份并查看"
+            setOnClickListener { isEnabled = false; owner.reveal() }
+        }
+        val done = Button(this).apply {
+            text = "关闭并清除"; setOnClickListener { owner.end(cancelled = !owner.isReady()) }
+        }
+        setContentView(layout(title("查看账户私钥"), warning, content, reveal, done))
+    }
+
+    @JvmSynthetic
+    internal fun privateKeyReady() {
+        val owner = coordinator?.privateKeyView ?: return
+        recoveryContent?.visibility = if (owner.isReady() && hasWindowFocus() &&
+            lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED) && !isFinishing
+        ) android.view.View.VISIBLE else android.view.View.INVISIBLE
+        recoveryContent?.invalidate()
+    }
+
+    @JvmSynthetic
+    internal fun clearPrivateKeyAndFinish() {
+        recoveryContent?.visibility = android.view.View.INVISIBLE
+        recoveryContent?.close()
+        finish()
     }
 
     private fun showCreate(wordCount: Int) {
@@ -332,6 +411,7 @@ internal class CitizenSdkWalletFlowActivity : FragmentActivity() {
     }
 
     private fun finishCancelled() {
+        coordinator?.privateKeyView?.let { it.end(cancelled = true); return }
         if (coordinator?.requestCancellationSettlement() == true) {
             showMutationInProgress()
             return

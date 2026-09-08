@@ -37,7 +37,7 @@ void write_execution(WireWriter *writer,
                      const citizensdk_execution_info_t &execution);
 bool encode_result(citizensdk_result_handle_t result, uint64_t prepared_token,
                    WireWriter *writer,
-                   citizensdk_prepared_wallet_handle_t *prepared);
+                   citizensdk_prepared_wallet_handle_t *prepared, bool *qr_review);
 bool encode_capabilities(citizensdk_handle_t handle, WireWriter *writer);
 bool encode_watch(citizensdk_result_handle_t result, WireWriter *writer);
 

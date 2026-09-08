@@ -3,8 +3,8 @@ export 'package:citizenapp/qr/generated/qr_bodies.g.dart' show QrKind;
 
 /// QR_V1 统一二维码协议常量。
 ///
-/// 唯一事实源：`shared/qr-protocol/registry.json`。
-/// Golden fixtures:`shared/qr-protocol/tests/fixtures/*.json`
+/// 唯一事实源：`citizenchain/crates/qr-protocol/registry.json`。
+/// Golden fixtures:`citizenchain/crates/qr-protocol/tests/fixtures/*.json`
 ///
 /// 本文件只有一个协议字符串和一个扫码流向枚举,禁止新增任何旧协议常量。
 class QrProtocol {
@@ -43,7 +43,7 @@ class QrProtocol {
 /// 新增字段必须先在本表登记,禁止就地取一个没登记过的字母。
 /// QR_V1 业务动作码。`k` 只表达扫码流向,业务场景必须放在 `a`。
 ///
-/// 当前 Dart 动作表由 `shared/qr-protocol/registry/actions.yaml`
+/// 当前 Dart 动作表由 `citizenchain/crates/qr-protocol/registry/actions.yaml`
 /// 生成；本文件只保留调用方仍在使用的常量别名和协议辅助函数。
 class QrActions {
   QrActions._();

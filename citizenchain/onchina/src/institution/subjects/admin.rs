@@ -9,16 +9,14 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use chrono::Utc;
 use serde::Serialize;
-use uuid::Uuid;
 
 use crate::auth::actions::require_admin_security_grant;
 use crate::auth::login::require_admin_any;
 use crate::auth::operation_auth::AdminActionType;
 use crate::institution::subjects::http::{resolve_created_by, service_error_to_response};
 use crate::institution::subjects::model::{
-    InstitutionDetailOutput, LegalRepresentative, LegalRepresentativePhoto, ParentInstitutionRow,
+    InstitutionDetailOutput, LegalRepresentative, ParentInstitutionRow,
     UpdateInstitutionInput,
 };
 use crate::institution::subjects::service::{
@@ -133,76 +131,99 @@ pub(crate) async fn upload_legal_representative_photo(
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    if let Err(resp) = require_admin_any(&state, &headers) {
-        return resp;
-    }
-
-    let mut file_name: Option<String> = None;
-    let mut file_mime: Option<String> = None;
-    let mut file_data: Option<Vec<u8>> = None;
-    while let Ok(Some(field)) = multipart.next_field().await {
-        if field.name().unwrap_or("") != "file" {
-            continue;
+    let ctx = match require_admin_any(&state, &headers) {
+        Ok(ctx) => ctx,
+        Err(resp) => return resp,
+    };
+    let mut upload = None;
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(err) => return api_error(err.status(), 1001, "读取证件照失败"),
+        };
+        if field.name().unwrap_or("") != "file" { continue; }
+        if upload.is_some() {
+            return api_error(StatusCode::BAD_REQUEST, 1001, "一次只能上传一张证件照");
         }
-        file_name = field.file_name().map(|v| v.to_string());
-        file_mime = field.content_type().map(|v| v.to_string());
-        match field.bytes().await {
-            Ok(bytes) => file_data = Some(bytes.to_vec()),
-            Err(e) => {
-                let message = format!("读取证件照失败: {e}");
-                return api_error(StatusCode::BAD_REQUEST, 1001, message.as_str());
-            }
+        let name = field.file_name().unwrap_or("").trim().to_string();
+        let mime = field.content_type().unwrap_or("").to_string();
+        if name.is_empty() {
+            return api_error(StatusCode::BAD_REQUEST, 1001, "file name is required");
+        }
+        if !matches!(mime.as_str(), "image/jpeg" | "image/png" | "image/webp") {
+            return api_error(StatusCode::BAD_REQUEST, 1001, "证件照只支持 JPEG/PNG/WebP");
+        }
+        let bytes = match field.bytes().await {
+            Ok(bytes) => bytes,
+            Err(err) => return api_error(err.status(), 1001, "读取证件照失败"),
+        };
+        if bytes.is_empty() {
+            return api_error(StatusCode::BAD_REQUEST, 1001, "file is empty");
+        }
+        if bytes.len() > super::service::MAX_LEGAL_REP_PHOTO_BYTES as usize {
+            return api_error(StatusCode::PAYLOAD_TOO_LARGE, 1001, "证件照不能超过 5MB");
+        }
+        upload = Some((name, mime, bytes.to_vec()));
+    }
+    let Some((name, mime, bytes)) = upload else {
+        return api_error(StatusCode::BAD_REQUEST, 1001, "file is required");
+    };
+    match state.db.insert_legal_representative_photo(name, mime, bytes, ctx.account_id.clone()) {
+        Ok(photo) => Json(ApiResponse { code: 0, message: "ok".into(), data: photo }).into_response(),
+        Err(err) => {
+            tracing::error!(error = %err, "save legal representative photo failed");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, 1004, "证件照保存失败")
         }
     }
+}
 
-    let file_name = match file_name
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-    {
-        Some(v) => v,
-        None => return api_error(StatusCode::BAD_REQUEST, 1001, "file is required"),
+pub(crate) async fn read_legal_representative_photo(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(photo_id): Path<String>,
+) -> impl IntoResponse {
+    let ctx = match require_admin_any(&state, &headers) {
+        Ok(ctx) => ctx,
+        Err(resp) => return resp,
     };
-    let file_data = match file_data.filter(|v| !v.is_empty()) {
-        Some(v) => v,
-        None => return api_error(StatusCode::BAD_REQUEST, 1001, "file is empty"),
+    let path = format!("{}{photo_id}", super::photos::PHOTO_URL_PREFIX);
+    if !super::photos::valid_photo_path(&path) {
+        return api_error(StatusCode::NOT_FOUND, 1004, "photo not found");
+    }
+    let photo = match state.db.read_legal_representative_photo(path.clone()) {
+        Ok(Some(photo)) => photo,
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, 1004, "photo not found"),
+        Err(err) => {
+            tracing::error!(error = %err, "read legal representative photo failed");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, 1004, "证件照读取失败");
+        }
     };
-    if file_data.len() > crate::institution::subjects::service::MAX_LEGAL_REP_PHOTO_BYTES as usize {
-        return api_error(StatusCode::BAD_REQUEST, 1001, "证件照不能超过 5MB");
+    if let Some(cid) = &photo.institution_cid_number {
+        let inst = match state.db.get_institution_with_accounts(cid) {
+            Ok(Some((inst, _))) => inst,
+            Ok(None) => return api_error(StatusCode::NOT_FOUND, 1004, "institution not found"),
+            Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, 1004, "机构读取失败"),
+        };
+        let scope = get_visible_scope(&ctx);
+        if inst.legal_representative_photo_path.as_deref() != Some(path.as_str())
+            || !scope.includes_province(&inst.province_name)
+            || !scope.includes_city(&inst.city_name)
+            || !scope.includes_town(&inst.town_name)
+        {
+            return api_error(StatusCode::FORBIDDEN, 1003, "out of admin scope");
+        }
+    } else if photo.uploader_account_id != ctx.account_id {
+        return api_error(StatusCode::FORBIDDEN, 1003, "photo belongs to another uploader");
     }
-    let mime = file_mime.unwrap_or_else(|| "application/octet-stream".to_string());
-    let ext = match mime.as_str() {
-        "image/jpeg" => "jpg",
-        "image/png" => "png",
-        "image/webp" => "webp",
-        _ => return api_error(StatusCode::BAD_REQUEST, 1001, "证件照只支持 JPEG/PNG/WebP"),
-    };
-    let doc_dir = format!("data/legal-rep-photos/{}", Utc::now().format("%Y%m"));
-    if let Err(e) = std::fs::create_dir_all(&doc_dir) {
-        tracing::error!(error = %e, "create legal representative photo dir failed");
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, 1004, "create dir failed");
-    }
-    let stored_name = format!(
-        "{}_{}.{}",
-        Utc::now().format("%Y%m%d%H%M%S"),
-        Uuid::new_v4().as_simple(),
-        ext
-    );
-    let stored_path = format!("{doc_dir}/{stored_name}");
-    if let Err(e) = std::fs::write(&stored_path, &file_data) {
-        tracing::error!(error = %e, "write legal representative photo failed");
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, 1004, "write file failed");
-    }
-    Json(ApiResponse {
-        code: 0,
-        message: "ok".to_string(),
-        data: LegalRepresentativePhoto {
-            file_path: stored_path,
-            file_name,
-            mime_type: mime,
-            file_size: file_data.len() as u64,
-        },
-    })
-    .into_response()
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, photo.mime_type.as_str()),
+            (axum::http::header::CACHE_CONTROL, "private, no-store"),
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        photo.content,
+    ).into_response()
 }
 
 pub(crate) async fn update_institution(
@@ -393,10 +414,14 @@ pub(crate) async fn update_institution(
     existing.legal_representative_photo_name = Some(legal_rep.photo_name);
     existing.legal_representative_photo_mime = Some(legal_rep.photo_mime);
     existing.legal_representative_photo_size = Some(legal_rep.photo_size);
-    if let Err(err) = state.db.upsert_institution_row(&existing) {
-        let message = format!("update institution failed: {err}");
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, 5001, message.as_str());
-    }
+    existing = match state.db.save_institution_with_photo(existing, ctx.account_id.clone()) {
+        Ok(Some(inst)) => inst,
+        Ok(None) => return api_error(StatusCode::BAD_REQUEST, 1001, "证件照不存在、已过期或不属于本次办理，请重新上传"),
+        Err(err) => {
+            tracing::error!(error = %err, "save institution and photo failed");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, 5001, "机构资料保存失败");
+        }
+    };
     crate::core::runtime_ops::append_audit_log(
         &state,
         "INSTITUTION_UPDATE",

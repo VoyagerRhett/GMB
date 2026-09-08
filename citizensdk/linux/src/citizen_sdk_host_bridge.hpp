@@ -24,12 +24,14 @@ class HostBridge final : public std::enable_shared_from_this<HostBridge> {
  public:
   HostBridge(std::filesystem::path storage_root,
              std::filesystem::path asset_root, std::string application_id,
-             void *gtk_parent_window, bool enable_wallet);
+             void *gtk_parent_window, uint32_t modules);
   HostBridge(const HostBridge &) = delete;
   HostBridge &operator=(const HostBridge &) = delete;
   ~HostBridge();
 
   citizensdk_error_code_t create_sdk(citizensdk_handle_t *out_sdk);
+  uint32_t modules() const noexcept { return modules_; }
+  const void *authentication_owner() const noexcept { return &parent_window_; }
   citizensdk_handle_t sdk() const noexcept;
   citizensdk_handle_t public_sdk() const noexcept;
   citizensdk_error_code_t set_event_callback(citizensdk_event_callback_t callback,
@@ -103,7 +105,8 @@ class HostBridge final : public std::enable_shared_from_this<HostBridge> {
   std::thread::id ui_thread_;
   GtkParentRef parent_window_;
   std::filesystem::path asset_root_;
-  PublicStore public_store_;
+  const uint32_t modules_;
+  std::unique_ptr<PublicStore> public_store_;
   std::unique_ptr<SecureStore> secure_store_;
   std::unique_ptr<SecretVault> vault_;
   citizensdk_host_public_store_v1_t public_vtable_{};

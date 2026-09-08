@@ -1,0 +1,40 @@
+[package]
+name = "citizen-signer"
+description = "citizenapp 内部 sr25519 签名实现（schnorrkel FFI）。"
+version = "1.0.0"
+edition = "2021"
+authors = ["voyager_rhett <chinanation@icloud.com>"]
+repository = "https://github.com/VoyagerRhett/GMB"
+homepage = "https://github.com/VoyagerRhett/GMB"
+license = "MIT"
+publish = false
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
+
+# 本 crate 归属 citizenapp，仅供本产品通过内部 path 使用。
+[lib]
+# rlib：供两端的 cdylib 静态链接。FFI 外壳由 `export_citizen_signer_ffi!()` 宏在
+# 各端 cdylib 内就地生成，符号必被导出；符号检查（注意平台差异，用错标志会误判为 0）：
+#   Android/ELF   llvm-nm -D <lib>.so    | grep -c citizen_sr25519  应为 4
+#   macOS/Mach-O  llvm-nm -g <lib>.dylib | grep -c citizen_sr25519  应为 4
+crate-type = ["rlib"]
+
+[dependencies]
+# 保持迁移前的 schnorrkel 版本约束和 feature 集。
+schnorrkel = { version = "0.11.2", default-features = false, features = [
+    "preaudit_deprecated",
+    "alloc",
+    "getrandom",
+] }
+# 私钥材料作用域结束即擦除，禁止手写清零（会被编译器优化掉）。
+zeroize = "1"
+
+[workspace]

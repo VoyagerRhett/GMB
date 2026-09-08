@@ -86,6 +86,8 @@ set(CITIZENSDK_LINUX_HOST_TEST_SOURCES
   ../src/citizen_sdk_sqlite.cc
   ../src/citizen_sdk_tpm2.cc
   ../src/citizen_sdk_user_auth.cc
+  ../src/citizen_sdk_qr_camera.cc
+  ../src/citizen_sdk_qr_flow.cc
   ../src/citizen_sdk_wallet_flow.cc
   ../src/citizen_sdk_wallet_validation.cc
   ../src/citizen_sdk_wallet_window.cc
@@ -107,19 +109,21 @@ target_include_directories(citizensdk_linux_test_support
     "${CMAKE_CURRENT_LIST_DIR}/../src"
     "${CITIZENSDK_CORE_INCLUDE_DIR}"
   PRIVATE
+    "${CITIZENSDK_INTERNAL_INCLUDE_DIR}"
     "${CITIZENSDK_SQLITE_INCLUDE_DIR}"
     "${CITIZENSDK_OPENSSL_INCLUDE_DIR}"
     "${CITIZENSDK_TSS2_INCLUDE_DIR}"
 )
 target_link_libraries(citizensdk_linux_test_support PUBLIC
   CitizenSDK::Core
+  CitizenSDK::QrImage
   "$<LINK_GROUP:RESCAN,${CITIZENSDK_SQLITE_ARCHIVE},${CITIZENSDK_CRYPTO_ARCHIVE},${CITIZENSDK_TSS2_ESYS_ARCHIVE},${CITIZENSDK_TSS2_MU_ARCHIVE},${CITIZENSDK_TSS2_SYS_ARCHIVE},${CITIZENSDK_TSS2_RC_ARCHIVE},${CITIZENSDK_TSS2_TCTI_DEVICE_ARCHIVE}>"
   PkgConfig::GLIB
   Threads::Threads
   ${CMAKE_DL_LIBS}
 )
 if(CITIZENSDK_ENABLE_WALLET_UI)
-  target_link_libraries(citizensdk_linux_test_support PUBLIC PkgConfig::GTK3)
+  target_link_libraries(citizensdk_linux_test_support PUBLIC PkgConfig::GTK3 PkgConfig::GSTREAMER)
 endif()
 target_compile_options(citizensdk_linux_test_support PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion

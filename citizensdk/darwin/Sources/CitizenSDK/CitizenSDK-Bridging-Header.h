@@ -3,5 +3,6 @@
 
 /* The canonical builder stages the frozen root header beside this bridge. */
 #include "citizensdk.h"
+#include "citizensdk_qr_image.h"
 
 #endif

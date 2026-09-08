@@ -9,7 +9,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 /// - Android：插件 10.x 默认使用 RSA-OAEP 包装 AES-GCM 数据密钥；开启算法变更
 ///   迁移及迁移备份，避免升级过程中断造成既有密文不可读。
 /// - iOS：仅允许本机在首次解锁后访问，不随 iCloud/换机迁移；真正的 Secure
-///   Enclave 生物绑定由 `shared/hardware-secretvault` 统一实现。
+///   Enclave 生物绑定由 `citizenapp/packages/hardware-secretvault` 统一实现。
 const FlutterSecureStorage appSecureStorage = FlutterSecureStorage(
   aOptions: AndroidOptions(
     migrateOnAlgorithmChange: true,

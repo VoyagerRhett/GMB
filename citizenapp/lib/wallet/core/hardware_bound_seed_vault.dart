@@ -34,7 +34,7 @@ class SecureStorageBlobStore implements VaultBlobStore {
 /// 公民无根钱包的共享硬件严档后端。
 ///
 /// App 只保存账户 child [MiniSecretKey]，不保存助记词或 master [MiniSecretKey]。明文
-/// 以字节进入 `shared/hardware-secretvault`；AAD 固定绑定 `citizenapp + walletIndex +
+/// 以字节进入 `citizenapp/packages/hardware-secretvault`；AAD 固定绑定 `citizenapp + walletIndex +
 /// accountId + account_mini_secret`。Android 必须为 StrongBox/TEE 且每次强生物识别，
 /// iOS 必须为 Secure Enclave `biometryCurrentSet`。
 class HardwareBoundSeedVault implements SecureSeedStore {

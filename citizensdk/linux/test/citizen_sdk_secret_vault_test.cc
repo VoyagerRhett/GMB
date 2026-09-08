@@ -84,7 +84,7 @@ int main() {
   const auto unwrap = source.find("SecretVault::unwrap_dek");
   const auto unwrap_lock = source.find("generation_lock_", unwrap);
   const auto prompt =
-      source.find("user_auth_.unlock_vault_password()", unwrap_lock);
+      source.find("user_auth_.unlock_vault_password(host_operation_id)", unwrap_lock);
   const auto post_prompt_check =
       source.find("secure_store_.vault_object_is_active(key, *object)", prompt);
   const auto decrypt = source.find("tpm_.decrypt_dek", post_prompt_check);

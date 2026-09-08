@@ -1,10 +1,13 @@
 #include "citizen_sdk_wallet_window.hpp"
+#include "citizen_sdk_user_auth.hpp"
 
 #include <charconv>
 #include <cstring>
 #include <exception>
 #include <sstream>
 #include <utility>
+#include <memory>
+#include <unistd.h>
 #include "citizen_sdk_host_record.hpp"
 #include "citizen_sdk_input_limits.hpp"
 
@@ -62,6 +65,7 @@ WalletWindow::WalletWindow(void *parent, const ValidatedWalletRequest &request,
                            Action action, Action cancel)
     : action_(std::move(action)), cancel_(std::move(cancel)) {
   kind_ = request.kind;
+  private_key_mode_ = request.account_id.has_value();
   ui_thread_ = std::this_thread::get_id();
 #if !CITIZENSDK_ENABLE_WALLET_UI
   (void)parent; (void)request;
@@ -90,6 +94,67 @@ WalletWindow::WalletWindow(void *parent, const ValidatedWalletRequest &request,
   gtk_label_set_xalign(GTK_LABEL(status_), 0.0F);
   gtk_box_pack_start(GTK_BOX(box), static_cast<GtkWidget *>(status_), FALSE, FALSE, 0);
 
+  if (private_key_mode_) {
+    gtk_window_set_title(GTK_WINDOW(dialog), "CitizenSDK 账户私钥安全查看");
+    gtk_label_set_text(GTK_LABEL(status_),
+        "私钥可控制此账户全部资产。请确认周围无人、没有录屏。"
+        "仅在 SDK 安全窗口短时查看；不可选择、复制或导出。"
+        "设备认证后才会显示，关闭、隐藏或离开查看窗口即永久清除。");
+    // 账户标识是公开审阅信息，显示值与传给 Core 的原始 AccountId 一致。
+    std::string account_text = "账户：0x";
+    constexpr char account_digits[] = "0123456789abcdef";
+    for (const uint8_t byte : request.account_id->bytes) {
+      account_text += account_digits[byte >> 4];
+      account_text += account_digits[byte & 15];
+    }
+    GtkWidget *account = gtk_label_new(account_text.c_str());
+    gtk_label_set_line_wrap(GTK_LABEL(account), TRUE);
+    gtk_label_set_line_wrap_mode(GTK_LABEL(account), PANGO_WRAP_CHAR);
+    gtk_box_pack_start(GTK_BOX(box), account, FALSE, FALSE, 0);
+    private_key_area_ = gtk_drawing_area_new();
+    gtk_widget_set_size_request(static_cast<GtkWidget *>(private_key_area_), -1, 140);
+    gtk_widget_set_can_focus(static_cast<GtkWidget *>(private_key_area_), FALSE);
+    gtk_box_pack_start(GTK_BOX(box), static_cast<GtkWidget *>(private_key_area_), FALSE, FALSE, 0);
+    g_signal_connect(private_key_area_, "draw", G_CALLBACK((+[](GtkWidget *, cairo_t *cr,
+                                                               gpointer data) -> gboolean {
+      auto *self = static_cast<WalletWindow *>(data);
+      if (!self->private_key_visible_ || self->private_key_text_.size() != 67) return FALSE;
+      // 私钥不进入 GtkLabel/GtkTextBuffer/可访问文本；只从可擦除缓冲绘制字形。
+      cairo_select_font_face(cr, "monospace", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+      cairo_set_font_size(cr, 16.0);
+      for (std::size_t row = 0; row < 2; ++row) {
+        const std::size_t begin = row == 0 ? 0 : 34;
+        const std::size_t count = row == 0 ? 34 : 32;
+        SensitiveBuffer line(count + 1);
+        std::memcpy(line.data(), self->private_key_text_.data() + begin, count);
+        cairo_move_to(cr, 8.0, 32.0 + static_cast<double>(row) * 30.0);
+        cairo_show_text(cr, reinterpret_cast<const char *>(line.data()));
+      }
+      return FALSE;
+    })), this);
+    action_button_ = gtk_button_new_with_label("我已了解风险，进行设备认证并查看");
+    gtk_box_pack_start(GTK_BOX(box), static_cast<GtkWidget *>(action_button_), FALSE, FALSE, 0);
+    g_signal_connect(dialog, "focus-out-event", G_CALLBACK((+[](GtkWidget *, GdkEventFocus *,
+                                                               gpointer data) -> gboolean {
+      auto *self = static_cast<WalletWindow *>(data);
+      if (self->private_key_visible_) { self->lose_private_view(); }
+      else self->defer_private_focus_check();
+      return FALSE;
+    })), this);
+    g_signal_connect(dialog, "window-state-event", G_CALLBACK((+[](GtkWidget *, GdkEventWindowState *event,
+                                                                  gpointer data) -> gboolean {
+      auto *self = static_cast<WalletWindow *>(data);
+      if ((event->new_window_state & (GDK_WINDOW_STATE_ICONIFIED | GDK_WINDOW_STATE_WITHDRAWN)) != 0) {
+        self->lose_private_view();
+      }
+      return FALSE;
+    })), this);
+    g_signal_connect(dialog, "unmap", G_CALLBACK((+[](GtkWidget *, gpointer data) {
+      auto *self = static_cast<WalletWindow *>(data);
+      self->clear_secrets();
+      if (!self->destroying_) self->lose_private_view();
+    })), this);
+  } else {
   GtkWidget *scroll = gtk_scrolled_window_new(nullptr, nullptr);
   mnemonic_scroll_ = scroll;
   gtk_widget_set_size_request(scroll, -1, 240);
@@ -243,6 +308,7 @@ WalletWindow::WalletWindow(void *parent, const ValidatedWalletRequest &request,
               gtk_toggle_button_get_active(button) == FALSE);
         }
       })), this);
+  }
   g_signal_connect(action_button_, "clicked", G_CALLBACK((+[](GtkButton *, gpointer data) {
     try { static_cast<WalletWindow *>(data)->action_(); } catch (...) {}
   })), this);
@@ -264,6 +330,7 @@ WalletWindow::WalletWindow(void *parent, const ValidatedWalletRequest &request,
       self->clear_secrets();
       const bool notify_cancel = !self->destroying_;
       self->window_ = nullptr;
+      self->private_key_area_ = nullptr;
       self->mnemonic_scroll_ = nullptr;
       self->mnemonic_ = nullptr;
       self->mnemonic_state_ = nullptr;
@@ -294,6 +361,7 @@ WalletWindow::~WalletWindow() {
   // state.
   if (window_ != nullptr && !on_ui_thread()) std::terminate();
   destroy();
+  stop_private_monitor();
 #if CITIZENSDK_ENABLE_WALLET_UI
   if (ui_context_ != nullptr) {
     g_main_context_unref(static_cast<GMainContext *>(ui_context_));
@@ -306,7 +374,9 @@ void WalletWindow::show() {
 #if CITIZENSDK_ENABLE_WALLET_UI
   require(window_ != nullptr, CITIZENSDK_ERROR_UNAVAILABLE,
           "CitizenSDK wallet window is no longer available");
+  if (private_key_mode_) install_private_monitor();
   gtk_widget_show_all(static_cast<GtkWidget *>(window_));
+  if (private_key_mode_) return;
   if (kind_ == CITIZENSDK_WALLET_FLOW_CREATE) {
     gtk_widget_hide(static_cast<GtkWidget *>(mnemonic_scroll_));
     gtk_widget_hide(static_cast<GtkWidget *>(mnemonic_state_));
@@ -324,6 +394,8 @@ void WalletWindow::show() {
 }
 
 void WalletWindow::destroy() noexcept {
+  revoke_private_key_authorization();
+  stop_private_monitor();
 #if CITIZENSDK_ENABLE_WALLET_UI
   if (window_ != nullptr) {
     if (!on_ui_thread()) std::terminate();
@@ -389,6 +461,203 @@ void WalletWindow::show_prepared_mnemonic(const SensitiveBuffer &mnemonic) {
       "请断网抄写并在离线安全位置核对助记词。热钱包不保存助记词，关闭后无法再次显示。若使用了非空钱包密码，还必须单独记住；不同密码会得到不同账户。设备 TPM 认证是独立的金库保护，不是钱包密码。");
 #else
   (void)mnemonic;
+#endif
+}
+
+bool WalletWindow::private_session_safe() const noexcept {
+#if CITIZENSDK_ENABLE_WALLET_UI
+  const auto boolean = [](void *opaque, const char *field, bool expected) {
+    if (opaque == nullptr) return false;
+    auto *proxy = static_cast<GDBusProxy *>(opaque);
+    gchar *owner = g_dbus_proxy_get_name_owner(proxy);
+    const bool owned = owner != nullptr;
+    g_free(owner);
+    GVariant *value = g_dbus_proxy_get_cached_property(proxy, field);
+    const bool valid = owned && value != nullptr &&
+        g_variant_is_of_type(value, G_VARIANT_TYPE_BOOLEAN) &&
+        (g_variant_get_boolean(value) != FALSE) == expected;
+    if (value != nullptr) g_variant_unref(value);
+    return valid;
+  };
+  return boolean(private_session_proxy_, "Active", true) &&
+      boolean(private_session_proxy_, "LockedHint", false) &&
+      boolean(private_manager_proxy_, "PreparingForSleep", false) &&
+      boolean(private_manager_proxy_, "PreparingForShutdown", false);
+#else
+  return false;
+#endif
+}
+
+void WalletWindow::install_private_monitor() {
+#if CITIZENSDK_ENABLE_WALLET_UI
+  // 直接解析当前进程的真实 logind session；没有服务/属性就拒绝显示，
+  // 不把订阅编号或“暂未收到信号”当成锁屏监督已经可用。
+  using Proxy = std::unique_ptr<GDBusProxy, decltype(&g_object_unref)>;
+  Proxy manager(g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM,
+      G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START, nullptr, "org.freedesktop.login1",
+      "/org/freedesktop/login1", "org.freedesktop.login1.Manager",
+      nullptr, nullptr), g_object_unref);
+  require(manager != nullptr, CITIZENSDK_ERROR_UNAVAILABLE, "无法建立会话锁屏监督");
+  GVariant *response = g_dbus_proxy_call_sync(manager.get(), "GetSessionByPID",
+      g_variant_new("(u)", static_cast<guint32>(getpid())),
+      G_DBUS_CALL_FLAGS_NO_AUTO_START, 1000, nullptr, nullptr);
+  require(response != nullptr, CITIZENSDK_ERROR_UNAVAILABLE, "当前进程没有受监督的桌面会话");
+  const gchar *path = nullptr;
+  if (g_variant_is_of_type(response, G_VARIANT_TYPE("(o)")))
+    g_variant_get(response, "(&o)", &path);
+  Proxy session(path == nullptr ? nullptr : g_dbus_proxy_new_for_bus_sync(
+      G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START, nullptr,
+      "org.freedesktop.login1", path, "org.freedesktop.login1.Session",
+      nullptr, nullptr), g_object_unref);
+  g_variant_unref(response);
+  require(session != nullptr, CITIZENSDK_ERROR_UNAVAILABLE, "桌面会话锁屏监督不可用");
+  private_session_proxy_ = session.release();
+  private_manager_proxy_ = manager.release();
+  const auto changed = +[](GDBusProxy *, GVariant *, const gchar *const *, gpointer data) {
+    auto *self = static_cast<WalletWindow *>(data);
+    if (!self->private_session_safe()) { self->lose_private_view(); }
+  };
+  const auto owner_changed = +[](GObject *, GParamSpec *, gpointer data) {
+    auto *self = static_cast<WalletWindow *>(data);
+    if (!self->private_session_safe()) { self->lose_private_view(); }
+  };
+  for (void *proxy : {private_session_proxy_, private_manager_proxy_}) {
+    g_signal_connect(proxy, "g-properties-changed", G_CALLBACK(changed), this);
+    g_signal_connect(proxy, "notify::g-name-owner", G_CALLBACK(owner_changed), this);
+  }
+  g_signal_connect(private_session_proxy_, "g-signal", G_CALLBACK((+[](GDBusProxy *,
+      const gchar *, const gchar *signal, GVariant *, gpointer data) {
+    auto *self = static_cast<WalletWindow *>(data);
+    if (std::strcmp(signal, "Lock") == 0) { self->lose_private_view(); }
+  })), this);
+  g_signal_connect(private_manager_proxy_, "g-signal", G_CALLBACK((+[](GDBusProxy *,
+      const gchar *, const gchar *signal, GVariant *parameters, gpointer data) {
+    auto *self = static_cast<WalletWindow *>(data);
+    if (std::strcmp(signal, "PrepareForSleep") != 0 &&
+        std::strcmp(signal, "PrepareForShutdown") != 0) return;
+    gboolean active = TRUE;
+    if (g_variant_is_of_type(parameters, G_VARIANT_TYPE("(b)")))
+      g_variant_get(parameters, "(b)", &active);
+    if (active) { self->lose_private_view(); }
+  })), this);
+  require(private_session_safe(), CITIZENSDK_ERROR_UNAVAILABLE,
+          "桌面会话未激活、已锁屏或无法确认监督状态");
+#endif
+}
+
+void WalletWindow::stop_private_monitor() noexcept {
+#if CITIZENSDK_ENABLE_WALLET_UI
+  if (private_focus_source_ != nullptr) {
+    auto *source = static_cast<GSource *>(private_focus_source_);
+    private_focus_source_ = nullptr;
+    g_source_destroy(source);
+    g_source_unref(source);
+  }
+  for (void **proxy : {&private_session_proxy_, &private_manager_proxy_}) {
+    if (*proxy != nullptr) {
+      g_signal_handlers_disconnect_by_data(*proxy, this);
+      g_object_unref(*proxy);
+      *proxy = nullptr;
+    }
+  }
+#endif
+}
+
+void WalletWindow::lose_private_view() noexcept {
+  revoke_private_key_authorization();
+  clear_secrets();
+  const auto callback = cancel_;
+  callback();
+}
+
+bool WalletWindow::authorize_private_key_view(
+    const void *owner, uint64_t host_operation_id) noexcept {
+  if (owner == nullptr || host_operation_id == 0 ||
+      private_authorization_closed_.load()) return false;
+  private_auth_owner_.store(owner);
+  private_auth_operation_.store(host_operation_id);
+  return !private_authorization_closed_.load();
+}
+
+void WalletWindow::revoke_private_key_authorization() noexcept {
+  private_authorization_closed_.store(true);
+  private_auth_operation_.store(0);
+}
+
+void WalletWindow::finish_private_key_authentication() noexcept {
+  private_auth_operation_.store(0);
+}
+
+bool WalletWindow::private_focus_safe() const noexcept {
+#if CITIZENSDK_ENABLE_WALLET_UI
+  if (window_ == nullptr || private_authorization_closed_.load()) return false;
+  GList *windows = gtk_window_list_toplevels();
+  bool safe = false;
+  for (GList *entry = windows; entry != nullptr; entry = entry->next) {
+    auto *active = GTK_WINDOW(entry->data);
+    if (!gtk_window_is_active(active)) continue;
+    // 已收到失焦，快速切回本窗口也不能抹掉后台事实；唯一例外是准确认证窗口。
+    safe = !private_key_visible_ &&
+        accept_private_key_authentication_window(entry->data, window_,
+            private_auth_owner_.load(), private_auth_operation_.load());
+    break;
+  }
+  g_list_free(windows);
+  return safe;
+#else
+  return false;
+#endif
+}
+
+void WalletWindow::defer_private_focus_check() noexcept {
+#if CITIZENSDK_ENABLE_WALLET_UI
+  if (destroying_ || window_ == nullptr || private_focus_source_ != nullptr) return;
+  // 仅等这一轮焦点事件落定，再核对真实活动窗口；没有时间或通用认证豁免。
+  GSource *source = g_idle_source_new();
+  if (source == nullptr) { lose_private_view(); return; }
+  private_focus_source_ = source;
+  g_source_set_callback(source, +[](gpointer data) -> gboolean {
+    auto *self = static_cast<WalletWindow *>(data);
+    auto *current = static_cast<GSource *>(self->private_focus_source_);
+    self->private_focus_source_ = nullptr;
+    g_source_unref(current);
+    if (!self->private_focus_safe()) {
+      self->lose_private_view();
+    }
+    return G_SOURCE_REMOVE;
+  }, this, nullptr);
+  if (g_source_attach(source, static_cast<GMainContext *>(ui_context_)) == 0) {
+    private_focus_source_ = nullptr;
+    g_source_unref(source);
+    lose_private_view();
+  }
+#endif
+}
+
+void WalletWindow::show_private_key(const SensitiveBuffer &private_key) {
+#if CITIZENSDK_ENABLE_WALLET_UI
+  require(on_ui_thread() && private_key_mode_ && window_ != nullptr &&
+              !private_authorization_closed_.load() &&
+              private_key_area_ != nullptr && private_key.size() == 32 &&
+              private_session_safe() &&
+              gtk_window_is_active(GTK_WINDOW(window_)),
+          CITIZENSDK_ERROR_UNAVAILABLE, "安全查看窗口不再可显示");
+  SensitiveBuffer text(67);
+  text.data()[0] = '0'; text.data()[1] = 'x';
+  constexpr char digits[] = "0123456789abcdef";
+  for (std::size_t index = 0; index < 32; ++index) {
+    text.data()[2 + index * 2] = static_cast<uint8_t>(digits[private_key.data()[index] >> 4]);
+    text.data()[3 + index * 2] = static_cast<uint8_t>(digits[private_key.data()[index] & 15]);
+  }
+  private_key_text_ = std::move(text);
+  private_key_visible_ = true;
+  gtk_widget_queue_draw(static_cast<GtkWidget *>(private_key_area_));
+  gtk_button_set_label(GTK_BUTTON(action_button_), "清除并关闭");
+  gtk_widget_set_sensitive(static_cast<GtkWidget *>(action_button_), TRUE);
+  gtk_label_set_text(GTK_LABEL(status_), "私钥仅短时显示于此窗口。不可复制、选择或导出；离开窗口即清除。");
+#else
+  (void)private_key;
+  throw HostError(CITIZENSDK_ERROR_UNSUPPORTED, "安全查看 UI 未编译");
 #endif
 }
 
@@ -550,7 +819,10 @@ SensitiveBuffer WalletWindow::take_password() {
 }
 
 void WalletWindow::clear_secrets() noexcept {
+  private_key_visible_ = false;
+  private_key_text_.clear();
 #if CITIZENSDK_ENABLE_WALLET_UI
+  if (private_key_area_ != nullptr) gtk_widget_queue_draw(static_cast<GtkWidget *>(private_key_area_));
   if (mnemonic_ != nullptr) {
     GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(mnemonic_));
     gtk_text_buffer_set_text(buffer, "", 0);

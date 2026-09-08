@@ -59,34 +59,51 @@ FlValuePtr decode_call(FlMethodCodec *codec, GBytes *bytes, std::string *method)
 void test_method_closure_and_requests() {
   constexpr Method all[] = {
       Method::open, Method::start, Method::stop, Method::close,
-      Method::get_capabilities, Method::get_finalized_head,
-      Method::get_account_balance, Method::get_account_nonce,
-      Method::get_fee_snapshot, Method::get_wallet_profile,
+      Method::get_capabilities, Method::get_finalized_head, Method::get_genesis_hash,
+      Method::get_account_balance, Method::get_account_balances, Method::get_account_nonce,
+      Method::get_fee_snapshot, Method::get_wallet_profile, Method::view_account_private_key,
       Method::create_wallet, Method::import_wallet, Method::add_wallet_accounts,
       Method::set_active_wallet_account, Method::rename_wallet_account,
       Method::delete_wallet_account, Method::delete_wallet,
-      Method::reconcile_wallet_cleanup, Method::sign_wallet_payload,
+      Method::reconcile_wallet_cleanup, Method::sign_wallet_payload, Method::verify_signature,
       Method::transfer_with_remark, Method::initialize_finalized_history,
-      Method::sync_finalized_history,
+      Method::sync_finalized_history, Method::qr_parse, Method::qr_create_sign_request,
+      Method::qr_consume_sign_response, Method::qr_cancel_sign_request,
+      Method::qr_encode_account_id, Method::qr_encode_user_transfer,
+      Method::qr_decode_luminance, Method::qr_encode, Method::qr_scan, Method::sign_qr_request,
   };
   std::set<std::string> names;
   for (Method method : all) names.insert(citizen_sdk::flutter::method_name(method));
-  assert(names.size() == 22 && names.count("open") == 1 &&
+  assert(names.size() == 36 && names.count("open") == 1 &&
          names.count("transferWithRemark") == 1);
 
-  assert(decode("open", list({Value::integer(1)})).method == Method::open);
+  assert(decode("open", list({Value::integer(1), Value::integer(63)})).modules == 63);
+  assert(decode("open", list({Value::integer(1), Value::integer(2)})).modules == 2);
+  expect_failure([&] { (void)decode("open", list({Value::integer(1)})); },
+                 CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  for (const auto invalid : {int64_t{0}, int64_t{-1}, int64_t{UINT32_MAX} + 1}) {
+    expect_failure([&] { (void)decode("open", list({Value::integer(1), Value::integer(invalid)})); },
+                   CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  }
   for (const char *method : {"start", "stop", "close", "getCapabilities",
-       "getFinalizedHead", "getFeeSnapshot", "getWalletProfile", "importWallet",
+       "getFinalizedHead", "getGenesisHash", "getFeeSnapshot", "getWalletProfile", "importWallet",
        "deleteWallet", "reconcileWalletCleanup"}) {
     auto value = decode(method, list({Value::integer(1), Value::string("s"),
                                       Value::integer(1)}));
     assert(value.session == "s" && value.sequence == 1);
   }
   for (const char *method : {"getAccountBalance", "getAccountNonce",
-       "setActiveWalletAccount", "deleteWalletAccount"}) {
+       "setActiveWalletAccount", "deleteWalletAccount", "viewAccountPrivateKey"}) {
     assert(decode(method, list({Value::integer(1), Value::string("s"),
         Value::integer(1), Value::string(account('0'))})).account_id.bytes[0] == 0);
   }
+  citizen_sdk::flutter::validate_public_value(Method::view_account_private_key, list({}));
+  expect_failure([&] { citizen_sdk::flutter::validate_public_value(
+      Method::view_account_private_key, list({Value::bytes(Value::Bytes(32))})); },
+      CITIZENSDK_ERROR_INTEGRITY);
+  expect_failure([&] { (void)decode("viewAccountPrivateKey", list({Value::integer(1),
+      Value::string("s"), Value::integer(1), Value::string(account('0')), Value::integer(1)})); },
+      CITIZENSDK_ERROR_INVALID_ARGUMENT);
   assert(decode("createWallet", list({Value::integer(1), Value::string("s"),
       Value::integer(1), Value::integer(24)})).word_count == 24);
   assert(decode("createWallet", list({Value::integer(1), Value::string("s"),
@@ -98,6 +115,76 @@ void test_method_closure_and_requests() {
       Value::integer(1), Value::string(account('1')), Value::string("账户") })).name == "账户");
   assert(decode("signWalletPayload", list({Value::integer(1), Value::string("s"),
       Value::integer(1), Value::string(account('2')), Value::bytes({1, 2})})).payload.size() == 2);
+  const auto verification = decode("verifySignature", list({Value::integer(1),
+      Value::string(account('2')), Value::bytes(Value::Bytes(64)), Value::bytes({})}));
+  assert(verification.signature.size() == 64 && verification.session.empty() &&
+         verification.sequence == 0);
+
+  assert(decode("qrScan", list({Value::integer(1), Value::string("s"),
+      Value::integer(1)})).method == Method::qr_scan);
+  assert(decode("signQrRequest", list({Value::integer(1), Value::string("s"),
+      Value::integer(1), Value::string("{}")})).qr_text == "{}");
+  expect_failure([&] { (void)decode("qrParse", list({Value::integer(1),
+      Value::string("s"), Value::integer(1), Value::string("{}"), Value::integer(10)})); },
+      CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  for (const char *removed : {"qrSigningInput", "qrCreateSignResponse", "qrEncodeImage"})
+    expect_failure([&] { (void)decode(removed, list({Value::integer(1),
+        Value::string("s"), Value::integer(1)})); }, CITIZENSDK_ERROR_UNSUPPORTED);
+  citizen_sdk::flutter::validate_public_value(Method::qr_consume_sign_response,
+      list({Value::bytes(Value::Bytes(64))}));
+  expect_failure([&] { citizen_sdk::flutter::validate_public_value(Method::qr_consume_sign_response,
+      list({})); }, CITIZENSDK_ERROR_INTEGRITY);
+  expect_failure([&] { citizen_sdk::flutter::validate_public_value(Method::qr_consume_sign_response,
+      list({Value::bytes(Value::Bytes(63))})); }, CITIZENSDK_ERROR_INTEGRITY);
+  citizen_sdk::flutter::validate_public_value(Method::qr_scan, list({Value::string("{}")}));
+  assert(decode("qrParse", list({Value::integer(1), Value::string("s"), Value::integer(2),
+      Value::string("{}")})).qr_text == "{}");
+  assert(decode("qrCreateSignRequest", list({Value::integer(1), Value::string("s"),
+      Value::integer(3), Value::integer(0x0400), Value::string(account('2')),
+      Value::bytes({4, 0}), Value::integer(120)})).qr_action == 0x0400);
+  assert(decode("qrEncode", list({Value::integer(1), Value::string("s"),
+      Value::integer(4), Value::string("{}"), Value::integer(4)})).qr_scale == 4);
+  expect_failure([&] { (void)decode("verifySignature", list({Value::integer(1),
+      Value::string(account('2')), Value::bytes(Value::Bytes(63)), Value::bytes({})}));
+  }, CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  expect_failure([&] { (void)decode("verifySignature", list({Value::integer(1),
+      Value::string("s"), Value::integer(1), Value::string(account('2')),
+      Value::bytes(Value::Bytes(64)), Value::bytes({})}));
+  }, CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  citizen_sdk::flutter::validate_public_value(Method::verify_signature, list({Value::boolean(false)}));
+  expect_failure([&] { citizen_sdk::flutter::validate_public_value(
+      Method::verify_signature, list({Value::integer(0)})); }, CITIZENSDK_ERROR_INTEGRITY);
+  for (const std::size_t count : {std::size_t{0}, std::size_t{2}, std::size_t{1990}}) {
+    const auto batch = decode("getAccountBalances", list({Value::integer(1), Value::string("s"),
+        Value::integer(1), Value::list(Value::List(count, Value::string(account('2'))))}));
+    assert(batch.account_ids.size() == count);
+  }
+  expect_failure([&] { (void)decode("getAccountBalances", list({Value::integer(1), Value::string("s"),
+      Value::integer(1), Value::list(Value::List(1991, Value::string(account('2'))))}));
+  }, CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  expect_failure([&] { (void)decode("getAccountBalances", list({Value::integer(1), Value::string("s"),
+      Value::integer(1), list({Value::string("invalid")})}));
+  }, CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  const auto anchor = list({Value::string(account('3')), Value::string("9"), Value::string("finalized")});
+  const auto balance = list({Value::string(account('2')), anchor, Value::string("1"),
+                            Value::string("0"), Value::string("1")});
+  citizen_sdk::flutter::validate_public_value(Method::get_genesis_hash, list({Value::string(account('3'))}));
+  expect_failure([&] { citizen_sdk::flutter::validate_public_value(
+      Method::get_genesis_hash, list({Value::string("invalid")})); }, CITIZENSDK_ERROR_INTEGRITY);
+  auto request = decode("getAccountBalances", list({Value::integer(1), Value::string("s"),
+      Value::integer(1), list({Value::string(account('2')), Value::string(account('2'))})}));
+  citizen_sdk::flutter::validate_account_balances(request, list({list({balance, balance})}));
+  expect_failure([&] { citizen_sdk::flutter::validate_account_balances(
+      request, list({list({balance})})); }, CITIZENSDK_ERROR_INTEGRITY);
+  auto wrong_account = balance;
+  std::get<Value::List>(wrong_account.data)[0] = Value::string(account('1'));
+  expect_failure([&] { citizen_sdk::flutter::validate_account_balances(
+      request, list({list({balance, wrong_account})})); }, CITIZENSDK_ERROR_INTEGRITY);
+  auto wrong_block = balance;
+  std::get<Value::List>(wrong_block.data)[1] =
+      list({Value::string(account('3')), Value::string("10"), Value::string("finalized")});
+  expect_failure([&] { citizen_sdk::flutter::validate_account_balances(
+      request, list({list({balance, wrong_block})})); }, CITIZENSDK_ERROR_INTEGRITY);
   const std::string nul_remark("a\0b", 3);
   const auto transfer = decode("transferWithRemark", list({Value::integer(1), Value::string("s"),
       Value::integer(1), Value::string(account('3')), Value::string(account('4')),

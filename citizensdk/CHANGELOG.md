@@ -2,6 +2,16 @@
 
 ## 1.0.0 - Unreleased
 
+- 二维码作为独立可组合模块纳入 CitizenSDK：`qr=32`，完整模块集合为
+  `63`。QR_V1 协议解析、签名请求会话、一次性响应消费和链调用审阅统一由
+  Rust Core 实现；二维码图像识别与生成在 iOS、Android、macOS、Windows、Linux
+  唯一使用 ZXing-C++ 3.1.1。公开面统一为 89 项 Core ABI 和 36 项 Flutter 方法，
+  QR-only 不初始化钱包、设备金库或轻节点。二维码与签名仍是独立模块，调用方可
+  单独集成或完整集成 SDK。SDK 自有扫描和扫码签名窗口接入五端；链调用签名
+  复用已验证 chain metadata 与已有 signing，删除调用方时钟及外部签名拼装入口。
+  本轮未修改 CitizenApp、CitizenWallet、CitizenChain
+  上游，也未发布候选。
+
 - 第 12 步 P2 修复：Android/Apple 以进程内锁和 OS 文件锁原子覆盖 generation
   tombstone 与物理 KEK；Apple 拒绝非正整数 revision，能力快照保留明确未就绪原因。
   删除交易 watch 的重复 `hash()` 名称，修复 Android Flutter 进度交错和 Apple Flutter

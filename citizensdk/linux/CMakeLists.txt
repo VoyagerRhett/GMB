@@ -13,6 +13,7 @@ set(CITIZENSDK_PLATFORM "" CACHE STRING "Public CitizenSDK platform identity: Li
 set_property(CACHE CITIZENSDK_PLATFORM PROPERTY STRINGS LinuxARM LinuxAMD)
 set(CITIZENSDK_CORE_LIBRARY "" CACHE FILEPATH "Absolute path to the matching libcitizensdk.so")
 set(CITIZENSDK_CORE_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/../include" CACHE PATH "Directory containing citizensdk.h")
+set(CITIZENSDK_INTERNAL_INCLUDE_DIR "" CACHE PATH "本轮构建生成的 SDK 私有声明目录；不安装")
 set(CITIZENSDK_ASSET_DIR "${CMAKE_CURRENT_LIST_DIR}/../assets/citizenchain" CACHE PATH "Canonical CitizenChain asset directory")
 set(CITIZENSDK_SQLITE_INCLUDE_DIR "" CACHE PATH "Pinned SQLite include directory")
 set(CITIZENSDK_OPENSSL_INCLUDE_DIR "" CACHE PATH "Pinned OpenSSL include directory")
@@ -24,6 +25,7 @@ set(CITIZENSDK_TSS2_MU_ARCHIVE "" CACHE FILEPATH "Pinned libtss2-mu.a")
 set(CITIZENSDK_TSS2_SYS_ARCHIVE "" CACHE FILEPATH "Pinned libtss2-sys.a")
 set(CITIZENSDK_TSS2_RC_ARCHIVE "" CACHE FILEPATH "Pinned libtss2-rc.a")
 set(CITIZENSDK_TSS2_TCTI_DEVICE_ARCHIVE "" CACHE FILEPATH "Pinned libtss2-tcti-device.a")
+set(CITIZENSDK_ZXING_SOURCE_DIR "" CACHE PATH "Official complete ZXing-C++ 3.1.1 source directory")
 option(CITIZENSDK_BUILD_TESTS "Build Linux Host contract tests" OFF)
 option(CITIZENSDK_ENABLE_WALLET_UI "Build the SDK-owned GTK3 wallet and authentication UI" ON)
 option(CITIZENSDK_WARNINGS_AS_ERRORS "Treat CitizenSDK Linux Host warnings as errors" ON)
@@ -33,6 +35,11 @@ option(CITIZENSDK_WARNINGS_AS_ERRORS "Treat CitizenSDK Linux Host warnings as er
 if(TARGET flutter)
   include(cmake/CitizenSDKFlutter.cmake)
   return()
+endif()
+
+if(NOT IS_ABSOLUTE "${CITIZENSDK_INTERNAL_INCLUDE_DIR}" OR
+   NOT EXISTS "${CITIZENSDK_INTERNAL_INCLUDE_DIR}/citizensdk_internal.h")
+  message(FATAL_ERROR "CITIZENSDK_INTERNAL_INCLUDE_DIR must contain the generated private header")
 endif()
 
 if(NOT CITIZENSDK_PLATFORM STREQUAL "LinuxARM" AND NOT CITIZENSDK_PLATFORM STREQUAL "LinuxAMD")
@@ -79,6 +86,8 @@ find_package(Threads REQUIRED)
 pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0 gio-2.0)
 if(CITIZENSDK_ENABLE_WALLET_UI)
   pkg_check_modules(GTK3 REQUIRED IMPORTED_TARGET gtk+-3.0>=3.24)
+  pkg_check_modules(GSTREAMER REQUIRED IMPORTED_TARGET
+    gstreamer-1.0>=1.18 gstreamer-app-1.0>=1.18 gstreamer-video-1.0>=1.18)
 endif()
 
 add_library(citizensdk_core SHARED IMPORTED GLOBAL)
@@ -87,6 +96,11 @@ set_target_properties(citizensdk_core PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES "${CITIZENSDK_CORE_INCLUDE_DIR}"
 )
 add_library(CitizenSDK::Core ALIAS citizensdk_core)
+
+# 五端只链接这一份 SDK 自有窄包装；完整上游源码由构建输入显式提供，
+# 不复制、不补丁、不从系统包或网络隐式替换。
+add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../native/qr-image"
+                 "${CMAKE_CURRENT_BINARY_DIR}/citizensdk-qr-image")
 
 add_library(citizensdk_host SHARED
   src/citizen_sdk_assets.cc
@@ -105,6 +119,8 @@ add_library(citizensdk_host SHARED
   src/citizen_sdk_sqlite.cc
   src/citizen_sdk_tpm2.cc
   src/citizen_sdk_user_auth.cc
+  src/citizen_sdk_qr_camera.cc
+  src/citizen_sdk_qr_flow.cc
   src/citizen_sdk_wallet_flow.cc
   src/citizen_sdk_wallet_validation.cc
   src/citizen_sdk_wallet_window.cc
@@ -125,6 +141,7 @@ target_include_directories(citizensdk_host
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src
+    ${CITIZENSDK_INTERNAL_INCLUDE_DIR}
     ${CITIZENSDK_SQLITE_INCLUDE_DIR}
     ${CITIZENSDK_OPENSSL_INCLUDE_DIR}
     ${CITIZENSDK_TSS2_INCLUDE_DIR}
@@ -137,10 +154,11 @@ target_link_libraries(citizensdk_host
   "$<LINK_GROUP:RESCAN,${CITIZENSDK_SQLITE_ARCHIVE},${CITIZENSDK_CRYPTO_ARCHIVE},${CITIZENSDK_TSS2_ESYS_ARCHIVE},${CITIZENSDK_TSS2_MU_ARCHIVE},${CITIZENSDK_TSS2_SYS_ARCHIVE},${CITIZENSDK_TSS2_RC_ARCHIVE},${CITIZENSDK_TSS2_TCTI_DEVICE_ARCHIVE}>"
   PkgConfig::GLIB
   Threads::Threads
+  "$<LINK_LIBRARY:WHOLE_ARCHIVE,citizensdk_qr_image>"
   ${CMAKE_DL_LIBS}
 )
 if(CITIZENSDK_ENABLE_WALLET_UI)
-  target_link_libraries(citizensdk_host PRIVATE PkgConfig::GTK3)
+  target_link_libraries(citizensdk_host PRIVATE PkgConfig::GTK3 PkgConfig::GSTREAMER)
 endif()
 set_target_properties(citizensdk_host PROPERTIES
   EXPORT_NAME Host
@@ -174,6 +192,7 @@ install(FILES "${CITIZENSDK_CORE_LIBRARY}"
 install(FILES
   "${CITIZENSDK_CORE_INCLUDE_DIR}/citizensdk.h"
   "${CITIZENSDK_CORE_INCLUDE_DIR}/citizensdk_types.h"
+  "${CMAKE_CURRENT_LIST_DIR}/../native/qr-image/citizensdk_qr_image.h"
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
 )
 # 注册头仅由 Flutter generated registrant 使用，原生 C/C++ 安装不依赖 Flutter。

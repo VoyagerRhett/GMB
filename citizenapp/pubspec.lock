@@ -800,21 +800,21 @@ packages:
   gmb_hardware_secretvault:
     dependency: "direct main"
     description:
-      path: "../shared/hardware-secretvault"
+      path: "packages/hardware-secretvault"
       relative: true
     source: path
     version: "1.0.0"
   gmb_scanner_flutter:
     dependency: "direct main"
     description:
-      path: "../shared/scanner-flutter"
+      path: "packages/scanner-flutter"
       relative: true
     source: path
     version: "1.0.0"
   gmb_wallet_password:
     dependency: "direct main"
     description:
-      path: "../shared/wallet-password"
+      path: "packages/wallet-password"
       relative: true
     source: path
     version: "1.0.0"

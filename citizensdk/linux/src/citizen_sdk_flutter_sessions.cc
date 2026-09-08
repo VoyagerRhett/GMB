@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 #include "citizen_sdk/citizen_sdk.hpp"
+#include "citizensdk_qr_image.h"
 
 namespace citizen_sdk::flutter {
 namespace {
@@ -20,11 +21,51 @@ citizensdk_bytes_view_t view(const std::vector<uint8_t> &bytes) noexcept {
   return {bytes.empty() ? nullptr : bytes.data(), static_cast<uint64_t>(bytes.size())};
 }
 
+citizensdk_bytes_view_t view(const std::string &text) noexcept {
+  return {reinterpret_cast<const uint8_t *>(text.data()),
+          static_cast<uint64_t>(text.size())};
+}
+
+template <typename Call>
+std::vector<uint8_t> qr_core_output(Call call) {
+  uint64_t required = 0;
+  auto code = call(nullptr, 0, &required);
+  if (code != CITIZENSDK_OK) throw Error(code, "CitizenSDK QR output query failed");
+  if (required == 0 || required > 65536)
+    throw ContractFailure(CITIZENSDK_ERROR_INTEGRITY, "CitizenSDK QR output length is invalid");
+  std::vector<uint8_t> output(static_cast<std::size_t>(required));
+  code = call(output.data(), required, &required);
+  if (code != CITIZENSDK_OK) throw Error(code, "CitizenSDK QR output copy failed");
+  if (required != output.size())
+    throw ContractFailure(CITIZENSDK_ERROR_INTEGRITY, "CitizenSDK QR output length changed");
+  return output;
+}
+
+std::string qr_text(std::vector<uint8_t> bytes) {
+  return std::string(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+}
+
+citizensdk_error_code_t qr_image_error(citizensdk_qr_image_status_t status) noexcept {
+  switch (status) {
+    case CITIZENSDK_QR_IMAGE_INVALID_ARGUMENT:
+    case CITIZENSDK_QR_IMAGE_CAPACITY_EXCEEDED: return CITIZENSDK_ERROR_INVALID_ARGUMENT;
+    case CITIZENSDK_QR_IMAGE_NO_CODE: return CITIZENSDK_ERROR_NOT_FOUND;
+    case CITIZENSDK_QR_IMAGE_MULTIPLE_CODES: return CITIZENSDK_ERROR_CONFLICT;
+    case CITIZENSDK_QR_IMAGE_INVALID_UTF8: return CITIZENSDK_ERROR_DECODE;
+    default: return CITIZENSDK_ERROR_INTERNAL;
+  }
+}
+
+void check_qr_image(citizensdk_qr_image_status_t status, const char *message) {
+  if (status != CITIZENSDK_QR_IMAGE_OK) throw Error(qr_image_error(status), message);
+}
+
 // This adapter contains no chain/wallet algorithm. Every accepted method goes
 // directly to the same installed Host/Core used by the native C/C++ binding.
 class HostTransport final : public NativeTransport {
  public:
-  explicit HostTransport(const Config &config) : host_(std::make_unique<Host>(config)) {
+  explicit HostTransport(const Config &config)
+      : host_(std::make_unique<Host>(config)), modules_(config.modules) {
     host_->open();
   }
   ~HostTransport() override = default;
@@ -39,6 +80,10 @@ class HostTransport final : public NativeTransport {
       case Method::get_finalized_head: return citizensdk_get_finalized_head(sdk, out);
       case Method::get_account_balance:
         return citizensdk_get_finalized_account_balance(sdk, &r.account_id, out);
+      case Method::get_account_balances:
+        return citizensdk_get_finalized_account_balances(sdk,
+            r.account_ids.empty() ? nullptr : r.account_ids.data(),
+            static_cast<uint32_t>(r.account_ids.size()), out);
       case Method::get_account_nonce: return citizensdk_get_account_nonce(sdk, &r.account_id, out);
       case Method::get_fee_snapshot: return citizensdk_get_best_fee_snapshot(sdk, out);
       case Method::get_wallet_profile: return citizensdk_get_wallet_profile(sdk, out);
@@ -63,8 +108,15 @@ class HostTransport final : public NativeTransport {
                      static_cast<uint32_t>(r.account_ids.size()), out);
       // open/close/capabilities are synchronous Host operations; the three
       // secret-bearing wallet mutations are admitted only by existing GTK UI.
-      case Method::open: case Method::close: case Method::get_capabilities:
+      case Method::view_account_private_key:
+      case Method::verify_signature:
+      case Method::open: case Method::close: case Method::get_capabilities: case Method::get_genesis_hash:
       case Method::create_wallet: case Method::import_wallet: case Method::add_wallet_accounts:
+      case Method::qr_parse: case Method::qr_create_sign_request:
+      case Method::qr_scan: case Method::sign_qr_request:
+      case Method::qr_consume_sign_response: case Method::qr_cancel_sign_request:
+      case Method::qr_encode_account_id: case Method::qr_encode_user_transfer:
+      case Method::qr_decode_luminance: case Method::qr_encode:
         return CITIZENSDK_ERROR_UNSUPPORTED;
     }
     return CITIZENSDK_ERROR_UNSUPPORTED;
@@ -81,6 +133,7 @@ class HostTransport final : public NativeTransport {
     if (code != CITIZENSDK_OK) throw Error(code, "CitizenSDK lifecycle query failed");
     return state;
   }
+  Value genesis_hash() override { return copy_genesis_hash(host_->native_handle()); }
   Value capability_snapshot() override {
     citizensdk_capability_snapshot_t snapshot{};
     snapshot.struct_size = sizeof(snapshot);
@@ -89,15 +142,109 @@ class HostTransport final : public NativeTransport {
     if (code != CITIZENSDK_OK) throw Error(code, "CitizenSDK capability query failed");
     return capabilities(snapshot);
   }
+  Value qr(const DecodedRequest &r) override {
+    if ((modules_ & CITIZENSDK_MODULE_QR) == 0)
+      throw Error(CITIZENSDK_ERROR_UNSUPPORTED, "CitizenSDK QR module is not enabled");
+    const auto sdk = host_->native_handle();
+    switch (r.method) {
+      case Method::qr_parse: {
+        auto output = qr_core_output([&](uint8_t *target, uint64_t capacity, uint64_t *required) {
+          return citizensdk_qr_parse(sdk, view(r.qr_text), target, capacity, required);
+        });
+        return Value::list({Value::string(qr_text(std::move(output)))});
+      }
+      case Method::qr_create_sign_request: {
+        auto output = qr_core_output([&](uint8_t *target, uint64_t capacity, uint64_t *required) {
+          return citizensdk_qr_create_sign_request(sdk, r.qr_action, &r.account_id,
+              view(r.payload), r.qr_ttl, target, capacity, required);
+        });
+        return Value::list({Value::string(qr_text(std::move(output)))});
+      }
+      case Method::qr_consume_sign_response: {
+        std::vector<uint8_t> signature(64);
+        const auto code = citizensdk_qr_consume_sign_response(sdk, view(r.qr_text), signature.data());
+        if (code != CITIZENSDK_OK) throw Error(code, "CitizenSDK QR response was rejected");
+        return Value::list({Value::bytes(std::move(signature))});
+      }
+      case Method::qr_cancel_sign_request: {
+        uint8_t cancelled = 0;
+        const auto code = citizensdk_qr_cancel_sign_request(sdk, view(r.qr_request_id), &cancelled);
+        if (code != CITIZENSDK_OK) throw Error(code, "CitizenSDK QR request cancellation failed");
+        if (cancelled > 1)
+          throw ContractFailure(CITIZENSDK_ERROR_INTEGRITY, "CitizenSDK QR cancellation result is invalid");
+        return Value::list({Value::boolean(cancelled != 0)});
+      }
+      case Method::qr_encode_account_id: {
+        auto output = qr_core_output([&](uint8_t *target, uint64_t capacity, uint64_t *required) {
+          return citizensdk_qr_encode_account_id(sdk, &r.account_id, target, capacity, required);
+        });
+        return Value::list({Value::string(qr_text(std::move(output)))});
+      }
+      case Method::qr_encode_user_transfer: {
+        auto output = qr_core_output([&](uint8_t *target, uint64_t capacity, uint64_t *required) {
+          return citizensdk_qr_encode_user_transfer(sdk, view(r.qr_request_id), r.qr_expires_at,
+              &r.account_id, view(r.qr_amount), view(r.qr_symbol), view(r.qr_memo),
+              view(r.qr_bank_cid), target, capacity, required);
+        });
+        return Value::list({Value::string(qr_text(std::move(output)))});
+      }
+      case Method::qr_decode_luminance: {
+        size_t required = 0;
+        auto status = citizensdk_qr_image_decode_luminance(r.payload.data(), r.payload.size(),
+            r.qr_width, r.qr_height, r.qr_stride, nullptr, 0, &required);
+        if (status != CITIZENSDK_QR_IMAGE_BUFFER_TOO_SMALL || required == 0 || required > 2331)
+          throw Error(qr_image_error(status), "ZXing-C++ QR decode query failed");
+        std::vector<uint8_t> output(required);
+        status = citizensdk_qr_image_decode_luminance(r.payload.data(), r.payload.size(),
+            r.qr_width, r.qr_height, r.qr_stride, output.data(), output.size(), &required);
+        check_qr_image(status, "ZXing-C++ QR decode failed");
+        if (required != output.size())
+          throw ContractFailure(CITIZENSDK_ERROR_INTEGRITY, "ZXing-C++ QR decode length changed");
+        const auto text = qr_text(std::move(output));
+        auto document = qr_core_output([&](uint8_t *target, uint64_t capacity, uint64_t *size) {
+          return citizensdk_qr_parse(sdk, view(text), target, capacity, size);
+        });
+        return Value::list({Value::string(qr_text(std::move(document)))});
+      }
+      case Method::qr_encode: {
+        uint32_t width = 0, height = 0;
+        size_t required = 0;
+        auto status = citizensdk_qr_image_encode_text(
+            reinterpret_cast<const uint8_t *>(r.qr_text.data()), r.qr_text.size(), r.qr_scale,
+            nullptr, 0, &width, &height, &required);
+        if (status != CITIZENSDK_QR_IMAGE_BUFFER_TOO_SMALL || required == 0 || required > 16777216)
+          throw Error(qr_image_error(status), "ZXing-C++ QR encode query failed");
+        std::vector<uint8_t> output(required);
+        status = citizensdk_qr_image_encode_text(
+            reinterpret_cast<const uint8_t *>(r.qr_text.data()), r.qr_text.size(), r.qr_scale,
+            output.data(), output.size(), &width, &height, &required);
+        check_qr_image(status, "ZXing-C++ QR encode failed");
+        if (required != output.size())
+          throw ContractFailure(CITIZENSDK_ERROR_INTEGRITY, "ZXing-C++ QR image length changed");
+        return Value::list({Value::integer(width), Value::integer(height), Value::bytes(std::move(output))});
+      }
+      default: throw ContractFailure(CITIZENSDK_ERROR_UNSUPPORTED, "Unsupported QR method");
+    }
+  }
   void cancel(citizensdk_request_id_t request) override {
     const auto code = citizensdk_cancel_request(host_->native_handle(), request);
     if (code != CITIZENSDK_OK && code != CITIZENSDK_ERROR_NOT_FOUND &&
         code != CITIZENSDK_ERROR_INVALID_HANDLE)
       throw Error(code, "CitizenSDK request cancellation failed");
   }
-  WalletCancellation present(const WalletFlowRequest &request,
+  WalletCancellation present(const DecodedRequest &request,
                               WalletFlowCompletion completion) override {
-    auto flow = host_->present_wallet_flow(request, std::move(completion));
+    auto flow = request.method == Method::view_account_private_key
+        ? host_->view_account_private_key(request.account_id, std::move(completion))
+        : host_->present_wallet_flow(FlutterWalletFlows::contract(request), std::move(completion));
+    return [flow]() mutable { flow.cancel(); };
+  }
+  WalletCancellation present_qr(const DecodedRequest &request, QrCompletion completion) override {
+    auto done = [completion = std::move(completion)](QrFlowResult result) {
+      completion(result.error_code, std::move(result.document));
+    };
+    auto flow = request.method == Method::qr_scan ? host_->scan_qr(std::move(done))
+        : host_->sign_qr_request(request.qr_text, std::move(done));
     return [flow]() mutable { flow.cancel(); };
   }
   void close() override { host_->close(); }
@@ -108,6 +255,7 @@ class HostTransport final : public NativeTransport {
   }
  private:
   std::unique_ptr<Host> host_;
+  const uint32_t modules_;
 };
 
 std::string random_session_id() {
@@ -131,13 +279,18 @@ std::string random_session_id() {
 
 Reply failure(citizensdk_error_code_t code, const std::string &message,
               const DecodedRequest &request) {
-  const bool open = request.method == Method::open;
+  const bool open = request.method == Method::open || request.method == Method::verify_signature;
   return {false, error_details(code, message,
           open ? std::optional<std::string>{} : request.session,
           open ? std::optional<int64_t>{} : request.sequence), code, message};
 }
 
 Reply success(const DecodedRequest &request, Value payload) {
+  if (request.method == Method::get_account_balances)
+    validate_account_balances(request, payload);
+  if (request.method == Method::get_genesis_hash ||
+      (request.method >= Method::qr_parse && request.method <= Method::sign_qr_request))
+    validate_public_value(request.method, payload);
   return {true, response(request.session, request.sequence, std::move(payload)),
           CITIZENSDK_OK, {}};
 }
@@ -176,6 +329,8 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     bool completed{};
     bool close_stop{};
     bool wallet{};
+    WalletCancellation qr_cancel;
+    bool qr_revoked{};
     bool mutation{};
     bool fetch_profile_after_mutation{};
     std::shared_ptr<void> mutation_owner;
@@ -379,14 +534,17 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     post_drain(session);
   }
 
-  void open(ReplyCallback reply) {
-    DecodedRequest request;
+  void open(DecodedRequest request, ReplyCallback reply) {
     std::shared_ptr<Session> session;
     std::optional<Reply> outcome;
     try {
-      auto source = environment(); // keeps upgraded parent alive through Host creation
+      const auto module_code = citizensdk_validate_modules(request.modules);
+      if (module_code != CITIZENSDK_OK)
+        throw ContractFailure(module_code, "CitizenSDK module selection is invalid");
+      auto source = environment(request.modules); // keeps upgraded parent alive through Host creation
       session = std::make_shared<Session>();
       session->id = random_session_id();
+      source.config.modules = request.modules;
       session->transport = factory(source.config);
       if (!session->transport) throw ContractFailure(CITIZENSDK_ERROR_UNAVAILABLE,
                                                      "CitizenSDK native Host is unavailable");
@@ -463,6 +621,9 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
 
   static bool is_mutation(Method method) noexcept {
     switch (method) {
+      // 查看持有钱包代际租约，沿用同一 UI 排他/关闭排空门。
+      case Method::qr_scan: case Method::sign_qr_request:
+      case Method::view_account_private_key:
       case Method::create_wallet: case Method::import_wallet:
       case Method::add_wallet_accounts: case Method::set_active_wallet_account:
       case Method::rename_wallet_account: case Method::delete_wallet_account:
@@ -494,6 +655,8 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
                        const std::shared_ptr<Route> &route) {
     try {
       switch (route->request.method) {
+        case Method::qr_scan: case Method::sign_qr_request: qr_flow(session, route); break;
+        case Method::view_account_private_key:
         case Method::create_wallet: case Method::import_wallet:
         case Method::add_wallet_accounts: wallet(session, route); break;
         default: submit(session, route); break;
@@ -539,12 +702,62 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     release_detached_state_if_empty();
   }
 
+
+  void qr_flow(const std::shared_ptr<Session> &session, const std::shared_ptr<Route> &route) {
+    route->wallet = true;
+    std::weak_ptr<State> weak = shared_from_this();
+    std::weak_ptr<Session> target = session;
+    auto cancel = session->transport->present_qr(route->request,
+      [weak, target, route](citizensdk_error_code_t code, std::string document) noexcept {
+        const auto state = weak.lock(); const auto current_session = target.lock();
+        if (!state || !current_session) return;
+        std::optional<Reply> reply;
+        try {
+          reply = code == CITIZENSDK_OK
+              ? success(route->request, tuple({Value::string(std::move(document))}))
+              : failure(code, "CitizenSDK QR flow did not complete", route->request);
+        } catch (...) {
+          reply = failure(CITIZENSDK_ERROR_INTEGRITY, "CitizenSDK QR result is invalid", route->request);
+        }
+        {
+          std::lock_guard<std::mutex> guard(current_session->lock);
+          if (route->completed) return;
+          if (route->qr_revoked)
+            reply = failure(CITIZENSDK_ERROR_CANCELLED, "CitizenSDK QR flow was cancelled", route->request);
+          route->ready = std::move(reply); route->completed = true; route->wallet = false;
+          route->qr_cancel = {};
+        }
+        state->post_drain(current_session);
+      });
+    {
+      std::lock_guard<std::mutex> guard(session->lock);
+      if (!route->completed) route->qr_cancel = std::move(cancel);
+    }
+  }
+
+  void cancel_qr_routes(const std::shared_ptr<Session> &session) {
+    std::vector<WalletCancellation> cancellation;
+    {
+      std::lock_guard<std::mutex> guard(session->lock);
+      for (const auto &entry : session->routes) {
+        if (!entry.second->completed &&
+            (entry.second->request.method == Method::qr_scan ||
+             entry.second->request.method == Method::sign_qr_request)) {
+          entry.second->qr_revoked = true;
+          if (entry.second->qr_cancel) cancellation.push_back(entry.second->qr_cancel);
+        }
+      }
+    }
+    // 不能在 session 锁内进入 Host：有限回调可能同步返回。
+    for (auto &cancel : cancellation) cancel();
+  }
+
   void wallet(const std::shared_ptr<Session> &session, const std::shared_ptr<Route> &route) {
     route->wallet = true;
     std::weak_ptr<State> weak = shared_from_this();
     std::weak_ptr<Session> target = session;
     wallets.launch(route->request,
-      [transport = session->transport](const WalletFlowRequest &request, WalletFlowCompletion done) {
+      [transport = session->transport](const DecodedRequest &request, WalletFlowCompletion done) {
         return transport->present(request, std::move(done));
       },
       [weak, target, route](WalletFlowResult result) {
@@ -553,6 +766,16 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
         route->wallet = false;
         try {
           if (result.status == WalletFlowStatus::Completed && result.error_code == CITIZENSDK_OK) {
+            if (route->request.method == Method::view_account_private_key) {
+              // 私钥查看只能返回空完成，不投影秘密，也不额外读取钱包资料。
+              {
+                std::lock_guard<std::mutex> guard(session->lock);
+                route->completed = true;
+                route->ready = success(route->request, tuple({}));
+              }
+              state->drain(session);
+              return;
+            }
             // The GTK flow contains private prepared/import/add operations. Only
             // a new public-profile query is projected onto the original tuple.
             route->native_method = Method::get_wallet_profile;
@@ -713,6 +936,7 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     session->close_reply = std::move(reply);
     std::exception_ptr first;
     try { wallets.cancel_session(session->id); } catch (...) { first = std::current_exception(); }
+    try { cancel_qr_routes(session); } catch (...) { if (!first) first = std::current_exception(); }
     std::vector<citizensdk_request_id_t> cancel;
     {
       std::lock_guard<std::mutex> guard(session->lock);
@@ -738,13 +962,26 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     require_owner();
     if (!reply) throw ContractFailure(CITIZENSDK_ERROR_INVALID_ARGUMENT, "CitizenSDK reply is required");
     if (is_detached()) { reply(failure(CITIZENSDK_ERROR_UNAVAILABLE, "CitizenSDK Flutter engine is detached", request)); return; }
+    // 不创建或查找 session，不调用环境/Host 工厂，不打开钱包、金库或链。
+    if (request.method == Method::verify_signature) {
+      uint8_t valid = 0;
+      const auto code = citizensdk_verify_signature(
+          &request.account_id, view(request.signature), view(request.payload), &valid);
+      if (code != CITIZENSDK_OK) {
+        reply(failure(code, "CitizenSDK signature verification failed", request));
+      } else {
+        reply({true, Value::list({Value::integer(kProtocolVersion),
+                                 Value::boolean(valid != 0)}), CITIZENSDK_OK, {}});
+      }
+      return;
+    }
     wallets.drain();
     // A previous failed main-loop allocation may have left a copied completion
     // ready. Retry ownership settlement before admitting another request.
     std::vector<std::shared_ptr<Session>> existing;
     for (const auto &pair : sessions) existing.push_back(pair.second);
     for (const auto &session : existing) drain(session);
-    if (request.method == Method::open) { open(std::move(reply)); return; }
+    if (request.method == Method::open) { open(std::move(request), std::move(reply)); return; }
     const auto found = sessions.find(request.session);
     if (found == sessions.end()) { reply(failure(CITIZENSDK_ERROR_NOT_FOUND, "CitizenSDK session was not found", request)); return; }
     const auto session = found->second;
@@ -756,6 +993,24 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     }
     ++session->next_request;
     if (request.method == Method::close) { begin_close(session, request, std::move(reply)); return; }
+    if (request.method >= Method::qr_parse && request.method <= Method::qr_encode) {
+      std::optional<Reply> result;
+      try { result = success(request, session->transport->qr(request)); }
+      catch (const ContractFailure &error) { result = failure(error.code, error.what(), request); }
+      catch (const Error &error) { result = failure(error.code(), error.what(), request); }
+      catch (...) { result = failure(CITIZENSDK_ERROR_INTERNAL, "CitizenSDK QR operation failed", request); }
+      reply(std::move(*result));
+      return;
+    }
+    if (request.method == Method::get_genesis_hash) {
+      std::optional<Reply> result;
+      try { result = success(request, Value::list({session->transport->genesis_hash()})); }
+      catch (const ContractFailure &error) { result = failure(error.code, error.what(), request); }
+      catch (const Error &error) { result = failure(error.code(), error.what(), request); }
+      catch (...) { result = failure(CITIZENSDK_ERROR_INTERNAL, "CitizenSDK genesis query failed", request); }
+      reply(std::move(*result));
+      return;
+    }
     if (request.method == Method::get_capabilities) {
       try { reply(success(request, Value::list({session->transport->capability_snapshot()}))); }
       catch (const ContractFailure &error) { reply(failure(error.code, error.what(), request)); }
@@ -828,6 +1083,7 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
       session->closing = true;
       session->close_reply = {};
       try { wallets.cancel_session(session->id); } catch (...) {}
+      try { cancel_qr_routes(session); } catch (...) {}
       {
         std::lock_guard<std::mutex> guard(session->lock);
         for (auto &route_pair : session->routes) route_pair.second->reply = {};

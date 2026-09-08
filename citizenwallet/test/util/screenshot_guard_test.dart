@@ -56,18 +56,23 @@ void main() {
   });
 
   test('永久应用标识、原生通道和 Isar 静态库输出保持统一', () {
-    final androidBuild = File(
+    // 中央校验根只生成当前平台配置；原生源码断言读取链接的真实钱包源码。
+    final sourceRoot = File('test/util/screenshot_guard_test.dart')
+        .resolveSymbolicLinksSync();
+    final root = File(sourceRoot).parent.parent.parent.path;
+    File sourceFile(String path) => File('$root/$path');
+    final androidBuild = sourceFile(
       'android/app/build.gradle.kts',
     ).readAsStringSync();
-    final androidEntry = File(
+    final androidEntry = sourceFile(
       'android/app/src/main/kotlin/com/crcfrcn/citizenwallet/MainActivity.kt',
     ).readAsStringSync();
-    final iosProject = File(
+    final iosProject = sourceFile(
       'ios/Runner.xcodeproj/project.pbxproj',
     ).readAsStringSync();
-    final iosEntry = File('ios/Runner/AppDelegate.swift').readAsStringSync();
-    final infoPlist = File('ios/Runner/Info.plist').readAsStringSync();
-    final podfile = File('ios/Podfile').readAsStringSync();
+    final iosEntry = sourceFile('ios/Runner/AppDelegate.swift').readAsStringSync();
+    final infoPlist = sourceFile('ios/Runner/Info.plist').readAsStringSync();
+    final podfile = sourceFile('ios/Podfile').readAsStringSync();
 
     expect(
         androidBuild, contains('applicationId = "com.crcfrcn.citizenwallet"'));

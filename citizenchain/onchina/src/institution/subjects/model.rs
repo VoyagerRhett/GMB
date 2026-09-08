@@ -78,7 +78,7 @@ pub struct Institution {
     /// 法定代表人公开身份；初始化目录机构没有真实任免资料时允许为空。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legal_representative: Option<LegalRepresentative>,
-    /// 法定代表人证件照服务端存储路径。
+    /// 法定代表人证件照数据库记录的鉴权读取地址。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legal_representative_photo_path: Option<String>,
     /// 法定代表人证件照原始文件名。

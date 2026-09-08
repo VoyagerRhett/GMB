@@ -34,7 +34,7 @@ fi
 
 echo "==> 编译 benchmark node（release）..."
 cd "$CHAIN_ROOT"
-cargo build --release --features runtime-benchmarks --bin citizenchain
+cargo build --release --features runtime-benchmarks --bin citizenchain --config "$CHAIN_ROOT/config.toml"
 echo "    编译完成"
 
 # 当前 runtime 的链规 preset 只在 std 节点侧提供，WASM 不能通过

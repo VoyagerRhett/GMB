@@ -25,7 +25,9 @@ pub use account::{
     AccountNonce, AccountNonceSource, FinalizedAccountBalance, OnchainFeePolicy,
     PERBILL_DENOMINATOR,
 };
-pub use capability::{CapabilityName, CapabilityReason, CapabilitySnapshot, CapabilityStatus};
+pub use capability::{
+    CapabilityName, CapabilityReason, CapabilitySnapshot, CapabilityStatus, Modules,
+};
 pub use chain::{
     validated_finalized_block_range_len, AccountId32, BlockFinality, ChainIdentity,
     ExportedChainState, FinalizedBlockRef, Hash32, RuntimeContext, RuntimeVersion,

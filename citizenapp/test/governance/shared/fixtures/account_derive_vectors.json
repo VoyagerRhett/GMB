@@ -1,5 +1,5 @@
 {
-  "_comment": "ADR-024 账户派生金标向量 (canonical, Rust 权威源). 行为中性基线: domain=GMB, ss58_format=2027. account_id 一律为 ADR-040 规范文本: 小写 0x + 64 位十六进制. china_* 来源的 Main/Fee/Stake/SafetyFund/He account_id 必须与 china_*.rs 字面值逐字节一致(创世账户烘焙器 scripts/rederive_accounts.py 用 GMB+OP_* 派生的真值,原名 multisig.py). InstitutionNamed / Personal 的 account_id 由 Rust 导出测试(ACCOUNT_DERIVE_UPDATE=1)用 account_derive 计算后回填,勿手算. 重生方式: tools/sync-derive-vectors.sh. 【镜像】真源在 citizenchain/runtime/primitives/tests/fixtures/account_derive_vectors.json，本文件是供本端金标测试独立回归的副本。不得在此自造向量或单方面改值；需要新向量请先在真源登记。CI 由 .github/scripts/gmb-repository/ci-repository.mjs golden-vectors 比对。",
+  "_comment": "ADR-024 账户派生金标向量 (canonical, Rust 权威源). 行为中性基线: domain=GMB, ss58_format=2027. account_id 一律为 ADR-040 规范文本: 小写 0x + 64 位十六进制. china_* 来源的 Main/Fee/Stake/SafetyFund/He account_id 必须与 china_*.rs 字面值逐字节一致(创世账户烘焙器 citizenchain/scripts/rederive_accounts.py 用 GMB+OP_* 派生的真值,原名 multisig.py). InstitutionNamed / Personal 的 account_id 由 Rust 导出测试(ACCOUNT_DERIVE_UPDATE=1)用 account_derive 计算后回填,勿手算. 重生方式: citizenchain/scripts/sync-derive-vectors.sh. 【镜像】真源在 citizenchain/runtime/primitives/tests/fixtures/account_derive_vectors.json，本文件是供本端金标测试独立回归的副本。不得在此自造向量或单方面改值；需要新向量请先在真源登记。CI 由 .github/scripts/gmb-repository/ci-repository.mjs golden-vectors 比对。",
   "domain": "GMB",
   "ss58_format": 2027,
   "vectors": [

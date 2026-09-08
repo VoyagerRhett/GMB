@@ -1,3 +1,5 @@
+#![cfg(feature = "chain")]
+
 use std::{
     collections::{HashMap, HashSet},
     sync::{
@@ -13,10 +15,10 @@ use citizen_sdk_contracts::{
     ContractError, ContractErrorCode, ContractFuture, ContractResult, ContractStream,
     EncryptedSecretBlobSnapshot, EncryptedSecretBlobState, EncryptedSecretBlobStore,
     EncryptedSecretEnvelope, ExportedChainState, ExtrinsicWatchEvent, FinalizedBlockRef, Hash32,
-    Hash32Bytes, HistoryTransactionStatus, RuntimeContext, RuntimeVersion, SecretBuffer, SecretRef,
-    SecretVault, SignedExtrinsic, StateImportReceipt, SubmittedExtrinsic, TransactionHistoryCursor,
-    TransactionHistoryState, TransactionHistoryStore, VaultAvailability, VaultGeneration,
-    VerifiedBlockRef, VerifiedChainClient, WalletProfileStore, WalletState,
+    Hash32Bytes, HistoryTransactionStatus, Modules, RuntimeContext, RuntimeVersion, SecretBuffer,
+    SecretRef, SecretVault, SignedExtrinsic, StateImportReceipt, SubmittedExtrinsic,
+    TransactionHistoryCursor, TransactionHistoryState, TransactionHistoryStore, VaultAvailability,
+    VaultGeneration, VerifiedBlockRef, VerifiedChainClient, WalletProfileStore, WalletState,
 };
 use citizen_sdk_engine::{
     CapabilityProbe, CitizenEngine, EngineComponents, EngineError, WalletTransferResolution,
@@ -158,6 +160,105 @@ impl VerifiedChainClient for CountingClient {
 }
 
 #[test]
+fn genesis_hash_is_static_but_still_obeys_module_and_dispose_gates() {
+    let client = Arc::new(CountingClient::new());
+    let engine = engine(client.clone());
+    assert_eq!(
+        engine
+            .genesis_hash()
+            .unwrap_or_else(|error| panic!("genesis failed: {error}")),
+        ChainIdentity::citizenchain().genesis_hash()
+    );
+    assert_eq!(client.reads.load(Ordering::SeqCst), 0);
+    engine
+        .dispose()
+        .unwrap_or_else(|error| panic!("dispose failed: {error}"));
+    assert!(engine.genesis_hash().is_err());
+
+    let local = CitizenEngine::new(
+        EngineComponents::new(None, None, None, None, None, None, None, None).with_modules(
+            Modules::try_new(Modules::WALLET)
+                .unwrap_or_else(|error| panic!("modules failed: {error}")),
+        ),
+    );
+    assert!(
+        matches!(local.genesis_hash(), Err(EngineError::Contract(error)) if error.code() == ContractErrorCode::Unsupported)
+    );
+}
+
+#[test]
+fn empty_balance_batch_requires_running_chain_and_never_reads_provider() {
+    let client = Arc::new(CountingClient::new());
+    let engine = engine(client.clone());
+    assert!(futures::executor::block_on(engine.finalized_account_balances(Vec::new())).is_err());
+    assert_eq!(client.reads.load(Ordering::SeqCst), 0);
+    engine
+        .begin_provider_start()
+        .unwrap_or_else(|error| panic!("start failed: {error}"));
+    futures::executor::block_on(engine.complete_provider_start())
+        .unwrap_or_else(|error| panic!("complete start failed: {error}"));
+    let before = client.reads.load(Ordering::SeqCst);
+    assert!(
+        futures::executor::block_on(engine.finalized_account_balances(Vec::new()))
+            .unwrap_or_else(|error| panic!("empty batch failed: {error}"))
+            .is_empty()
+    );
+    assert_eq!(client.reads.load(Ordering::SeqCst), before);
+    engine
+        .mark_provider_stopped()
+        .unwrap_or_else(|error| panic!("stop failed: {error}"));
+    assert!(futures::executor::block_on(engine.finalized_account_balances(Vec::new())).is_err());
+    assert_eq!(client.reads.load(Ordering::SeqCst), before);
+    engine
+        .dispose()
+        .unwrap_or_else(|error| panic!("dispose failed: {error}"));
+    assert!(futures::executor::block_on(engine.finalized_account_balances(Vec::new())).is_err());
+}
+
+#[test]
+fn chain_readiness_refresh_preserves_local_facts_and_cannot_open_a_stopped_engine() {
+    let client = Arc::new(CountingClient::new());
+    let engine = engine(client);
+    let before = engine
+        .capabilities()
+        .unwrap_or_else(|error| panic!("snapshot failed: {error}"))
+        .unwrap_or_else(|| panic!("snapshot missing"));
+    engine
+        .update_chain_readiness(false)
+        .unwrap_or_else(|error| panic!("chain update failed: {error}"));
+    engine
+        .begin_provider_start()
+        .unwrap_or_else(|error| panic!("start failed: {error}"));
+    futures::executor::block_on(engine.complete_provider_start())
+        .unwrap_or_else(|error| panic!("complete start failed: {error}"));
+    assert!(futures::executor::block_on(engine.finalized_account_balances(Vec::new())).is_err());
+    let ready = engine
+        .update_chain_readiness(true)
+        .unwrap_or_else(|error| panic!("chain update failed: {error}"));
+    assert!(ready
+        .status(CapabilityName::ChainRead)
+        .is_some_and(|status| status.is_ready()));
+    for name in [
+        CapabilityName::WalletProfile,
+        CapabilityName::LocalSigning,
+        CapabilityName::HardwareVault,
+        CapabilityName::UserAuthentication,
+    ] {
+        assert_eq!(ready.status(name), before.status(name));
+    }
+    engine
+        .mark_provider_stopped()
+        .unwrap_or_else(|error| panic!("stop failed: {error}"));
+    let stopped = engine
+        .update_chain_readiness(true)
+        .unwrap_or_else(|error| panic!("chain update failed: {error}"));
+    assert!(!stopped
+        .status(CapabilityName::ChainRead)
+        .is_some_and(|status| status.is_ready()));
+    assert!(engine.genesis_hash().is_ok());
+}
+
+#[test]
 fn provider_contract_error_code_survives_the_engine_boundary() {
     let client = Arc::new(CountingClient::failing_best(ContractErrorCode::Timeout));
     let engine = engine(client);
@@ -201,7 +302,14 @@ fn probes() -> Vec<CapabilityProbe> {
 fn engine(client: Arc<CountingClient>) -> CitizenEngine {
     let chain: Arc<dyn VerifiedChainClient> = client;
     let engine = CitizenEngine::new(EngineComponents::new(
-        chain, None, None, None, None, None, None, None,
+        Some(chain),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     ));
     engine
         .update_capabilities(probes())
@@ -235,19 +343,22 @@ fn typed_chain_access_is_closed_before_start_and_open_while_running() {
             .unwrap_or_else(|error| panic!("batch storage failed: {error}"));
     assert_eq!(values, vec![Some(vec![1]), Some(vec![2]), Some(vec![1])]);
 
-    let signed = SignedExtrinsic::try_new(vec![0x08, 0xaa])
-        .unwrap_or_else(|error| panic!("extrinsic fixture failed: {error}"));
-    let submitted = futures::executor::block_on(engine.submit_signed_extrinsic(signed.clone()))
-        .unwrap_or_else(|error| panic!("submit failed: {error}"));
-    assert_eq!(submitted.hash(), Hash32::from_bytes([0x44; 32]));
+    #[cfg(feature = "transactions")]
+    {
+        let signed = SignedExtrinsic::try_new(vec![0x08, 0xaa])
+            .unwrap_or_else(|error| panic!("extrinsic fixture failed: {error}"));
+        let submitted = futures::executor::block_on(engine.submit_signed_extrinsic(signed.clone()))
+            .unwrap_or_else(|error| panic!("submit failed: {error}"));
+        assert_eq!(submitted.hash(), Hash32::from_bytes([0x44; 32]));
 
-    let mut watch = engine
-        .watch_signed_extrinsic(signed)
-        .unwrap_or_else(|error| panic!("watch failed: {error}"));
-    let event = futures::executor::block_on(futures::StreamExt::next(&mut watch));
-    assert_eq!(event, Some(Ok(ExtrinsicWatchEvent::Ready)));
-    assert_eq!(client.submits.load(Ordering::SeqCst), 1);
-    assert_eq!(client.watches.load(Ordering::SeqCst), 1);
+        let mut watch = engine
+            .watch_signed_extrinsic(signed)
+            .unwrap_or_else(|error| panic!("watch failed: {error}"));
+        let event = futures::executor::block_on(futures::StreamExt::next(&mut watch));
+        assert_eq!(event, Some(Ok(ExtrinsicWatchEvent::Ready)));
+        assert_eq!(client.submits.load(Ordering::SeqCst), 1);
+        assert_eq!(client.watches.load(Ordering::SeqCst), 1);
+    }
 
     engine
         .mark_provider_stopped()
@@ -258,12 +369,13 @@ fn typed_chain_access_is_closed_before_start_and_open_while_running() {
 }
 
 #[test]
+#[cfg(feature = "transactions")]
 fn raw_broadcast_entries_cannot_bypass_history_when_any_wallet_component_is_present() {
     let client = Arc::new(CountingClient::new());
     let chain: Arc<dyn VerifiedChainClient> = client.clone();
     let signer: Arc<dyn ChainSigner> = Arc::new(citizen_signer::Sr25519SoftwareSigner);
     let engine = CitizenEngine::new(EngineComponents::new(
-        chain,
+        Some(chain),
         Some(signer),
         None,
         None,
@@ -296,6 +408,35 @@ fn raw_broadcast_entries_cannot_bypass_history_when_any_wallet_component_is_pres
     };
     assert_contract_error(watch_error, ContractErrorCode::InvalidState);
     assert_eq!(client.watches.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+#[cfg(feature = "transactions")]
+fn public_nonce_source_does_not_turn_a_chain_client_into_a_wallet() {
+    use citizen_sdk_contracts::Modules;
+    let client = Arc::new(CountingClient::new());
+    let engine = CitizenEngine::new(
+        EngineComponents::new(
+            Some(client.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .with_modules(Modules::try_new(Modules::CHAIN | Modules::TRANSACTIONS).unwrap())
+        .with_account_nonce_source(Arc::new(FixedTransferNonce { value: 7 })),
+    );
+    engine.update_capabilities(probes()).unwrap();
+    engine.begin_provider_start().unwrap();
+    futures::executor::block_on(engine.complete_provider_start()).unwrap();
+    let signed = SignedExtrinsic::try_new(vec![4, 1]).unwrap();
+    futures::executor::block_on(engine.submit_signed_extrinsic(signed.clone())).unwrap();
+    let _watch = engine.watch_signed_extrinsic(signed).unwrap();
+    assert_eq!(client.submits.load(Ordering::SeqCst), 1);
+    assert_eq!(client.watches.load(Ordering::SeqCst), 1);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -884,7 +1025,7 @@ fn transfer_harness(
     });
     let engine = CitizenEngine::new(
         EngineComponents::new(
-            chain,
+            Some(chain),
             Some(signer),
             Some(vault),
             None,
@@ -1067,6 +1208,12 @@ fn assert_contract_error(error: EngineError, expected: ContractErrorCode) {
 }
 
 #[test]
+#[cfg(all(
+    feature = "wallet",
+    feature = "signing",
+    feature = "transactions",
+    feature = "history"
+))]
 fn wallet_transfer_commits_pending_before_watch_then_persists_explicit_rejection() {
     let mut harness = transfer_harness(HistoryWriteMode::Gated, ProviderWatchMode::Invalid);
     let entered = harness
@@ -1139,6 +1286,12 @@ fn wallet_transfer_commits_pending_before_watch_then_persists_explicit_rejection
 }
 
 #[test]
+#[cfg(all(
+    feature = "wallet",
+    feature = "signing",
+    feature = "transactions",
+    feature = "history"
+))]
 fn wallet_transfer_never_broadcasts_when_pending_cas_fails_before_write() {
     let harness = transfer_harness(
         HistoryWriteMode::FailBeforeWrite,
@@ -1167,6 +1320,12 @@ fn wallet_transfer_never_broadcasts_when_pending_cas_fails_before_write() {
 }
 
 #[test]
+#[cfg(all(
+    feature = "wallet",
+    feature = "signing",
+    feature = "transactions",
+    feature = "history"
+))]
 fn wallet_transfer_stream_end_preserves_pending_and_same_account_gate() {
     let harness = transfer_harness(HistoryWriteMode::Immediate, ProviderWatchMode::StreamEnded);
     let error = futures::executor::block_on(harness.engine.transfer_with_remark(

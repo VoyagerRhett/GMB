@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../api/citizen_sdk_error.dart';
 import '../api/citizen_sdk_events.dart';
+import '../models/citizen_capability.dart';
 import '../models/citizen_chain_state.dart';
 import 'citizen_sdk_flutter_codec.dart';
 import 'citizen_sdk_platform.dart';
@@ -20,6 +21,7 @@ final class CitizenSdkFlutterSession {
   static Future<CitizenSdkFlutterSession> open({
     CitizenSdkPlatform? platform,
     CitizenSdkFlutterCodec codec = const CitizenSdkFlutterCodec(),
+    int modules = CitizenSdkModules.full,
   }) async {
     final selectedPlatform =
         platform ??
@@ -38,7 +40,10 @@ final class CitizenSdkFlutterSession {
       codec: codec,
     );
     try {
-      final raw = await session._platform.invoke('open', codec.encodeOpen());
+      final raw = await session._platform.invoke(
+        'open',
+        codec.encodeOpen(modules),
+      );
       // 先记录外壳中的原生 sessionId，再验证 open value。若 value 损坏，
       // catch 路径仍有足够身份关闭已经创建的原生实例。
       final response = codec.decodeResponseEnvelope(
@@ -355,8 +360,10 @@ final class CitizenSdkFlutterSession {
 }
 
 typedef _CitizenSdkRawEventHandler = void Function(Object? raw);
-typedef _CitizenSdkRawErrorHandler =
-    void Function(Object error, StackTrace stackTrace);
+typedef _CitizenSdkRawErrorHandler = void Function(
+  Object error,
+  StackTrace stackTrace,
+);
 
 final class _CitizenSdkEventHandler {
   const _CitizenSdkEventHandler(this.onData, this.onError);

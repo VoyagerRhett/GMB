@@ -119,7 +119,9 @@ SecretVault::SecretVault(SecureStore &store, WindowRef &parent)
   services_.availability = [this] { return cng_.availability(); };
   services_.authentication_available = [this] { return user_auth_->available(); };
   services_.create_password = [this] { return user_auth_->create_vault_password(); };
-  services_.unlock_password = [this] { return user_auth_->unlock_vault_password(); };
+  services_.unlock_password = [this](uint64_t host_operation_id) {
+    return user_auth_->unlock_vault_password(host_operation_id);
+  };
   services_.create_key = [this](const WalletKey &key, const SensitiveBuffer &password) {
     return cng_.create_key(key, password);
   };
@@ -272,7 +274,7 @@ void SecretVault::unwrap_dek(uint64_t host_operation_id, const WalletKey &key,
       throw HostError(CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED,
                       "TPM 2.0 and SDK-owned user authentication are required");
     }
-    AuthenticationResult authentication = services_.unlock_password();
+    AuthenticationResult authentication = services_.unlock_password(host_operation_id);
     if (authentication.code != CITIZENSDK_OK) {
       throw HostError(authentication.code, "CitizenSDK device-vault unlock was cancelled");
     }

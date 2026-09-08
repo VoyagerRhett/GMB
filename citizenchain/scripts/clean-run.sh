@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 清库后二选一启动(杀进程 + 删本机链数据 + 删链上中国运行时 PG,再按模式启动):
-#   [1] 冻结 SSOT + 从网络同步:用【冻结 SSOT】(node/chainspecs/citizenchain.plain.json)
+#   [1] 冻结 SSOT + 从网络同步:用【冻结 SSOT】(node/citizenchain.json)
 #       启动,作为新节点从区块链网络同步区块。
 #       要求:冻结创世 = 现网创世、且有可达 bootnode;本机为唯一节点时同步不到对等数据。
 #   [2] 隔离 fresh 新链:用【当前源码 genesis_build】启动一条独立本地新链。
@@ -45,7 +45,7 @@ GMB_REPOSITORY_ROOT="$(dirname "$CHAIN_ROOT")"
 
 # 在杀进程、清库之前先校验中央任务身份和工具，依赖只在本任务目录离线安装。
 # 本脚本不会自行创建任务或选择用户工具；未由控制台提供准确环境时立即失败。
-source "$GMB_REPOSITORY_ROOT/scripts/prepare-toolchain.sh"
+source "$GMB_REPOSITORY_ROOT/citizenchain/scripts/prepare-toolchain.sh"
 NODE_FRONTEND_DIST="$TATA_CONSOLE_WORK_DIR/node-frontend"
 ONCHINA_BUILD_DIST="$TATA_CONSOLE_WORK_DIR/onchina-frontend/dist"
 
@@ -85,7 +85,7 @@ echo "    已清库(node-key/keystore/tls 节点身份保留;china.sqlite 源数
 # ── 3. onchina 控制台 dev 配置 ──
 # 启动节点不需要任何机构鉴权/身份;此处仅准备链上中国平台手动启动所需资源(内嵌 PG + 前端 + china.sqlite)。
 echo "==> 构建 onchina 二进制 + 前端..."
-( cd "$CHAIN_ROOT" && cargo build -p onchina )
+( cd "$CHAIN_ROOT" && cargo build -p onchina --config "$CHAIN_ROOT/config.toml" )
 echo "==> 构建链上中国平台前端产物..."
 ( cd "$ONCHINA_FRONTEND_PROJECT" && ONCHINA_FRONTEND_DIST="$ONCHINA_BUILD_DIST" npm run build )
 PG_PREFIX=""
@@ -122,7 +122,7 @@ if [ "$MODE" = "2" ]; then
     echo "==> 用当前源码 fresh genesis 启动(genesis_build 现跑,宪法/立法院等 block#0 改动即时生效)..."
 else
     # 模式 1:不设 CITIZENCHAIN_CHAIN_SPEC → 默认冻结 SSOT;从网络同步区块。
-    echo "==> 用冻结创世(node/chainspecs/citizenchain.plain.json)启动,从网络同步区块..."
+    echo "==> 用冻结创世(node/citizenchain.json)启动,从网络同步区块..."
     echo "    注意:需冻结创世 = 现网创世、且有可达 bootnode;本机为唯一节点时同步不到对等数据。"
 fi
 cd "$CHAIN_ROOT/node"

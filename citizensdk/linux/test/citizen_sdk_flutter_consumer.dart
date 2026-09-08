@@ -67,6 +67,13 @@ Future<void> _verify() async {
     sdk = await CitizenSdk.open().timeout(_timeout);
     final opened = sdk;
     _require(opened.lifecycle == CitizenSdkLifecycle.created);
+    // 创世身份可在 start 前直接读取；空批量查询不能绕过 Core 的生命周期门。
+    final genesisHash = await opened.chain.getGenesisHash().timeout(_timeout);
+    _require(RegExp(r'^0x[0-9a-f]{64}$').hasMatch(genesisHash));
+    await _expectError(
+      () => opened.chain.getAccountBalances(const <String>[]),
+      CitizenSdkErrorCode.notReady,
+    );
     final lifecycleEvents = <CitizenSdkLifecycle>[];
     final capabilityEvents = <CitizenCapabilitySnapshot>[];
     var eventSequence = 0;

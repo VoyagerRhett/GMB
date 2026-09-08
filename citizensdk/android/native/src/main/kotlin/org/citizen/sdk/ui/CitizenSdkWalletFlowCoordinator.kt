@@ -10,6 +10,7 @@ import org.citizen.sdk.CitizenSdkException
 import org.citizen.sdk.CitizenSdkPreparedWallet
 import org.citizen.sdk.CitizenSdkPreparedReleaseStatus
 import org.citizen.sdk.CitizenWalletProfile
+import org.citizen.sdk.CitizenSdkOperation
 import java.lang.ref.WeakReference
 import java.security.SecureRandom
 import java.util.concurrent.CompletableFuture
@@ -22,8 +23,10 @@ class CitizenSdkWalletFlowCoordinator private constructor(
     @get:JvmSynthetic
     internal val sdk: CitizenSdk,
     @get:JvmSynthetic
-    internal val request: CitizenSdkWalletFlowContract.Request,
-    private val callback: CitizenSdkWalletFlowContract.Callback,
+    internal val request: CitizenSdkWalletFlowContract.Request?,
+    private val callback: CitizenSdkWalletFlowContract.Callback?,
+    @get:JvmSynthetic
+    internal val privateKeyView: CitizenSdkPrivateKeyView? = null,
 ) : AutoCloseable {
     private var flowActivity = WeakReference<CitizenSdkWalletFlowActivity>(null)
     private val detachCancellation = AtomicBoolean(false)
@@ -54,6 +57,7 @@ class CitizenSdkWalletFlowCoordinator private constructor(
     }
 
     fun cancel() {
+        privateKeyView?.let { it.end(cancelled = true); return }
         // Engine/session detach is allowed to remove the parent host first.
         // Still wait for the secure Activity teardown, but do not then wait
         // forever for a parent Activity that is intentionally gone.
@@ -166,7 +170,7 @@ class CitizenSdkWalletFlowCoordinator private constructor(
                     readinessWaiter.also { readinessWaiter = null }
                 }
                 waiter?.close()
-                callback.onResult(result)
+                callback?.onResult(result)
             }
         }
         if (Looper.myLooper() == Looper.getMainLooper()) deliver.run() else MAIN.post(deliver)
@@ -174,6 +178,11 @@ class CitizenSdkWalletFlowCoordinator private constructor(
 
     @JvmSynthetic
     internal fun attach(activity: CitizenSdkWalletFlowActivity) {
+        privateKeyView?.let {
+            synchronized(operationGate) { attachmentClaimPending = false }
+            it.attach(activity)
+            return
+        }
         val outcome = synchronized(operationGate) {
             attachmentClaimPending = false
             flowActivity = WeakReference(activity)
@@ -323,6 +332,7 @@ class CitizenSdkWalletFlowCoordinator private constructor(
         activity: CitizenSdkWalletFlowActivity,
         changingConfigurations: Boolean,
     ) {
+        privateKeyView?.let { it.destroyed(); return }
         synchronized(operationGate) {
             if (flowActivity.get() === activity) flowActivity = WeakReference(null)
             if (preparationInFlight) preparationCancelRequested = true
@@ -425,6 +435,31 @@ class CitizenSdkWalletFlowCoordinator private constructor(
             CitizenSdkCleanupRetention<CitizenSdkWalletFlowCoordinator>()
         private val MAIN = Handler(Looper.getMainLooper())
 
+        @JvmSynthetic
+        internal fun launchPrivateKeyView(sdk: CitizenSdk, activity: FragmentActivity, accountId: ByteArray): CitizenSdkOperation<Unit> {
+            check(Looper.myLooper() == Looper.getMainLooper()) { "private key view must start on the main thread" }
+            if (REGISTRY.values.any { it.sdk === sdk }) throw CitizenSdkException(
+                CitizenSdkErrorCode.BUSY, "CitizenSDK already owns a wallet interface",
+            )
+            if (activity.isFinishing || activity.isDestroyed) throw CitizenSdkException(
+                CitizenSdkErrorCode.UNAVAILABLE, "private key view host is unavailable",
+            )
+            val view = CitizenSdkPrivateKeyView(sdk, accountId)
+            val coordinator = CitizenSdkWalletFlowCoordinator(sdk, null, null, view)
+            check(REGISTRY.putIfAbsent(coordinator.flowId, coordinator) == null)
+            view.releaseOwner = {
+                coordinator.finished.set(true)
+                REGISTRY.remove(coordinator.flowId, coordinator)
+            }
+            try {
+                activity.startActivity(Intent(activity, CitizenSdkWalletFlowActivity::class.java)
+                    .putExtra(CitizenSdkWalletFlowActivity.EXTRA_FLOW_ID, coordinator.flowId))
+            } catch (failure: RuntimeException) {
+                view.failToLaunch(failure)
+            }
+            return view.operation
+        }
+
         @JvmStatic
         fun launch(
             sdk: CitizenSdk,
@@ -432,6 +467,11 @@ class CitizenSdkWalletFlowCoordinator private constructor(
             request: CitizenSdkWalletFlowContract.Request,
             callback: CitizenSdkWalletFlowContract.Callback,
         ): CitizenSdkWalletFlowCoordinator {
+            // 未选择钱包模块时在 Activity、秘密输入和等待宿主认证之前精确拒绝。
+            sdk.requireWalletUI()
+            if (REGISTRY.values.any { it.sdk === sdk && it.privateKeyView != null }) throw CitizenSdkException(
+                CitizenSdkErrorCode.BUSY, "CitizenSDK owns a private key view",
+            )
             val coordinator = CitizenSdkWalletFlowCoordinator(sdk, request, callback)
             check(REGISTRY.putIfAbsent(coordinator.flowId, coordinator) == null)
             try {
@@ -503,6 +543,95 @@ class CitizenSdkWalletFlowCoordinator private constructor(
                 ) return candidate
             }
         }
+    }
+}
+
+/** 私钥查看不重建、不等待父 Activity 恢复；仅在清屏与 Core 真实请求终态后释放 UI 注册。 */
+internal class CitizenSdkPrivateKeyView(private val sdk: CitizenSdk, accountId: ByteArray) {
+    val buffer = CitizenSdkPrivateKeyDisplayBuffer()
+    private val main = Handler(Looper.getMainLooper())
+    private val admission = sdk.openPrivateKeyView(accountId, buffer)
+    private val viewId = admission.first
+    private val core = admission.second
+    private val completion = CompletableFuture<Unit>()
+    val operation = CitizenSdkOperation(core.operationId, completion) { end(cancelled = true); !completion.isDone }
+    var releaseOwner: (() -> Unit)? = null
+    private var activity = WeakReference<CitizenSdkWalletFlowActivity>(null)
+    private var ending = false
+    private var coreDone = false
+    private var coreError: Throwable? = null
+    private var presentationError: Throwable? = null
+    private var uiGone = true
+    private var ready = false
+    private var revealAccepted = false
+
+    init {
+        buffer.bind(viewId)
+        buffer.listen { code -> main.post {
+            if (!ending) {
+                if (code == CitizenSdkErrorCode.OK.value) { ready = true; activity.get()?.privateKeyReady() }
+                else end(cancelled = false)
+            }
+        } }
+        core.future.whenComplete { _, failure -> main.post {
+            coreDone = true; coreError = failure
+            buffer.clear()
+            activity.get()?.clearPrivateKeyAndFinish()
+            completeIfReady()
+        } }
+    }
+
+    fun attach(value: CitizenSdkWalletFlowActivity) {
+        activity = WeakReference(value); uiGone = false
+        if (ending || coreDone) value.clearPrivateKeyAndFinish()
+    }
+    fun reveal() {
+        if (ending || revealAccepted) return
+        revealAccepted = true
+        try { sdk.revealPrivateKeyView(viewId) } catch (_: Throwable) { end(cancelled = false) }
+    }
+    fun isReady(): Boolean = ready && !ending
+    fun isAuthenticating(): Boolean {
+        if (ending) return false
+        val current = activity.get() ?: return false
+        val id = buffer.authenticationId() ?: return false
+        return sdk.isPrivateKeyAuthenticationActive(id, current)
+    }
+    fun failToLaunch(failure: Throwable) {
+        presentationError = CitizenSdkException(CitizenSdkErrorCode.UNAVAILABLE,
+            "Unable to start the CitizenSDK private key view", failure)
+        end(cancelled = true)
+    }
+    fun end(cancelled: Boolean) {
+        if (Looper.myLooper() != Looper.getMainLooper()) { main.post { end(cancelled) }; return }
+        if (ending) return
+        ending = true
+        // 锁内撤销接收并清零后才通知 Core finish；晚到的认证/display 不得复活 UI。
+        buffer.clear(); activity.get()?.clearPrivateKeyAndFinish()
+        buffer.authenticationId()?.let(sdk::cancelPrivateKeyAuthentication)
+        fun settle() {
+            if (coreDone) { completeIfReady(); return }
+            try {
+                if (cancelled) sdk.cancelPrivateKeyView(viewId)
+                sdk.finishPrivateKeyView(viewId)
+            } catch (_: Throwable) {
+                // 不以异常推定 Core 已释放，保留所有者和取消能力直到真实终态。
+                main.postDelayed({ settle() }, 100)
+            }
+        }
+        settle()
+    }
+    fun destroyed() {
+        buffer.clear(); activity = WeakReference(null); uiGone = true
+        if (!ending) end(cancelled = true)
+        completeIfReady()
+    }
+    private fun completeIfReady() {
+        if (!coreDone || !uiGone || completion.isDone) return
+        buffer.clear()
+        releaseOwner?.invoke(); releaseOwner = null
+        val failure = presentationError ?: coreError
+        if (failure == null) completion.complete(Unit) else completion.completeExceptionally(failure)
     }
 }
 

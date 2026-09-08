@@ -10,6 +10,7 @@ use std::{
 
 use citizen_sdk_contracts::CapabilitySnapshot;
 use citizen_sdk_engine::CitizenEngine;
+#[cfg(feature = "chain")]
 use citizen_sdk_smoldot_provider::{ProviderLifecycle, SmoldotVerifiedChainClient};
 
 use crate::{
@@ -17,7 +18,7 @@ use crate::{
         CitizenSdkErrorCode, CitizenSdkEventCallback, CitizenSdkEventType, CitizenSdkHandle,
         CitizenSdkHostServicesV1, CitizenSdkRequestId,
     },
-    capabilities::{provider_runtime_ready, require_snapshot},
+    capabilities::require_snapshot,
     composition::ProductComposition,
     error::{FfiError, FfiResult},
     events::{CompletionEventReservation, EventDispatcher},
@@ -103,10 +104,19 @@ pub struct NativeRuntime {
     owned_results: AtomicU64,
     cancellations: Mutex<HashMap<CitizenSdkRequestId, PendingRequest>>,
     capability_monitor: Mutex<Option<CapabilityMonitor>>,
+    #[cfg(feature = "chain")]
     chain_monitor: Mutex<Option<crate::chain_monitor::ChainMonitor>>,
 }
 
 impl NativeRuntime {
+    pub(crate) fn private_key_view_vault(
+        &self,
+        authorizing: Arc<dyn Fn(u64) -> i32 + Send + Sync>,
+    ) -> Option<Arc<dyn citizen_sdk_contracts::SecretVault>> {
+        self.composition.private_key_view_vault(authorizing)
+    }
+
+    #[cfg(all(test, feature = "chain", feature = "transactions"))]
     pub fn new(
         handle: CitizenSdkHandle,
         combined_chain_spec: String,
@@ -122,31 +132,7 @@ impl NativeRuntime {
         )
     }
 
-    /// Creates one instance from copied, validated host service vtables.
-    ///
-    /// # Safety
-    /// Nested vtable pointers must be readable for this call. Copied callback
-    /// code and contexts must remain valid and thread-safe until successful
-    /// instance destruction returns.
-    pub unsafe fn new_with_host(
-        handle: CitizenSdkHandle,
-        combined_chain_spec: String,
-        system_name: String,
-        system_version: String,
-        host_services: &CitizenSdkHostServicesV1,
-    ) -> FfiResult<Arc<Self>> {
-        // SAFETY: forwarded from this method's documented caller contract.
-        let composition = unsafe {
-            ProductComposition::host_abi(
-                combined_chain_spec,
-                system_name,
-                system_version,
-                host_services,
-            )
-        }?;
-        Self::new_with_composition(handle, composition, &ownership::RESULT_HANDLES)
-    }
-
+    #[cfg(all(test, feature = "chain", feature = "transactions"))]
     fn new_with_result_allocator(
         handle: CitizenSdkHandle,
         combined_chain_spec: String,
@@ -159,7 +145,7 @@ impl NativeRuntime {
         Self::new_with_composition(handle, composition, result_handles)
     }
 
-    fn new_with_composition(
+    pub(crate) fn new_with_composition(
         handle: CitizenSdkHandle,
         composition: ProductComposition,
         result_handles: &'static ResultHandleAllocator,
@@ -182,6 +168,7 @@ impl NativeRuntime {
             owned_results: AtomicU64::new(0),
             cancellations: Mutex::new(HashMap::new()),
             capability_monitor: Mutex::new(None),
+            #[cfg(feature = "chain")]
             chain_monitor: Mutex::new(None),
         }))
     }
@@ -194,11 +181,52 @@ impl NativeRuntime {
         self.composition.engine()
     }
 
-    pub fn provider(&self) -> &Arc<SmoldotVerifiedChainClient> {
-        self.composition.provider()
+    pub(crate) const fn has_modules(&self, bits: u32) -> bool {
+        self.composition.has_modules(bits)
     }
 
-    pub const fn uses_host_services(&self) -> bool {
+    #[cfg(feature = "chain")]
+    pub fn provider(&self) -> FfiResult<&Arc<SmoldotVerifiedChainClient>> {
+        self.composition.provider().ok_or_else(|| {
+            FfiError::new(
+                CitizenSdkErrorCode::Unsupported,
+                "chain module is not selected",
+            )
+        })
+    }
+
+    /// 同一工作线程驱动已组合的真实依赖；纯钱包/签名不创建轻节点运行时。
+    pub fn drive<F: std::future::Future>(&self, future: F) -> FfiResult<F::Output> {
+        #[cfg(feature = "chain")]
+        if let Some(provider) = self.composition.provider() {
+            return provider.drive(future).map_err(FfiError::from);
+        }
+        Ok(futures_executor::block_on(future))
+    }
+
+    /// # Safety
+    /// Non-null copied host callbacks must outlive successful destruction.
+    pub unsafe fn new_with_modules(
+        handle: CitizenSdkHandle,
+        combined_chain_spec: Option<String>,
+        system_name: String,
+        system_version: String,
+        host_services: Option<&CitizenSdkHostServicesV1>,
+        modules: citizen_sdk_contracts::Modules,
+    ) -> FfiResult<Arc<Self>> {
+        let composition = unsafe {
+            ProductComposition::module_abi(
+                combined_chain_spec,
+                system_name,
+                system_version,
+                host_services,
+                modules,
+            )
+        }?;
+        Self::new_with_composition(handle, composition, &ownership::RESULT_HANDLES)
+    }
+
+    pub fn uses_host_services(&self) -> bool {
         self.composition.uses_host_services()
     }
 
@@ -405,7 +433,7 @@ impl NativeRuntime {
             .ok()
             .and_then(|mut cancellations| cancellations.remove(&request_id));
         let Some(PendingRequest {
-            cancellation: _,
+            cancellation,
             completion_event,
             result: result_reservation,
             exclusive,
@@ -413,6 +441,15 @@ impl NativeRuntime {
         else {
             return;
         };
+        #[cfg(feature = "qr")]
+        let outcome = if matches!(cancellation, CancellationState::Requested)
+            && matches!(&outcome, Ok(ResultPayload::QrReview(_) | ResultPayload::QrSigned(_)))
+        {
+            // 与取消登记同一 registry 线性化；关闭最后一段计算到结果提交之间的竞态。
+            Err(FfiError::new(CitizenSdkErrorCode::Cancelled, "二维码操作已取消且真实作业已排空"))
+        } else { outcome };
+        #[cfg(not(feature = "qr"))]
+        let _ = cancellation;
         let result = match outcome {
             Ok(payload) => OwnedResult::success(self.handle, payload),
             Err(error) => OwnedResult::failure(self.handle, error),
@@ -497,19 +534,41 @@ impl NativeRuntime {
     /// never infers usability from peer count, height, elapsed time, or Engine
     /// lifecycle alone.
     pub fn refresh_provider_capabilities(&self) -> FfiResult<CapabilitySnapshot> {
+        self.refresh_capability_readiness(false)
+    }
+
+    /// 只刷新链读取的真实 provider readiness，不能为公开余额查询探测钱包或金库。
+    pub fn refresh_chain_readiness(&self) -> FfiResult<CapabilitySnapshot> {
+        self.refresh_capability_readiness(true)
+    }
+
+    fn refresh_capability_readiness(&self, chain_only: bool) -> FfiResult<CapabilitySnapshot> {
         let before = self.capability_snapshot()?.revision();
-        let lifecycle = self.provider().lifecycle()?;
-        let status_error = if lifecycle == ProviderLifecycle::Running {
-            match self.provider().drive(self.provider().status()) {
-                Ok(Ok(status)) => (provider_runtime_ready(lifecycle, status.is_usable), None),
-                Ok(Err(error)) | Err(error) => (false, Some(FfiError::from(error))),
+        #[cfg(feature = "chain")]
+        let status_error = if let Some(provider) = self.composition.provider() {
+            let lifecycle = provider.lifecycle()?;
+            if lifecycle == ProviderLifecycle::Running {
+                match provider.drive(provider.status()) {
+                    Ok(Ok(status)) => (
+                        crate::capabilities::provider_runtime_ready(lifecycle, status.is_usable),
+                        None,
+                    ),
+                    Ok(Err(error)) | Err(error) => (false, Some(FfiError::from(error))),
+                }
+            } else {
+                (false, None)
             }
         } else {
-            (provider_runtime_ready(lifecycle, false), None)
+            (false, None)
         };
-        let snapshot = self
-            .engine()
-            .update_capabilities(self.composition.capability_probes(status_error.0))?;
+        #[cfg(not(feature = "chain"))]
+        let status_error: (bool, Option<FfiError>) = (false, None);
+        let snapshot = if chain_only {
+            self.engine().update_chain_readiness(status_error.0)?
+        } else {
+            self.engine()
+                .update_capabilities(self.composition.capability_probes(status_error.0))?
+        };
         let publish_error = if snapshot.revision() != before {
             self.dispatcher
                 .send(
@@ -678,6 +737,7 @@ impl NativeRuntime {
             .send(CitizenSdkEventType::HistoryChanged, 0, 0, 0)
     }
 
+    #[cfg(feature = "chain")]
     pub(crate) fn start_product_services(self: &Arc<Self>) -> FfiResult<()> {
         let mut monitor = self
             .chain_monitor
@@ -688,7 +748,7 @@ impl NativeRuntime {
         }
         let wallet = self.composition.has_wallet_services();
         if wallet {
-            self.provider()
+            self.provider()?
                 .drive(self.engine().start_chain_monitor())?
                 .map_err(FfiError::from)?;
         }
@@ -702,10 +762,14 @@ impl NativeRuntime {
     /// Converge every failure after provider startup side effects into the
     /// one-way failed-start state. Cleanup is best-effort so callers can return
     /// the original causal error unchanged; destroy remains the only recovery.
+    #[cfg(feature = "chain")]
     pub fn converge_failed_start(&self) {
         let _ = self.stop_product_services();
-        if matches!(self.provider().lifecycle(), Ok(ProviderLifecycle::Running)) {
-            let _ = self.provider().stop();
+        let Ok(provider) = self.provider() else {
+            return;
+        };
+        if matches!(provider.lifecycle(), Ok(ProviderLifecycle::Running)) {
+            let _ = provider.stop();
         }
         if matches!(
             self.engine().lifecycle(),
@@ -715,7 +779,7 @@ impl NativeRuntime {
         } else if matches!(
             self.engine().lifecycle(),
             Ok(citizen_sdk_engine::EngineLifecycle::Running)
-        ) && matches!(self.provider().lifecycle(), Ok(ProviderLifecycle::Stopped))
+        ) && matches!(provider.lifecycle(), Ok(ProviderLifecycle::Stopped))
         {
             // 最后一个启动阶段（自有 worker 启动）失败时，不能留下 provider 已停、
             // Engine 却仍 Running 的矛盾事实；实例保持单向停止，只能销毁。
@@ -784,10 +848,13 @@ impl NativeRuntime {
 
         // 产品后台服务若存在，必须先停止并 drain；provider 是最后一个被关闭的依赖。
         self.stop_product_services()?;
-        if self.provider().lifecycle()? == ProviderLifecycle::Running {
-            self.provider().stop()?;
-            if self.engine().lifecycle()? == citizen_sdk_engine::EngineLifecycle::Running {
-                self.engine().mark_provider_stopped()?;
+        #[cfg(feature = "chain")]
+        if let Some(provider) = self.composition.provider() {
+            if provider.lifecycle()? == ProviderLifecycle::Running {
+                provider.stop()?;
+                if self.engine().lifecycle()? == citizen_sdk_engine::EngineLifecycle::Running {
+                    self.engine().mark_provider_stopped()?;
+                }
             }
         }
         self.engine().dispose()?;
@@ -797,13 +864,16 @@ impl NativeRuntime {
     /// 停止显式 `citizensdk_stop` 前的产品侧服务；顺序与 destroy 共用同一组合边界。
     pub fn stop_product_services(&self) -> FfiResult<()> {
         self.engine().stop_chain_monitor()?;
-        let monitor = self
-            .chain_monitor
-            .lock()
-            .map_err(|_| FfiError::internal("chain monitor lock poisoned"))?
-            .take();
-        if let Some(monitor) = monitor {
-            monitor.stop()?;
+        #[cfg(feature = "chain")]
+        {
+            let monitor = self
+                .chain_monitor
+                .lock()
+                .map_err(|_| FfiError::internal("chain monitor lock poisoned"))?
+                .take();
+            if let Some(monitor) = monitor {
+                monitor.stop()?;
+            }
         }
         self.composition.stop_and_drain_product_services()
     }
@@ -864,7 +934,7 @@ fn capability_monitor_loop(runtime: Weak<NativeRuntime>, stop: Arc<(Mutex<bool>,
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "chain", feature = "transactions"))]
 mod tests {
     use std::{
         ffi::c_void,
@@ -984,6 +1054,36 @@ mod tests {
         runtime
             .shutdown()
             .unwrap_or_else(|error| panic!("runtime shutdown failed: {error:?}"));
+    }
+
+    #[cfg(feature = "qr")]
+    #[test]
+    fn qr_cancel_after_work_before_commit_suppresses_success_and_keeps_destroy_busy_until_release() {
+        let runtime = runtime();
+        let (sender, receiver) = mpsc::channel::<CitizenSdkEvent>();
+        runtime.set_event_callback(Some(record_event), (&sender as *const mpsc::Sender<CitizenSdkEvent>).cast_mut().cast()).unwrap();
+        for _ in 0..2 { receiver.recv_timeout(Duration::from_secs(2)).unwrap(); }
+        let (id, _cancellation) = runtime.begin_request(true).unwrap();
+        assert_eq!(runtime.shutdown().unwrap_err().code, CitizenSdkErrorCode::Busy);
+        runtime.request_cancel(id).unwrap();
+        runtime.complete_request(id, Ok(ResultPayload::QrSigned("{\"kind\":2}".to_owned())));
+        let event = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(event.request_id, id);
+        let result = ownership::get(event.result).unwrap();
+        assert_eq!(result.code, CitizenSdkErrorCode::Cancelled);
+        assert!(matches!(result.payload, ResultPayload::Empty));
+        assert_eq!(runtime.shutdown().unwrap_err().code, CitizenSdkErrorCode::Busy);
+        ownership::release(event.result).unwrap();
+        runtime.result_released();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match runtime.set_event_callback(None, std::ptr::null_mut()) {
+                Ok(()) => break,
+                Err(error) if error.code == CitizenSdkErrorCode::Busy && Instant::now() < deadline => std::thread::yield_now(),
+                Err(error) => panic!("callback drain failed: {error:?}"),
+            }
+        }
+        runtime.shutdown().unwrap();
     }
 
     #[test]
@@ -1185,12 +1285,19 @@ mod tests {
             .unwrap_or_else(|error| panic!("Engine start reservation failed: {error}"));
         runtime
             .provider()
-            .drive(runtime.provider().start())
+            .unwrap_or_else(|error| panic!("chain missing: {error:?}"))
+            .drive(
+                runtime
+                    .provider()
+                    .unwrap_or_else(|error| panic!("chain missing: {error:?}"))
+                    .start(),
+            )
             .unwrap_or_else(|error| panic!("provider drive failed: {error}"))
             .unwrap_or_else(|error| panic!("provider start failed: {error}"));
         assert_eq!(
             runtime
                 .provider()
+                .unwrap_or_else(|error| panic!("chain missing: {error:?}"))
                 .lifecycle()
                 .unwrap_or_else(|error| panic!("provider lifecycle failed: {error}")),
             ProviderLifecycle::Running
@@ -1201,6 +1308,7 @@ mod tests {
         assert_ne!(
             runtime
                 .provider()
+                .unwrap_or_else(|error| panic!("chain missing: {error:?}"))
                 .lifecycle()
                 .unwrap_or_else(|error| panic!("provider lifecycle failed: {error}")),
             ProviderLifecycle::Running

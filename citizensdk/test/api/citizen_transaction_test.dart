@@ -42,10 +42,10 @@ void main() {
 
   test('finalized历史以账户闭集显式初始化和增量同步', () async {
     final sdk = await CitizenSdk.open();
-    final initialized = await sdk.transactions.initializeFinalizedHistory(
-      <String>[_account(1)],
-    );
-    final synced = await sdk.transactions.syncFinalizedHistory(<String>[
+    final initialized = await sdk.history.initializeFinalizedHistory(<String>[
+      _account(1),
+    ]);
+    final synced = await sdk.history.syncFinalizedHistory(<String>[
       _account(1),
     ]);
 
@@ -92,17 +92,17 @@ void main() {
       throwsA(invalid),
     );
     await expectLater(
-      sdk.transactions.initializeFinalizedHistory(const <String>[]),
+      sdk.history.initializeFinalizedHistory(const <String>[]),
       throwsA(invalid),
     );
     await expectLater(
-      sdk.transactions.syncFinalizedHistory(
+      sdk.history.syncFinalizedHistory(
         List<String>.filled(1991, _account(1), growable: false),
       ),
       throwsA(invalid),
     );
     await expectLater(
-      sdk.transactions.syncFinalizedHistory(<String>[_account(1), _account(1)]),
+      sdk.history.syncFinalizedHistory(<String>[_account(1), _account(1)]),
       throwsA(invalid),
     );
     expect(platform.historyMethods, isEmpty);

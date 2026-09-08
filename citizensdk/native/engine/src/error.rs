@@ -17,6 +17,8 @@ pub enum EngineError {
     /// A provider, typed store, or validated contract rejected an operation.
     /// The stable typed code is retained all the way to language bindings.
     Contract(ContractError),
+    /// SDK 自有查看已撤销；区别于金库返回的生物认证取消。
+    Cancelled,
     /// Internal synchronized state was poisoned and is no longer trustworthy.
     StatePoisoned,
 }
@@ -35,6 +37,7 @@ impl fmt::Display for EngineError {
                 write!(formatter, "capability unavailable: {reason}")
             }
             Self::Contract(error) => write!(formatter, "typed contract failed: {error}"),
+            Self::Cancelled => formatter.write_str("SDK operation was cancelled"),
             Self::StatePoisoned => formatter.write_str("engine synchronized state is poisoned"),
         }
     }

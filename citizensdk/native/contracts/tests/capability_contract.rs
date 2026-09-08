@@ -97,3 +97,22 @@ fn ready_and_not_ready_states_cannot_be_ambiguous() {
         "engine_not_running"
     );
 }
+
+#[test]
+fn modules_validate_every_combination_and_reject_unknown_bits() {
+    use citizen_sdk_contracts::Modules;
+    assert_eq!(Modules::full().bits(), Modules::ALL);
+    for bits in 0..=Modules::ALL {
+        let valid = bits != 0
+            && (bits & (Modules::TRANSACTIONS | Modules::HISTORY) == 0
+                || bits & Modules::CHAIN != 0);
+        assert_eq!(Modules::try_new(bits).is_ok(), valid, "modules={bits}");
+    }
+    assert!(Modules::try_new(Modules::ALL | 64).is_err());
+    assert!(Modules::try_new(u32::MAX).is_err());
+    let wallet = Modules::try_new(Modules::WALLET).expect("钱包可独立选择");
+    assert!(wallet.contains(Modules::WALLET));
+    assert!(!wallet.contains(Modules::WALLET | Modules::SIGNING));
+    assert!(Modules::try_new(Modules::SIGNING).is_ok());
+    assert!(Modules::try_new(Modules::QR).is_ok());
+}

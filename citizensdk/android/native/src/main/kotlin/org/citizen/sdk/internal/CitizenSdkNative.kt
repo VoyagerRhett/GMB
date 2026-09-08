@@ -2,19 +2,26 @@
 
 package org.citizen.sdk.internal
 
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.charset.CodingErrorAction
+import java.nio.charset.StandardCharsets
 import org.citizen.sdk.*
+import org.citizen.sdk.ui.CitizenSdkPrivateKeyDisplayBuffer
 
 /** One private JNI owner; no native identity is returned by a public method. */
 internal class CitizenSdkNative private constructor(
-    assets: CitizenSdkAssets,
+    assets: CitizenSdkAssets?,
     hostServices: CitizenSdkHostServices,
+    modules: Int,
 ) : AutoCloseable {
     private val calls = CitizenSdkNativeCalls()
     private val bridge = nativeCreate(
         hostServices,
-        assets.manifest,
-        assets.chainSpec,
-        assets.lightSyncState,
+        assets?.manifest ?: byteArrayOf(),
+        assets?.chainSpec ?: byteArrayOf(),
+        assets?.lightSyncState ?: byteArrayOf(),
+        modules,
     )
 
     @Volatile
@@ -47,10 +54,19 @@ internal class CitizenSdkNative private constructor(
     fun stop(): Long = call { nativeStop(it) }
     fun cancel(coreRequestId: Long): Boolean = call { nativeCancel(it, coreRequestId) }
     fun getFinalizedHead(): Long = call { nativeGetFinalizedHead(it) }
+    fun getGenesisHash(): ByteArray = call { nativeGetGenesisHash(it) }
     fun getAccountBalance(accountId: ByteArray): Long = call { nativeGetAccountBalance(it, accountId) }
+    fun getAccountBalances(accountIds: Array<ByteArray>): Long =
+        call { nativeGetAccountBalances(it, flattenAccounts(accountIds), accountIds.size) }
     fun getAccountNonce(accountId: ByteArray): Long = call { nativeGetAccountNonce(it, accountId) }
     fun getFeeSnapshot(): Long = call { nativeGetFeeSnapshot(it) }
     fun getWalletProfile(): Long = call { nativeGetWalletProfile(it) }
+    fun openPrivateKeyView(accountId: ByteArray, buffer: CitizenSdkPrivateKeyDisplayBuffer): LongArray =
+        call { nativeOpenPrivateKeyView(it, accountId, buffer) }
+    fun revealPrivateKeyView(viewId: Long) = call { nativeRevealPrivateKeyView(it, viewId) }
+    fun cancelPrivateKeyView(viewId: Long) = call { nativeCancelPrivateKeyView(it, viewId) }
+    fun finishPrivateKeyView(viewId: Long) = call { nativeFinishPrivateKeyView(it, viewId) }
+    fun releasePrivateKeyViewContext(context: Long) = call { nativeReleasePrivateKeyViewContext(context) }
     fun validateWalletPassword(password: ByteArray) = call { nativeValidateWalletPassword(password) }
     fun validateWalletMnemonic(mnemonic: ByteArray, wordCount: Int) = call { nativeValidateWalletMnemonic(mnemonic, wordCount) }
     fun walletWordSuggestions(prefix: ByteArray): ByteArray = call { nativeWalletWordSuggestions(prefix) }
@@ -62,6 +78,43 @@ internal class CitizenSdkNative private constructor(
     fun reconcileWalletCleanup(): Long = call { nativeReconcileWalletCleanup(it) }
     fun signWalletPayload(accountId: ByteArray, message: ByteArray): Long =
         call { nativeSignWalletPayload(it, accountId, message) }
+    fun qrParse(text: String): CitizenQrDocument = call {
+        CitizenQrDocument.parse(strictUtf8(nativeQrParse(it, text.toByteArray(Charsets.UTF_8))))
+    }
+    fun qrCreateSignRequest(action: Int, accountId: ByteArray, payload: ByteArray, ttl: Long): String =
+        call { strictUtf8(nativeQrCreateSignRequest(it, action, accountId, payload, ttl)) }
+    fun reviewQrSignRequest(text: String): Long = call { nativeReviewQrSignRequest(it, text.toByteArray(Charsets.UTF_8)) }
+    fun signQrRequest(token: Long): Long = call { nativeSignQrRequest(it, token) }
+    fun releaseQrReview(token: Long) = call { nativeReleaseQrReview(it, token) }
+    fun qrConsumeSignResponse(text: String): ByteArray =
+        call { nativeQrConsumeSignResponse(it, text.toByteArray(Charsets.UTF_8)).also { bytes -> check(bytes.size == 64) } }
+    fun qrCancelSignRequest(requestId: String): Boolean =
+        call { nativeQrCancelSignRequest(it, requestId.toByteArray(Charsets.UTF_8)) }
+    fun qrEncodeAccountId(accountId: ByteArray): String =
+        call { strictUtf8(nativeQrEncodeAccountId(it, accountId)) }
+    fun qrEncodeUserTransfer(
+        requestId: String, expiresAt: Long, accountId: ByteArray, amount: String,
+        symbol: String, memo: String, bankCidNumber: String,
+    ): String = call {
+        strictUtf8(nativeQrEncodeUserTransfer(
+            it, requestId.toByteArray(Charsets.UTF_8), expiresAt, accountId,
+            amount.toByteArray(Charsets.UTF_8), symbol.toByteArray(Charsets.UTF_8),
+            memo.toByteArray(Charsets.UTF_8), bankCidNumber.toByteArray(Charsets.UTF_8),
+        ))
+    }
+    fun qrDecodeLuminance(data: ByteArray, width: Int, height: Int, rowStride: Int): CitizenQrDocument =
+        qrParse(call { strictUtf8(nativeQrDecodeLuminance(it, data, width, height, rowStride)) })
+    fun qrEncode(text: String, scale: Int): CitizenQrImage = call {
+        val encoded = nativeQrEncode(it, text.toByteArray(Charsets.UTF_8), scale)
+        require(encoded.size >= 8) { "QR image result is truncated" }
+        val header = ByteBuffer.wrap(encoded, 0, 8).order(ByteOrder.LITTLE_ENDIAN)
+        val width = header.int
+        val height = header.int
+        require(width in 1..4096 && height in 1..4096 && encoded.size - 8 == width * height) {
+            "QR image result dimensions are invalid"
+        }
+        CitizenQrImage(width, height, encoded.copyOfRange(8, encoded.size))
+    }
     fun transferWithRemark(
         source: ByteArray,
         destination: ByteArray,
@@ -86,10 +139,12 @@ internal class CitizenSdkNative private constructor(
     }
 
     @Suppress("unused") // Called only by citizensdk_jni.
-    private fun onNativeRequestCompleted(coreRequestId: Long, encoded: ByteArray) {
+    private fun onNativeRequestCompleted(coreRequestId: Long, encoded: ByteArray): Boolean {
+        var accepted = true
         val decoded = try {
             CitizenSdkNativeCodec.decode(encoded)
         } catch (error: Throwable) {
+            accepted = false
             CitizenSdkNativeCodec.Decoded(
                 result = null,
                 error = CitizenSdkException(
@@ -99,7 +154,9 @@ internal class CitizenSdkNative private constructor(
                 ),
             )
         }
-        router?.onCompletion(coreRequestId, decoded)
+        val target = router ?: return false
+        target.onCompletion(coreRequestId, decoded)
+        return accepted
     }
 
     @Suppress("unused") // Called only by citizensdk_jni.
@@ -165,11 +222,17 @@ internal class CitizenSdkNative private constructor(
         else -> throw CitizenSdkException(CitizenSdkErrorCode.INTEGRITY, "unknown Core lifecycle $value")
     }
 
+    private fun strictUtf8(value: ByteArray): String = StandardCharsets.UTF_8.newDecoder()
+        .onMalformedInput(CodingErrorAction.REPORT)
+        .onUnmappableCharacter(CodingErrorAction.REPORT)
+        .decode(ByteBuffer.wrap(value)).toString()
+
     private external fun nativeCreate(
         hostServices: CitizenSdkHostServices,
         manifest: ByteArray,
         chainSpec: ByteArray,
         lightSyncState: ByteArray,
+        modules: Int,
     ): Long
     private external fun nativeBind(bridge: Long)
     private external fun nativeLifecycle(bridge: Long): Int
@@ -179,16 +242,34 @@ internal class CitizenSdkNative private constructor(
     private external fun nativeStop(bridge: Long): Long
     private external fun nativeCancel(bridge: Long, coreRequestId: Long): Boolean
     private external fun nativeGetFinalizedHead(bridge: Long): Long
+    private external fun nativeGetGenesisHash(bridge: Long): ByteArray
     private external fun nativeGetAccountBalance(bridge: Long, accountId: ByteArray): Long
+    private external fun nativeGetAccountBalances(bridge: Long, accountIds: ByteArray, count: Int): Long
     private external fun nativeGetAccountNonce(bridge: Long, accountId: ByteArray): Long
     private external fun nativeGetFeeSnapshot(bridge: Long): Long
     private external fun nativeGetWalletProfile(bridge: Long): Long
+    private external fun nativeOpenPrivateKeyView(bridge: Long, accountId: ByteArray, buffer: CitizenSdkPrivateKeyDisplayBuffer): LongArray
+    private external fun nativeRevealPrivateKeyView(bridge: Long, viewId: Long)
+    private external fun nativeCancelPrivateKeyView(bridge: Long, viewId: Long)
+    private external fun nativeFinishPrivateKeyView(bridge: Long, viewId: Long)
+    private external fun nativeReleasePrivateKeyViewContext(context: Long)
     private external fun nativeSetActiveWalletAccount(bridge: Long, accountId: ByteArray): Long
     private external fun nativeRenameWalletAccount(bridge: Long, accountId: ByteArray, name: ByteArray): Long
     private external fun nativeDeleteWalletAccount(bridge: Long, accountId: ByteArray): Long
     private external fun nativeDeleteWallet(bridge: Long): Long
     private external fun nativeReconcileWalletCleanup(bridge: Long): Long
     private external fun nativeSignWalletPayload(bridge: Long, accountId: ByteArray, message: ByteArray): Long
+    private external fun nativeQrParse(bridge: Long, text: ByteArray): ByteArray
+    private external fun nativeQrCreateSignRequest(bridge: Long, action: Int, accountId: ByteArray, payload: ByteArray, ttl: Long): ByteArray
+    private external fun nativeReviewQrSignRequest(bridge: Long, text: ByteArray): Long
+    private external fun nativeSignQrRequest(bridge: Long, token: Long): Long
+    private external fun nativeReleaseQrReview(bridge: Long, token: Long)
+    private external fun nativeQrConsumeSignResponse(bridge: Long, text: ByteArray): ByteArray
+    private external fun nativeQrCancelSignRequest(bridge: Long, requestId: ByteArray): Boolean
+    private external fun nativeQrEncodeAccountId(bridge: Long, accountId: ByteArray): ByteArray
+    private external fun nativeQrEncodeUserTransfer(bridge: Long, requestId: ByteArray, expiresAt: Long, accountId: ByteArray, amount: ByteArray, symbol: ByteArray, memo: ByteArray, bankCidNumber: ByteArray): ByteArray
+    private external fun nativeQrDecodeLuminance(bridge: Long, data: ByteArray, width: Int, height: Int, rowStride: Int): ByteArray
+    private external fun nativeQrEncode(bridge: Long, text: ByteArray, scale: Int): ByteArray
     private external fun nativeTransferWithRemark(
         bridge: Long,
         source: ByteArray,
@@ -219,9 +300,16 @@ internal class CitizenSdkNative private constructor(
         init { System.loadLibrary("citizensdk_jni") }
 
         internal fun create(
-            assets: CitizenSdkAssets,
+            assets: CitizenSdkAssets?,
             hostServices: CitizenSdkHostServices,
-        ): CitizenSdkNative = CitizenSdkNative(assets, hostServices)
+            modules: Int = CitizenSdkModules.FULL,
+        ): CitizenSdkNative = CitizenSdkNative(assets, hostServices, modules)
+
+        @JvmStatic
+        internal external fun validateModules(modules: Int)
+
+        @JvmStatic
+        internal external fun verifySignature(accountId: ByteArray, signature: ByteArray, message: ByteArray): Boolean
 
         @JvmStatic
         internal external fun completeVaultUnwrap(nativeBridge: Long, hostOperationId: Long, errorCode: Int)

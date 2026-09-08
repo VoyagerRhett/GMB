@@ -284,7 +284,7 @@ class _HomePageState extends State<HomePage> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Image.asset(
-              'assets/icons/citizen-logo.png',
+              'resources/icons/citizen-logo.png',
               key: const Key('citizenLogo'),
               width: 22,
               height: 22,
@@ -555,7 +555,7 @@ class _HomePageState extends State<HomePage> {
                 // 本钱包扫码签名(只扫本钱包账户)。
                 IconButton(
                   icon: SvgPicture.asset(
-                    'assets/icons/scan-line.svg',
+                    'resources/icons/scan-line.svg',
                     width: 20,
                     height: 20,
                     colorFilter: const ColorFilter.mode(

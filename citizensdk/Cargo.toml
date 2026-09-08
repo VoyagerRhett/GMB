@@ -3,6 +3,7 @@ members = [
     "native/contracts",
     "native/engine",
     "native/ffi",
+    "native/qr",
     "native/signer",
     "native/smoldot/provider",
 ]

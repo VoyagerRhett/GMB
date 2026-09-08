@@ -38,7 +38,7 @@ int main() {
   assert(config.storage_root == temporary.path() / "xdg-data");
   assert(config.asset_root == assets);
   assert(config.gtk_parent_window == nullptr);
-  assert(config.enable_wallet);
+  assert(config.modules == CITIZENSDK_MODULE_FULL);
 
   auto invalid = inputs;
   invalid.application_id = "shared-default";
@@ -50,6 +50,8 @@ int main() {
                  CITIZENSDK_ERROR_INVALID_ARGUMENT);
 
   std::filesystem::remove(assets / "manifest.json");
+  assert(FlutterEnvironment::resolve(inputs, CITIZENSDK_MODULE_WALLET).modules == CITIZENSDK_MODULE_WALLET);
+  assert(FlutterEnvironment::resolve(inputs, CITIZENSDK_MODULE_SIGNING).modules == CITIZENSDK_MODULE_SIGNING);
   expect_failure([&] { (void)FlutterEnvironment::resolve(inputs); },
                  CITIZENSDK_ERROR_INTEGRITY);
   write_asset(assets / "manifest.json");

@@ -11,7 +11,7 @@ CitizenChatServer 是公民产品使用的 TataChatServer Cloudflare 实例。�
 
 CitizenChatServer 是无宿主操作系统平台的云端服务；Cloudflare 是它的部署供应商，不是
 iOS、Android、macOS、LinuxARM、LinuxAMD、Windows、WASM 或 SDK 这类发布平台。
-因此 `product.json` 与正式 Release manifest 使用 `deployment_provider: cloudflare`，禁止再把
+因此 `scripts/product.json` 与正式 Release manifest 使用 `deployment_provider: cloudflare`，禁止再把
 `cloudflare` 写入这两个合同的 `platform` 字段。
 
 QR_V1 发布/恢复签名载荷与现有 action 边界中的 `platform=cloudflare` 属于尚未迁移的既有
@@ -24,15 +24,16 @@ QR_V1 发布/恢复签名载荷与现有 action 边界中的 `platform=cloudflar
 - 授权受众：`citizenchatserver`
 - 通用实现：TATA 仓库的 `tatachatserver`
 
-正式 Worker 由 TataChatServer 的 `cloudflare/assemble.mjs` 在
-`TATA/tataconsole/target/.work/citizenchatserver-cloudflare/` 中装配。装配器按 TATA 仓库原布局把
-TataChatServer 与构建期唯一协议源 TataChatSDK 复制到隔离目录，调用官方锁定版
-`worker-build`。TataChatSDK 只提供 OpenMLS/protobuf 规范，不进入最终候选。候选只保留：
+本机候选由中央 `flows/gmb/citizenchatserver/cloudflare/build.sh` 调用同目录 `ci.mjs`，在
+`TATA/tataconsole/work/gmb/citizenchatserver/cloudflare/stage/candidate/` 中装配。
+流程消费并校验 TataChatServer 的正式 Cloudflare Release，复制其中的 Worker 与唯一 D1
+结构，再绑定当前 GMB `main` 的实例声明；不复制聊天源码或调用 `worker-build` 重新编译。
+验真后的候选由本机入口归档到准确产物库目录。候选只保留：
 
 - 官方 Worker 运行模块集：`worker/shim.mjs`、`index.js`、WebAssembly、必要 snippets 与 `package.json`。
-- `wrangler.jsonc`：CitizenChatServer 独立资源、域名、应用标识和授权合同。
+- `scripts/wrangler.jsonc`：CitizenChatServer 独立资源、域名、应用标识和授权合同。
 - `schema.sql`：TataChatServer 唯一 D1 最终结构。
-- `product.json` 与 `SHA256SUMS`：产品来源和候选闭集验真。
+- `scripts/product.json`、候选中的 `upstream-release.json` 与 `SHA256SUMS`：实例声明、上游正式来源及候选闭集验真。
 
 装配必须复制 `worker-build` 的完整现代模块布局，禁止只保留 `worker/` 而遗漏 `shim.mjs`
 引用的 `index.js`、WebAssembly 或 snippets；官方构建目录中的 `.gitignore` 不得进入候选。

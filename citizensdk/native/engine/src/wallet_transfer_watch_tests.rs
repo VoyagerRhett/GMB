@@ -827,6 +827,12 @@ fn pool_terminal_and_changed_authorized_bytes_never_rebroadcast() {
 }
 
 #[test]
+#[cfg(all(
+    feature = "wallet",
+    feature = "signing",
+    feature = "transactions",
+    feature = "history"
+))]
 fn public_engine_resumes_outbox_after_failed_write_receipt_without_wallet_or_new_nonce() {
     use citizen_sdk_contracts as c;
     // 任一钱包/秘密访问都会使测试失败；恢复必须只使用已经持久的公开授权。
@@ -988,7 +994,7 @@ fn public_engine_resumes_outbox_after_failed_write_receipt_without_wallet_or_new
             );
             let client = Arc::new(client);
             let components = crate::EngineComponents::new(
-                client.clone(),
+                Some(client.clone()),
                 Some(signer),
                 Some(Arc::new(NoWallet)),
                 None,

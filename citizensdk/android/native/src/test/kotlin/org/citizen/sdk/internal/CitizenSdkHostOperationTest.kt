@@ -4,6 +4,10 @@ import org.citizen.sdk.CitizenSdkErrorCode
 import org.citizen.sdk.CitizenSdkException
 import org.citizen.sdk.CitizenSdkClosePolicy
 import org.citizen.sdk.CitizenSdkLifecycle
+import org.citizen.sdk.CitizenAccountBalance
+import org.citizen.sdk.CitizenBlockRef
+import org.citizen.sdk.CitizenFinality
+import org.citizen.sdk.CitizenU128
 import org.citizen.sdk.ui.CitizenSdkWalletFlowAttachmentPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -17,6 +21,103 @@ import java.nio.ByteOrder
 import kotlin.concurrent.thread
 
 class CitizenSdkHostOperationTest {
+    @Test
+    fun `QR close waits only for owned surfaces and frames while a shared camera may remain open`() {
+        val gate = org.citizen.sdk.ui.CitizenSdkQrOwnedDrain()
+        gate.surfaceBorrowed(); gate.surfaceBorrowed()
+        gate.revoke(); gate.framesReturned()
+        assertFalse(gate.isReady())
+        gate.surfaceReturned(); assertFalse(gate.isReady())
+        gate.surfaceReturned(); assertTrue(gate.isReady())
+        // 不输入共享 CameraState.CLOSED；另一用例继续 OPEN 不阻碍本次真实归还。
+        assertThrows(IllegalStateException::class.java) { gate.surfaceBorrowed() }
+        assertThrows(IllegalStateException::class.java) { gate.surfaceReturned() }
+        val noDevice = org.citizen.sdk.ui.CitizenSdkQrOwnedDrain()
+        noDevice.revoke(); assertFalse(noDevice.isReady())
+        noDevice.framesReturned(); assertTrue(noDevice.isReady())
+    }
+
+    @Test
+    fun `QR review ownership is released on orphan failed admission and failed decode`() {
+        val released = mutableListOf<Long>()
+        val router = CitizenSdkRequestRouter({ false }) { if (it is CitizenSdkNativeResult.QrReview) released += it.token }
+        fun value(token: Long) = CitizenSdkNativeCodec.Decoded(CitizenSdkNativeResult.QrReview(token, "{}"), null)
+        router.onCompletion(91, value(1))
+        assertEquals(listOf(1L), released)
+        assertThrows(IllegalStateException::class.java) {
+            router.submitOperation<Int>({ router.onCompletion(92, value(2)); error("admission rejected") }, { 1 }, null)
+        }
+        val pending = router.submitOperation<Int>({ 93 }, { error("projection rejected") }, null)
+        router.onCompletion(93, value(3))
+        assertTrue(pending.future.isCompletedExceptionally)
+        assertEquals(listOf(1L, 2L, 3L), released)
+        router.requireIdle(); router.close()
+    }
+
+    @Test
+    fun `QR cancellation waits for a real completion and preserves successful review ownership`() {
+        val cancelled = mutableListOf<Long>(); val released = mutableListOf<Long>()
+        val router = CitizenSdkRequestRouter({ cancelled += it; true }) { if (it is CitizenSdkNativeResult.QrReview) released += it.token }
+        val pending = router.submitOperation({ 71 }, { it as CitizenSdkNativeResult.QrReview }, null)
+        assertTrue(pending.cancel()); assertEquals(listOf(71L), cancelled)
+        assertFalse(pending.future.isDone)
+        router.onCompletion(71, CitizenSdkNativeCodec.Decoded(null, CitizenSdkException(CitizenSdkErrorCode.CANCELLED, "cancelled")))
+        assertTrue(pending.future.isCompletedExceptionally)
+        val retained = router.submitOperation({ 72 }, { it as CitizenSdkNativeResult.QrReview }, null)
+        router.onCompletion(72, CitizenSdkNativeCodec.Decoded(CitizenSdkNativeResult.QrReview(9, "{}"), null))
+        assertEquals(9L, retained.future.join().token)
+        assertTrue(released.isEmpty())
+        router.requireIdle(); router.close()
+    }
+
+    @Test
+    fun `batch balance wire uses kind eighteen and rejects truncated or excessive results`() {
+        fun wire(count: Int, includeBalances: Boolean = true): ByteArray {
+            val stored = if (includeBalances) count else 0
+            val output = ByteBuffer.allocate(20 + stored * 124).order(ByteOrder.LITTLE_ENDIAN)
+                .putInt(1).putInt(0).putInt(18).putInt(0).putInt(count)
+            repeat(stored) {
+                output.put(ByteArray(32) { 3 }).putLong(7).putInt(2)
+                output.put(ByteArray(32) { 1 })
+                output.putLong(7).putLong(0).putLong(3).putLong(0).putLong(10).putLong(0)
+            }
+            return output.array()
+        }
+        for (count in listOf(0, 2)) {
+            val result = CitizenSdkNativeCodec.decode(wire(count)).result as CitizenSdkNativeResult.Balances
+            assertEquals(count, result.value.size)
+            result.value.forEach { value ->
+                assertEquals("10", value.totalFen.toString())
+                assertEquals(CitizenFinality.FINALIZED, value.block.finality)
+            }
+        }
+        for (invalid in listOf(wire(2).dropLast(1).toByteArray(), wire(1991, false))) {
+            assertEquals(CitizenSdkErrorCode.INTEGRITY, assertThrows(CitizenSdkException::class.java) {
+                CitizenSdkNativeCodec.decode(invalid)
+            }.code)
+        }
+    }
+
+    @Test
+    fun `batch balance result correlation preserves duplicates and rejects partial reordered mixed blocks`() {
+        val first = ByteArray(32) { 1 }
+        val second = ByteArray(32) { 2 }
+        val finalized = CitizenBlockRef(ByteArray(32) { 3 }, "7", CitizenFinality.FINALIZED)
+        fun balance(accountId: ByteArray, block: CitizenBlockRef = finalized) =
+            CitizenAccountBalance(block, accountId, CitizenU128("7"), CitizenU128("3"), CitizenU128("10"))
+        val a = balance(first)
+        val b = balance(second)
+        assertTrue(CitizenSdkNativeCodec.validateBalances(emptyList(), emptyArray()).isEmpty())
+        assertEquals(listOf(b, a, b), CitizenSdkNativeCodec.validateBalances(listOf(b, a, b), arrayOf(second, first, second)))
+        for (values in listOf(listOf(a), listOf(b, a),
+            listOf(a, balance(second, CitizenBlockRef(ByteArray(32) { 4 }, "8", CitizenFinality.FINALIZED))),
+            listOf(a, balance(second, CitizenBlockRef(finalized.hash(), "7", CitizenFinality.BEST))))) {
+            assertEquals(CitizenSdkErrorCode.INTEGRITY, assertThrows(CitizenSdkException::class.java) {
+                CitizenSdkNativeCodec.validateBalances(values, arrayOf(first, second))
+            }.code)
+        }
+    }
+
     @Test
     fun `close barrier allows callback reentry to fail immediately without holding admission lock`() {
         val calls = CitizenSdkNativeCalls()
@@ -263,7 +364,7 @@ class CitizenSdkHostOperationTest {
     @Test
     fun `completion racing before accepting return maps by exact core id`() {
         lateinit var router: CitizenSdkRequestRouter
-        router = CitizenSdkRequestRouter { true }
+        router = CitizenSdkRequestRouter(cancelNative = { true })
         val operation = router.submitOperation(
             begin = {
                 router.onCompletion(41, CitizenSdkNativeCodec.Decoded(CitizenSdkNativeResult.Empty, null))
@@ -281,12 +382,12 @@ class CitizenSdkHostOperationTest {
     fun `cancel remains in admission gate and never completes future locally`() {
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
-        val router = CitizenSdkRequestRouter { requestId ->
+        val router = CitizenSdkRequestRouter(cancelNative = { requestId ->
             assertEquals(9L, requestId)
             entered.countDown()
             release.await(1, TimeUnit.SECONDS)
             true
-        }
+        })
         val operation = router.submitOperation(
             begin = { 9 },
             decode = { Unit },

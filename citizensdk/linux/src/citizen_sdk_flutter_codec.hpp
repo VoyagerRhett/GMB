@@ -39,12 +39,15 @@ struct Value final {
 };
 
 enum class Method {
-  open, start, stop, close, get_capabilities, get_finalized_head,
-  get_account_balance, get_account_nonce, get_fee_snapshot, get_wallet_profile,
+  open, start, stop, close, get_capabilities, get_finalized_head, get_genesis_hash,
+  get_account_balance, get_account_balances, get_account_nonce, get_fee_snapshot, get_wallet_profile, view_account_private_key,
   create_wallet, import_wallet, add_wallet_accounts, set_active_wallet_account,
   rename_wallet_account, delete_wallet_account, delete_wallet,
-  reconcile_wallet_cleanup, sign_wallet_payload, transfer_with_remark,
+  reconcile_wallet_cleanup, sign_wallet_payload, verify_signature, transfer_with_remark,
   initialize_finalized_history, sync_finalized_history,
+  qr_parse, qr_create_sign_request,
+  qr_consume_sign_response, qr_cancel_sign_request, qr_encode_account_id,
+  qr_encode_user_transfer, qr_decode_luminance, qr_encode, qr_scan, sign_qr_request,
 };
 
 const char *method_name(Method method) noexcept;
@@ -56,15 +59,30 @@ struct DecodedRequest final {
   Method method{Method::open};
   std::string session;
   int64_t sequence{};
+  uint32_t modules{CITIZENSDK_MODULE_FULL};
   citizensdk_account_id_t account_id{};
   citizensdk_account_id_t destination{};
   uint32_t word_count{};
   std::vector<uint32_t> indices;
   std::string name;
   std::vector<uint8_t> payload;
+  std::vector<uint8_t> signature;
   std::vector<uint8_t> remark;
   citizensdk_u128_t amount{};
   std::vector<citizensdk_account_id_t> account_ids;
+  uint16_t qr_action{};
+  uint64_t qr_expires_at{};
+  uint64_t qr_ttl{};
+  std::string qr_text;
+  std::string qr_request_id;
+  std::string qr_amount;
+  std::string qr_symbol;
+  std::string qr_memo;
+  std::string qr_bank_cid;
+  uint32_t qr_width{};
+  uint32_t qr_height{};
+  uint32_t qr_stride{};
+  uint32_t qr_scale{};
 };
 
 class ContractFailure final : public std::runtime_error {
@@ -111,6 +129,8 @@ Value capabilities(const citizensdk_capability_snapshot_t &value);
 // result is alive. These functions never retain/release or publish its handle.
 // sessions supplies lifecycle after start/stop and fetches a profile after the
 // private native wallet UI completes; those operations do not expose tokens.
+// 创世身份同步读取，不借用异步 result，也不启动链或访问金库。
+Value copy_genesis_hash(citizensdk_handle_t sdk);
 Value copy_public_result(Method method, citizensdk_result_handle_t result);
 Value watch_payload(citizensdk_result_handle_t result,
                     int64_t request_sequence);
@@ -121,6 +141,8 @@ Value watch_payload(citizensdk_result_handle_t result,
 // contract tests can inject malformed public fixtures without forging Core
 // result handles.
 void validate_public_value(Method method, const Value &value);
+// 批量余额必须完整回显输入数量、顺序与重复项，不能返回部分或错配事实。
+void validate_account_balances(const DecodedRequest &request, const Value &value);
 void validate_watch_value(const Value &value);
 
 // Decimal strings preserve u64/u128 exactly across Dart/StandardMessageCodec.

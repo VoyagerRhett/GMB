@@ -19,7 +19,7 @@ struct Reply final {
 };
 using ReplyCallback = std::function<void(Reply)>;
 using EventSink = std::function<void(Value)>;
-using EnvironmentFactory = std::function<OpenEnvironment()>;
+using EnvironmentFactory = std::function<OpenEnvironment(uint32_t modules)>;
 
 // Internal native seam, not an exported SDK API. Production delegates only to
 // the installed Host and its borrowed Core. Tests inject finite callbacks into
@@ -38,8 +38,16 @@ class NativeTransport {
   virtual Value copy_progress(citizensdk_result_handle_t result, int64_t sequence) = 0;
   virtual citizensdk_lifecycle_t lifecycle_state() = 0;
   virtual Value capability_snapshot() = 0;
+  virtual Value genesis_hash() = 0;
+  virtual Value qr(const DecodedRequest &) {
+    throw ContractFailure(CITIZENSDK_ERROR_UNSUPPORTED, "QR transport is unavailable");
+  }
+  using QrCompletion = std::function<void(citizensdk_error_code_t, std::string)>;
+  virtual WalletCancellation present_qr(const DecodedRequest &, QrCompletion) {
+    throw ContractFailure(CITIZENSDK_ERROR_UNSUPPORTED, "QR native UI is unavailable");
+  }
   virtual void cancel(citizensdk_request_id_t request) = 0;
-  virtual WalletCancellation present(const WalletFlowRequest &request,
+  virtual WalletCancellation present(const DecodedRequest &request,
                                       WalletFlowCompletion completion) = 0;
   virtual void close() = 0;
   // No-throw ownership transfer to the existing Host supervisor. Caller must

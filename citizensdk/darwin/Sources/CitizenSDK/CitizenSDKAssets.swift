@@ -29,7 +29,7 @@ internal struct CitizenSDKAssets {
         }
 
         // Asset identity, genesis binding and all manifest hashes are
-        // revalidated by Rust during `citizensdk_create_with_host`; Swift only
+        // revalidated by Rust during `citizensdk_create_with_modules`; Swift only
         // locates and supplies the exact packaged bytes.
         return try CitizenSDKAssets(
             manifest: read("manifest.json"),

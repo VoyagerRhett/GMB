@@ -31,7 +31,7 @@ struct SecretVaultServices final {
   std::function<CngAvailability()> availability;
   std::function<bool()> authentication_available;
   std::function<AuthenticationResult()> create_password;
-  std::function<AuthenticationResult()> unlock_password;
+  std::function<AuthenticationResult(uint64_t)> unlock_password;
   std::function<VaultObject(const WalletKey &, const SensitiveBuffer &)> create_key;
   std::function<bool(const VaultObject &)> validate_key;
   std::function<Bytes(const VaultObject &, const uint8_t *)> encrypt_dek;

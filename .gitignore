@@ -2,18 +2,6 @@
 .claude/
 citizenchain/target
 
-# 根目录 scripts 默认是本机私密脚本区；各产品/模块自己的 scripts 目录允许进 Git。
-# 例外：代码生成器/构建工具必须进 Git —— 它们的产出物已在版本管理里，
-# 生成器不跟踪就会在模型改名后无声漂移，只能等下次重生时以编译失败爆出来。
-# 注意：父目录被排除时 `!` 反选无效，故这里排除的是目录内容 `/scripts/*`。
-/scripts/*
-!/scripts/generate-logo-assets.mjs
-!/scripts/generate_citizenapp_governance_registry.mjs
-!/scripts/prepare-toolchain.sh
-!/scripts/rederive_accounts.py
-!/scripts/rebake_china_codes.py
-!/scripts/sync-derive-vectors.sh
-
 target/
 citizenchain/citizenui/target/
 citizenchain/citizenui/desktop/src-tauri/binaries/

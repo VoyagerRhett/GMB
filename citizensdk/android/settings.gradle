@@ -59,4 +59,5 @@ gradle.beforeProject { project ->
 
 rootProject.name = 'citizen_sdk'
 include ':native'
-project(':native').projectDir = file('native')
+// apply-from 脚本的 file('native') 会按源码脚本目录解析；显式绑定任务工程，避免 Gradle 写源码树。
+project(':native').projectDir = new File(taskProject, 'native')

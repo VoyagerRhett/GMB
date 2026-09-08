@@ -1,9 +1,11 @@
 // This black-box test intentionally crosses the exported raw-pointer ABI.
 #![allow(unsafe_code)]
+// 本黑盒实例夹具只组合真实 chain；不隐式要求交易或本地金库。
+#![cfg(feature = "chain")]
 
 use citizensdk::{
-    citizensdk_create, citizensdk_destroy, CitizenSdkBytesView, CitizenSdkCreateOptions,
-    CitizenSdkErrorCode, CITIZENSDK_ABI_VERSION,
+    citizensdk_create_with_modules, citizensdk_destroy, CitizenSdkBytesView,
+    CitizenSdkCreateOptions, CitizenSdkErrorCode, CITIZENSDK_ABI_VERSION,
 };
 
 const MANIFEST: &[u8] = include_bytes!("../../../assets/citizenchain/manifest.json");
@@ -34,11 +36,25 @@ fn instance_handles_are_nonzero_monotonic_and_never_reused() {
     let mut first = 0;
     let mut second = 0;
     assert_eq!(
-        unsafe { citizensdk_create(&options(), &mut first) },
+        unsafe {
+            citizensdk_create_with_modules(
+                &options(),
+                std::ptr::null(),
+                citizen_sdk_contracts::Modules::CHAIN,
+                &mut first,
+            )
+        },
         CitizenSdkErrorCode::Ok.as_i32()
     );
     assert_eq!(
-        unsafe { citizensdk_create(&options(), &mut second) },
+        unsafe {
+            citizensdk_create_with_modules(
+                &options(),
+                std::ptr::null(),
+                citizen_sdk_contracts::Modules::CHAIN,
+                &mut second,
+            )
+        },
         CitizenSdkErrorCode::Ok.as_i32()
     );
     assert_ne!(first, 0);

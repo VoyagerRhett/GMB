@@ -5,7 +5,7 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 import 'package:smoldot/smoldot.dart' show SmoldotPlatform;
 
-/// `shared/account-crypto` 在 CitizenApp 的唯一 Dart FFI 入口。
+/// `citizenapp/native/account-crypto` 在 CitizenApp 的唯一 Dart FFI 入口。
 ///
 /// 所有私钥和明文用途钥缓冲在调用结束前清零；原生实现与 CitizenWallet 完全共用。
 class NativeAccountCrypto {

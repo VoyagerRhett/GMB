@@ -1,3 +1,17 @@
+/// 实例启用的模块位集合；依赖关系由同一 Rust 核心校验。
+///
+/// 钱包管理和签名分别选择。组合只改变装配，不改变算法或安全金库要求。
+abstract final class CitizenSdkModules {
+  static const int wallet = 1;
+  static const int signing = 2;
+  static const int chain = 4;
+  static const int transactions = 8;
+  static const int history = 16;
+  static const int qr = 32;
+  static const int full =
+      wallet | signing | chain | transactions | history | qr;
+}
+
 /// CitizenSDK Core 可以组合的固定能力。
 enum CitizenCapabilityName {
   chainRead,

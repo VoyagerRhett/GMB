@@ -249,3 +249,14 @@ internal fun ByteArray.requireSize(expected: Int, label: String): ByteArray {
     require(size == expected) { "$label must contain exactly $expected bytes" }
     return clone()
 }
+
+/** 仅投影 Rust 模块位集合；依赖与非法组合由核心统一判定。 */
+object CitizenSdkModules {
+    const val WALLET = 1
+    const val SIGNING = 2
+    const val CHAIN = 4
+    const val TRANSACTIONS = 8
+    const val HISTORY = 16
+    const val QR = 32
+    const val FULL = 63
+}

@@ -16,8 +16,8 @@ use std::str::FromStr;
 pub type ChainSpec = sc_service::GenericChainSpec<NoExtension>;
 
 // 主网冻结 chainspec(plain)。文件路径相对本文件:
-// citizenchain/node/src/core/chain_spec.rs → ../../chainspecs/citizenchain.plain.json
-const CHAIN_SPEC_PLAIN: &[u8] = include_bytes!("../../chainspecs/citizenchain.plain.json");
+// citizenchain/node/src/core/chain_spec.rs → ../../citizenchain.json
+const CHAIN_SPEC_PLAIN: &[u8] = include_bytes!("../../citizenchain.json");
 
 pub fn chain_config() -> Result<ChainSpec, String> {
     ChainSpec::from_json_bytes(CHAIN_SPEC_PLAIN.to_vec())

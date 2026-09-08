@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "citizensdk.h"
@@ -22,7 +23,7 @@ class CitizenSdkHostBridge final {
 
   bool create(JNIEnv *env, const std::vector<uint8_t> &manifest,
               const std::vector<uint8_t> &chain_spec,
-              const std::vector<uint8_t> &sync_state);
+              const std::vector<uint8_t> &sync_state, uint32_t modules);
   bool bind(JNIEnv *env, jobject native_owner);
   bool destroy(JNIEnv *env);
 
@@ -44,6 +45,8 @@ class CitizenSdkHostBridge final {
   void complete_unwrap(uint64_t operation_id, int32_t error_code);
 
   void dispatch_event(const citizensdk_event_t &event);
+  bool has_qr_review(uint64_t result) const;
+  void release_qr_review(uint64_t result);
 
  private:
   struct PendingUnwrap {
@@ -67,6 +70,8 @@ class CitizenSdkHostBridge final {
   std::atomic<uint64_t> next_prepared_{1};
   std::mutex unwrap_mutex_;
   std::unordered_map<uint64_t, PendingUnwrap> unwraps_;
+  mutable std::mutex qr_mutex_;
+  std::unordered_set<uint64_t> qr_reviews_;
 };
 
 }  // namespace citizen::sdk::jni

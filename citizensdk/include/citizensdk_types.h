@@ -6,6 +6,16 @@
 #define CITIZENSDK_ABI_VERSION UINT32_C(1)
 #define CITIZENSDK_CAPABILITY_COUNT UINT32_C(10)
 
+/* Immutable instance module selection. Transactions and history require chain.
+ * Wallet may reuse crypto internally without enabling the public signing API. */
+#define CITIZENSDK_MODULE_WALLET UINT32_C(1)
+#define CITIZENSDK_MODULE_SIGNING UINT32_C(2)
+#define CITIZENSDK_MODULE_CHAIN UINT32_C(4)
+#define CITIZENSDK_MODULE_TRANSACTIONS UINT32_C(8)
+#define CITIZENSDK_MODULE_HISTORY UINT32_C(16)
+#define CITIZENSDK_MODULE_QR UINT32_C(32)
+#define CITIZENSDK_MODULE_FULL UINT32_C(63)
+
 typedef uint64_t citizensdk_handle_t;
 typedef uint64_t citizensdk_request_id_t;
 typedef uint64_t citizensdk_result_handle_t;
@@ -101,6 +111,9 @@ typedef uint32_t citizensdk_result_kind_t;
 #define CITIZENSDK_RESULT_PREPARED_WALLET UINT32_C(15)
 #define CITIZENSDK_RESULT_WALLET_TRANSFER UINT32_C(16)
 #define CITIZENSDK_RESULT_TRANSACTION_HISTORY UINT32_C(17)
+#define CITIZENSDK_RESULT_ACCOUNT_BALANCES UINT32_C(18)
+#define CITIZENSDK_RESULT_QR_REVIEW UINT32_C(19)
+#define CITIZENSDK_RESULT_QR_SIGNED UINT32_C(20)
 
 typedef uint32_t citizensdk_wallet_word_count_t;
 #define CITIZENSDK_WALLET_WORDS_12 UINT32_C(12)

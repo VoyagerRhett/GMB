@@ -10,12 +10,14 @@ def sdkProductRoot = sdkSourceValue == null
     ? project.projectDir.parentFile.canonicalFile : new File(sdkSourceValue).canonicalFile
 def androidSourceRoot = new File(sdkProductRoot, 'android')
 def tataConsoleTargetRoot = file('/Users/rhett/TATA/tataconsole/target').canonicalFile
-def localCitizenSdkRoots = {
-    def roots = [new File(tataConsoleTargetRoot, 'GMB/citizensdk/SDK').canonicalFile]
+def localCitizenSdkRoots = { boolean buildOnly = false ->
+    def roots = [new File(tataConsoleTargetRoot.parentFile, 'work/gmb/citizensdk').canonicalFile]
+    // 编译只能写测试库；验真原件输入仍可消费产物库的正式成功文件。
+    if (!buildOnly) roots.add(new File(tataConsoleTargetRoot, 'gmb/citizensdk').canonicalFile)
     def taskWorkValue = System.getenv('TATA_CONSOLE_WORK_DIR')
     if (taskWorkValue != null && !taskWorkValue.trim().isEmpty()) {
         def taskWork = file(taskWorkValue).canonicalFile
-        def sharedWorkRoot = new File(tataConsoleTargetRoot, '.work').canonicalFile
+        def sharedWorkRoot = new File(tataConsoleTargetRoot.parentFile, 'work').canonicalFile
         if (taskWork.path.startsWith(sharedWorkRoot.path + File.separator)) {
             // 宿主产品只得到自己任务目录下的 CitizenSDK 工作空间，不获得任意外部写权限。
             roots.add(new File(taskWork, 'citizensdk').canonicalFile)
@@ -23,8 +25,8 @@ def localCitizenSdkRoots = {
     }
     roots
 }
-def staysInLocalCitizenSdkRoot = { File candidate ->
-    localCitizenSdkRoots().any { File root ->
+def staysInLocalCitizenSdkRoot = { File candidate, boolean buildOnly = false ->
+    localCitizenSdkRoots(buildOnly).any { File root ->
         candidate.path == root.path || candidate.path.startsWith(root.path + File.separator)
     }
 }
@@ -43,8 +45,8 @@ if (androidBuildValue != null && !androidBuildValue.trim().isEmpty()) {
                 throw new GradleException('CitizenSDK Android output must remain outside the GitHub source checkout')
             }
         }
-    } else if (!staysInLocalCitizenSdkRoot(androidBuildRoot)) {
-        throw new GradleException('Local CitizenSDK Android output must stay in the CitizenSDK product root or current host task')
+    } else if (!staysInLocalCitizenSdkRoot(androidBuildRoot, true)) {
+        throw new GradleException('Local CitizenSDK Android build output must stay in its central work directory or current host task')
     }
     if (androidBuildRoot.toPath().startsWith(sdkProductRoot.toPath())) {
         throw new GradleException('CitizenSDK Android output must remain outside the source tree')
@@ -139,10 +141,14 @@ android {
 }
 
 // 使用公开编译选项保持JVM17和接口默认实现语义。
+// 本文件通过 apply from 加载；从已应用插件的类加载器取公开枚举，避免脚本编译期没有插件 classpath。
+def kotlinPluginLoader = extensions.getByName('kotlin').getClass().getClassLoader()
+def kotlinJvmTarget = kotlinPluginLoader.loadClass('org.jetbrains.kotlin.gradle.dsl.JvmTarget')
+def kotlinJvmDefault = kotlinPluginLoader.loadClass('org.jetbrains.kotlin.gradle.dsl.JvmDefaultMode')
 kotlin {
     compilerOptions {
-        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
-        jvmDefault = org.jetbrains.kotlin.gradle.dsl.JvmDefaultMode.NO_COMPATIBILITY
+        jvmTarget = kotlinJvmTarget.JVM_17
+        jvmDefault = kotlinJvmDefault.NO_COMPATIBILITY
     }
 }
 
@@ -185,5 +191,8 @@ dependencies {
     implementation 'androidx.biometric:biometric:1.1.0'
     implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'androidx.fragment:fragment-ktx:1.8.9'
+    implementation 'androidx.camera:camera-core:1.5.3'
+    implementation 'androidx.camera:camera-camera2:1.5.3'
+    implementation 'androidx.camera:camera-lifecycle:1.5.3'
     testImplementation 'junit:junit:4.13.2'
 }

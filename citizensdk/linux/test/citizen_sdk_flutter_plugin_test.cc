@@ -220,13 +220,16 @@ class PendingTransport final : public csf::NativeTransport {
   citizensdk_lifecycle_t lifecycle_state() override {
     return CITIZENSDK_LIFECYCLE_CREATED;
   }
+  csf::Value genesis_hash() override {
+    return csf::Value::string("0x" + std::string(64, '0'));
+  }
   csf::Value capability_snapshot() override {
     throw csf::ContractFailure(CITIZENSDK_ERROR_UNAVAILABLE,
                                "Fixture has no chain capabilities");
   }
   void cancel(citizensdk_request_id_t) override { assert(false); }
   csf::WalletCancellation present(
-      const citizen_sdk::WalletFlowRequest &,
+      const csf::DecodedRequest &,
       citizen_sdk::WalletFlowCompletion) override {
     assert(false);
     return {};
@@ -290,10 +293,10 @@ void pending_detach_contract(GMainContext *context, bool engine_gone) {
       g_object_new(fixture_registrar_get_type(), nullptr));
   auto native = std::make_shared<PendingTransport>();
   csf::register_plugin(FL_PLUGIN_REGISTRAR(registrar),
-      [] { return csf::OpenEnvironment{}; },
+      [](uint32_t) { return csf::OpenEnvironment{}; },
       [native](const citizen_sdk::Config &) { return native; });
   auto *opened = send_method(registrar, "open",
-                             csf::Value::list({csf::Value::integer(1)}));
+                             csf::Value::list({csf::Value::integer(1), csf::Value::integer(63)}));
   assert(registrar->messenger->responses == 1);
   bool opened_alive = true;
   observe_release(G_OBJECT(opened), &opened_alive);
@@ -365,11 +368,60 @@ void pending_detach_contract(GMainContext *context, bool engine_gone) {
   g_object_unref(registrar);
 }
 
+void test_stateless_verification(GMainContext *context) {
+  auto *registrar = reinterpret_cast<FixtureRegistrar *>(
+      g_object_new(fixture_registrar_get_type(), nullptr));
+  int environments = 0;
+  int transports = 0;
+  csf::register_plugin(FL_PLUGIN_REGISTRAR(registrar),
+      [&](uint32_t) { ++environments; return csf::OpenEnvironment{}; },
+      [&](const citizen_sdk::Config &) {
+        ++transports; return std::make_shared<PendingTransport>();
+      });
+  csf::Value::Bytes signature(64);
+  signature.back() = 0x80;
+  g_autoptr(FlStandardMethodCodec) codec = csf::new_method_codec();
+  for (const bool valid_shape : {true, false}) {
+    if (!valid_shape) signature.pop_back();
+    auto *response = send_method(registrar, "verifySignature", csf::Value::list({
+        csf::Value::integer(1), csf::Value::string("0x2afba9278e30ccf6a6ceb3a8b6e336b70068f045c666f2e7f4f9cc5f47db8972"),
+        csf::Value::bytes(signature), csf::Value::bytes({})}));
+    g_object_unref(response);
+    g_autoptr(GError) error = nullptr;
+    g_autoptr(FlMethodResponse) reply = fl_method_codec_decode_response(
+        FL_METHOD_CODEC(codec), registrar->messenger->last_response, &error);
+    assert(error == nullptr);
+    if (valid_shape) {
+      assert(FL_IS_METHOD_SUCCESS_RESPONSE(reply));
+      const auto result = csf::from_fl_value(fl_method_success_response_get_result(
+          FL_METHOD_SUCCESS_RESPONSE(reply)));
+      const auto &values = std::get<csf::Value::List>(result.data);
+      assert(values.size() == 2 && !std::get<bool>(values[1].data));
+    } else {
+      assert(FL_IS_METHOD_ERROR_RESPONSE(reply));
+      auto *failure = FL_METHOD_ERROR_RESPONSE(reply);
+      assert(std::string(fl_method_error_response_get_code(failure)) ==
+             "citizensdk.invalidArgument");
+      const auto details = csf::from_fl_value(fl_method_error_response_get_details(failure));
+      const auto &values = std::get<csf::Value::List>(details.data);
+      assert(std::holds_alternative<std::monostate>(values[1].data));
+      assert(std::holds_alternative<std::monostate>(values[2].data));
+    }
+  }
+  // 未 open 或 listen；公开纯验签不得触及环境/Host 工厂。
+  assert(environments == 0 && transports == 0 && registrar->messenger->responses == 2);
+  auto *messenger = FL_BINARY_MESSENGER(registrar->messenger);
+  FL_BINARY_MESSENGER_GET_IFACE(messenger)->shutdown(messenger);
+  drain_context(context);
+  g_object_unref(registrar);
+}
+
 }  // namespace
 
 int main() {
   GMainContext *context = g_main_context_default();
   assert(g_main_context_acquire(context));
+  test_stateless_verification(context);
   auto *registrar = reinterpret_cast<FixtureRegistrar *>(
       g_object_new(fixture_registrar_get_type(), nullptr));
   citizen_sdk_plugin_register_with_registrar(FL_PLUGIN_REGISTRAR(registrar));
@@ -384,6 +436,7 @@ int main() {
   auto method = citizen_sdk::flutter::new_method_codec();
   g_autoptr(FlValue) open_args = fl_value_new_list();
   fl_value_append_take(open_args, fl_value_new_int(1));
+  fl_value_append_take(open_args, fl_value_new_int(31));
   g_autoptr(GError) encode_error = nullptr;
   g_autoptr(GBytes) message = fl_method_codec_encode_method_call(
       FL_METHOD_CODEC(method), "open", open_args, &encode_error);

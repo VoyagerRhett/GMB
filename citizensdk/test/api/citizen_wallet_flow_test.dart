@@ -90,10 +90,100 @@ void main() {
     }
   });
 
+  test('签名模块独立选择而不合并钱包门面', () async {
+    final sdk = await CitizenSdk.open(modules: CitizenSdkModules.signing);
+    expect(platform.argumentsByMethod['open'], <Object?>[1, 2]);
+    expect(sdk.signing, isA<CitizenSigning>());
+    await sdk.close();
+  });
+
+  test('私钥查看只传账户，等真实完成后返回void，不提前结束', () async {
+    final sdk = await CitizenSdk.open(modules: CitizenSdkModules.wallet);
+    platform.viewCompletion = Completer<void>();
+    var completed = false;
+    final Future<void> viewing = sdk.wallet.viewAccountPrivateKey(_account(1));
+    final completion = viewing.then((_) => completed = true);
+    await Future<void>.delayed(Duration.zero);
+    expect(completed, isFalse);
+    expect(platform.argumentsByMethod['viewAccountPrivateKey'], <Object?>[
+      1,
+      'session-a',
+      1,
+      _account(1),
+    ]);
+    platform.viewCompletion!.complete();
+    await completion;
+    expect(completed, isTrue);
+    await sdk.close();
+  });
+
+  test('私钥查看拒绝额外响应槽，取消和认证失败保留原错误', () async {
+    final sdk = await CitizenSdk.open(modules: CitizenSdkModules.wallet);
+    platform.viewResponse = <Object?>[Uint8List(32)];
+    await expectLater(
+      sdk.wallet.viewAccountPrivateKey(_account(1)),
+      throwsA(isA<CitizenSdkException>()),
+    );
+    platform.viewResponse = null;
+    for (final code in <CitizenSdkErrorCode>[
+      CitizenSdkErrorCode.cancelled,
+      CitizenSdkErrorCode.unavailable,
+    ]) {
+      platform.viewError = CitizenSdkException(
+        code: code,
+        message: '原生安全流程未完成',
+      );
+      await expectLater(
+        sdk.wallet.viewAccountPrivateKey(_account(1)),
+        throwsA(
+          isA<CitizenSdkException>().having(
+            (error) => error.code,
+            'code',
+            code,
+          ),
+        ),
+      );
+    }
+    platform.viewError = null;
+    await sdk.close();
+  });
+
+  test('未open纯验签无需事件订阅或任何会话资源，原生true/false原样返回', () async {
+    for (final valid in <bool>[false, true]) {
+      platform.verificationResult = valid;
+      expect(
+        await CitizenSigning.verify(
+          accountId: _account(1),
+          signature: Uint8List(64),
+          payload: Uint8List(0),
+        ),
+        valid,
+      );
+    }
+    expect(platform.argumentsByMethod.keys, <String>['verifySignature']);
+    expect(platform.argumentsByMethod['verifySignature'], <Object?>[
+      1,
+      _account(1),
+      Uint8List(64),
+      Uint8List(0),
+    ]);
+    expect(platform.eventReads, 0);
+    await expectLater(
+      CitizenSigning.verify(
+        accountId: _account(1),
+        signature: Uint8List(63),
+        payload: Uint8List(0),
+      ),
+      throwsA(isA<CitizenSdkException>()),
+    );
+    expect(platform.eventReads, 0);
+    expect(platform.verificationCalls, 2);
+  });
+
   test('sign消息使用临时副本并仅返回公开sr25519签名', () async {
     final sdk = await CitizenSdk.open();
     final callerPayload = Uint8List.fromList(<int>[1, 2, 3]);
-    final signature = await sdk.wallet.sign(
+    final signature = await sdk.signing.sign(
       accountId: _account(1),
       payload: callerPayload,
     );
@@ -106,7 +196,7 @@ void main() {
 
   test('空签名载荷有效且账户名在编码前统一修剪', () async {
     final sdk = await CitizenSdk.open();
-    await sdk.wallet.sign(accountId: _account(1), payload: Uint8List(0));
+    await sdk.signing.sign(accountId: _account(1), payload: Uint8List(0));
     await sdk.wallet.renameAccount(accountId: _account(1), name: '  旅行钱包  ');
 
     expect(
@@ -136,7 +226,7 @@ void main() {
       throwsA(invalid),
     );
     await expectLater(
-      sdk.wallet.sign(
+      sdk.signing.sign(
         accountId: _account(1),
         payload: Uint8List(
           CitizenSdkFlutterCodec.maximumSigningPayloadBytes + 1,
@@ -171,9 +261,18 @@ final class _WalletPlatform implements CitizenSdkPlatform {
   final Map<String, List<Object?>> argumentsByMethod =
       <String, List<Object?>>{};
   Uint8List? borrowedPayloadAfterReturn;
+  int eventReads = 0;
+  int verificationCalls = 0;
+  bool verificationResult = false;
+  Completer<void>? viewCompletion;
+  CitizenSdkException? viewError;
+  List<Object?>? viewResponse;
 
   @override
-  Stream<Object?> get events => _events.stream;
+  Stream<Object?> get events {
+    eventReads += 1;
+    return _events.stream;
+  }
 
   @override
   Future<Object?> invoke(String method, List<Object?> arguments) async {
@@ -186,7 +285,24 @@ final class _WalletPlatform implements CitizenSdkPlatform {
         <Object?>['created', 1],
       ];
     }
+    if (method == 'verifySignature') {
+      verificationCalls += 1;
+      return <Object?>[1, verificationResult];
+    }
     final sequence = arguments[2]! as int;
+    if (method == 'viewAccountPrivateKey') {
+      await viewCompletion?.future;
+      final error = viewError;
+      if (error != null) {
+        throw CitizenSdkException(
+          code: error.code,
+          message: error.message,
+          sessionId: 'session-a',
+          requestSequence: sequence,
+        );
+      }
+      return <Object?>[1, 'session-a', sequence, viewResponse ?? <Object?>[]];
+    }
     final value = switch (method) {
       'createWallet' => <Object?>[_profile('created', 1)],
       'importWallet' => <Object?>[_profile('imported', 1)],

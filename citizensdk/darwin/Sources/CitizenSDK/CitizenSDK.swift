@@ -19,15 +19,22 @@ public final class CitizenSdk: @unchecked Sendable {
         CitizenSDKWalletFlowRegistry.shared.registerOpen(self)
     }
 
-    public static func open() throws -> CitizenSdk {
-        let native = try CitizenSDKNative.open(assets: CitizenSDKAssets.load())
+    /// 未选择链时不读取链资产；钱包、签名和链均由同一核心按模块装配。
+    public static func open(modules: CitizenSDKModules = .full) throws -> CitizenSdk {
+        try CitizenSDKNative.validateModules(modules)
+        let native = try CitizenSDKNative.open(
+            assets: modules.contains(.chain) ? CitizenSDKAssets.load() : nil, modules: modules
+        )
         return try finishOpen(native)
     }
 
     internal static func open(storageRoot: URL, applicationID: String? = Bundle.main.bundleIdentifier,
-                              assets: CitizenSDKAssets? = nil) throws -> CitizenSdk {
-        let native = try CitizenSDKNative.open(assets: assets ?? CitizenSDKAssets.load(), storageRoot: storageRoot,
-                                              applicationID: applicationID)
+                              assets: CitizenSDKAssets? = nil, modules: CitizenSDKModules = .full) throws -> CitizenSdk {
+        try CitizenSDKNative.validateModules(modules)
+        let native = try CitizenSDKNative.open(
+            assets: modules.contains(.chain) ? (assets ?? CitizenSDKAssets.load()) : nil,
+            storageRoot: storageRoot, applicationID: applicationID, modules: modules
+        )
         return try finishOpen(native)
     }
 
@@ -97,8 +104,16 @@ public final class CitizenSdk: @unchecked Sendable {
     public func capabilities() throws -> CitizenSDKCapabilities { try native.capabilities() }
     public func finalizedHead() async throws -> CitizenBlockRef { try await native.finalizedHead().value() }
 
+    /// 返回 Core 固定链身份的创世哈希；只要求启用 chain，不要求启动或同步轻节点。
+    public func genesisHash() throws -> Data { try native.genesisHash() }
+
     public func accountBalance(accountID: Data) async throws -> CitizenAccountBalance {
         try await native.accountBalance(CitizenSDKInputLimits.accountID(accountID)).value()
+    }
+
+    /// 同一已验证 finalized 块的批量余额；保持输入顺序和重复项，空列表仍交由 Core 校验状态。
+    public func accountBalances(accountIDs: [Data]) async throws -> [CitizenAccountBalance] {
+        try await native.accountBalances(CitizenSDKInputLimits.balanceAccountIDs(accountIDs)).value()
     }
 
     public func accountNonce(accountID: Data) async throws -> CitizenAccountNonce {
@@ -149,10 +164,66 @@ public final class CitizenSdk: @unchecked Sendable {
         }
     }
 
-    public func signWalletPayload(accountID: Data, message: Data) async throws -> CitizenSignature {
-        try await native.sign(accountID: CitizenSDKInputLimits.accountID(accountID),
-                              message: CitizenSDKInputLimits.signingPayload(message)).value()
+    /// 签名是独立公开模块，不要求开启钱包管理或轻节点。
+    public var signing: CitizenSigning { CitizenSigning(native: native) }
+
+    public func qrParse(_ text: String) throws -> CitizenQRDocument {
+        try native.qrParse(text)
     }
+
+    public func qrCreateSignRequest(action: UInt16, signerAccountID: Data,
+                                    reviewPayload: Data, ttlSeconds: UInt64 = 120) throws -> String {
+        try native.qrCreateSignRequest(action: action, accountID: signerAccountID,
+                                       payload: reviewPayload, ttl: ttlSeconds)
+    }
+
+    public func qrConsumeSignResponse(_ text: String) throws -> Data {
+        try native.qrConsumeSignResponse(text)
+    }
+
+    public func qrCancelSignRequest(_ requestID: String) throws -> Bool {
+        try native.qrCancelSignRequest(requestID)
+    }
+
+    public func qrEncodeAccountID(_ accountID: Data) throws -> String {
+        try native.qrEncodeAccountID(accountID)
+    }
+
+    public func qrEncodeUserTransfer(requestID: String, expiresAt: UInt64,
+                                     accountID: Data, amount: String, symbol: String,
+                                     memo: String = "", bankCIDNumber: String) throws -> String {
+        try native.qrEncodeUserTransfer(requestID: requestID, expiresAt: expiresAt,
+            accountID: accountID, amount: amount, symbol: symbol, memo: memo,
+            bankCIDNumber: bankCIDNumber)
+    }
+
+    public func qrDecodeLuminance(_ data: Data, width: UInt32, height: UInt32,
+                                  rowStride: UInt32) throws -> CitizenQRDocument {
+        try native.qrDecodeLuminance(data, width: width, height: height, rowStride: rowStride)
+    }
+
+    public func qrEncode(_ text: String, scale: UInt32 = 4) throws -> CitizenQRImage {
+        try native.qrEncode(text, scale: scale)
+    }
+
+    internal func requireQRUI() throws { try native.requireQRModule() }
+    internal func reviewQrSignRequest(_ text: String) throws -> CitizenSDKOperation<CitizenSDKQrReview> {
+        try native.reviewQrSignRequest(text)
+    }
+    internal func signQrReview(_ review: CitizenSDKQrReview) throws -> CitizenSDKOperation<CitizenQRDocument> {
+        try native.signQrRequest(review)
+    }
+
+    // 这些内部接线不进入公开 Swift 接口，私钥内容只由 SDK 自有显示所有者接收。
+    internal func openPrivateKeyView(accountID: Data, buffer: CitizenSDKPrivateKeyDisplayBuffer)
+        throws -> (UInt64, CitizenSDKOperation<Void>) {
+        try native.openPrivateKeyView(accountID: accountID, buffer: buffer)
+    }
+    internal func revealPrivateKeyView(_ viewID: UInt64) throws { try native.revealPrivateKeyView(viewID) }
+    internal func cancelPrivateKeyView(_ viewID: UInt64) throws { try native.cancelPrivateKeyView(viewID) }
+    internal func finishPrivateKeyView(_ viewID: UInt64) throws { try native.finishPrivateKeyView(viewID) }
+    internal func isPrivateKeyAuthenticationActive(_ operationID: UInt64) -> Bool { native.isPrivateKeyAuthenticationActive(operationID) }
+    internal func cancelPrivateKeyAuthentication(_ operationID: UInt64) { native.cancelPrivateKeyAuthentication(operationID) }
 
     public func transferWithRemark(sourceAccountID: Data, destinationAccountID: Data,
                                    amountFen: CitizenU128, remark: Data,
@@ -321,6 +392,23 @@ public final class CitizenSdk: @unchecked Sendable {
         let handler = eventHandler
         stateLock.unlock()
         handler?(event)
+    }
+}
+
+/// 本地签名始终经核心账户归属检查与设备金库授权；公开验签不创建钱包或访问金库。
+public struct CitizenSigning: Sendable {
+    private let native: CitizenSDKNative
+    internal init(native: CitizenSDKNative) { self.native = native }
+
+    public func sign(accountID: Data, message: Data) async throws -> CitizenSignature {
+        try await native.sign(accountID: CitizenSDKInputLimits.accountID(accountID),
+                              message: CitizenSDKInputLimits.signingPayload(message)).value()
+    }
+
+    public static func verify(accountID: Data, signature: Data, message: Data) throws -> Bool {
+        try CitizenSDKNative.verify(accountID: CitizenSDKInputLimits.accountID(accountID),
+                                    signature: signature,
+                                    message: CitizenSDKInputLimits.signingPayload(message))
     }
 }
 

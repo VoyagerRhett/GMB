@@ -49,7 +49,7 @@ int main() {
   const auto config = csf::FlutterEnvironment::resolve(inputs);
   assert(config.application_id == inputs.application_id);
   assert(config.storage_root == user_data && config.asset_root == assets);
-  assert(config.hwnd == nullptr && config.enable_wallet);
+  assert(config.hwnd == nullptr && config.modules == CITIZENSDK_MODULE_FULL);
 
   // 这些是装配预检夹具，不冒充通过 Core 的 manifest/链锚验真。
   for (const auto &identifier : {std::string{}, std::string("shared-default"),
@@ -71,6 +71,8 @@ int main() {
   for (const auto *name : {L"manifest.json", L"chainspec.json", L"light_sync_state.json"}) {
     const auto path = assets / name;
     assert(std::filesystem::remove(path));
+    assert(csf::FlutterEnvironment::resolve(inputs, CITIZENSDK_MODULE_WALLET).modules == CITIZENSDK_MODULE_WALLET);
+    assert(csf::FlutterEnvironment::resolve(inputs, CITIZENSDK_MODULE_SIGNING).modules == CITIZENSDK_MODULE_SIGNING);
     expect_failure([&] { (void)csf::FlutterEnvironment::resolve(inputs); }, CITIZENSDK_ERROR_INTEGRITY);
     write_file(path, "");
     expect_failure([&] { (void)csf::FlutterEnvironment::resolve(inputs); }, CITIZENSDK_ERROR_INTEGRITY);

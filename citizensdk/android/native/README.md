@@ -1,9 +1,33 @@
 # CitizenSDK Android native distribution
 
+当前按 wallet、signing、chain、transactions、history、qr 六模块装配同一 Rust Core，
+默认 full。先调用统一模块校验，再仅创建所选服务的资源；chain 未选不加载链资产或创建链数据库，
+history 未选不初始化历史，wallet/signing 才使用配套 secure store/Vault。SigningService
+仅使用同宿主已有 SDK 安全账户归属资料，首次 provision 仍须钱包安全流程，秘密不导出。
+纯验签无需实例、钱包、金库或链；Flutter 五端共用 36 方法，open 仅 `[1, modules]`，
+`verifySignature` 请求仅 `[1, accountId, signature, payload]`、响应仅 `[1, bool]`，
+不建立 session 或事件订阅。运行期模块选择不裁剪现有正式 full 包及链资产。
+JNI 中的十个 QR 入口只是同一 Rust `QR_V1` 与 ZXing-C++ 3.1.1 窄包装的类型化投影，
+不调用 Android 第二扫码引擎。
+本次第 2 步仅更新源码、注释、合同和测试，尚未执行新的真实构建、平台测试或硬件验收；下文旧分步运行记录保留为历史证据，不代表本次变更已验证。
+
+第 3 步增加 `getGenesisHash()` 与 `getAccountBalances(accountIds)`，仅依赖 chain。
+创世哈希不要求启动；批量结果复用现有余额值，保持账户顺序与重复项，空列表仍由 Core 校验状态。
+JNI 只负责参数和结果传输，不另行计算余额。
+`viewAccountPrivateKey(activity, accountId)` 仅属于 wallet，返回 `CitizenSdkOperation<Unit>`。
+SDK 自有 Activity 通过私有四操作接收短期显示借用并复制进可擦字符缓冲，不返回秘密。
+公开完成必须等待 UI 清除、Activity 销毁和 Core 请求真实排空；后台或销毁后不恢复显示。
+私有声明仅从构建工作目录导入。新的平台运行态及硬件安全验收仍未完成。
+
 This Gradle library is the official Android projection of the single
 CitizenSDK Rust Core. It produces the Java/Kotlin AAR and the private JNI
 bridge. The Flutter plugin compiles the same Kotlin facade sources and stages
 the same two native-library bytes; it must not embed this AAR.
+
+原生 Gradle 模块与 Flutter 插件声明同一组 AndroidX 依赖。直接使用裸 AAR 的宿主须
+同时声明 `build.gradle` 中的 biometric、core-ktx、fragment-ktx 及 CameraX
+core/camera2/lifecycle；`files("citizensdk.aar")` 本身不携带 Maven 传递依赖信息。
+相机权限与非导出扫描 Activity 随 AAR manifest 合并，不需要宿主实现扫描或签名界面。
 
 The module accepts one external Android ABI `arm64-v8a` Core leaf through
 `CITIZENSDK_ANDROID_CORE_DIR`. That `arm64-v8a` directory must contain
@@ -23,7 +47,7 @@ module writes only below `<root>/native`; the Flutter host uses `<root>/flutter`
 The release AAR therefore has the stable Gradle location
 `<root>/native/outputs/aar/native-release.aar`.
 On the maintained workstation it must be below
-`/Users/rhett/TATA/tataconsole/target/GMB/citizensdk/SDK`; GitHub Actions may use an absolute runner
+`/Users/rhett/TATA/tataconsole/work/gmb/citizensdk`; GitHub Actions may use an absolute runner
 directory outside the source checkout. Never leave a
 `build`, `.gradle`, CMake, binary, database or test artifact in this source
 directory.

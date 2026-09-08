@@ -16,7 +16,7 @@ use std::{
 use crate::{
     error::EngineError,
     wallet_derivation::{WalletEntropySource, WalletWordCount},
-    wallet_service::{WalletClock, WalletService},
+    wallet_service::{SigningService, WalletClock, WalletService},
 };
 use citizen_sdk_contracts::{
     store::{EncryptedSecretBlobStore, WalletProfileStore},
@@ -216,6 +216,10 @@ struct MemorySecretVault {
     wallet_keys: Mutex<HashSet<(u32, VaultGeneration)>>,
     retired_wallets: Mutex<HashSet<(u32, VaultGeneration)>>,
     delete_wallet_calls: AtomicUsize,
+    open_calls: AtomicUsize,
+    open_completed: AtomicUsize,
+    open_gate: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
+    open_entered: Mutex<Option<futures::channel::oneshot::Sender<()>>>,
 }
 
 impl Default for MemorySecretVault {
@@ -225,6 +229,10 @@ impl Default for MemorySecretVault {
             wallet_keys: Mutex::new(HashSet::new()),
             retired_wallets: Mutex::new(HashSet::new()),
             delete_wallet_calls: AtomicUsize::new(0),
+            open_calls: AtomicUsize::new(0),
+            open_completed: AtomicUsize::new(0),
+            open_gate: Mutex::new(None),
+            open_entered: Mutex::new(None),
         }
     }
 }
@@ -280,6 +288,15 @@ impl SecretVault for MemorySecretVault {
         envelope: EncryptedSecretEnvelope,
     ) -> ContractFuture<'_, SecretBuffer> {
         Box::pin(async move {
+            self.open_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(entered) = self.open_entered.lock().unwrap().take() {
+                let _ = entered.send(());
+            }
+            let gate = self.open_gate.lock().unwrap().take();
+            if let Some(gate) = gate {
+                let _ = gate.await;
+            }
+            self.open_completed.fetch_add(1, Ordering::SeqCst);
             if !self.has_key(secret_ref.wallet_index(), secret_ref.generation()) {
                 return Err(ContractError::new(
                     ContractErrorCode::KeyInvalidated,
@@ -390,6 +407,40 @@ impl Harness {
         }
     }
 
+    fn signing_service(&self) -> SigningService {
+        SigningService::new(
+            self.signer.clone(),
+            self.vault.clone(),
+            self.profiles.clone(),
+            self.secrets.clone(),
+        )
+    }
+
+    fn engine(&self, modules: citizen_sdk_contracts::Modules) -> crate::CitizenEngine {
+        let engine = crate::CitizenEngine::new(
+            crate::EngineComponents::new(
+                None,
+                Some(self.signer.clone()),
+                Some(self.vault.clone()),
+                None,
+                None,
+                Some(self.profiles.clone()),
+                None,
+                Some(self.secrets.clone()),
+            )
+            .with_modules(modules),
+        );
+        engine
+            .update_capabilities(
+                citizen_sdk_contracts::CapabilityName::ALL
+                    .into_iter()
+                    .map(crate::CapabilityProbe::ready)
+                    .collect(),
+            )
+            .expect("模块能力快照");
+        engine
+    }
+
     fn second_service(&self) -> WalletService {
         WalletService::new(
             self.signer.clone(),
@@ -400,6 +451,50 @@ impl Harness {
             self.clock.clone(),
         )
     }
+}
+
+#[test]
+fn signing_guard_rejects_before_auth_without_wallet_management() {
+    block_on(async {
+        let harness = Harness::new();
+        let mnemonic = SecretBuffer::try_new(KNOWN_MNEMONIC.as_bytes().to_vec()).unwrap();
+        let profile = harness.service.import(&mnemonic, "").await.unwrap();
+        let auth_before = harness.vault.open_calls.load(Ordering::SeqCst);
+        let writes_before = harness.profiles.cas_calls.load(Ordering::SeqCst);
+        let result = harness.signing_service().sign_guarded(profile.master_account_id(), vec![4, 0], &|| Err(EngineError::Cancelled)).await;
+        assert_eq!(result, Err(EngineError::Cancelled));
+        assert_eq!(harness.vault.open_calls.load(Ordering::SeqCst), auth_before);
+        assert_eq!(harness.profiles.cas_calls.load(Ordering::SeqCst), writes_before);
+    });
+}
+
+#[test]
+fn signing_guard_cancellation_drains_late_auth_and_never_returns_signature() {
+    use std::sync::atomic::AtomicBool;
+    block_on(async {
+        let harness = Harness::new();
+        harness.entropy.0.store(224, Ordering::SeqCst);
+        let mnemonic = SecretBuffer::try_new(KNOWN_MNEMONIC.as_bytes().to_vec()).unwrap();
+        let profile = harness.service.import(&mnemonic, "").await.unwrap();
+        let (release, gate) = futures::channel::oneshot::channel();
+        *harness.vault.open_gate.lock().unwrap() = Some(gate);
+        let (entered, entered_rx) = futures::channel::oneshot::channel();
+        *harness.vault.open_entered.lock().unwrap() = Some(entered);
+        let cancelled = AtomicBool::new(false);
+        let completed = harness.vault.open_completed.load(Ordering::SeqCst);
+        let guard = || if cancelled.load(Ordering::SeqCst) { Err(EngineError::Cancelled) } else { Ok(()) };
+        let service = harness.signing_service();
+        let work = Box::pin(service.sign_guarded(profile.master_account_id(), vec![4, 0], &guard));
+        let work = match futures::future::select(work, entered_rx).await {
+            futures::future::Either::Right((Ok(()), work)) => work,
+            _ => panic!("必须进入真实授权等待"),
+        };
+        cancelled.store(true, Ordering::SeqCst);
+        assert_eq!(harness.vault.open_completed.load(Ordering::SeqCst), completed);
+        release.send(()).unwrap();
+        assert_eq!(work.await, Err(EngineError::Cancelled));
+        assert_eq!(harness.vault.open_completed.load(Ordering::SeqCst), completed + 1);
+    });
 }
 
 #[test]
@@ -485,7 +580,7 @@ fn create_add_accounts_usability_and_local_signing_form_one_complete_lifecycle()
         let master = created_profile.master_account_id();
         let message = b"CitizenSDK wallet signing contract".to_vec();
         let signature = harness
-            .service
+            .signing_service()
             .sign(master, message.clone())
             .await
             .expect("账户0本地签名");
@@ -648,7 +743,11 @@ fn public_profile_and_rename_need_no_unlock_and_invalid_names_never_commit() {
             .await
             .is_err());
         assert!(harness.service.set_active_account(unknown).await.is_err());
-        assert!(harness.service.sign(unknown, vec![]).await.is_err());
+        assert!(harness
+            .signing_service()
+            .sign(unknown, vec![])
+            .await
+            .is_err());
         assert_eq!(harness.profiles.snapshot(), before);
         assert_eq!(harness.secrets.envelope_count(), 1);
         assert_eq!(harness.vault.delete_wallet_calls.load(Ordering::SeqCst), 0);
@@ -705,13 +804,47 @@ fn mismatched_child_ciphertext_is_not_usable_and_cannot_sign() {
         assert!(harness.service.usable_profile().await.unwrap().is_none());
         assert_contract_code(
             harness
-                .service
+                .signing_service()
                 .sign(profile.master_account_id(), b"public test message".to_vec())
                 .await
                 .unwrap_err(),
             ContractErrorCode::Integrity,
         );
         assert_eq!(harness.profiles.snapshot(), before);
+    });
+}
+
+#[test]
+fn independent_signing_rechecks_device_security_before_opening_a_secret() {
+    block_on(async {
+        let harness = Harness::new();
+        let profile = harness.service.import(&known_mnemonic(), "").await.unwrap();
+        for (availability, code) in [
+            (
+                VaultAvailability::NoStrongUserAuthentication,
+                ContractErrorCode::AuthenticationRequired,
+            ),
+            (
+                VaultAvailability::Unsupported,
+                ContractErrorCode::Unsupported,
+            ),
+            (
+                VaultAvailability::Unavailable,
+                ContractErrorCode::Unavailable,
+            ),
+        ] {
+            *harness.vault.availability.lock().unwrap() = availability;
+            let before = harness.profiles.snapshot();
+            assert_contract_code(
+                harness
+                    .signing_service()
+                    .sign(profile.master_account_id(), Vec::new())
+                    .await
+                    .expect_err("设备保护不可用时独立签名必须拒绝"),
+                code,
+            );
+            assert_eq!(harness.profiles.snapshot(), before);
+        }
     });
 }
 
@@ -777,7 +910,7 @@ fn incomplete_create_never_exposes_the_uncommitted_target_profile() {
         assert_eq!(harness.service.usable_profile().await.unwrap(), None);
         assert_contract_code(
             harness
-                .service
+                .signing_service()
                 .sign(profile.master_account_id(), b"must stay hidden".to_vec())
                 .await
                 .expect_err("未完成 create 的目标 profile 不得进入签名路径"),
@@ -1164,4 +1297,407 @@ fn decode_fixed_hex<const N: usize>(encoded: &str) -> [u8; N] {
         *byte = u8::from_str_radix(&encoded[index * 2..index * 2 + 2], 16).unwrap();
     }
     output
+}
+
+#[cfg(feature = "wallet")]
+#[test]
+fn private_key_view_requires_confirmation_and_holds_wallet_until_ui_and_notification_finish() {
+    use citizen_sdk_contracts::Modules;
+    block_on(async {
+        let harness = Harness::new();
+        harness.entropy.0.store(160, Ordering::SeqCst);
+        let mnemonic = SecretBuffer::try_new(KNOWN_MNEMONIC.as_bytes().to_vec()).unwrap();
+        let profile = harness.service.import(&mnemonic, "").await.unwrap();
+        let engine = harness.engine(Modules::try_new(Modules::WALLET).unwrap());
+        let view = engine
+            .internal_private_key_view(profile.master_account_id(), None)
+            .unwrap();
+        let before_auth = harness.vault.open_calls.load(Ordering::SeqCst);
+        assert!(view.reserve_work().unwrap());
+        view.run_work(|_| panic!("准备阶段不得调用显示"))
+            .await
+            .unwrap();
+        view.release_work().unwrap();
+        assert_eq!(harness.vault.open_calls.load(Ordering::SeqCst), before_auth);
+        assert!(view.take_notification().unwrap().is_none());
+        assert!(view.take_completion().unwrap().is_none());
+        assert!(engine.dispose().is_err());
+        assert!(harness.second_service().delete_wallet().await.is_err());
+        assert!(harness
+            .service
+            .rename_account(profile.master_account_id(), "禁止变更")
+            .await
+            .is_err());
+        let revision = harness.profiles.snapshot().revision();
+        view.confirm().unwrap();
+        assert!(view.confirm().is_err(), "用户确认只允许一次");
+        assert!(view.reserve_work().unwrap());
+        let displayed = AtomicUsize::new(0);
+        view.run_work(|bytes| {
+            assert_eq!(bytes.len(), 32);
+            displayed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        view.release_work().unwrap();
+        assert_eq!(displayed.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            harness.profiles.snapshot().revision(),
+            revision,
+            "查看不持久写入"
+        );
+        assert_eq!(view.take_notification().unwrap(), Some(Ok(())));
+        view.finish().unwrap();
+        assert!(
+            view.take_completion().unwrap().is_none(),
+            "settled 自身仍未返回"
+        );
+        view.finish_notification().unwrap();
+        assert_eq!(view.take_completion().unwrap(), Some(Ok(())));
+        assert!(view.take_completion().unwrap().is_none());
+        assert!(view.take_notification().unwrap().is_none());
+        assert!(!view.reserve_work().unwrap());
+        harness.service.delete_wallet().await.unwrap();
+        engine.dispose().unwrap();
+    });
+}
+
+#[cfg(feature = "wallet")]
+#[test]
+fn private_key_view_cancel_and_finish_do_not_drop_pending_authentication_or_allow_late_display() {
+    use citizen_sdk_contracts::Modules;
+    block_on(async {
+        let harness = Harness::new();
+        harness.entropy.0.store(176, Ordering::SeqCst);
+        let mnemonic = SecretBuffer::try_new(KNOWN_MNEMONIC.as_bytes().to_vec()).unwrap();
+        let profile = harness.service.import(&mnemonic, "").await.unwrap();
+        let engine = harness.engine(Modules::try_new(Modules::WALLET).unwrap());
+        let view = engine
+            .internal_private_key_view(profile.master_account_id(), None)
+            .unwrap();
+        view.confirm().unwrap(); // open 准备尚未完成时原生确认可以先排队。
+        assert!(view.reserve_work().unwrap());
+        let (release, gate) = futures::channel::oneshot::channel();
+        *harness.vault.open_gate.lock().unwrap() = Some(gate);
+        let before_completed = harness.vault.open_completed.load(Ordering::SeqCst);
+        let (entered, entered_rx) = futures::channel::oneshot::channel();
+        *harness.vault.open_entered.lock().unwrap() = Some(entered);
+        let displayed = AtomicUsize::new(0);
+        let work = Box::pin(view.run_work(|_| {
+            displayed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }));
+        let work = match futures::future::select(work, entered_rx).await {
+            futures::future::Either::Right((Ok(()), work)) => work,
+            _ => panic!("必须先真实进入授权等待"),
+        };
+        view.cancel().unwrap();
+        assert_eq!(
+            view.take_notification().unwrap(),
+            Some(Err(EngineError::Cancelled))
+        );
+        view.finish().unwrap();
+        view.finish_notification().unwrap();
+        assert!(
+            view.take_completion().unwrap().is_none(),
+            "取消不能丢弃实际授权 future"
+        );
+        assert_eq!(
+            harness.vault.open_completed.load(Ordering::SeqCst),
+            before_completed
+        );
+        assert!(harness.service.delete_wallet().await.is_err());
+        assert!(engine.dispose().is_err());
+        release.send(()).unwrap();
+        work.await.unwrap();
+        view.release_work().unwrap();
+        assert_eq!(displayed.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            harness.vault.open_completed.load(Ordering::SeqCst),
+            before_completed + 1
+        );
+        assert_eq!(
+            view.take_completion().unwrap(),
+            Some(Err(EngineError::Cancelled))
+        );
+        assert!(view.take_notification().unwrap().is_none());
+        harness.service.delete_wallet().await.unwrap();
+        engine.dispose().unwrap();
+    });
+}
+
+#[cfg(feature = "wallet")]
+#[test]
+fn private_key_view_cancel_before_work_never_loads_a_secret_and_missing_account_settles_once() {
+    use citizen_sdk_contracts::Modules;
+    block_on(async {
+        let harness = Harness::new();
+        let engine = harness.engine(Modules::try_new(Modules::WALLET).unwrap());
+        let missing = AccountId32::from_bytes([0; 32]);
+        let view = engine.internal_private_key_view(missing, None).unwrap();
+        view.cancel().unwrap();
+        assert!(!view.reserve_work().unwrap());
+        assert_eq!(
+            view.take_notification().unwrap(),
+            Some(Err(EngineError::Cancelled))
+        );
+        view.finish_notification().unwrap();
+        view.finish().unwrap();
+        assert_eq!(
+            view.take_completion().unwrap(),
+            Some(Err(EngineError::Cancelled))
+        );
+        let view = engine.internal_private_key_view(missing, None).unwrap();
+        assert!(view.reserve_work().unwrap());
+        let failure = view
+            .run_work(|_| panic!("缺账户不得显示"))
+            .await
+            .unwrap_err();
+        view.fail(failure).unwrap();
+        let error = view.take_notification().unwrap().unwrap().unwrap_err();
+        assert_contract_code(error, ContractErrorCode::NotFound);
+        view.release_work().unwrap();
+        view.finish().unwrap();
+        assert!(view.take_completion().unwrap().is_none());
+        view.finish_notification().unwrap();
+        assert!(view.take_completion().unwrap().unwrap().is_err());
+        assert_eq!(harness.vault.open_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(harness.profiles.cas_calls.load(Ordering::SeqCst), 0);
+        assert!(harness
+            .engine(Modules::try_new(Modules::SIGNING).unwrap())
+            .internal_private_key_view(missing, None)
+            .is_err());
+    });
+}
+
+#[cfg(feature = "wallet")]
+#[test]
+fn private_key_view_rechecks_generation_after_pending_authorization() {
+    use citizen_sdk_contracts::Modules;
+    block_on(async {
+        let harness = Harness::new();
+        harness.entropy.0.store(192, Ordering::SeqCst);
+        let replacement = Harness::new();
+        replacement.entropy.0.store(208, Ordering::SeqCst);
+        let mnemonic = SecretBuffer::try_new(KNOWN_MNEMONIC.as_bytes().to_vec()).unwrap();
+        let profile = harness.service.import(&mnemonic, "").await.unwrap();
+        replacement.service.import(&mnemonic, "").await.unwrap();
+        let engine = harness.engine(Modules::try_new(Modules::WALLET).unwrap());
+        let view = engine
+            .internal_private_key_view(profile.master_account_id(), None)
+            .unwrap();
+        view.confirm().unwrap();
+        assert!(view.reserve_work().unwrap());
+        let (release, gate) = futures::channel::oneshot::channel();
+        *harness.vault.open_gate.lock().unwrap() = Some(gate);
+        let (entered, entered_rx) = futures::channel::oneshot::channel();
+        *harness.vault.open_entered.lock().unwrap() = Some(entered);
+        let work = Box::pin(view.run_work(|_| panic!("换代账户不得显示")));
+        // Pending 也可能是钱包门竞争；必须等明确的 vault.open 进入信号后才能模拟换代。
+        let work = match futures::future::select(work, entered_rx).await {
+            futures::future::Either::Right((Ok(()), work)) => work,
+            _ => panic!("必须先真实进入授权等待"),
+        };
+        // 模拟外部持久层被置换，不绕过 SDK 变更门制造成功路径。
+        *harness.profiles.state.lock().unwrap() = replacement.profiles.snapshot();
+        release.send(()).unwrap();
+        work.await.unwrap();
+        view.release_work().unwrap();
+        let failure = view.take_notification().unwrap().unwrap().unwrap_err();
+        assert_contract_code(failure, ContractErrorCode::Conflict);
+        view.finish_notification().unwrap();
+        view.finish().unwrap();
+        assert!(view.take_completion().unwrap().unwrap().is_err());
+        engine.dispose().unwrap();
+    });
+}
+
+#[cfg(feature = "wallet")]
+#[test]
+fn private_key_view_rejects_missing_ciphertext_invalidated_key_and_wrong_account_public_key() {
+    use citizen_sdk_contracts::Modules;
+    block_on(async {
+        let harness = Harness::new();
+        harness.entropy.0.store(224, Ordering::SeqCst);
+        let mnemonic = SecretBuffer::try_new(KNOWN_MNEMONIC.as_bytes().to_vec()).unwrap();
+        let profile = harness.service.import(&mnemonic, "").await.unwrap();
+        let child = harness
+            .service
+            .add_accounts(&mnemonic, "", &[1])
+            .await
+            .unwrap()
+            .remove(0);
+        let master = profile.account_by_id(profile.master_account_id()).unwrap();
+        let master_ref = master.secret_ref();
+        let original = harness.secrets.entries.lock().unwrap()[&master_ref].clone();
+        let child_envelope = harness.secrets.entries.lock().unwrap()[&child.secret_ref()]
+            .envelope()
+            .cloned()
+            .unwrap();
+        let engine = harness.engine(Modules::try_new(Modules::WALLET).unwrap());
+        for expected in [
+            ContractErrorCode::AuthenticationRequired,
+            ContractErrorCode::KeyInvalidated,
+            ContractErrorCode::Integrity,
+        ] {
+            harness
+                .secrets
+                .entries
+                .lock()
+                .unwrap()
+                .insert(master_ref, original.clone());
+            harness
+                .vault
+                .wallet_keys
+                .lock()
+                .unwrap()
+                .insert((master_ref.wallet_index(), master_ref.generation()));
+            match expected {
+                ContractErrorCode::AuthenticationRequired => {
+                    harness.secrets.remove_without_contract(master_ref)
+                }
+                ContractErrorCode::KeyInvalidated => {
+                    harness.vault.wallet_keys.lock().unwrap().clear();
+                }
+                ContractErrorCode::Integrity => {
+                    // 仅复用已有公开向量派生的另一个 child；不输出或断言秘密内容。
+                    let envelope = EncryptedSecretEnvelope::try_new(
+                        1,
+                        Hash32Bytes::from_bytes(secret_ref_digest(master_ref)),
+                        child_envelope.ciphertext().to_vec(),
+                    )
+                    .unwrap();
+                    let swapped = EncryptedSecretBlobSnapshot::empty()
+                        .try_advance(EncryptedSecretBlobState::Sealed {
+                            provisioning_operation_id: [0x61; 16],
+                            envelope,
+                        })
+                        .unwrap();
+                    harness
+                        .secrets
+                        .entries
+                        .lock()
+                        .unwrap()
+                        .insert(master_ref, swapped);
+                }
+                _ => unreachable!(),
+            }
+            let view = engine
+                .internal_private_key_view(master.account_id(), None)
+                .unwrap();
+            view.confirm().unwrap();
+            assert!(view.reserve_work().unwrap());
+            view.run_work(|_| panic!("无效设备秘密不得进入显示"))
+                .await
+                .unwrap();
+            view.release_work().unwrap();
+            assert_contract_code(
+                view.take_notification().unwrap().unwrap().unwrap_err(),
+                expected,
+            );
+            view.finish_notification().unwrap();
+            view.finish().unwrap();
+            assert!(view.take_completion().unwrap().unwrap().is_err());
+        }
+        engine.dispose().unwrap();
+    });
+}
+
+#[cfg(all(feature = "wallet", feature = "signing"))]
+#[test]
+fn wallet_and_signing_modules_are_independent_without_a_chain_or_history() {
+    use citizen_sdk_contracts::{CapabilityName, Modules, Sr25519PublicKey};
+    block_on(async {
+        let harness = Harness::new();
+        let wallet = harness.engine(Modules::try_new(Modules::WALLET).unwrap());
+        let prepared = wallet
+            .prepare_wallet_creation(WalletWordCount::Words12, Zeroizing::new(String::new()))
+            .await
+            .expect("钱包独立创建不需要公开签名模块");
+        let profile = wallet
+            .commit_wallet_creation_after_backup(prepared)
+            .await
+            .expect("钱包独立备份提交");
+        assert!(wallet.begin_provider_start().is_err(), "不能伪造轻节点启动");
+        assert!(wallet.start_chain_monitor().await.is_err());
+        let account_id = profile.master_account_id();
+        assert!(wallet
+            .sign_wallet_payload(account_id, b"module boundary".to_vec())
+            .await
+            .is_err());
+        assert!(wallet
+            .capabilities()
+            .unwrap()
+            .unwrap()
+            .status(CapabilityName::WalletProfile)
+            .unwrap()
+            .is_ready());
+        assert!(!wallet
+            .capabilities()
+            .unwrap()
+            .unwrap()
+            .status(CapabilityName::LocalSigning)
+            .unwrap()
+            .enabled());
+
+        let signing = harness.engine(Modules::try_new(Modules::SIGNING).unwrap());
+        assert!(
+            signing.wallet_profile().await.is_err(),
+            "签名不开放钱包管理"
+        );
+        assert!(
+            signing
+                .capabilities()
+                .unwrap()
+                .unwrap()
+                .status(CapabilityName::LocalSigning)
+                .unwrap()
+                .is_ready(),
+            "钱包管理关闭不应关闭独立签名"
+        );
+        let message = b"module boundary".to_vec();
+        let signature = signing
+            .sign_wallet_payload(account_id, message.clone())
+            .await
+            .expect("签名模块读取已有安全账户");
+        assert!(harness
+            .signer
+            .verify(
+                Sr25519PublicKey::from_bytes(*account_id.as_bytes()),
+                message,
+                signature,
+            )
+            .await
+            .unwrap());
+        let before = harness.profiles.snapshot();
+        assert!(
+            signing
+                .sign_wallet_payload(AccountId32::from_bytes([0x98; 32]), Vec::new(),)
+                .await
+                .is_err(),
+            "独立签名不得伪造账户归属"
+        );
+        assert_eq!(harness.profiles.snapshot(), before);
+
+        wallet
+            .delete_wallet()
+            .await
+            .expect("本地删除不需要历史监控");
+        assert!(signing
+            .sign_wallet_payload(account_id, Vec::new())
+            .await
+            .is_err());
+        signing.dispose().unwrap();
+        assert!(
+            !signing
+                .capabilities()
+                .unwrap()
+                .unwrap()
+                .status(CapabilityName::LocalSigning)
+                .unwrap()
+                .is_ready(),
+            "关闭后本地签名也必须失效"
+        );
+    });
 }

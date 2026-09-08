@@ -1,5 +1,35 @@
 # 公民钱包
 
+钱包所有 Dart 功能集中在 `lib/`，平台实现归入 `android/` 和 `ios/`，Rust 密码学只有一个 crate。钱包不依赖 CitizenApp 或 CitizenSDK。
+
+## 目录
+
+```text
+citizenwallet/
+├── lib/                 Dart 应用代码
+│   ├── wallet/          钱包管理、派生、password
+│   ├── security/        金库接口、应用锁、用途钥交付
+│   ├── qr/scanner/      相机扫码适配
+│   ├── qr/              二维码信封、载荷与生成表
+│   ├── signer/          交易解码、确认字段与离线签名
+│   ├── ui/              页面与组件
+│   ├── isar/            数据模型与持久化
+│   ├── chain/           离线链参数
+│   ├── login/           登录二维码业务
+│   └── util/            应用内工具
+├── android/             Android 宿主、硬件金库与原生测试
+├── ios/                 iOS 宿主、硬件金库与 Rust 链接配置
+├── rust/
+│   ├── src/lib.rs       八个 FFI 入口
+│   ├── src/sr25519.rs   派生、签名和验签
+│   └── src/account_crypto.rs  用途钥派生与加密交付
+├── test/                Dart 测试和本地固定向量
+├── resources/           唯一资源根：icons、android、ios
+└── scripts/             控制台构建入口及生成工具
+```
+
+根目录只保留 README、Flutter/Cargo 所需配置及上述源码目录；不设本地 `packages/`、多 crate 层或第二份分析配置。包依赖统一由根 `pubspec.yaml` 和锁文件管理。
+
 `CitizenWallet` 是公民体系的离线冷钱包。应用不声明网络权限，使用二维码接收
 `QR_V1` 请求并离线签名；SS58 地址仅用于展示和边界输入输出，签名与授权使用
 `AccountId`。
@@ -7,7 +37,7 @@
 ## 安全边界
 
 - 助记词和 32 字节 master `MiniSecretKey` 只以可擦除字节数组进出
-  `shared/hardware-secretvault`；Secure Storage 只保存 Base64 硬件信封密文。
+  `lib/security/hardware_secretvault.dart`；Secure Storage 只保存 Base64 硬件信封密文。
 - Android 使用 StrongBox/TEE RSA-2048 OAEP KEK，每次解密由强生物识别
   `CryptoObject` 原子授权；iOS 使用 Secure Enclave P-256 ECIES，访问控制
   固定为 `biometryCurrentSet + privateKeyUsage`，不回退设备密码。
@@ -16,7 +46,7 @@
 - 创建、导入、查看根机密、删除和签名前强制使用指纹或面容认证，不回退设备密码。
 - 创建、导入或删除失败时逐项尝试清理 master 密文、助记词密文和硬件
   KEK；全部清理并回读通过后才删除 Isar 事实行。
-- 钱包可选 Substrate BIP-39 `password` 由 `shared/wallet-password` 单源校验和
+- 钱包可选 Substrate BIP-39 `password` 由 `lib/wallet/wallet_password.dart` 单源校验和
   派生；非空值为 6–30 位，不持久化。`substrate_bip39` 声明统一为
   `^0.7.0`，实际解析补丁版本由各应用 `pubspec.lock` 锁定。
 - 链上签名必须严格匹配正式 `genesis_hash` 和支持的 `transaction_version`；
@@ -41,17 +71,14 @@
 
 应用内“设置 → 产品手册”提供对应的图形化说明。
 
-## 本地验证
+## 构建与验证
 
-```bash
-flutter analyze
-flutter test
-```
+本机构建通过 TataConsole 钱包 Android/iOS 入口执行。控制台生成当前平台的 Flutter、Gradle 和 Pods 配置，业务源码按文件只读引用。
 
-Android 共享硬件金库的原生单元测试只运行 Release 变体。真机构建、签名、
-安装与证书回读只能通过 TataConsole 正式入口执行，不得把未签名候选
-当作交付结果。QR registry 与仓库守卫使用 Release profile 验证：
+- 正式本机工作目录：TataConsole `work/gmb/citizenwallet/<platform>/`。
+- Flutter 状态和产物、Cargo target、平台缓存均写入当前中央任务目录；成功包由控制台归档。
+- 宿主 FFI 从控制台注入的 `CARGO_TARGET_DIR/release` 加载，不查找源码下的 `rust/target`。
+- 源码目录不运行裸 `flutter test`、`dart pub get` 或无目标目录的 `cargo build`；校验使用同一中央配置生成、源码写保护及任务回收机制。
+- Android 金库测试位于 `android/app/src/test/`，随宿主 Release 单元测试执行；Flutter 测试位于 `test/`。
 
-```bash
-cargo test --release -p qr-protocol
-```
+`.dart_tool`、`build`、`target`、IDE 状态和自动注册文件属于生成状态，不是业务源码。不得把清理源码缓存作为正常构建步骤。

@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:gmb_scanner_flutter/scanner_flutter.dart';
+import 'package:citizenwallet/qr/scanner/scanner.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../qr/qr_protocols.dart';

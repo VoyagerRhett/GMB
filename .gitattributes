@@ -1,2 +1,0 @@
-citizenchain/registry/src/cid/china/china.sqlite filter=lfs diff=lfs merge=lfs -text
-/citizensdk/** text=auto eol=lf

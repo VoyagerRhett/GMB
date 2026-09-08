@@ -2,14 +2,31 @@ import Foundation
 
 #if os(iOS)
 import UIKit
+import CoreText
 
 public extension CitizenSdk {
+    /// 仅在 SDK 自有安全界面查看账户私钥；公开操作不返回秘密、内部句柄或显示回调。
+    @MainActor
+    func viewAccountPrivateKey(from presenter: UIViewController, accountID: Data) throws -> CitizenSDKOperation<Void> {
+        guard presenter.viewIfLoaded?.window != nil, UIApplication.shared.applicationState == .active else {
+            throw CitizenSDKError(.unavailable, "private key view requires a foreground presenter")
+        }
+        let flow = try CitizenSDKPrivateKeyView(sdk: self, accountID: accountID)
+        let controller = CitizenSDKPrivateKeyViewController(flow: flow)
+        let navigation = UINavigationController(rootViewController: controller)
+        navigation.modalPresentationStyle = .formSheet
+        navigation.isModalInPresentation = true
+        presenter.present(navigation, animated: true)
+        return flow.operation
+    }
+
     /// Presents the only supported secret-entry/recovery interface. No secret
     /// is an argument or result of this API.
     @MainActor
     func presentWalletFlow(from presenter: UIViewController, request: CitizenSDKWalletFlowRequest,
                            completion: @escaping (CitizenSDKWalletFlowResult) -> Void) throws -> CitizenSDKWalletFlow {
         let request = try citizenSDKValidateWalletFlowRequest(request)
+        try citizenSDKRequireWalletUI(capabilities())
         let token = try CitizenSDKWalletFlowRegistry.shared.reserve(self)
         let controller = CitizenSDKWalletViewController(sdk: self, request: request) { [weak self] result in
             guard let self else { return }
@@ -26,6 +43,133 @@ public extension CitizenSdk {
             DispatchQueue.main.async { controller?.requestCancel() }
         }
     }
+}
+
+/// 私钥不进入 UITextView/UILabel；绘图只临时借用可擦字符与 glyph 数组。
+@MainActor
+private final class CitizenSDKPrivateKeyContentIOS: UIView {
+    let buffer: CitizenSDKPrivateKeyDisplayBuffer
+    var onRemoval: (() -> Void)?
+    private var wasAttached = false
+    init(buffer: CitizenSDKPrivateKeyDisplayBuffer) {
+        self.buffer = buffer
+        super.init(frame: .zero)
+        isOpaque = true; backgroundColor = .systemBackground
+        isAccessibilityElement = false; accessibilityElementsHidden = true
+    }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil { wasAttached = true }
+        else if wasAttached { onRemoval?() }
+    }
+    override func draw(_ rect: CGRect) {
+        guard !isHidden, let context = UIGraphicsGetCurrentContext() else { return }
+        let font = CTFontCreateWithName("Menlo" as CFString, 18, nil)
+        context.setFillColor(UIColor.label.cgColor)
+        context.textMatrix = .identity
+        context.translateBy(x: 0, y: bounds.height); context.scaleBy(x: 1, y: -1)
+        buffer.withCharacters { characters in
+            var glyphs = [CGGlyph](repeating: 0, count: characters.count)
+            defer { for index in glyphs.indices { glyphs[index] = 0 } }
+            guard CTFontGetGlyphsForCharacters(font, characters.baseAddress!, &glyphs, characters.count) else { return }
+            var positions = (0..<characters.count).map {
+                CGPoint(x: 8 + ($0 % 22) * 11, y: Int(self.bounds.height) - 28 - ($0 / 22) * 28)
+            }
+            CTFontDrawGlyphs(font, &glyphs, &positions, characters.count, context)
+        }
+    }
+}
+
+@MainActor
+private final class CitizenSDKPrivateKeyViewController: UIViewController {
+    private let flow: CitizenSDKPrivateKeyView
+    private let content: CitizenSDKPrivateKeyContentIOS
+    private let status = UILabel()
+    private let reveal = UIButton(type: .system)
+    private let done = UIButton(type: .system)
+    private var tokens: [NSObjectProtocol] = []
+    private var ending = false
+    private var ready = false
+    private var security: CitizenSDKScreenSecurity?
+
+    init(flow: CitizenSDKPrivateKeyView) {
+        self.flow = flow; content = CitizenSDKPrivateKeyContentIOS(buffer: flow.buffer)
+        super.init(nibName: nil, bundle: nil)
+        content.onRemoval = { [weak flow] in flow?.finish(cancelled: true) }
+        flow.onReady = { [weak self] in self?.ready = true; self?.refreshVisibility() }
+        flow.onClear = { [weak self] in
+            self?.ending = true; self?.content.isHidden = true
+            self?.content.setNeedsDisplay(); self?.reveal.isEnabled = false; self?.done.isEnabled = false
+        }
+        flow.onTerminal = { [weak self] completion in
+            guard let self else { completion(); return }
+            self.tokens.forEach(NotificationCenter.default.removeObserver); self.tokens.removeAll()
+            self.content.isHidden = true
+            if self.presentingViewController != nil {
+                self.dismiss(animated: false) { [self] in self.security?.finish(); completion() }
+            } else { self.security?.finish(); completion() }
+            // 只在视图已经退出后移除截图遮盖和观察者。
+        }
+    }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func viewDidLoad() {
+        super.viewDidLoad(); title = "查看账户私钥"; view.backgroundColor = .systemBackground
+        status.text = "私钥可控制本账户。请确认周围无人、未共享屏幕；不能复制或分享。"
+        status.numberOfLines = 0
+        content.isHidden = true
+        content.heightAnchor.constraint(equalToConstant: 120).isActive = true
+        reveal.setTitle("已理解风险，验证身份并查看", for: .normal)
+        reveal.addTarget(self, action: #selector(revealPressed), for: .touchUpInside)
+        done.setTitle("关闭并清除", for: .normal)
+        done.addTarget(self, action: #selector(donePressed), for: .touchUpInside)
+        navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel, target: self, action: #selector(cancelPressed))
+        let stack = UIStackView(arrangedSubviews: [status, content, reveal, done])
+        stack.axis = .vertical; stack.spacing = 20
+        view.addSubview(stack); stack.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -24),
+            stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 24),
+        ])
+        security = CitizenSDKScreenSecurity(view: view)
+        let center = NotificationCenter.default
+        tokens = [
+            center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.content.isHidden = true
+                    if !self.flow.isAuthenticating { self.flow.finish(cancelled: true) }
+                }
+            },
+            center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshVisibility() }
+            },
+            center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.flow.finish(cancelled: true) }
+            },
+            center.addObserver(forName: UIScreen.capturedDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshVisibility() }
+            },
+        ]
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        // 被宿主移除不能复活；系统认证的短暂失焦只由通知遮盖，不走此销毁边界。
+        if !ending { flow.finish(cancelled: true) }
+    }
+    private func refreshVisibility() {
+        content.isHidden = ending || !ready || UIApplication.shared.applicationState != .active || UIScreen.main.isCaptured
+        content.setNeedsDisplay()
+    }
+    @objc private func revealPressed() {
+        guard reveal.isEnabled else { return }
+        reveal.isEnabled = false; flow.reveal()
+    }
+    @objc private func donePressed() { flow.finish(cancelled: !ready) }
+    @objc private func cancelPressed() { flow.finish(cancelled: true) }
 }
 
 @MainActor

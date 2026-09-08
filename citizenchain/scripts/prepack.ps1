@@ -12,7 +12,7 @@ $Root = (Resolve-Path "$PSScriptRoot\..").Path          # citizenchain\
 $Here = (Join-Path $Root "node")                        # citizenchain\node
 
 Write-Host "[prepack] build onchina (release)"
-Push-Location $Root; cargo build -p onchina --release; Pop-Location
+Push-Location $Root; cargo build -p onchina --release --config "$Root\config.toml"; Pop-Location
 
 Write-Host "[prepack] build onchina frontend"
 Push-Location "$Root\onchina\frontend"; npm ci; npm run build; Pop-Location

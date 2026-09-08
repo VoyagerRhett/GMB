@@ -1,9 +1,14 @@
 // 验证 Windows SDK-owned 钱包流程严格复用 Core 的 prepare/commit 和输入门禁。
 #include <cassert>
+#include <array>
+#include <thread>
+#include <memory>
+#include "citizen_sdk_wallet_flow.hpp"
 #include <fstream>
 #include <iterator>
 #include <string>
 #include <windows.h>
+#include <wtsapi32.h>
 #include <atomic>
 #include <chrono>
 #include <cwchar>
@@ -22,6 +27,56 @@
 #ifdef NDEBUG
 #error "CitizenSDK Windows contract assertions must remain enabled"
 #endif
+
+namespace citizen_sdk::windows {
+struct WalletFlowTestPeer final {
+  static void private_view_buffer_contract() {
+    ValidatedWalletRequest request;
+    request.account_id = citizensdk_account_id_t{};
+    auto make_flow = [&] {
+      return std::make_shared<WalletFlow>(1, nullptr, 0, request, nullptr, nullptr,
+                                          [](citizensdk_wallet_flow_handle_t) {});
+    };
+    auto flow = make_flow();
+    assert(WalletFlow::private_key_authorizing(nullptr, 9, 71) == CITIZENSDK_ERROR_INTEGRITY);
+    assert(WalletFlow::private_key_authorizing(flow.get(), 0, 71) == CITIZENSDK_ERROR_INTEGRITY);
+    assert(WalletFlow::private_key_authorizing(flow.get(), 9, 0) == CITIZENSDK_ERROR_INTEGRITY);
+    flow->private_view_id_ = 9;
+    assert(WalletFlow::private_key_authorizing(flow.get(), 10, 71) == CITIZENSDK_ERROR_INTEGRITY);
+    std::array<uint8_t, 32> synthetic{};
+    synthetic[0] = 7;
+    assert(WalletFlow::display_private_key(flow.get(), 9, {synthetic.data(), 31}) ==
+           CITIZENSDK_ERROR_INTEGRITY);
+    assert(WalletFlow::display_private_key(flow.get(), 9, {nullptr, 32}) ==
+           CITIZENSDK_ERROR_INTEGRITY);
+    assert(WalletFlow::display_private_key(flow.get(), 9, {synthetic.data(), 32}) == CITIZENSDK_OK);
+    synthetic[0] = 0;
+    assert(flow->private_key_.data()[0] == 7);  // 已同步复制，不保存借用指针。
+    assert(WalletFlow::display_private_key(flow.get(), 10, {synthetic.data(), 32}) ==
+           CITIZENSDK_ERROR_INVALID_HANDLE);
+    assert(WalletFlow::display_private_key(flow.get(), 9, {synthetic.data(), 32}) ==
+           CITIZENSDK_ERROR_INVALID_STATE);
+    assert(flow->revoke_private_key_display() == 9);
+    assert(flow->private_key_.empty());
+    assert(WalletFlow::private_key_authorizing(flow.get(), 9, 71) == CITIZENSDK_ERROR_CANCELLED);
+    assert(WalletFlow::display_private_key(flow.get(), 9, {synthetic.data(), 32}) ==
+           CITIZENSDK_ERROR_CANCELLED);
+    // 锁屏/关闭使用相同撤销门：并发认证晚回调与清屏的顺序不影响最终空缓冲。
+    for (unsigned attempt = 0; attempt < 32; ++attempt) {
+      auto racing = make_flow();
+      std::thread late([&] {
+        const auto code = WalletFlow::display_private_key(racing.get(), 11, {synthetic.data(), 32});
+        assert(code == CITIZENSDK_OK || code == CITIZENSDK_ERROR_CANCELLED);
+      });
+      (void)racing->revoke_private_key_display();
+      late.join();
+      assert(racing->private_key_.empty());
+      assert(WalletFlow::display_private_key(racing.get(), 11, {synthetic.data(), 32}) ==
+             CITIZENSDK_ERROR_CANCELLED);
+    }
+  }
+};
+}  // namespace citizen_sdk::windows
 
 namespace {
 
@@ -142,6 +197,48 @@ void exercise_windows_ui() {
   assert(reference.retire() == CITIZENSDK_OK);
 }
 
+// 实际生产 Win32 消息处理与自绘输入；模拟锁屏消息不是实体锁屏/TPM 验收。
+void exercise_private_view_ui() {
+  namespace csw = citizen_sdk::windows;
+  for (const bool lock_screen : {true, false}) {
+    HWND owner = CreateWindowExW(0, L"STATIC", L"CitizenSDK private view contract owner",
+        WS_OVERLAPPEDWINDOW, 0, 0, 700, 700, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    assert(owner != nullptr);
+    ShowWindow(owner, SW_SHOW);
+    csw::WindowRef reference(owner, std::this_thread::get_id());
+    {
+      csw::ValidatedWalletRequest request{};
+      request.account_id = citizensdk_account_id_t{};
+      unsigned cancelled = 0;
+      csw::WalletWindow window(reference.acquire(), request, [] {}, [&] { ++cancelled; });
+      window.show();
+      HWND dialog = wallet_window();
+      assert(dialog != nullptr);
+      SetForegroundWindow(dialog);
+      pump_until([&] { return GetForegroundWindow() == dialog; });
+      assert(window.authorize_private_key_view(&reference, 71));
+      window.finish_private_key_authentication();
+      csw::SensitiveBuffer synthetic(32); // 非钱包派生数据，不输出内容。
+      window.show_private_key(synthetic);
+      wchar_t denied[128]{};
+      assert(SendMessageW(GetDlgItem(dialog, 110), WM_GETTEXT,
+                         128, reinterpret_cast<LPARAM>(denied)) == 0);
+      if (lock_screen) SendMessageW(dialog, WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK, 0);
+      else SendMessageW(dialog, WM_ACTIVATE, WA_INACTIVE, reinterpret_cast<LPARAM>(owner));
+      assert(cancelled == 1);
+      assert(!window.authorize_private_key_view(&reference, 72));
+      bool rejected_late = false;
+      try { window.show_private_key(synthetic); }
+      catch (const csw::HostError &error) { rejected_late = error.code() == CITIZENSDK_ERROR_UNAVAILABLE; }
+      assert(rejected_late); // 即使重新前台也不恢复本次查看授权。
+      synthetic.clear();
+      window.destroy();
+    }
+    assert(reference.retire() == CITIZENSDK_OK);
+    assert(DestroyWindow(owner));
+  }
+}
+
 bool rejected(const citizensdk_wallet_flow_request_v1_t &request) {
   try {
     (void)citizen_sdk::windows::validate_wallet_request(request);
@@ -163,8 +260,10 @@ citizensdk_wallet_flow_request_v1_t request(
 }  // namespace
 
 int main() {
+  citizen_sdk::windows::WalletFlowTestPeer::private_view_buffer_contract();
   assert(citizensdk_validate_wallet_password({nullptr, 0}) == CITIZENSDK_OK);
   exercise_windows_ui();
+  exercise_private_view_ui();
   const citizen_sdk::WalletFlowRequest public_default{};
   assert(public_default.kind == citizen_sdk::WalletFlowKind::Create);
   assert(public_default.word_count == 12);

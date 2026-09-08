@@ -114,7 +114,7 @@ void SecretVault::unwrap_dek(uint64_t host_operation_id, const WalletKey &key,
       throw HostError(CITIZENSDK_ERROR_KEY_INVALIDATED,
                       "wallet TPM object is unavailable");
     }
-    AuthenticationResult authentication = user_auth_.unlock_vault_password();
+    AuthenticationResult authentication = user_auth_.unlock_vault_password(host_operation_id);
     if (authentication.code != CITIZENSDK_OK) {
       throw HostError(authentication.code,
                       "CitizenSDK device-vault unlock was cancelled");

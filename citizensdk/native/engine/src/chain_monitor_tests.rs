@@ -65,6 +65,7 @@ fn profile_fixture(byte: u8) -> citizen_sdk_contracts::WalletState {
 }
 
 #[test]
+#[cfg(feature = "history")]
 fn account_set_is_reloaded_from_store_after_creation_replacement_and_deletion() {
     let mut engine = running_engine(Arc::new(MemoryHistoryStore::default()), 9);
     let profiles = Arc::new(MutableProfiles(Mutex::new(
@@ -99,6 +100,7 @@ fn account_set_is_reloaded_from_store_after_creation_replacement_and_deletion() 
 }
 
 #[test]
+#[cfg(feature = "history")]
 fn empty_profile_is_a_valid_monitor_and_does_not_create_history_cursors() {
     let mut engine = running_engine(Arc::new(MemoryHistoryStore::default()), 9);
     engine.components.wallet_profiles = Some(Arc::new(EmptyProfiles));
@@ -117,6 +119,7 @@ fn empty_profile_is_a_valid_monitor_and_does_not_create_history_cursors() {
 }
 
 #[test]
+#[cfg(feature = "history")]
 fn idle_wallet_only_reads_local_state_until_finalized_notification_or_new_pending() {
     let (mut engine, reads) =
         crate::finalized_history_runtime_tests::running_engine_with_read_counter(
@@ -145,6 +148,7 @@ fn idle_wallet_only_reads_local_state_until_finalized_notification_or_new_pendin
 use futures::{executor::block_on, FutureExt};
 
 #[test]
+#[cfg(feature = "history")]
 fn cancellation_wakes_pending_chain_read_without_polling_network() {
     let engine = running_engine(Arc::new(MemoryHistoryStore::default()), 9);
     let (_, guard) = engine
@@ -163,6 +167,7 @@ fn cancellation_wakes_pending_chain_read_without_polling_network() {
 }
 
 #[test]
+#[cfg(feature = "history")]
 fn transfer_cancellation_is_isolated_and_keeps_its_lease_until_drained() {
     let engine = running_engine(Arc::new(MemoryHistoryStore::default()), 9);
     let (_, mut guard) = engine
@@ -193,6 +198,7 @@ fn transfer_cancellation_is_isolated_and_keeps_its_lease_until_drained() {
 }
 
 #[test]
+#[cfg(feature = "history")]
 fn cancelled_wallet_mutation_cannot_reopen_an_explicit_stop() {
     let engine = running_engine(Arc::new(MemoryHistoryStore::default()), 9);
     block_on(engine.start_chain_monitor()).unwrap();
@@ -224,6 +230,7 @@ fn failed_wallet_mutation_reopens_only_its_own_generation() {
 }
 
 #[test]
+#[cfg(feature = "history")]
 fn wallet_mutation_waits_for_all_old_history_leases() {
     let engine = running_engine(Arc::new(MemoryHistoryStore::default()), 9);
     let (_, guard) = engine

@@ -3,17 +3,6 @@
 version = 4
 
 [[package]]
-name = "account-crypto"
-version = "1.0.0"
-dependencies = [
- "aes-gcm",
- "hkdf",
- "sha2",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
 name = "aead"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -92,19 +81,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "citizen-signer"
-version = "1.0.0"
-dependencies = [
- "schnorrkel",
- "zeroize",
-]
-
-[[package]]
 name = "citizenwallet_signer"
 version = "1.0.0"
 dependencies = [
- "account-crypto",
- "citizen-signer",
+ "aes-gcm",
+ "hkdf",
+ "schnorrkel",
+ "sha2",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
@@ -390,7 +375,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -423,9 +408,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.3"
+version = "3.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
+checksum = "12df2e0110f65b775f769bb17ef989067a1d931b2eb822bd4346631eeada89f9"
 dependencies = [
  "proc-macro2",
  "quote",

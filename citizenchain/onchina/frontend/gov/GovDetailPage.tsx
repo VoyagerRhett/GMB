@@ -7,6 +7,7 @@ import { EDUCATION_TYPE_LABEL } from '../subjects/labels';
 import { useInstitutionCodeLabels } from '../subjects/institutionLabels';
 import { getInstitution, type InstitutionDetail } from './api';
 import type { AdminAuth } from '../auth/types';
+import { LegalRepresentativePhoto } from '../subjects/LegalRepresentativePhoto';
 import { AccountList } from '../accounts/AccountList';
 import { notice } from '../utils/notice';
 import { PrivateDetailLayout } from '../private/PrivateDetailLayout';
@@ -450,7 +451,7 @@ export const GovDetailPage: React.FC<Props> = ({ auth, cidNumber, canWrite, onBa
                 )}
               </Descriptions.Item>
               <Descriptions.Item label="法定代表人证件照">
-                {inst.legal_representative_photo_name || <span style={{ color: '#999' }}>(未上传)</span>}
+                <LegalRepresentativePhoto auth={auth} path={inst.legal_representative_photo_path} name={inst.legal_representative_photo_name} />
               </Descriptions.Item>
               <Descriptions.Item label="创建时间">
                 {new Date(inst.created_at).toLocaleString('zh-CN')}

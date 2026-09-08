@@ -150,6 +150,9 @@ pub enum CitizenSdkResultKind {
     PreparedWallet = 15,
     WalletTransfer = 16,
     TransactionHistory = 17,
+    AccountBalances = 18,
+    QrReview = 19,
+    QrSigned = 20,
 }
 
 #[repr(u32)]

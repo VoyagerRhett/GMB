@@ -3,8 +3,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const root = new URL('../', import.meta.url);
-const product = JSON.parse(readFileSync(new URL('product.json', root), 'utf8'));
-const wrangler = JSON.parse(readFileSync(new URL('wrangler.jsonc', root), 'utf8'));
+const product = JSON.parse(readFileSync(new URL('scripts/product.json', root), 'utf8'));
+const wrangler = JSON.parse(readFileSync(new URL('scripts/wrangler.jsonc', root), 'utf8'));
 
 test('CitizenChatServer 是 TataChatServer 的独立 Cloudflare 部署实例', () => {
   assert.deepEqual(product, {

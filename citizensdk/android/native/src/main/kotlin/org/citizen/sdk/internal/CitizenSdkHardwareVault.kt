@@ -27,6 +27,7 @@ import java.security.spec.X509EncodedKeySpec
 import java.util.IdentityHashMap
 import java.util.LinkedHashMap
 import java.util.concurrent.atomic.AtomicLong
+import java.lang.ref.WeakReference
 import javax.crypto.Cipher
 import javax.crypto.spec.OAEPParameterSpec
 import javax.crypto.spec.PSource
@@ -39,6 +40,22 @@ internal class CitizenSdkHardwareVault(
     private val activities = CitizenSdkActivityRegistry()
     // 仅由主线程访问；每个 prompt 的取消与销毁观察者都拥有同一 terminal owner。
     private val prompts = IdentityHashMap<FragmentActivity, MutableSet<() -> Unit>>()
+    private val authenticationOperations = HashMap<Long, Pair<WeakReference<FragmentActivity>, () -> Unit>>()
+    private val cancelledAuthentications = HashSet<Long>()
+
+    /** 只查询当前视图所属实际操作和 Activity，其他 prompt 不提供失焦豁免。 */
+    fun isAuthenticationActive(operationId: Long, activity: FragmentActivity): Boolean {
+        check(android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
+        return authenticationOperations[operationId]?.first?.get() === activity &&
+            !cancelledAuthentications.contains(operationId)
+    }
+    fun cancelAuthentication(operationId: Long) = dispatchAuthentication {
+        cancelledAuthentications.add(operationId)
+        authenticationOperations[operationId]?.second?.invoke()
+    }
+    fun releasePrivateKeyAuthentication(operationId: Long) = dispatchAuthentication {
+        cancelledAuthentications.remove(operationId)
+    }
 
     fun attachActivity(value: FragmentActivity) {
         activities.attach(value)
@@ -157,6 +174,8 @@ internal class CitizenSdkHardwareVault(
      * Completion is invoked after the cipher has stopped accessing the view.
      */
     fun unwrapDek(
+        hostOperationId: Long,
+        privateKeyView: Boolean,
         walletIndex: Int,
         generation: ByteArray,
         wrappedDek: ByteArray,
@@ -192,9 +211,14 @@ internal class CitizenSdkHardwareVault(
                     observer?.let { host.lifecycle.removeObserver(it) }
                     cancel?.let { prompts[host]?.remove(it) }
                     if (prompts[host]?.isEmpty() == true) prompts.remove(host)
+                    authenticationOperations.remove(hostOperationId)
                     completion(code)
                 }
                 try {
+                    if (privateKeyView && cancelledAuthentications.contains(hostOperationId)) {
+                        accepted.finish { CitizenSdkErrorCode.AUTHENTICATION_CANCELLED }
+                        return@dispatchAuthentication
+                    }
                     // 排队期间宿主可能已销毁、暂停或被替换，不能沿用 worker 的就绪快照。
                     if (activities.currentResumed() !== host || host.supportFragmentManager.isStateSaved) {
                         accepted.finish { CitizenSdkErrorCode.AUTHENTICATION_REQUIRED }
@@ -220,14 +244,15 @@ internal class CitizenSdkHardwareVault(
                     }
                     prompt = BiometricPrompt(host, ContextCompat.getMainExecutor(host), callback)
                     cancel = {
-                        // 先结束 buffer 借用，再取消 UI；迟到的系统回调不能再次访问 Rust 内存。
-                        accepted.finish { CitizenSdkErrorCode.AUTHENTICATION_CANCELLED }
+                        // 私钥查看只请求系统取消，必须等真实认证回调归还借用，不能提前伪造排空。
+                        if (!privateKeyView) accepted.finish { CitizenSdkErrorCode.AUTHENTICATION_CANCELLED }
                         prompt?.cancelAuthentication()
                     }
                     observer = object : DefaultLifecycleObserver {
                         override fun onDestroy(owner: LifecycleOwner) { cancel?.invoke() }
                     }
                     prompts.getOrPut(host) { LinkedHashSet() }.add(cancel!!)
+                    authenticationOperations[hostOperationId] = WeakReference(host) to cancel!!
                     host.lifecycle.addObserver(observer!!)
                     val promptInfo = BiometricPrompt.PromptInfo.Builder()
                         .setTitle("验证身份")

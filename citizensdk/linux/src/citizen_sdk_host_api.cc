@@ -15,6 +15,7 @@
 #include "citizen_sdk_host_bridge.hpp"
 #include "citizen_sdk_input_limits.hpp"
 #include "citizen_sdk_wallet_flow.hpp"
+#include "citizen_sdk_qr_flow.hpp"
 
 namespace citizen_sdk::linux {
 namespace {
@@ -225,6 +226,15 @@ uint32_t citizensdk_host_config_size(void) {
 citizensdk_error_code_t citizensdk_host_create(
     const citizensdk_host_config_v1_t *config,
     citizensdk_host_handle_t *out_host) {
+  const uint32_t modules = config != nullptr && config->enable_wallet != 0
+      ? CITIZENSDK_MODULE_FULL
+      : CITIZENSDK_MODULE_CHAIN | CITIZENSDK_MODULE_TRANSACTIONS | CITIZENSDK_MODULE_HISTORY;
+  return citizensdk_host_create_with_modules(config, modules, out_host);
+}
+
+citizensdk_error_code_t citizensdk_host_create_with_modules(
+    const citizensdk_host_config_v1_t *config, uint32_t modules,
+    citizensdk_host_handle_t *out_host) {
   using namespace citizen_sdk::linux;
   if (out_host == nullptr) return expose(CITIZENSDK_ERROR_INVALID_ARGUMENT);
   *out_host = 0;
@@ -232,27 +242,33 @@ citizensdk_error_code_t citizensdk_host_create(
     require(config != nullptr && config->struct_size >= sizeof(*config) &&
                 config->abi_version == CITIZENSDK_HOST_ABI_VERSION &&
                 config->enable_wallet <= 1 &&
+                (config->enable_wallet != 0) ==
+                    ((modules & (CITIZENSDK_MODULE_WALLET | CITIZENSDK_MODULE_SIGNING)) != 0) &&
                 std::all_of(std::begin(config->reserved),
                             std::end(config->reserved),
                             [](uint8_t byte) { return byte == 0; }),
             CITIZENSDK_ERROR_INVALID_ARGUMENT,
             "CitizenSDK Host configuration ABI is invalid");
+    const auto module_code = citizensdk_validate_modules(modules);
+    require(module_code == CITIZENSDK_OK, module_code,
+            "CitizenSDK module selection is invalid");
     const std::string storage = required_utf8(
         config->storage_root_utf8, input_limits::kMaximumPathBytes,
         "CitizenSDK storage root is invalid UTF-8");
-    const std::string assets = required_utf8(
+    const std::string assets = (modules & CITIZENSDK_MODULE_CHAIN) != 0 ? required_utf8(
         config->asset_root_utf8, input_limits::kMaximumPathBytes,
-        "CitizenSDK asset root is invalid UTF-8");
+        "CitizenSDK asset root is invalid UTF-8") : std::string{};
     const std::string application_id =
         input_limits::validate_application_id(config->application_id_utf8);
     require(std::filesystem::path(storage).is_absolute() &&
-                std::filesystem::path(assets).is_absolute(),
+                ((modules & CITIZENSDK_MODULE_CHAIN) == 0 ||
+                 std::filesystem::path(assets).is_absolute()),
             CITIZENSDK_ERROR_INVALID_ARGUMENT,
             "CitizenSDK storage and asset roots must be absolute");
     auto bridge = std::make_shared<HostBridge>(
         std::filesystem::path(storage), std::filesystem::path(assets),
         application_id, config->gtk_parent_window,
-        config->enable_wallet != 0);
+        modules);
     std::lock_guard<std::mutex> guard(registry_lock());
     require(!host_identity_exhausted(), CITIZENSDK_ERROR_UNAVAILABLE,
             "CitizenSDK Host identity space is exhausted");
@@ -340,6 +356,44 @@ citizensdk_error_code_t citizensdk_host_present_wallet_flow(
   if (!host) return expose(CITIZENSDK_ERROR_INVALID_HANDLE);
   return expose(present_wallet_flow(host.entry()->host, *request, context,
                                     completion, out_flow));
+}
+
+citizensdk_error_code_t citizensdk_host_view_account_private_key(
+    citizensdk_host_handle_t host_handle, const citizensdk_account_id_t *account_id,
+    void *context, citizensdk_wallet_flow_completion_v1_t completion,
+    citizensdk_wallet_flow_handle_t *out_flow) {
+  using namespace citizen_sdk::linux;
+  if (out_flow != nullptr) *out_flow = 0;
+  if (account_id == nullptr || completion == nullptr || out_flow == nullptr)
+    return expose(CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  auto host = acquire_host(host_handle);
+  if (!host) return expose(CITIZENSDK_ERROR_INVALID_HANDLE);
+  return expose(view_account_private_key(host.entry()->host, *account_id,
+                                          context, completion, out_flow));
+}
+
+citizensdk_error_code_t citizensdk_host_scan_qr(
+    citizensdk_host_handle_t host_handle, void *context,
+    citizensdk_qr_completion_v1_t completion, citizensdk_wallet_flow_handle_t *out_flow) {
+  using namespace citizen_sdk::linux;
+  if (out_flow != nullptr) *out_flow = 0;
+  auto host = acquire_host(host_handle);
+  if (!host) return expose(CITIZENSDK_ERROR_INVALID_HANDLE);
+  return expose(present_qr_flow(host.entry()->host, {}, context, completion, out_flow));
+}
+citizensdk_error_code_t citizensdk_host_sign_qr_request(
+    citizensdk_host_handle_t host_handle, citizensdk_bytes_view_t sign_request,
+    void *context, citizensdk_qr_completion_v1_t completion,
+    citizensdk_wallet_flow_handle_t *out_flow) {
+  using namespace citizen_sdk::linux;
+  if (out_flow != nullptr) *out_flow = 0;
+  auto host = acquire_host(host_handle);
+  if (!host) return expose(CITIZENSDK_ERROR_INVALID_HANDLE);
+  try {
+    return expose(present_qr_flow(host.entry()->host,
+        required_utf8(sign_request, 2331, "二维码签名请求必须为有界 UTF-8"),
+        context, completion, out_flow));
+  } catch (...) { return expose(map_exception()); }
 }
 
 citizensdk_error_code_t citizensdk_host_cancel_wallet_flow(

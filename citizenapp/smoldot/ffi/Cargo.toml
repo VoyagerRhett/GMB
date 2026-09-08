@@ -32,11 +32,11 @@ aes-gcm = "0.10"
 hpke-rs = { version = "0.6.1", features = ["rustcrypto", "std"] }
 hpke-rs-rust-crypto = { version = "0.6.1", features = ["std"] }
 base64 = "0.22"
-# sr25519 原生签名：全仓单一真源，与 CitizenWallet 冷端共用同一份源码。
+# App 内部 sr25519 原生签名实现，不引用其它产品。
 # 禁止在本 crate 内另写 sr25519 实现。
-citizen-signer = { path = "../../../shared/citizen-signer" }
-# 账户数据用途钥派生和冷钱包加密交付与 CitizenWallet 共用同一份实现。
-account-crypto = { path = "../../../shared/account-crypto" }
+citizen-signer = { path = "../../native/citizen-signer" }
+# App 内部账户数据用途钥派生和冷钱包加密交付实现。
+account-crypto = { path = "../../native/account-crypto" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"

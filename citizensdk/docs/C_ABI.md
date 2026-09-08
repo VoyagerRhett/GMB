@@ -1,5 +1,9 @@
 # CitizenSDK C ABI contract
 
+当前闭集为 89 个 Core 函数、Linux/Windows 各 17 个 Host 函数，另有 3 个 ZXing-C++
+图像窄包装函数。六模块运行期选择复用
+同一 Rust 装配；旧 ABI v1 结构/数值与默认构造保持。模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
+
 异步 admission 在接受请求前预留一个结果和一个真实完成事件槽位；队列容量为 64，
 容量用尽返回 `QUEUE_FULL`，不得先接收请求再丢失完成事件。普通事件与完成事件均即时
 入队，任何发送都不得持有 enqueue 锁等待宿主回调；结果所有权及一次释放合同不变。
@@ -14,21 +18,29 @@ Kotlin/Java and Flutter projections, and shared Darwin Swift/Flutter projections
 consume this ABI. Every exported product
 symbol has the `citizensdk_` prefix. Legacy `smoldot_*` and
 `citizen_sr25519_*` symbols are not included by the product header.
-ABI v1 preserves the original 36 symbols, layouts, numeric values and legacy
-`citizensdk_create` single-request semantics, then appends 34 typed account,
-wallet, signing, transfer and history functions: the product header and native
-library contain exactly 70 public symbols.
+既有 73 个函数保留，新增 `citizensdk_validate_modules`、
+`citizensdk_create_with_modules` 与 `citizensdk_verify_signature`；再补充
+`citizensdk_get_genesis_hash`、`citizensdk_get_finalized_account_balances`、
+`citizensdk_result_get_account_balance_count`、`citizensdk_result_get_account_balance_at`，以及 9 个
+QR 协议、审阅、签名与结果入口，当前共 89 个。
+QR 解析和会话时间由 Core 管理；公开结构通过有界 UTF-8 JSON 复制。
+异步审阅结果由 `citizensdk_review_qr_sign_request` 创建，由 `citizensdk_sign_qr_request`
+一次消费，均使用原结果注册表、事件及释放合同；`citizensdk_result_copy_qr` 只复制公开内容。
+旧待签字节 getter 与外部签名拼装入口不再存在。Flutter 不公开审阅结果句柄。
+模块验证是无副作用公共入口，必须在平台业务资源创建前调用；模块构造只装配已选择服务。
+纯验签无需 handle，直接验证公开账户、64 字节签名与消息；无效签名返回 false，参数编码错误
+独立报告。它不创建实例、链数据库、金库或事件订阅。
 
 The Step 7.1 Linux C/C++ Host source projection also consumes this exact ABI.
 Its header-only C++ facade does not define another binary contract, and its Host
 library must not re-export or duplicate the Core symbols. Step 7.4 includes
 the official Linux Flutter registration and both LinuxARM/LinuxAMD projections
-in the same-version candidate contract. This changes neither the 70-function
-Core ABI nor the 13-function Host ABI; actual platform builds and execution
+in the same-version candidate contract. 当前合同为 89 个 Core 函数、17 个 Host 函数与 3 个 QR 图像函数；
+actual platform builds and execution
 remain subject to the later unified GitHub CI/Release validation.
-源码候选合并 26 项同版安装件；Hosted 只增加 12 项 plugin 输入，不携带 Host 私有实现，
+源码候选合并 27 项同版安装件；Hosted 只增加 12 项 plugin 输入，不携带 Host 私有实现，
 也不创建第二份 Core。公共注册不表示 Linux 已运行或正式发布，缺少运行件不能生成可分发候选。
-The Linux Host ABI v1 is a closed set of 13 `citizensdk_host_*` functions that
+The Linux Host ABI v1 is a closed set of 17 `citizensdk_host_*` functions that
 compose and own the root instance; `citizensdk_host_abandon` is only an ownership-transfer escape hatch
 for a destructor that can no longer report a close error. It schedules the same
 checkpoint-first monotonic teardown and does not create a second Core ABI.
@@ -45,16 +57,25 @@ Completions that arrive synchronously while a private route is being installed
 remain lossless for 65 or more events and concurrent bursts; a fixed local
 buffer limit is never permission to release an otherwise owned result.
 
-Both creation boundaries accept raw packaged manifest, chainspec and light sync
-state bytes. Rust rechecks the exact manifest field set and product/network
-identity, both SHA-256 digests, the complete genesis #0 header, its Blake2b-256
-hash and state root before constructing the provider. Remote configuration
-cannot replace these trust anchors. `citizensdk_create` remains the compatible
-chain-only session constructor. `citizensdk_create_with_host` additionally
-requires one complete versioned host-services bundle; it never accepts a host
-signer, nonce source, light client or arbitrary key/value service.
+仅选择 chain 时加载随包 manifest、chainspec 与 light sync state；Rust 在创建 provider 前复核
+身份、SHA-256、完整 genesis #0 header、hash 和 state root，远程配置不能替换这些信任锚。
+未选 chain 不创建轻节点或链数据库。现有正式包装仍为 full 并携带链资产，模块选择不缩包。
+所有构造入口进入同一私有装配；旧入口保留默认组合，显式模块入口使用同一依赖与编译支持
+验证。宿主不得注入 signer、nonce、light client 或任意键值服务。
 
 ## Versioning and ownership
+
+账户私钥查看的公开控制位于钱包原生门面和桌面Host，不新增公开Core秘密getter。
+独立Core动态库另有精确四个内部链接符号，构建期私有头只供SDK自有视图使用，
+不安装、不进入公共模型或Flutter。Apple最终framework隐藏这些内部符号。
+原生清屏确认与Core认证/回调真实排空都完成后，公开操作才结束；阶段通知不能当作终态。
+
+创世哈希是同步复制的 32 字节公开值，只读取 Core 固定链身份，不访问网络或钱包。
+未编译或未选择 chain 返回 `UNSUPPORTED`；实例必须存活，但不要求 Running 或链同步就绪。
+批量余额使用既有异步请求/结果所有权，复用单余额结构和 Core 的同块批量读取。
+输入允许 0..1990 项，保留顺序和重复项；空输入仍通过模块、生命周期及链能力门禁，
+不产生存储读取。结果为 `ACCOUNT_BALANCES`，通过 count/at 逐项读取；不存在部分成功结果。
+该有限读取请求不支持取消，close/destroy 必须等待请求与结果排空，不丢弃正在执行的读取。
 
 - ABI version is `1`; all structures use fixed-width fields and the v1 product
   targets are 64-bit architectures.
@@ -111,7 +132,7 @@ the gate is not held while waiting for an in-flight callback or monitor thread.
 Thus clearing/replacing a callback cannot strand an accepted completion, and an
 active capability monitor always retains a registered callback.
 
-For `citizensdk_create_with_host` instances, start, stop and import are
+For durable chain-backed instances, start, stop and import are
 exclusive requests on this gate. They reject acceptance while an earlier
 asynchronous request is pending, then reject every later request, callback or
 subscription control, and destroy until their result is committed. The current
@@ -186,11 +207,10 @@ operations. Public and secure stores are separate vtables and every operation
 has a named field; there is no public `put(key, bytes)` escape hatch. Rust wraps
 typed state in a versioned, domain-bound envelope before calling the host and
 validates the full envelope again before reconstructing a contract value.
-These five typed stores plus the vault are the platform-independent complete
-composition contract. The public-store vtable is required; secure store and
-vault are either both supplied or both absent. The Apple adapter implements the
-same named operations with separate typed public and secure SQLite databases;
-neither database introduces a generic key/value escape hatch.
+五类 store 与 Vault 仍是职责隔离合同，但按选择提供：chain/history 需要 public store，
+wallet/signing 需要配套 secure store 与 Vault。签名服务只访问同宿主已安全建立账户的归属资料，
+不等于启用钱包管理；首次 provision 仍经钱包流程。所有官方绑定采用相同的 public/secure
+数据域隔离，不提供任意键值旁路。
 
 The Linux Host implements the same five operations over separate public and
 secure SQLite files and combines them with a TPM 2.0 vault. TPM callbacks wrap
@@ -226,7 +246,7 @@ result has no second identity and remains the terminal integrity failure for
 the operation selected by its token. Only a matching non-null pair may advance
 from Pending to Completing.
 
-For a `citizensdk_create_with_host` instance, `citizensdk_start` first loads,
+For a durable chain-backed instance, `citizensdk_start` first loads,
 validates and imports the typed chain database before any provider-start side
 effect. `citizensdk_export_state` persists the same stable exported snapshot by
 exact revision CAS before returning it. `citizensdk_stop` performs that durable
@@ -262,8 +282,8 @@ The provider's own `SmoldotProviderStatus.is_usable` is the sole runtime input
 for chain readiness. Peer count, height and elapsed time are not reinterpreted
 by the ABI. Submit and verify depend on chain read. The legacy constructor is a
 session-backed chain-only composition and continues to report wallet services
-unsupported. The host constructor composes the real wallet/history services,
-exact Runtime nonce and sole sr25519 signer. Construction only reports these
+unsupported. 显式模块构造只启用已选服务，钱包管理、SigningService 与 history 独立；
+唯一 Runtime nonce 与 sr25519 实现不由平台复制。Construction only reports these
 components as supported but not ready; asynchronous worker-side probes determine
 actual store, hardware-vault and authentication readiness without blocking an
 Android or Apple main thread. Before that first probe, the affected capabilities
@@ -314,7 +334,7 @@ not permit a private-key export, raw signer, or persistent secret callback.
 
 ## Windows 薄 Host（第 8.1 步）
 
-70 项 Core 根符号与既有数值/布局不变。Windows 另固定 13 项 `citizensdk_host_*`，
+当前为 89 项公开 Core 根符号，既有数值/布局不变；跨库另有精确四项 SDK 内部查看控制。Windows 另固定 17 项 `citizensdk_host_*`，
 配置平台 owner 字段为 `void *hwnd`，配置/钱包请求/公开结果分别为 72/32/16 字节。
 Host 独占 Core 所有权；应用不能直接销毁借用 handle 或替换内部事件回调。关闭在 Core
 释放后还要等待 UI 线程确认 HWND 退休，BUSY 时保留完整资源图。根 ABI 不增加秘密旁路。

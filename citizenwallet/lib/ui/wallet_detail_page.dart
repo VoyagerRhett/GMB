@@ -325,7 +325,7 @@ class _WalletDetailPageState extends State<WalletDetailPage> {
             tooltip: '扫码签名',
             onPressed: _openWalletScan,
             icon: SvgPicture.asset(
-              'assets/icons/scan-line.svg',
+              'resources/icons/scan-line.svg',
               width: 20,
               height: 20,
               colorFilter: const ColorFilter.mode(

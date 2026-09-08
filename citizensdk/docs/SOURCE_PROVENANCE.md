@@ -1,5 +1,13 @@
 # CitizenSDK 源码来源与同步策略
 
+当前 SDK 自有合同：Core 公开 89 个函数，另有 4 个内部链接函数；Linux/Windows Host 各 17 个函数，
+QR 图像窄包装 3 个函数，Flutter 五端统一 36 方法。此次只调整 SDK 自有装配与绑定，
+不修改 CitizenChain、CitizenApp、CitizenWallet 或 ZXing-C++ 上游源码。
+运行期模块选择不裁剪现有正式 full 包与链资产。模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
+
+当前产品边界：根共享目录已移除。CitizenApp 的签名及用途钥实现归入其 `native/`，CitizenWallet 的实现归入其 `rust/src/` 与 `lib/`，平台金库由钱包宿主直接承接。CitizenSDK 保持独立，不被这两个产品引用。下文旧 shared 路径仅记录历史来源。
+
+
 ## SDK 单源实现与来源界限
 
 SDK 自有旧 Dart 钱包、交易、轻节点协调和 Preferences 实现已删除，相关正式路径只在
@@ -57,11 +65,19 @@ https://github.com/VoyagerRhett/GMB。包清单、主页、自有版权署名与
 | SQLite 3.53.4 | https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip | 1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d |
 | OpenSSL 3.5.8 | https://github.com/openssl/openssl/releases/download/openssl-3.5.8/openssl-3.5.8.tar.gz | a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2 |
 | TPM2-TSS 4.2.0 | https://github.com/tpm2-software/tpm2-tss/releases/download/4.2.0/tpm2-tss-4.2.0.tar.gz | b53f0c5c8c4ce17f05701a410ca9688f725ca380c9bc4640eacd0eadb1fea124 |
+| ZXing-C++ 3.1.1 | https://github.com/zxing-cpp/zxing-cpp/releases/download/v3.1.1/zxing-cpp-3.1.1.tar.gz | c3c02c29c0b519de7bd4e25b376e606e87f0761befd1282815642a2246613d14 |
 
 SQLite 官方发布页提供的 SHA3-256 为
 628a44cfe82c66aed1ccbbe85a562d2e33ebe64b3288981ed76285612227934e；
 上表 SQLite SHA256 是对同一通过官方 SHA3 校验的归档另行计算，不冒称官方公布。
-OpenSSL/TPM2-TSS SHA256 与官方 GitHub Release asset digest 一致。
+OpenSSL/TPM2-TSS SHA256 与官方 GitHub Release asset digest 一致。ZXing-C++ 归档只在 TATA 任务工作区解包，
+SDK 源树不复制或修改上游源码；CMake 在执行上游前验证准确构建输入树，不只检查版本字符串。
+完整归档的 `core/`、`docs/`、根 `CMakeLists.txt` 和 `zxing.cmake` 共 342 文件，按相对路径排序，
+将每项 `路径:SHA256\n` 串接后的 SHA256 为 `47e4950494ae7fef55307846ad47f2586b83a1d4cde381ec3c2ca0215015db3e`。
+直接构建官方独立 `core/` 工程，不构建根工程无条件附带的 C 示例及其 stb 依赖；
+只关闭上游公开非 QR 格式选项、固定 bundled zint 与 LOCAL 依赖，不执行在线自动取源。顶层 Apache-2.0
+`LICENSE` SHA256 为 `c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08`；
+启用 writer 时所用的上游内置 libzint 文件保留其 BSD-3-Clause 头部声明。
 
 既有 LICENSE 原文保留；追加 SQLite sqlite3.h 的 public-domain 声明、OpenSSL 完整
 LICENSE.txt、TPM2-TSS 完整 LICENSE。OpenSSL 原文 SHA256：
@@ -143,8 +159,9 @@ Core/产品 FFI 闭集由 Release 独立反向枚举、固定哈希并拒绝额�
 不可拆分的钱包交易和 finalized 历史行为。第 4.2 步又建立 Rust 内部产品组合，固定真实
 smoldot provider、准确 Runtime nonce 和唯一 signer，并只接受 typed Vault/stores。第 5.1 步
 在未发布 ABI v1 内保留原 36 个符号不变，当时追加 34 个账户、钱包、签名、转账和历史符号；
-本轮再加入 3 个同步钱包输入接口，当前总计 73 个。旧 `citizensdk_create` 仍是 session-backed chain-only；
-`citizensdk_create_with_host` 以五类 typed stores 和 KEK/DEK Vault 形成完整平台无关组合。
+此前再加入 3 个同步钱包输入接口后为 73 个；第 2 步新增模块校验、模块构造与无实例验签，
+随后补充四个链查询/结果入口形成 80 个；QR 统一为九个协议、审阅、签名和结果入口，当前共 89 个。
+既有构造保留默认行为并进入同一私有装配，官方绑定改为按 modules 选择服务与资源。
 第 5.2 步根 Dart API 与 Android native/Flutter 双投影切换到 Rust Engine；第 6 步又以共享
 `darwin/` 源码为 iOS 与 macOS 建立 Swift/Flutter、typed SQLite 与 Apple Vault 投影。旧 Dart
 硬件秘密通道和装配已删除；SDK 自有 Dart 轻节点协调、钱包、交易与 Preferences 实现及
@@ -202,7 +219,7 @@ formatter 归一外不改行为；发布器继续对迁移闭集逐文件固定�
 `target` 命令不代表 CitizenSDK 当前交付合同，也不得作为 SDK 构建指引。CitizenSDK 当前产品
 ABI 投影覆盖 Android、iOS 与 macOS。当前 Android ABI 为 `arm64-v8a`；iOS 设备与模拟器变体
 及 macOS 的 Apple machine slice 架构值为 `arm64`。本机宿主测试库与全部生成记录只能写入
-`/Users/rhett/TATA/tataconsole/target/.work/GMB/citizensdk/SDK` 下的任务独占目录；Linux 合同测试由
+`/Users/rhett/TATA/tataconsole/work/gmb/citizensdk` 下的任务独占目录；Linux 合同测试由
 `CITIZENSDK_TEST_WORK_DIR` 显式接收现有 `0700` 目录且没有 `/tmp` fallback。远程 Runner 也
 必须由统一流程显式注入其 checkout 外的任务独占构建根，不能让测试自行选择临时目录。
 legacy `libsmoldot.dylib` 仅允许 macOS `arm64` 差分测试；
@@ -269,15 +286,17 @@ verified finalized 锚沿 exact parent hash 回溯，逐头核对响应 hash、S
 语义；C11/C++17 合同逐项核对公开结构布局。构建后的产品库真实导出必须与头文件函数集合
 相等，并拒绝 `smoldot_*`、`citizen_sr25519_*`、`account_crypto_*`、任意 RPC、raw signer、
 private-key/child-secret 导出与持久秘密 callback。
-原有 36 个符号与新增 34 个符号共同构成准确 70 符号闭集；`abi.rs`、`wallet_abi.rs`、对应
+早期原有 36 个符号与当时新增 34 个符号形成 70 个符号，随后增加三个钱包输入接口，
+此后新增模块校验、模块构造、纯验签及四个链查询/结果入口，QR 统一为九个入口，当前闭集为 89 个符号；`abi.rs`、`wallet_abi.rs`、对应
 合同测试及根 C 头均为 CitizenSDK 自有适配源码，不伪装成 CitizenApp/smoldot 逐字节来源。
 
-`citizensdk_create` 只启用 chain session、已签名交易提交/观察/核验和公开链状态导入导出。
-`citizensdk_create_with_host` 要求 public store，并将 secure store 与 Vault 作为 all-or-none；
-五类具名 store 是 chain database、runtime cache、wallet profile、transaction history 与
-encrypted secret blob。完整组合固定 signer、nonce 和 smoldot，宿主不能注入任意 RPC、raw
-signer 或 nonce source。prepared-wallet 助记词只为绑定 owner handle 的显式创建/备份 UI；
-import/add 是用户显式输入，private key 与 child secret 永不导出。
+`citizensdk_create` 保持既有默认组合与行为，显式 `citizensdk_create_with_modules` 由
+Rust 统一检查闭集、依赖和编译支持，随后按选择装配服务。chain/history 才需要 public store；
+wallet/signing 才需要配套 secure store 与 Vault。WalletService、SigningService 与 history
+服务各自有独立门禁；签名只使用同宿主已有安全账户归属元数据，首次 provision 仍走钱包流程。
+纯验签无需实例、订阅或任何平台业务资源。完整组合仍使用唯一 signer、nonce 和 smoldot，
+宿主不能注入任意 RPC 或 raw signer；prepared-wallet 资料仅限绑定 owner 的安全 UI，
+不增加秘密导出接口。
 
 Android 候选注入 `libcitizensdk.so` 与 `libcitizensdk_jni.so`，并生成无 Flutter 依赖的
 原生 AAR；根 Flutter 插件直接编译同一 Kotlin facade 并消费同字节双库。Apple 候选从
@@ -486,7 +505,7 @@ CitizenSDK 当前平台适配源码位于自己的 `android/` 与共享 `darwin/
 `darwin/` 是 CitizenSDK 自有 Apple 权威源码，不从任何旧 Apple 平台目录或 CitizenApp 运行时取文件。
 `Sources/CitizenSDK` 实现公开 Swift facade、70 符号产品 ABI codec、生命周期与事件、五类 typed
 store、分离的 public/secure SQLite、KEK-only `SecretVault`、敏感 buffer、prepared wallet 与
-SDK-owned iOS/macOS wallet flow；`Sources/CitizenSDKFlutter` 只实现固定 22 方法 tuple、单一
+SDK-owned iOS/macOS wallet flow；`Sources/CitizenSDKFlutter` 只实现统一 36 方法 tuple、单一
 EventChannel router、session/事件收口和 wallet-flow bridge，不包含第二份 Engine 或秘密通道。
 
 统一原生入口把 `Sources/CitizenSDK`、根产品头、Rust Core、Privacy Manifest 与链资产编成
@@ -534,7 +553,7 @@ header-only C++ facade 都位于 CitizenSDK 权威目录；链、Runtime、钱�
 第 7.2 步在同一 `linux/` 权威目录实现 Flutter codec、sessions、wallet-flow bridge、environment
 和 plugin。它按根 Dart tuple 及 Android/Darwin 已验证装配合同做平台适配，但不复制三端
 源码作为运行依赖，也不复制 Core 行为。Linux 新增生产/测试文件全部进入既有 Release 来源
-哈希与目录反向闭集；第 8.2 步后五份绑定的 22 方法表由 Node 来源合同逐项对拍。
+哈希与目录反向闭集；第 8.2 步后当时的 22 方法表由 Node 来源合同逐项对拍，第3步为 26 方法，第4步当前统一为 36 方法。
 
 Linux store 的 openat SQLite VFS、精确 schema/PRAGMA/commit 合同，Host admission lease 与
 无损早完成路由，Vault retirement 条件写/长提示后重验，GTK parent 销毁退休，以及 TPM child
@@ -559,10 +578,10 @@ Android/Apple 适配源码作为运行时依赖。
 `citizen_sdk_c_consumer.c`、`citizen_sdk_cpp_consumer.cc`、`citizen_sdk_flutter_consumer.dart`。
 它们是 SDK 自有验收源码，不是新的绑定、协议或 Core；与修改后的测试 CMake 一起进入既有
 测试哈希闭集。安装和临时 Flutter 工程仍由唯一 `scripts/build-native.sh` 装配，不增加工作流。
-第 7.4 步把两种单平台 19 项安装件合并为唯一候选 `linux/` 下的 26 项：根 C ABI 与 7 个
+第 7.4 步原把两种单平台 19 项安装件合并为 26 项；第4步加入共享 QR 图像头后，当前是唯一候选 `linux/` 下的 27 项：根 C ABI 与 7 个
 Host/C++ 头、3 个 CitizenChain 资产的重叠必须字节一致；每个平台的双库及 5 项 CMake 包
 配置分别隔离。源码树仍只保存 canonical 输入，准确生成投影只在中央候选中存在。
-Hosted 精确保留 38 项 Linux 运行输入，即 26 项安装件加 `CMakeLists.txt`、
+Hosted 精确保留 39 项 Linux 运行输入，即 27 项安装件加 `CMakeLists.txt`、
 `cmake/CitizenSDKFlutter.cmake`、5 个 plugin `.cc`、4 个内部 `.hpp` 和 Flutter 注册头。
 原生 Host 私有源码、测试和构建模板仍只用于 GitHub 审计闭集，不进入 Hosted。
 同轮同步官方 `linux` 注册与默认 `CitizenSdk.open()`；真实 Flutter 消费者不注入内部 platform、
@@ -610,8 +629,8 @@ CitizenSDK contracts、engine、ffi、signer、provider 统一 workspace 的已�
 Provider 的递归 smoldot registry name/version/checksum 另外必须与
 `native/smoldot/pow/Cargo.lock` 完全一致，根锁不能静默选择另一组“可兼容”版本。
 任何依赖升级都必须显式更新哈希与合同测试。
-Hosted 候选的 Dart 运行闭包是 17 个普通文件：根 `lib/citizen_sdk.dart`、`lib/src/api`
-六个文件、`lib/src/crypto/account_codec.dart`、`lib/src/models` 五个文件和 `lib/src/platform`
+Hosted 候选的 Dart 运行闭包是 18 个普通文件：根 `lib/citizen_sdk.dart`、`lib/src/api`
+七个文件、`lib/src/crypto/account_codec.dart`、`lib/src/models` 五个文件和 `lib/src/platform`
 四个正式 transport 文件。Release 必须双向核对该闭包，任何 legacy node/smoldot/wallet/
 transaction/Preferences 文件进入 Hosted 都是失败。
 Release 对 `native/signer` 做 10 个普通文件的逐字节哈希与反向闭集检查；crate 清单、两份
@@ -692,7 +711,7 @@ SecureZeroMemory、HANDLE/ACL/SQLite VFS、PCP 持久 KEK 引用与跨实例串�
 
 ## Windows Flutter adapter 来源与差异（第 8.2 步）
 
-固定双通道、22 方法、tuple 语义、公开结果与事件映射沿用现有绑定合同；Windows codec
+统一双通道、36 方法、tuple 语义、公开结果与事件映射沿用现有绑定合同；Windows codec
 的请求语义与 Linux 对应段逐段核对，不把平台迁移写成重新设计链或钱包。Windows 使用
 官方 EncodableValue 与 StandardMethodCodec，删除 Linux GLib 专用的字符串表示适配。
 官方解码前增加有界标准 wire 预检，拒绝截断、尾随及资源超限，但仍由官方 codec 产生
@@ -722,7 +741,7 @@ Windows 生产来源闭集由 51 增至 62 文件，测试输入由 17 增至 24
 新增两份消费者及独立 CMake 输入，Windows 测试闭集由 24 增至 27，整个 SDK 自有测试
 闭集由 192 增至 195。消费者仅使用现有公开 C/C++ API 与已安装同版库；生命周期和结果
 所有权沿用现有合同，Windows 路径、等待和 DLL 来源检查使用系统 API，不新增链算法。
-唯一原生构建器增加 21 项安装闭集及本轮来源字节核对，保留 14 项原生 CTest，再验证两个
+唯一原生构建器原增加 21 项安装闭集；第4步加入 QR 图像头后当前为 22 项。保留 14 项原生 CTest，再验证两个
 安装消费者，全部成功后才导出全新安装目标。Node 合成安装和 PE 输入测试校验逻辑，
 不能作为 Windows 编译、Win32、TPM 或钱包运行证据。
 
@@ -737,8 +756,8 @@ Hosted 与候选当时不开放 Windows，后续接入见第 8.4 步。文档、
 XDG/GTK 路径，不注入内部平台或变更 SDK 副本。Windows 测试输入由 27 增至 28 文件，
 SDK 自有测试合同由 195 增至 196，Windows 原有 62 份生产源码不新增算法。
 
-同一发布器验证并复制 21 项安装件，七个重叠 Host 头必须与来源相同，剩余十四项精确注入。
-Hosted 只保留 33 项 Windows 运行输入，不带入 Host 私有实现；正式候选共享同一 SDK
+同一发布器当前验证并复制 22 项安装件，七个重叠 Host 头必须与来源相同，其它项精确注入。
+Hosted 只保留 34 项 Windows 运行输入，不带入 Host 私有实现；正式候选共享同一 SDK
 版本、ABI 和平台集合。PE/COFF、导出/依赖和 CMake/资产结构检查不能证明二进制来自某个
 commit，构建来源、许可证和真实 Windows 行为仍由后续统一 CI/Release 提供。
 

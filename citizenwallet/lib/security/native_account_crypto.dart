@@ -5,7 +5,7 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 import 'package:path/path.dart' as p;
 
-/// `shared/account-crypto` 在 CitizenWallet 的唯一 FFI 入口。
+/// `citizenwallet/rust/src/account_crypto.rs` 在 CitizenWallet 的唯一 FFI 入口。
 ///
 /// 冷端只需要 X25519 公钥、AES-GCM 封装及底层用途钥派生；所有私钥缓冲用后清零。
 class NativeAccountCrypto {
@@ -17,15 +17,21 @@ class NativeAccountCrypto {
   static const String _libraryBase = 'libcitizenwallet_signer';
   static final DynamicLibrary _library = _openLibrary();
 
+  static String _hostTargetDirectory() {
+    final target = Platform.environment['CARGO_TARGET_DIR'];
+    if (target == null || target.isEmpty || !p.isAbsolute(target)) {
+      throw StateError('宿主测试必须由塔塔控制台提供 CARGO_TARGET_DIR');
+    }
+    return target;
+  }
+
   static DynamicLibrary _openLibrary() {
     if (Platform.isAndroid) return DynamicLibrary.open('$_libraryBase.so');
     if (Platform.isIOS) return DynamicLibrary.process();
     final extension = Platform.isMacOS ? 'dylib' : 'so';
     return DynamicLibrary.open(
       p.join(
-        Directory.current.path,
-        'rust',
-        'target',
+        _hostTargetDirectory(),
         'release',
         '$_libraryBase.$extension',
       ),

@@ -70,7 +70,8 @@ struct FakeSystem final {
         return cancel ? AuthenticationResult{CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED, {}}
                       : authenticated();
       },
-      [this] {
+      [this](uint64_t host_operation_id) {
+        assert(host_operation_id != 0);
         ++prompted;
         if (on_unlock) on_unlock();
         return cancel ? AuthenticationResult{CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED, {}}

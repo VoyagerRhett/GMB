@@ -1,5 +1,6 @@
 // This black-box test intentionally crosses the exported raw-pointer ABI.
 #![allow(unsafe_code)]
+#![cfg(all(feature = "chain", feature = "transactions"))]
 
 use std::{
     ffi::c_void,
@@ -93,22 +94,48 @@ fn snapshot_always_contains_ten_truthful_capabilities() {
     assert_eq!(names, (1_u32..=10).collect::<Vec<_>>());
     let chain = &snapshot.statuses[CitizenSdkCapabilityName::ChainRead as usize - 1];
     assert_eq!(chain.ready, 0);
-    for name in [
-        CitizenSdkCapabilityName::TransactionBuild,
-        CitizenSdkCapabilityName::WalletProfile,
-        CitizenSdkCapabilityName::LocalSigning,
-        CitizenSdkCapabilityName::HardwareVault,
-        CitizenSdkCapabilityName::UserAuthentication,
-        CitizenSdkCapabilityName::History,
-        CitizenSdkCapabilityName::BackgroundSync,
+    for (name, compiled) in [
+        (
+            CitizenSdkCapabilityName::TransactionBuild,
+            cfg!(feature = "transactions"),
+        ),
+        (
+            CitizenSdkCapabilityName::WalletProfile,
+            cfg!(feature = "wallet"),
+        ),
+        (
+            CitizenSdkCapabilityName::LocalSigning,
+            cfg!(feature = "signing"),
+        ),
+        (
+            CitizenSdkCapabilityName::HardwareVault,
+            cfg!(feature = "wallet") || cfg!(feature = "signing"),
+        ),
+        (
+            CitizenSdkCapabilityName::UserAuthentication,
+            cfg!(feature = "wallet") || cfg!(feature = "signing"),
+        ),
+        (CitizenSdkCapabilityName::History, cfg!(feature = "history")),
+        (
+            CitizenSdkCapabilityName::BackgroundSync,
+            cfg!(feature = "history"),
+        ),
     ] {
-        assert_eq!(snapshot.statuses[name as usize - 1].supported, 0);
-        assert_eq!(snapshot.statuses[name as usize - 1].available, 0);
-        assert_eq!(snapshot.statuses[name as usize - 1].enabled, 0);
-        assert_eq!(snapshot.statuses[name as usize - 1].ready, 0);
+        let status = &snapshot.statuses[name as usize - 1];
+        // 纯链实例没有钱包/历史资源，不等于当前完整构建删掉了这些功能。
+        assert_eq!(status.supported, u8::from(compiled));
+        let selected = name == CitizenSdkCapabilityName::TransactionBuild;
+        assert_eq!(status.enabled, u8::from(selected));
+        assert_eq!(status.ready, 0);
         assert_eq!(
-            snapshot.statuses[name as usize - 1].reason,
-            CitizenSdkCapabilityReason::BuildUnsupported as u32
+            status.reason,
+            if compiled && selected {
+                CitizenSdkCapabilityReason::DependencyNotReady
+            } else if compiled {
+                CitizenSdkCapabilityReason::HostDisabled
+            } else {
+                CitizenSdkCapabilityReason::BuildUnsupported
+            } as u32
         );
     }
 

@@ -55,7 +55,10 @@ impl ChainMonitor {
                 let Some(owner) = runtime.upgrade() else {
                     return;
                 };
-                let provider = Arc::clone(owner.provider());
+                // 调度器仅属于实际启用的链模块；缺席时不创建替身或重试循环。
+                let Ok(provider) = owner.provider().map(Arc::clone) else {
+                    return;
+                };
                 drop(owner);
                 let mut subscription = Some(provider.subscribe_finalized_heads());
                 let mut retry_at = Instant::now();

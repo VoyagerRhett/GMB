@@ -1,5 +1,17 @@
 # CitizenSDK 技术架构
 
+当前六模块是 wallet、signing、chain、transactions、history、qr，默认 full=63，按位组合并由 Rust
+在平台资源创建前验证依赖和编译支持。钱包管理与签名不互相隐式启用，history 独立。
+无链组合不构造 smoldot、读取链资产或创建链数据库；未选历史不初始化其服务。
+单独 qr=32 只构造 Rust `QR_V1` 协议/会话状态，不创建钱包、金库、链数据库或轻节点。
+图像路径是五端共用的 ZXing-C++ 3.1.1 窄包装，平台只提供 8 位亮度帧，不存在第二识别器或回退引擎。
+SDK 自有扫描窗口使用 AVFoundation、CameraX、Media Foundation 或 GStreamer 采集，不把扫描界面留给产品实现。
+`native/engine/src/qr_review.rs` 复用现有已验证 metadata 做完整链调用审阅；`native/ffi` 持有
+不可变、绑定实例、一次消费的审阅结果，确认后调用原有 SigningService。
+链调用扫码签名显式依赖 qr、signing、chain；不要求 wallet、transactions 或 history。
+普通 signing-only 和 QR-only 保留各自独立能力，不由扫码签名入口隐式启动链。
+运行期模块选择不裁剪现有 full 正式包与链资产。模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
+
 ## 单一产品原则
 
 第 12 步 P1 加固不改变分层：交易原授权与 Pending 原子持久化、恢复协调及 hook 流水
@@ -117,21 +129,24 @@ graceful stop 在任何退订、服务或 provider 停止副作用前完成同�
 受理，受理后直到完成都排斥新请求、callback/subscription 控制与 destroy；stop 仅允许当前
 独占 request 自己关闭此前已经存在的 capability monitor。
 
-第 4.1/4.2 步在 Core 源码增加并组合四组真实服务：
+第 4.1/4.2 步建立的 Core 服务在本次将签名单列后，当前职责如下：
 
 - 账户状态：从准确 metadata 生成 finalized `System.Account` storage key，解码
   free/reserved/total；batch 先去重再按原顺序及重复项重建。链上费率、最低费与存在性存款
   绑定同一 best runtime metadata；nonce 只接受同一次
   `AccountNonceApi_account_nonce` Runtime call 携带的账户、hash、高度与值，并复核准确 best
   身份。该值不包含交易池，持久同账户 Pending/InBlock single-flight 防止本地重复使用。
-- 钱包与 signer：English BIP-39 12／18／24 词、可选 NFKD password、`//0..//1989` 派生，以及
-  create/import/add/usable/rename/activate/delete/reconcile/sign。create 固定为 prepare（零持久
+- 钱包管理：English BIP-39 12／18／24 词、可选 NFKD password、`//0..//1989` 派生，以及
+  create/import/add/usable/rename/activate/delete/reconcile。create 固定为 prepare（零持久
   写入、一次性恢复词会话）→用户确认备份→commit，消除持久钱包先于恢复词展示的崩溃窗口；
   `bip39`、password 和 NFKD 临时值均进入 zeroize 生命周期。公开事实先以 revision CAS 保存
   provisioning，generation/owner/operation 精确拥有秘密与 cleanup；写后异常由 exact readback
   收敛。金库解锁秘密始终留在 Rust `SecretBuffer`，Rust Core 不提供私钥导出。
   产品 ABI 的 prepared-wallet handle 绑定 owner instance，只允许显式创建/备份 UI 复制助记词；
   import/add 的恢复词只能来自用户明确输入，private key 与 child secret 永不导出。
+- 独立签名：`SigningService` 只使用同宿主已由 SDK 安全建立账户的归属资料与设备金库，
+  首次 provision 仍经 wallet 安全流程，不开放钱包管理或任何秘密输出。
+  纯验签是无实例公开工具，既不需要启用签名模块，也不建立 session、订阅或金库。
 - 交易构造：固定 `OnchainTransaction.transfer_with_remark` pallet `4` / call `0`、正分金额和
   最多 99 UTF-8 字节 remark，以准确 best runtime/transaction version、CitizenChain genesis、
   准确 Runtime nonce、immortal era、tip `0` 和官方 `subxt-core 0.43.0` 构造 signed extrinsic
@@ -157,20 +172,17 @@ hash 逐头回溯，核对响应 hash、完整 SCALE header hash、高度与父�
 返回值都不是 finalized 证明；独立有界 proof-derived cache 只降低重复回溯成本。这样既关闭
 异步重组 TOCTOU，也允许重启后补扫旧块。
 
-真实 smoldot adapter 与产品 C ABI 已形成一个 70 符号的 ABI v1：原 36 个符号及其布局、数值、
-语义保持不变，追加 37 个账户、余额/nonce/fee、钱包生命周期/多账户、通用载荷签名、高层
-转账和历史符号；产品头文件仍没有任意 RPC、raw signer、private-key 或 child-secret 出口。
-`citizensdk_create` 保持 session-backed chain-only；`citizensdk_create_with_host` 固定 smoldot、
-准确 Runtime nonce 和唯一 sr25519 signer，并从 host v1 取得 chain database、runtime cache、
-wallet profile、transaction history、encrypted secret blob 五类具名 store 及 KEK/DEK Vault。
-secure store/Vault all-or-none，不能注入 signer、nonce 或任意键值服务。根 Dart、Android 与
-Apple 共享 Darwin 绑定均已改接这个产品 ABI；iOS 与 macOS 使用同一 host composition，平台
-差异只在宿主安全设施、文件保护与运行架构。
+当前产品 C ABI v1 共 89 个函数，既有结构、数值与默认构造行为保持；
+新增模块校验、显式模块构造和无实例验签三个入口，另补四个链查询/结果入口及九个 QR 协议/会话入口。官方绑定使用
+`citizensdk_create_with_modules`，旧入口也进入同一私有装配函数，不另设状态机。
+chain/history 按选择提供 public store，wallet/signing 才需要配套 secure store/Vault。
+依赖实现仍固定，宿主不能注入 signer、nonce、任意 RPC 或任意键值服务。
+五端唯一业务逻辑由 Rust 实现，平台差异只在设备安全设施、文件保护与运行架构。
 
 ## 唯一原生实现
 
-公开 `CitizenSdk` 位于 `lib/src/api/citizen_sdk.dart`，仅通过 `chain`、`wallet`、`transactions`
-调用产品 ABI。钱包生命周期、输入派生、交易构造与执行核验在 `native/engine`；
+公开 `CitizenSdk` 位于 `lib/src/api/citizen_sdk.dart`，分别通过 `chain`、`wallet`、`signing`、`transactions`、`history`
+调用产品 ABI；静态 `CitizenSigning.verify` 无需实例直接调用公共验签。钱包生命周期、输入派生、交易构造与执行核验在 `native/engine`；
 资产校验和系统装配在 `native/ffi`；签名算法在 `native/signer`；
 网络、共识和订阅仍由 smoldot 上游实现，`native/smoldot/provider` 只适配类型化合同。
 
@@ -372,11 +384,11 @@ Android Gradle/Kotlin persistent project state 只允许位于 TataConsole 中�
 framework 标准布局所需的精确五个内部相对符号链接，其他任何符号链接均失败关闭。
 LinuxARM、LinuxAMD 已有 Host、Flutter adapter/合同测试及安装消费者源码。第 7.4 步把两种
 同版本安装投影、官方 `linux` plugin 注册、默认 `CitizenSdk.open()` 与 manifest 候选合同
-原子接入；26 项安装件加 12 项插件输入构成 Hosted 的 38 项 Linux 运行闭集。应用只编译薄
+原子接入；27 项安装件加 12 项插件输入构成 Hosted 的 39 项 Linux 运行闭集。应用只编译薄
 plugin，不重编 Host/Core，也不携带 Host 私有源码。两种机器目标的实际编译/运行仍由后续
 统一 GitHub CI 增量缓存、Release 全量构建验证，源码注册不是已交付。Windows 已有原生
 Host 和 Flutter 适配；第 8.4 步同时接入默认公开注册、同版候选与正式 Flutter 消费者。
-Windows Hosted 固定 21 项安装件与 12 项插件输入，不重新编译 Host/Core；源码登记仍
+Windows Hosted 固定 22 项安装件与 12 项插件输入，不重新编译 Host/Core；源码登记仍
 不代表 Windows/MSVC 或实体 TPM 已实测。
 legacy `libsmoldot.dylib` 只允许
 作为 macOS `arm64` 差分测试宿主库；其 build-local `LC_ID_DYLIB` 不具分发身份，不得进入候选并须随

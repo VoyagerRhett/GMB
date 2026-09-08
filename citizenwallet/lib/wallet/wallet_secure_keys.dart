@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:gmb_hardware_secretvault/hardware_secretvault.dart';
+import 'package:citizenwallet/security/hardware_secretvault.dart';
 
 import '../security/secure_storage.dart';
 

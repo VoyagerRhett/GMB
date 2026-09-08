@@ -4,8 +4,6 @@ PODS:
   - flutter_secure_storage_darwin (10.0.0):
     - Flutter
     - FlutterMacOS
-  - gmb_hardware_secretvault (1.0.0):
-    - Flutter
   - image_picker_ios (0.0.1):
     - Flutter
   - isar_community_flutter_libs (1.0.0):
@@ -24,7 +22,6 @@ DEPENDENCIES:
   - citizenwallet_signer (from `signer`)
   - Flutter (from `Flutter`)
   - flutter_secure_storage_darwin (from `.symlinks/plugins/flutter_secure_storage_darwin/darwin`)
-  - gmb_hardware_secretvault (from `.symlinks/plugins/gmb_hardware_secretvault/ios`)
   - image_picker_ios (from `.symlinks/plugins/image_picker_ios/ios`)
   - isar_community_flutter_libs (from `.symlinks/plugins/isar_community_flutter_libs/ios`)
   - local_auth_darwin (from `.symlinks/plugins/local_auth_darwin/darwin`)
@@ -38,8 +35,6 @@ EXTERNAL SOURCES:
     :path: Flutter
   flutter_secure_storage_darwin:
     :path: ".symlinks/plugins/flutter_secure_storage_darwin/darwin"
-  gmb_hardware_secretvault:
-    :path: ".symlinks/plugins/gmb_hardware_secretvault/ios"
   image_picker_ios:
     :path: ".symlinks/plugins/image_picker_ios/ios"
   isar_community_flutter_libs:
@@ -55,7 +50,6 @@ SPEC CHECKSUMS:
   citizenwallet_signer: c9d03755d23cde9f08cdabc395298a9433b51866
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
   flutter_secure_storage_darwin: acdb3f316ed05a3e68f856e0353b133eec373a23
-  gmb_hardware_secretvault: 9cc8b4f68812094c1beb5e0cb37d8d51bc781d64
   image_picker_ios: e0ece4aa2a75771a7de3fa735d26d90817041326
   isar_community_flutter_libs: bede843185a61a05ff364a05c9b23209523f7e0d
   local_auth_darwin: c3ee6cce0a8d56be34c8ccb66ba31f7f180aaebb

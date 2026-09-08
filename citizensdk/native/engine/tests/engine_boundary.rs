@@ -1,3 +1,5 @@
+#![cfg(feature = "chain")]
+
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Barrier, Mutex,
@@ -356,7 +358,7 @@ fn engine_with_options_and_runtime_cache(
             store
         });
     let components = EngineComponents::new(
-        client,
+        Some(client),
         None,
         None,
         Some(Arc::clone(&chain_database) as Arc<dyn ChainDatabaseStore>),
@@ -364,6 +366,17 @@ fn engine_with_options_and_runtime_cache(
         None,
         None,
         None,
+    )
+    .with_modules(
+        citizen_sdk_contracts::Modules::try_new(
+            citizen_sdk_contracts::Modules::CHAIN
+                | if cfg!(feature = "transactions") {
+                    citizen_sdk_contracts::Modules::TRANSACTIONS
+                } else {
+                    0
+                },
+        )
+        .unwrap_or_else(|error| panic!("chain fixture module selection: {error}")),
     );
     let engine = CitizenEngine::new(components);
     if let Err(error) = engine.update_capabilities(all_ready()) {
@@ -401,6 +414,7 @@ fn start_engine(engine: &CitizenEngine) {
 }
 
 #[test]
+#[cfg(feature = "transactions")]
 fn engine_gathers_provider_evidence_without_arbitrary_rpc() {
     let (engine, context, signed, _) = running_engine(Some(hex_bytes(EVENTS_HEX)));
     let hash = match signed_extrinsic_hash(&context, &signed) {
@@ -419,6 +433,7 @@ fn engine_gathers_provider_evidence_without_arbitrary_rpc() {
 }
 
 #[test]
+#[cfg(feature = "transactions")]
 fn persistent_runtime_cache_is_never_transaction_execution_evidence() {
     let (engine, context, signed, counters) = engine_with_options_and_runtime_cache(
         Some(hex_bytes(EVENTS_HEX)),
@@ -443,6 +458,7 @@ fn persistent_runtime_cache_is_never_transaction_execution_evidence() {
 }
 
 #[test]
+#[cfg(feature = "transactions")]
 fn caller_finality_label_cannot_forge_the_provider_finalized_head() {
     let (engine, context, signed, counters) = running_engine(Some(hex_bytes(EVENTS_HEX)));
     let hash = match signed_extrinsic_hash(&context, &signed) {
@@ -471,6 +487,7 @@ fn caller_finality_label_cannot_forge_the_provider_finalized_head() {
 }
 
 #[test]
+#[cfg(feature = "transactions")]
 fn capability_change_is_rechecked_before_provider_evidence() {
     let (engine, context, signed, counters) = running_engine(Some(hex_bytes(EVENTS_HEX)));
     let mut unavailable = all_ready();
@@ -506,6 +523,7 @@ fn capability_change_is_rechecked_before_provider_evidence() {
 }
 
 #[test]
+#[cfg(feature = "transactions")]
 fn missing_events_remain_unverified() {
     let (engine, context, signed, _) = running_engine(None);
     let hash = match signed_extrinsic_hash(&context, &signed) {
@@ -922,6 +940,10 @@ fn lifecycle_closes_chain_capabilities_before_start_and_after_stop() {
         .unwrap_or_else(|error| panic!("capability read failed: {error}"))
         .unwrap_or_else(|| panic!("capability snapshot missing"));
     assert_eq!(created.revision(), 1);
+    assert!(!created
+        .status(CapabilityName::WalletProfile)
+        .unwrap()
+        .enabled());
     assert_eq!(
         created
             .status(CapabilityName::ChainRead)
@@ -932,7 +954,11 @@ fn lifecycle_closes_chain_capabilities_before_start_and_after_stop() {
         created
             .status(CapabilityName::WalletProfile)
             .and_then(|status| status.reason()),
-        Some(CapabilityReason::HostDisabled)
+        Some(if cfg!(feature = "wallet") {
+            CapabilityReason::HostDisabled
+        } else {
+            CapabilityReason::BuildUnsupported
+        })
     );
 
     start_engine(&engine);

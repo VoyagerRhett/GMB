@@ -80,6 +80,52 @@ void main() {
     await subscription.cancel();
   });
 
+  test('创世哈希无需start，批量余额保持顺序和重复项且空列表仍请求Core', () async {
+    final sdk = await CitizenSdk.open(modules: CitizenSdkModules.chain);
+    expect(await sdk.chain.getGenesisHash(), _account(9));
+    expect(sdk.lifecycle, CitizenSdkLifecycle.created);
+    for (final accounts in <List<String>>[
+      <String>[],
+      <String>[_account(2), _account(1), _account(2)],
+      List<String>.filled(1990, _account(1)),
+    ]) {
+      final balances = await sdk.chain.getAccountBalances(accounts);
+      expect(balances.map((value) => value.accountId), accounts);
+      expect(() => balances.clear(), throwsUnsupportedError);
+    }
+    final calls = platform.methods.length;
+    await expectLater(
+      sdk.chain.getAccountBalances(List<String>.filled(1991, _account(1))),
+      throwsA(isA<CitizenSdkException>()),
+    );
+    await expectLater(
+      sdk.chain.getAccountBalances(<String>['invalid']),
+      throwsA(isA<CitizenSdkException>()),
+    );
+    expect(platform.methods, hasLength(calls));
+    expect(
+      platform.methods.where((value) => value == 'getAccountBalances'),
+      hasLength(3),
+    );
+    await sdk.close();
+  });
+
+  test('批量余额拒绝错位、缺项和跨块结果而不返回部分事实', () async {
+    final sdk = await CitizenSdk.open();
+    for (final failure in <int>[1, 2, 3]) {
+      platform.batchFailure = failure;
+      await expectLater(
+        sdk.chain.getAccountBalances(<String>[
+          _account(2),
+          _account(1),
+          _account(2),
+        ]),
+        throwsA(isA<CitizenSdkException>()),
+      );
+    }
+    await sdk.close();
+  });
+
   test('余额与nonce响应必须精确绑定请求账户', () async {
     platform.wrongAccountResponses = true;
     final sdk = await CitizenSdk.open();
@@ -102,6 +148,7 @@ final class _SdkPlatform implements CitizenSdkPlatform {
   final List<String> methods = <String>[];
   final List<int> sequences = <int>[];
   bool wrongAccountResponses = false;
+  int batchFailure = 0;
 
   @override
   Stream<Object?> get events => _events.stream;
@@ -119,11 +166,32 @@ final class _SdkPlatform implements CitizenSdkPlatform {
     }
     final sequence = arguments[2]! as int;
     sequences.add(sequence);
+    if (method == 'getAccountBalances') {
+      final accounts = (arguments[3]! as List).cast<String>();
+      final balances = <Object?>[
+        for (var index = 0; index < accounts.length; index += 1)
+          <Object?>[
+            batchFailure == 1 ? _account(3) : accounts[index],
+            _block(batchFailure == 3 && index > 0 ? 10 : 9, 'finalized'),
+            '1',
+            '0',
+            '1',
+          ],
+      ];
+      if (batchFailure == 2 && balances.isNotEmpty) balances.removeLast();
+      return <Object?>[
+        1,
+        'session-a',
+        sequence,
+        <Object?>[balances],
+      ];
+    }
     final value = switch (method) {
       'start' => <Object?>['running'],
       'stop' => <Object?>['stopped'],
       'close' => <Object?>['disposed'],
       'getCapabilities' => <Object?>[_capabilitySnapshot()],
+      'getGenesisHash' => <Object?>[_account(9)],
       'getAccountBalance' => <Object?>[
         <Object?>[
           _account(wrongAccountResponses ? 2 : 1),

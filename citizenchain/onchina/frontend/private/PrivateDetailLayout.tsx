@@ -39,6 +39,7 @@ import {
 } from 'antd';
 import { SearchOutlined, UploadOutlined } from '@ant-design/icons';
 import type { AdminAuth } from '../auth/types';
+import { LegalRepresentativePhoto } from '../subjects/LegalRepresentativePhoto';
 import type { AdminActionType, AdminSecurityGrantOutput } from '../admins/securityApi';
 import {
   EDUCATION_TYPE_LABEL,
@@ -851,7 +852,7 @@ export const PrivateDetailLayout: React.FC<Props> = ({
                     )}
                   </Descriptions.Item>
                   <Descriptions.Item label="法定代表人证件照">
-                    {inst.legal_representative_photo_name || <span style={{ color: '#999' }}>(未上传)</span>}
+                    <LegalRepresentativePhoto auth={auth} path={inst.legal_representative_photo_path} name={inst.legal_representative_photo_name} />
                   </Descriptions.Item>
                 </Descriptions>
               )}

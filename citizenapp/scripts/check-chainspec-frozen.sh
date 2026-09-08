@@ -2,7 +2,7 @@
 # CitizenApp 轻节点 chainspec 守卫。
 #
 # 新创世形态:
-#   - 链端 SSOT = citizenchain/node/chainspecs/citizenchain.plain.json
+#   - 链端 SSOT = citizenchain/node/citizenchain.json
 #     (runtime WASM + genesis patch + bootnodes,不含 GB 级 raw state)
 #   - CitizenApp = assets/chainspec.json 轻形态,genesis 只允许携带 stateRootHash
 #   - stateRootHash 来自 bake-chainspec.sh 临时节点物化块 0 后读取的 state_root
@@ -13,11 +13,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CITIZENAPP="${CITIZENAPP_CHAINSPEC:-$REPO_ROOT/citizenapp/assets/chainspec.json}"
 LIGHT_SYNC_STATE="${CITIZENAPP_LIGHT_SYNC_STATE:-$REPO_ROOT/citizenapp/assets/light_sync_state.json}"
-SSOT="${CITIZENCHAIN_PLAIN_SPEC:-$REPO_ROOT/citizenchain/node/chainspecs/citizenchain.plain.json}"
+SSOT="${CITIZENCHAIN_PLAIN_SPEC:-$REPO_ROOT/citizenchain/node/citizenchain.json}"
 # 本地 preview manifest 不得自动拿来校验当前冻结资产；只有调用方显式传入时才交叉验证。
 GENESIS_MANIFEST="${CITIZENCHAIN_GENESIS_STATE_MANIFEST:-}"
 PUBLIC_INSTITUTION_MANIFEST="${CITIZENAPP_PUBLIC_INSTITUTION_MANIFEST:-$REPO_ROOT/citizenapp/assets/public_institutions/manifest.json}"
-CLOUDFLARE_WRANGLER="${CITIZENSERVE_CLOUDFLARE_WRANGLER:-$REPO_ROOT/citizenserve/wrangler.toml}"
+CLOUDFLARE_WRANGLER="${CITIZENSERVE_CLOUDFLARE_WRANGLER:-$REPO_ROOT/citizenserve/scripts/wrangler.toml}"
 CLOUDFLARE_BOOTSTRAP_SOURCE="${CITIZENSERVE_CLOUDFLARE_BOOTSTRAP_SOURCE:-$REPO_ROOT/citizenserve/src/chain/bootstrap.ts}"
 REQUIRE_STATE_ROOT="${CITIZENAPP_REQUIRE_STATE_ROOT:-0}"
 

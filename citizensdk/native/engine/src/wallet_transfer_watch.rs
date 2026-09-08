@@ -19,9 +19,10 @@ use citizen_sdk_contracts::{
 };
 use futures::StreamExt;
 
+use crate::{chain_monitor::MonitorCancellation, error::EngineError};
+
+#[cfg(feature = "chain")]
 use crate::{
-    chain_monitor::MonitorCancellation,
-    error::EngineError,
     finalized_history_runtime::{
         cancellable_chain, FinalizedHistoryRunGuard, FinalizedHistoryRuntime,
     },
@@ -207,6 +208,7 @@ impl WalletTransferObserver for NoopWalletTransferObserver {
 
 /// 观察一笔已经持久化的 SDK 钱包交易直至明确终态。
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "chain")]
 pub(crate) async fn watch_recorded_transfer(
     chain_client: &dyn VerifiedChainClient,
     runtime: &FinalizedHistoryRuntime,
@@ -487,6 +489,7 @@ pub(crate) async fn watch_recorded_transfer(
 }
 
 /// 恢复广播前先追到本次固定 finalized 上界；既不无限追赶新块，也不跳过任何历史块。
+#[cfg(feature = "chain")]
 pub(crate) async fn reconcile_before_rebroadcast(
     client: &dyn VerifiedChainClient,
     runtime: &FinalizedHistoryRuntime,
@@ -523,6 +526,7 @@ pub(crate) async fn reconcile_before_rebroadcast(
     }
 }
 
+#[cfg(feature = "chain")]
 async fn publish_nonterminal(
     runtime: &FinalizedHistoryRuntime,
     guard: &dyn FinalizedHistoryRunGuard,
@@ -541,6 +545,7 @@ async fn publish_nonterminal(
     Ok(())
 }
 
+#[cfg(feature = "chain")]
 async fn apply_nonterminal_event(
     runtime: &FinalizedHistoryRuntime,
     guard: &dyn FinalizedHistoryRunGuard,
@@ -553,6 +558,7 @@ async fn apply_nonterminal_event(
         .await
 }
 
+#[cfg(feature = "chain")]
 async fn finalize_exact_transaction(
     runtime: &FinalizedHistoryRuntime,
     history: &TransactionHistoryService,
@@ -611,6 +617,7 @@ async fn finalize_exact_transaction(
     }
 }
 
+#[cfg(feature = "chain")]
 async fn notify_interrupted(
     observer: &Arc<dyn WalletTransferObserver>,
     history: &TransactionHistoryService,
@@ -634,6 +641,7 @@ async fn notify_interrupted(
     Ok(())
 }
 
+#[cfg(feature = "chain")]
 fn pool_rejection_reason(
     state: &TransactionHistoryState,
     account_id: AccountId32,
@@ -646,6 +654,7 @@ fn pool_rejection_reason(
         .ok_or_else(|| integrity("交易池拒绝 watch 事件没有形成精确持久拒绝状态"))
 }
 
+#[cfg(feature = "chain")]
 fn unique_submission(
     state: &TransactionHistoryState,
     account_id: AccountId32,
@@ -665,6 +674,7 @@ fn unique_submission(
     }
 }
 
+#[cfg(feature = "chain")]
 fn conclusion_block(conclusion: &ExecutionConclusion) -> Option<VerifiedBlockRef> {
     match conclusion {
         ExecutionConclusion::Success { block, .. } | ExecutionConclusion::Failed { block, .. } => {
@@ -674,20 +684,24 @@ fn conclusion_block(conclusion: &ExecutionConclusion) -> Option<VerifiedBlockRef
     }
 }
 
+#[cfg(feature = "chain")]
 fn notify(observer: &Arc<dyn WalletTransferObserver>, update: WalletTransferWatchUpdate) {
     // 观察器属于宿主展示边界，不是交易状态机的一部分；恶意或有缺陷的实现不能通过
     // panic 中止 Rust 交易协调器，也不能撤销已经持久化的事实。
     let _ = catch_unwind(AssertUnwindSafe(|| observer.on_update(update)));
 }
 
+#[cfg(feature = "chain")]
 fn retryable(message: impl Into<String>) -> EngineError {
     EngineError::contract(ContractErrorCode::Unavailable, message)
 }
 
+#[cfg(feature = "chain")]
 fn invalid_state(message: impl Into<String>) -> EngineError {
     EngineError::contract(ContractErrorCode::InvalidState, message)
 }
 
+#[cfg(feature = "chain")]
 fn integrity(message: impl Into<String>) -> EngineError {
     EngineError::contract(ContractErrorCode::Integrity, message)
 }

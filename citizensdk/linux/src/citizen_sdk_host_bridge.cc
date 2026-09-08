@@ -1,4 +1,5 @@
 #include "citizen_sdk_host_bridge.hpp"
+#include "citizen_sdk_qr_flow.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -268,13 +269,18 @@ citizensdk_error_code_t vault_retire(void *context, uint64_t operation_id,
 HostBridge::HostBridge(std::filesystem::path storage_root,
                        std::filesystem::path asset_root,
                        std::string application_id, void *gtk_parent_window,
-                       bool enable_wallet)
+                       uint32_t modules)
     : ui_thread_(std::this_thread::get_id()),
       parent_window_(gtk_parent_window, ui_thread_),
       asset_root_(std::move(asset_root)),
-      public_store_(storage_root / application_id / "citizensdk" / "v1" / "public") {
+      modules_(modules) {
+  // 未选链/历史时不创建公开数据库，钱包独立运行完全不触碰链资产和存储。
+  if ((modules & (CITIZENSDK_MODULE_CHAIN | CITIZENSDK_MODULE_HISTORY)) != 0) {
+    public_store_ = std::make_unique<PublicStore>(
+        storage_root / application_id / "citizensdk" / "v1" / "public");
+  }
   const auto secure_root = storage_root / application_id / "citizensdk" / "v1" / "secure";
-  if (enable_wallet) {
+  if ((modules & (CITIZENSDK_MODULE_WALLET | CITIZENSDK_MODULE_SIGNING)) != 0) {
     secure_store_ = std::make_unique<SecureStore>(secure_root);
     vault_ = std::make_unique<SecretVault>(*secure_store_, parent_window_);
   }
@@ -288,6 +294,18 @@ void HostBridge::configure_vtables() noexcept {
     ::citizen_sdk::linux::chain_cas, ::citizen_sdk::linux::runtime_load,
     ::citizen_sdk::linux::runtime_store, ::citizen_sdk::linux::runtime_delete,
     ::citizen_sdk::linux::history_load, ::citizen_sdk::linux::history_cas};
+  // 每组回调必须完整或完全缺席；不可用模块不发布可触达的资源。
+  if ((modules_ & CITIZENSDK_MODULE_CHAIN) == 0) {
+    public_vtable_.chain_database_load = nullptr;
+    public_vtable_.chain_database_compare_and_swap = nullptr;
+    public_vtable_.runtime_cache_load = nullptr;
+    public_vtable_.runtime_cache_store = nullptr;
+    public_vtable_.runtime_cache_delete = nullptr;
+  }
+  if ((modules_ & CITIZENSDK_MODULE_HISTORY) == 0) {
+    public_vtable_.transaction_history_load = nullptr;
+    public_vtable_.transaction_history_compare_and_swap = nullptr;
+  }
   secure_vtable_ = {sizeof(secure_vtable_), 1, this,
     ::citizen_sdk::linux::profile_load, ::citizen_sdk::linux::profile_cas,
     ::citizen_sdk::linux::secret_load, ::citizen_sdk::linux::secret_cas};
@@ -300,7 +318,7 @@ void HostBridge::configure_vtables() noexcept {
 citizensdk_host_services_v1_t HostBridge::services() noexcept {
   citizensdk_host_services_v1_t result{};
   result.struct_size = sizeof(result); result.abi_version = 1;
-  result.public_store = &public_vtable_;
+  result.public_store = public_store_ ? &public_vtable_ : nullptr;
   result.secure_store = secure_store_ ? &secure_vtable_ : nullptr;
   result.secret_vault = vault_ ? &vault_vtable_ : nullptr;
   return result;
@@ -318,7 +336,8 @@ citizensdk_error_code_t HostBridge::create_sdk(citizensdk_handle_t *out_sdk) {
     create_in_progress_ = true;
   }
   try {
-    const Assets assets = Assets::load(asset_root_);
+    const Assets assets = (modules_ & CITIZENSDK_MODULE_CHAIN) != 0
+        ? Assets::load(asset_root_) : Assets{};
     const std::string name = "CitizenSDK";
     const std::string version = CITIZENSDK_HOST_VERSION;
     citizensdk_create_options_t options{};
@@ -331,7 +350,7 @@ citizensdk_error_code_t HostBridge::create_sdk(citizensdk_handle_t *out_sdk) {
     citizensdk_host_services_v1_t host_services = services();
     citizensdk_handle_t created = 0;
     citizensdk_error_code_t code =
-        citizensdk_create_with_host(&options, &host_services, &created);
+        citizensdk_create_with_modules(&options, &host_services, modules_, &created);
     if (code != CITIZENSDK_OK) {
       // A nonzero error handle is a destroy-only Core instance. Preserve it so
       // close()/abandon can reclaim all Rust and provider ownership safely.
@@ -539,6 +558,7 @@ citizensdk_host_vault_availability_t HostBridge::vault_availability() noexcept {
 }
 
 citizensdk_error_code_t HostBridge::close() {
+  cancel_host_qr_flows(this);
   bool teardown_started = false;
   const auto cancel_close = [&](citizensdk_error_code_t code) noexcept {
     std::lock_guard<std::recursive_mutex> guard(call_lock_);
@@ -643,7 +663,7 @@ citizensdk_error_code_t HostBridge::close() {
       vault_.reset();
       if (secure_store_) secure_store_->close();
       secure_store_.reset();
-      public_store_.close();
+      if (public_store_) public_store_->close();
       close_in_progress_ = false;
       lifecycle_.commit_closed();
     }
@@ -714,29 +734,29 @@ citizensdk_error_code_t HostBridge::submit_private(
 }
 
 HostRecord HostBridge::chain_load() {
-  return service_call([&] { return public_store_.chain_database_load(); });
+  return service_call([&] { return public_store_->chain_database_load(); });
 }
 HostRecord HostBridge::chain_cas(uint64_t expected, const Bytes &candidate) {
   return service_call([&] {
-    return public_store_.chain_database_compare_and_swap(expected, candidate);
+    return public_store_->chain_database_compare_and_swap(expected, candidate);
   });
 }
 HostRecord HostBridge::runtime_load(const std::array<uint8_t, 32> &hash) {
-  return service_call([&] { return public_store_.runtime_cache_load(hash); });
+  return service_call([&] { return public_store_->runtime_cache_load(hash); });
 }
 void HostBridge::runtime_store(const std::array<uint8_t, 32> &hash,
                                const Bytes &candidate) {
-  service_call([&] { public_store_.runtime_cache_store(hash, candidate); });
+  service_call([&] { public_store_->runtime_cache_store(hash, candidate); });
 }
 void HostBridge::runtime_delete(const std::array<uint8_t, 32> &hash) {
-  service_call([&] { public_store_.runtime_cache_delete(hash); });
+  service_call([&] { public_store_->runtime_cache_delete(hash); });
 }
 HostRecord HostBridge::history_load() {
-  return service_call([&] { return public_store_.transaction_history_load(); });
+  return service_call([&] { return public_store_->transaction_history_load(); });
 }
 HostRecord HostBridge::history_cas(uint64_t expected, const Bytes &candidate) {
   return service_call([&] {
-    return public_store_.transaction_history_compare_and_swap(expected,
+    return public_store_->transaction_history_compare_and_swap(expected,
                                                                candidate);
   });
 }

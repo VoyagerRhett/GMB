@@ -2,6 +2,7 @@
 library citizen_sdk;
 
 export 'src/api/citizen_chain.dart';
+export 'src/api/citizen_qr.dart';
 export 'src/api/citizen_sdk.dart';
 export 'src/api/citizen_sdk_error.dart';
 export 'src/api/citizen_sdk_events.dart';

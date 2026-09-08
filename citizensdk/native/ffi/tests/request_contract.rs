@@ -1,5 +1,7 @@
 // This black-box test intentionally crosses the exported raw-pointer ABI.
 #![allow(unsafe_code)]
+// 此黑盒控制夹具组合 chain；无链查看回调反调和关闭排空在组合测试覆盖。
+#![cfg(feature = "chain")]
 
 use std::{
     ffi::c_void,
@@ -8,9 +10,9 @@ use std::{
 };
 
 use citizensdk::{
-    citizensdk_create, citizensdk_destroy, citizensdk_get_lifecycle, citizensdk_set_event_callback,
-    CitizenSdkBytesView, CitizenSdkCreateOptions, CitizenSdkErrorCode, CitizenSdkEvent,
-    CitizenSdkLifecycle, CITIZENSDK_ABI_VERSION,
+    citizensdk_create_with_modules, citizensdk_destroy, citizensdk_get_lifecycle,
+    citizensdk_set_event_callback, CitizenSdkBytesView, CitizenSdkCreateOptions,
+    CitizenSdkErrorCode, CitizenSdkEvent, CitizenSdkLifecycle, CITIZENSDK_ABI_VERSION,
 };
 
 const MANIFEST: &[u8] = include_bytes!("../../../assets/citizenchain/manifest.json");
@@ -51,7 +53,14 @@ fn options() -> CitizenSdkCreateOptions {
 fn destroy_from_callback_is_busy_before_any_lifecycle_side_effect() {
     let mut handle = 0;
     assert_eq!(
-        unsafe { citizensdk_create(&options(), &mut handle) },
+        unsafe {
+            citizensdk_create_with_modules(
+                &options(),
+                std::ptr::null(),
+                citizen_sdk_contracts::Modules::CHAIN,
+                &mut handle,
+            )
+        },
         CitizenSdkErrorCode::Ok.as_i32()
     );
     HANDLE.store(handle, Ordering::SeqCst);

@@ -19,6 +19,9 @@ struct PromptState final {
   std::mutex lock;
   std::condition_variable ready;
   WindowRef *parent{};
+  uint64_t host_operation_id{};
+  bool private_view_bound{};
+  HWND private_view_window{};
   WindowLease lease;
   bool confirmation{};
   bool started{};
@@ -49,6 +52,8 @@ void clear_controls(const std::shared_ptr<PromptState> &state) noexcept {
 void finish_on_ui(const std::shared_ptr<PromptState> &state) noexcept {
   if (!state->parent->on_ui_thread()) std::terminate();
   clear_controls(state);
+  const bool restore_view_focus = state->private_view_bound &&
+      GetForegroundWindow() == state->hwnd;
   state->destroying = true;
   if (state->hwnd != nullptr && !DestroyWindow(state->hwnd)) std::terminate();
   state->password.reset(); state->second.reset();
@@ -60,6 +65,11 @@ void finish_on_ui(const std::shared_ptr<PromptState> &state) noexcept {
     EnableWindow(static_cast<HWND>(state->lease.get()), TRUE);
   }
   state->owner_disabled = false;
+  if (state->private_view_window != nullptr && IsWindow(state->private_view_window)) {
+    EnableWindow(state->private_view_window, TRUE);
+    if (restore_view_focus) SetForegroundWindow(state->private_view_window);
+  }
+  state->private_view_window = nullptr;
   const bool parent_lost = !state->lease.valid();
   state->lease = {};
   {
@@ -106,14 +116,23 @@ LRESULT CALLBACK prompt_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) noex
   const auto state = *raw->window_owner;
   try {
     if (message == WM_DESTROY) {
+      RemovePropW(hwnd, L"CitizenSDK.Authentication");
       clear_controls(state);
       state->hwnd = nullptr; state->error = nullptr;
       SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
       if (!state->destroying) queue_finish(state, CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED);
       return 0;
     }
-    if (message == WM_CLOSE || (message == WM_COMMAND && LOWORD(wp) == IDCANCEL)) {
+    if ((message == WM_ACTIVATE && LOWORD(wp) == WA_INACTIVE &&
+         state->private_view_bound && !state->destroying) ||
+        message == WM_CLOSE || (message == WM_COMMAND && LOWORD(wp) == IDCANCEL)) {
       clear_controls(state);
+      if (message == WM_ACTIVATE) {
+        std::lock_guard<std::mutex> guard(state->lock);
+        // 已排队确认也不能在真实后台后继续返回成功。
+        state->abandoned = true;
+        state->result.password.clear();
+      }
       queue_finish(state, CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED);
       return 0;
     }
@@ -187,6 +206,8 @@ void build_prompt(const std::shared_ptr<PromptState> &state) noexcept {
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 580, 360,
         static_cast<HWND>(state->lease.get()), nullptr, state->module, state.get());
     require(state->hwnd != nullptr, CITIZENSDK_ERROR_UNAVAILABLE, "CitizenSDK authentication window is unavailable");
+    require(SetPropW(state->hwnd, L"CitizenSDK.Authentication", state.get()) != FALSE,
+            CITIZENSDK_ERROR_UNAVAILABLE, "CitizenSDK authentication identity is unavailable");
     require(SetWindowDisplayAffinity(state->hwnd, WDA_EXCLUDEFROMCAPTURE) != FALSE,
             CITIZENSDK_ERROR_UNAVAILABLE, "CitizenSDK sensitive display protection is unavailable");
     prompt_control(state, L"STATIC", L"此口令只用于本设备 TPM 金库，不是助记词派生密码。\n口令不会返回应用业务层。", SS_LEFT, 0, 20, 15, 530, 60);
@@ -208,19 +229,44 @@ void build_prompt(const std::shared_ptr<PromptState> &state) noexcept {
 }
 }  // namespace
 
+bool accept_private_key_authentication_window(
+    void *window, void *view_window, const void *owner, uint64_t host_operation_id) noexcept {
+  if (window == nullptr || view_window == nullptr || owner == nullptr ||
+      host_operation_id == 0) return false;
+  const HWND hwnd = static_cast<HWND>(window);
+  DWORD process = 0;
+  if (GetWindowThreadProcessId(hwnd, &process) != GetCurrentThreadId() ||
+      process != GetCurrentProcessId()) return false;
+  auto *state = static_cast<PromptState *>(GetPropW(hwnd, L"CitizenSDK.Authentication"));
+  if (state == nullptr || state->parent != owner || state->hwnd != hwnd ||
+      state->host_operation_id != host_operation_id) return false;
+  const HWND view = static_cast<HWND>(view_window);
+  if (GetWindowThreadProcessId(view, nullptr) != GetCurrentThreadId()) return false;
+  SetLastError(ERROR_SUCCESS);
+  if (SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(view)) == 0 &&
+      GetLastError() != ERROR_SUCCESS) return false;
+  state->private_view_window = view;
+  state->private_view_bound = true;
+  EnableWindow(view, FALSE);
+  return true;
+}
+
 UserAuth::UserAuth(WindowRef &parent) : parent_(parent) {}
 UserAuth::~UserAuth() = default;
 bool UserAuth::available() const noexcept { return parent_.available(); }
-AuthenticationResult UserAuth::create_vault_password() { return prompt(true); }
-AuthenticationResult UserAuth::unlock_vault_password() { return prompt(false); }
+AuthenticationResult UserAuth::create_vault_password() { return prompt(true, 0); }
+AuthenticationResult UserAuth::unlock_vault_password(uint64_t host_operation_id) {
+  return prompt(false, host_operation_id);
+}
 
-AuthenticationResult UserAuth::prompt(bool confirmation) {
+AuthenticationResult UserAuth::prompt(bool confirmation, uint64_t host_operation_id) {
   if (!available()) return {CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED, {}};
   if (parent_.on_ui_thread()) return {CITIZENSDK_ERROR_BUSY, {}};
   // 沿用 Linux 接纳与等待语义；只能阻塞 Core worker，不能阻塞窗口消息线程。
   std::lock_guard<std::mutex> admission(prompt_lock_);
   auto state = std::make_shared<PromptState>();
   state->parent = &parent_;
+  state->host_operation_id = host_operation_id;
   state->confirmation = confirmation;
   if (!parent_.invoke([state] { build_prompt(state); })) {
     return {CITIZENSDK_ERROR_UNAVAILABLE, {}};

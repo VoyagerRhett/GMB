@@ -74,20 +74,7 @@ final class CitizenSDKWalletInputTests: XCTestCase {
     #if os(macOS)
     @MainActor
     func testRealMacOSWalletWindowInputAndRiskCancellation() async throws {
-        guard let directory = ProcessInfo.processInfo.environment["CITIZENSDK_WALLET_INPUT_STORAGE"] else {
-            throw XCTSkip("真实窗口验收须提供独立中央存储目录和测试 Bundle 身份")
-        }
-        _ = NSApplication.shared
-        let testFile = URL(fileURLWithPath: #filePath)
-        let sdkRoot = testFile.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let assetRoot = sdkRoot.appendingPathComponent("assets/citizenchain", isDirectory: true)
-        let assets = try CitizenSDKAssets(manifest: Data(contentsOf: assetRoot.appendingPathComponent("manifest.json")),
-                                         chainSpec: Data(contentsOf: assetRoot.appendingPathComponent("chainspec.json")),
-                                         lightSyncState: Data(contentsOf: assetRoot.appendingPathComponent("light_sync_state.json")))
-        let sdk = try CitizenSdk.open(storageRoot: URL(fileURLWithPath: directory, isDirectory: true),
-                                     applicationID: "org.citizen.sdk.wallet-input.tests", assets: assets)
-        let parent = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 820), styleMask: [.titled], backing: .buffered, defer: false)
-        parent.makeKeyAndOrderFront(nil)
+        let (sdk, parent) = try await realMacOSWalletFixture()
         defer { parent.orderOut(nil); try? sdk.close() }
         var terminal: CitizenSDKWalletFlowResult?
         let flow = try sdk.presentWalletFlow(from: parent, request: .create(wordCount: 12)) { terminal = $0 }
@@ -133,7 +120,119 @@ final class CitizenSDKWalletInputTests: XCTestCase {
         try await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertEqual(phrase.string, "")
         parent.orderOut(nil)
-        try sdk.close()
+        try await closeAfterDraining(sdk)
+    }
+
+    @MainActor
+    func testRealMacOSPrivateKeyViewMissingAccountClearsWindowBeforeCompletion() async throws {
+        let (sdk, parent) = try await realMacOSWalletFixture()
+        defer { parent.orderOut(nil); try? sdk.close() }
+        // 仅传入合成公开账户；隔离资料库没有钱包，Core 必须在认证或解密前返回 NotFound。
+        let operation = try sdk.viewAccountPrivateKey(from: parent, accountID: Data(repeating: 0, count: 32))
+        let sheet = try XCTUnwrap(parent.attachedSheet)
+        XCTAssertEqual(sheet.sharingType, .none)
+        XCTAssertFalse(sheet.styleMask.contains(.closable))
+        XCTAssertThrowsError(try sdk.close()) { XCTAssertEqual(($0 as? CitizenSDKError)?.code, .busy) }
+        do {
+            try await operation.value()
+            XCTFail("不存在的账户不能成功查看")
+        } catch {
+            XCTAssertEqual((error as? CitizenSDKError)?.code, .notFound)
+        }
+        XCTAssertNil(parent.attachedSheet, "公开终态必须晚于窗口分离")
+        XCTAssertNil(sheet.contentViewController, "公开终态必须晚于 SDK 显示控件释放")
+        XCTAssertFalse(sheet.isVisible)
+        XCTAssertEqual(CitizenSDKWalletFlowRegistry.shared.status(sdk), .open)
+        let profile = try await sdk.walletProfile()
+        XCTAssertNil(profile)
+        try await closeAfterDraining(sdk)
+    }
+
+    @MainActor
+    func testRealMacOSPrivateKeyViewParentCloseAndLateCancellationNeverRestoreWindow() async throws {
+        let (sdk, parent) = try await realMacOSWalletFixture()
+        defer { parent.orderOut(nil); try? sdk.close() }
+        let operation = try sdk.viewAccountPrivateKey(from: parent, accountID: Data(repeating: 0, count: 32))
+        let sheet = try XCTUnwrap(parent.attachedSheet)
+        var completions = 0
+        operation.observe { _ in completions += 1 }
+        parent.close() // 真实窗口关闭通知必须终止查看，不能等待重新回到前台再恢复。
+        XCTAssertTrue(try operation.cancel())
+        do {
+            try await operation.value()
+            XCTFail("关闭窗口后不能成功查看")
+        } catch {
+            // Core 保留先发生的错误：空钱包准备与窗口关闭并发时，只有这两个合法失败终态。
+            let code = (error as? CitizenSDKError)?.code
+            XCTAssertTrue(code == .cancelled || code == .notFound)
+        }
+        XCTAssertEqual(completions, 1)
+        XCTAssertNil(parent.attachedSheet)
+        XCTAssertNil(sheet.contentViewController)
+        XCTAssertFalse(sheet.isVisible)
+        XCTAssertTrue(try operation.cancel())
+        NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApp)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(completions, 1, "晚到取消/前台通知不得再次完成或恢复查看")
+        XCTAssertNil(parent.attachedSheet)
+        XCTAssertFalse(sheet.isVisible)
+        XCTAssertEqual(CitizenSDKWalletFlowRegistry.shared.status(sdk), .open)
+        try await closeAfterDraining(sdk)
+    }
+
+    @MainActor
+    func testRealMacOSPrivateKeyViewRejectsHiddenPresenterWithoutOwningWalletUI() async throws {
+        let (sdk, parent) = try await realMacOSWalletFixture()
+        defer { parent.orderOut(nil); try? sdk.close() }
+        parent.orderOut(nil)
+        XCTAssertThrowsError(try sdk.viewAccountPrivateKey(from: parent, accountID: Data(repeating: 0, count: 32))) {
+            XCTAssertEqual(($0 as? CitizenSDKError)?.code, .unavailable)
+        }
+        XCTAssertNil(parent.attachedSheet)
+        XCTAssertEqual(CitizenSDKWalletFlowRegistry.shared.status(sdk), .open)
+        try await closeAfterDraining(sdk)
+    }
+
+    @MainActor
+    private func realMacOSWalletFixture() async throws -> (CitizenSdk, NSWindow) {
+        guard let directory = ProcessInfo.processInfo.environment["CITIZENSDK_WALLET_INPUT_STORAGE"] else {
+            throw XCTSkip("真实窗口验收须提供独立中央存储目录和测试 Bundle 身份")
+        }
+        // 每例只开独立的空钱包模块，不加载链资源，不创建或读取任何真实钱包秘密。
+        let root = URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sdk = try CitizenSdk.open(storageRoot: root, applicationID: "org.citizen.sdk.wallet-input.tests", modules: .wallet)
+        try await sdk.refreshCapabilities()
+        _ = NSApplication.shared
+        NSApp.setActivationPolicy(.regular)
+        // 命令行 XCTest 没有 NSApplicationMain，必须真实完成 AppKit 启动后才能申请前台。
+        if !NSRunningApplication.current.isFinishedLaunching { NSApp.finishLaunching() }
+        let parent = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 820), styleMask: [.titled], backing: .buffered, defer: false)
+        parent.isReleasedWhenClosed = false
+        parent.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        let deadline = DispatchTime.now().uptimeNanoseconds + 5_000_000_000
+        while !NSApp.isActive && DispatchTime.now().uptimeNanoseconds < deadline {
+            // XCTest 只驱动异步任务，不运行 NSApplication.run；真实激活事件仍须交给 AppKit 派发。
+            for _ in 0..<256 {
+                guard let event = NSApp.nextEvent(matching: .any, until: .distantPast, inMode: .default, dequeue: true) else { break }
+                NSApp.sendEvent(event)
+            }
+            NSApp.updateWindows()
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(NSApp.isActive, "已启用的窗口验收必须获得真实前台，不能静默跳过")
+        return (sdk, parent)
+    }
+
+    @MainActor
+    private func closeAfterDraining(_ sdk: CitizenSdk) async throws {
+        let deadline = DispatchTime.now().uptimeNanoseconds + 5_000_000_000
+        while true {
+            do { try sdk.close(); return }
+            catch let error as CitizenSDKError where error.code == .busy && DispatchTime.now().uptimeNanoseconds < deadline {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+        }
     }
     #endif
 }

@@ -11,7 +11,9 @@ use citizen_sdk_contracts::{
     FinalizedAccountBalance, Hash32, RuntimeContext, Sr25519Signature, TransactionHistoryState,
     VerifiedBlockRef, WalletAccount, WalletProfile,
 };
-use citizen_sdk_engine::{BestFeeSnapshot, WalletTransferWatchResult};
+#[cfg(feature = "chain")]
+use citizen_sdk_engine::BestFeeSnapshot;
+use citizen_sdk_engine::WalletTransferWatchResult;
 
 use crate::{
     abi::{
@@ -32,7 +34,9 @@ pub enum ResultPayload {
     Watch(ExtrinsicWatchEvent),
     ExportedState(ExportedChainState),
     AccountBalance(FinalizedAccountBalance),
+    AccountBalances(Vec<FinalizedAccountBalance>),
     AccountNonce(AccountNonce),
+    #[cfg(feature = "chain")]
     FeeSnapshot(BestFeeSnapshot),
     WalletProfile(Option<WalletProfile>),
     WalletAccounts(Vec<WalletAccount>),
@@ -40,6 +44,10 @@ pub enum ResultPayload {
     PreparedWallet(u64),
     WalletTransfer(WalletTransferWatchResult),
     TransactionHistory(TransactionHistoryState),
+    #[cfg(feature = "qr")]
+    QrReview(std::sync::Arc<crate::qr_abi::QrReviewResult>),
+    #[cfg(feature = "qr")]
+    QrSigned(String),
 }
 
 impl ResultPayload {
@@ -55,7 +63,9 @@ impl ResultPayload {
             Self::Watch(_) => CitizenSdkResultKind::WatchEvent,
             Self::ExportedState(_) => CitizenSdkResultKind::ExportedState,
             Self::AccountBalance(_) => CitizenSdkResultKind::AccountBalance,
+            Self::AccountBalances(_) => CitizenSdkResultKind::AccountBalances,
             Self::AccountNonce(_) => CitizenSdkResultKind::AccountNonce,
+            #[cfg(feature = "chain")]
             Self::FeeSnapshot(_) => CitizenSdkResultKind::FeeSnapshot,
             Self::WalletProfile(_) => CitizenSdkResultKind::WalletProfile,
             Self::WalletAccounts(_) => CitizenSdkResultKind::WalletAccounts,
@@ -63,6 +73,10 @@ impl ResultPayload {
             Self::PreparedWallet(_) => CitizenSdkResultKind::PreparedWallet,
             Self::WalletTransfer(_) => CitizenSdkResultKind::WalletTransfer,
             Self::TransactionHistory(_) => CitizenSdkResultKind::TransactionHistory,
+            #[cfg(feature = "qr")]
+            Self::QrReview(_) => CitizenSdkResultKind::QrReview,
+            #[cfg(feature = "qr")]
+            Self::QrSigned(_) => CitizenSdkResultKind::QrSigned,
         }
     }
 
@@ -74,13 +88,15 @@ impl ResultPayload {
             | Self::Execution(_)
             | Self::Watch(_)
             | Self::AccountBalance(_)
+            | Self::AccountBalances(_)
             | Self::AccountNonce(_)
-            | Self::FeeSnapshot(_)
             | Self::WalletProfile(_)
             | Self::WalletAccounts(_)
             | Self::PreparedWallet(_)
             | Self::WalletTransfer(_)
             | Self::TransactionHistory(_) => 0,
+            #[cfg(feature = "chain")]
+            Self::FeeSnapshot(_) => 0,
             Self::Storage(Some(bytes)) => bytes.len() as u64,
             Self::Storage(None) => 0,
             Self::StorageBatch(values) => values
@@ -91,6 +107,10 @@ impl ResultPayload {
             Self::RuntimeContext(context) => context.metadata().len() as u64,
             Self::ExportedState(state) => state.database().len() as u64,
             Self::Signature(_) => 64,
+            #[cfg(feature = "qr")]
+            Self::QrReview(review) => review.json.len() as u64,
+            #[cfg(feature = "qr")]
+            Self::QrSigned(json) => json.len() as u64,
         }
     }
 }
@@ -272,6 +292,46 @@ pub fn get(handle: CitizenSdkResultHandle) -> FfiResult<OwnedResult> {
                 "result handle is unknown or already released",
             )
         })
+}
+
+/// 批量余额按索引读取时不能克隆整批；此处只在 registry 短锁内借用公开事实。
+/// 私有闭包在本模块内同步执行，不调用宿主，也不把引用带出锁的生命周期。
+fn with_account_balances<T>(
+    handle: CitizenSdkResultHandle,
+    read: impl FnOnce(&[FinalizedAccountBalance]) -> FfiResult<T>,
+) -> FfiResult<T> {
+    let registry = lock_results();
+    let Some(ResultEntry::Ready(result)) = registry.get(&handle) else {
+        return Err(FfiError::new(
+            CitizenSdkErrorCode::InvalidHandle,
+            "result handle is unknown, reserved, or already released",
+        ));
+    };
+    let ResultPayload::AccountBalances(balances) = &result.payload else {
+        return Err(crate::wrong_result("account balances"));
+    };
+    read(balances)
+}
+
+pub fn account_balance_count(handle: CitizenSdkResultHandle) -> FfiResult<u32> {
+    with_account_balances(handle, |balances| {
+        u32::try_from(balances.len())
+            .map_err(|_| FfiError::internal("account balance result count overflowed"))
+    })
+}
+
+pub fn account_balance_at(
+    handle: CitizenSdkResultHandle,
+    index: u32,
+) -> FfiResult<FinalizedAccountBalance> {
+    with_account_balances(handle, |balances| {
+        let index = usize::try_from(index)
+            .map_err(|_| FfiError::invalid("account balance index is too large"))?;
+        balances
+            .get(index)
+            .copied()
+            .ok_or_else(|| FfiError::invalid("account balance index is out of bounds"))
+    })
 }
 
 pub fn release(handle: CitizenSdkResultHandle) -> FfiResult<OwnedResult> {

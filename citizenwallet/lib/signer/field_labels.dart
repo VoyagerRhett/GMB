@@ -2,7 +2,7 @@
 //
 // decoder(payload_decoder.dart)的 `reviewFields` 保留英文机器 key 用于
 // 跨端验真,到 UI 层统一经本文件翻译。payload_decoder 新增 reviewFields key
-// 时必须先登记 `shared/qr-protocol/registry/fields.yaml`,
+// 时必须先登记 `citizenchain/crates/qr-protocol/registry/fields.yaml`,
 // 再同步本表并补测试。未登记字段必须红色拒绝,不得 fallback 展示英文 key。
 import 'dart:typed_data';
 

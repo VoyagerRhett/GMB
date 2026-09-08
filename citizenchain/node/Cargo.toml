@@ -25,7 +25,7 @@ workspace = true
 [dependencies]
 async-channel = "1.9"
 hex = "0.4"
-qr-protocol = { path = "../../shared/qr-protocol" } # 仓库级 QR_V1 协议真源：registry + 载荷编解码
+qr-protocol = { path = "../crates/qr-protocol" } # 仓库级 QR_V1 协议真源：registry + 载荷编解码
 hex-literal = "0.4"
 clap = { workspace = true }
 futures = { workspace = true }
@@ -122,7 +122,7 @@ libp2p-identity = { version = "0.2", features = ["ed25519", "peerid"] }
 ed25519-dalek = "2"
 sha2 = "0.10"
 rand = { workspace = true, default-features = true }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "=0.13.4", default-features = false, features = ["blocking", "json", "query", "rustls"] }
 sysinfo = "0.34"
 thiserror = { workspace = true }
 twox-hash = "2"
@@ -141,6 +141,9 @@ sc-block-builder = { workspace = true, default-features = true }
 sc-network-sync = { workspace = true, default-features = true }
 
 [build-dependencies]
+serde_json = { workspace = true, default-features = true }
+json-patch = "3"
+tauri-utils = "=2.9.3"
 substrate-build-script-utils = { workspace = true, default-features = true }
 tauri-build = { version = "=2.6.3", features = [] }
 

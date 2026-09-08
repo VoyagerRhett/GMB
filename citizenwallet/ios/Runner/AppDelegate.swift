@@ -58,6 +58,12 @@ import UIKit
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    guard let vaultRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "HardwareSecretvaultPlugin"
+    ) else {
+      preconditionFailure("硬件金库注册失败")
+    }
+    HardwareSecretvaultPlugin.register(with: vaultRegistrar)
     // UIScene 模式启动时 AppDelegate.window 可能还未建立，必须从隐式引擎注册。
     registerApplicationChannels(
       binaryMessenger: engineBridge.applicationRegistrar.messenger()

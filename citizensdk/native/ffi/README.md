@@ -1,5 +1,13 @@
 # CitizenSDK product C ABI
 
+当前公共 Core 闭集为 88 个函数；ABI v1 既有结构和数值不重解释。
+
+账户私钥查看另有SDK内部四操作链接闭集，声明由构建器生成而非进入公开include。
+open不解密，reveal记录一次确认，cancel不丢弃实际认证future，finish仅表示原生已清屏/清零。
+全生命周期request必须等原生清理及所有Core工作真实排空才完成；display只同步借用32字节，
+settled不是终态。独立动态Core保留精确内部符号供自有Host链接，Apple最终framework隐藏它们。
+运行期模块配置只选择同一 Core 服务与资源，正式包装仍为 full 并携带链资产。当前模块化与新增链查询仅完成源码、注释、合同和测试用例更新，尚未完成真实构建、平台测试或硬件验收；下文旧分步运行记录仅为历史证据。
+
 This crate is the only product-level native ABI. Every exported symbol starts
 with `citizensdk_`; language bindings do not receive a smoldot handle, an
 arbitrary RPC method, a borrowed Rust secret pointer, a raw signer, or an
@@ -54,23 +62,19 @@ lifecycle, finite read, import/export, or submit work on the bounded
 short-operation executor. Cancelling a wallet transfer drops the active future
 and reports `CANCELLED`, but never clears durable Pending/InBlock history.
 
-The ABI v1 surface contains the unchanged original 36 symbols plus 34 appended
-typed account, wallet, signing, transfer and history symbols: exactly 70 public
-functions. `citizensdk_create` remains the compatible session-backed chain-only
-constructor. `citizensdk_create_with_host` builds the platform-independent full
-composition from five named stores (chain database, runtime cache, wallet
-profile, transaction history and encrypted-secret blob) plus the KEK/DEK
-`SecretVault`; secure storage and vault are all-or-none. No placeholder reports
-missing components ready.
+既有 73 个公共函数保留，新增 `citizensdk_validate_modules`、
+`citizensdk_create_with_modules` 与 `citizensdk_verify_signature` 三个函数，
+另有创世哈希、批量余额及两个批量结果读取入口，以及八个 QR 协议/会话入口，当前共 88 个。
+模块验证在任何平台资源创建前执行；wallet/signing/chain/transactions/history 五位按同一规则
+组合，旧构造仍进入同一私有装配函数并保持原默认组合。wallet 管理与签名不互相隐式启用，
+history 单独初始化；仅 chain 构造 provider、读取链资产并使用链持久化，
+wallet/signing 才需要配套 secure store 与 KEK/DEK Vault。
+签名使用同宿主已由 SDK 安全建立的账户归属元数据，不提供首次 provision 或秘密导出旁路。
+无实例纯验签不使用 handle、store、金库或事件订阅；签名无效返回 false，参数编码错误单独报告。
 
-For that host constructor only, `citizensdk_start` restores and validates the
-typed chain database before Engine/provider start, `citizensdk_export_state`
-persists the exact exported snapshot before returning it, and
-`citizensdk_stop` checkpoints before unsubscribe, product-service or provider
-stop. A checkpoint failure leaves those stop side effects untouched. Direct
-destroy does not perform asynchronous host persistence; callers use a
-successful graceful stop first. The legacy constructor keeps its original
-session behavior and shared request admission.
+启用链且装配持久 store 时，start 在 provider 启动前恢复并验证链数据库，export 返回前持久化
+同一精确 revision 快照，stop 在退订/停止依赖前 checkpoint。失败必须保留资源供重试；
+destroy 不能替代 checkpoint。未选链的本地模块无需 start 轻节点，也不启动 smoldot。
 
 Accepted host callbacks remain registered as outstanding both before and after
 their exactly-once completion claim. The completing phase ends only after the
@@ -99,7 +103,7 @@ The Apple host provides separate typed public/secure SQLite stores and a
 KEK-only Secure Enclave vault; no secret or native handle crosses Flutter.
 
 Build and test output must be redirected to
-`/Users/rhett/TATA/tataconsole/target/GMB/citizensdk/SDK`. This source directory must
+`/Users/rhett/TATA/tataconsole/work/gmb/citizensdk`. This source directory must
 stay free of generated headers and native artifacts; there is intentionally no
 `build.rs`.
 

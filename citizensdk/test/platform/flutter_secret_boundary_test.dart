@@ -6,7 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   const codec = CitizenSdkFlutterCodec();
 
-  test('三平台Flutter create/import/add只携带公开流程选择，不存在秘密字段槽', () {
+  test('五平台Flutter create/import/add只携带公开流程选择，不存在秘密字段槽', () {
     expect(
       codec.encodeRequest(
         method: 'createWallet',
@@ -40,6 +40,63 @@ void main() {
         const <int>[1, 2],
       ],
     );
+  });
+
+  test('安全查看没有秘密响应槽，拒绝错误账户及额外输入', () {
+    final fields = <Object?>[_account(1)];
+    expect(
+      codec.encodeRequest(
+        method: 'viewAccountPrivateKey',
+        sessionId: 's',
+        requestSequence: 1,
+        fields: fields,
+      ),
+      <Object?>[1, 's', 1, _account(1)],
+    );
+    for (final invalid in <List<Object?>>[
+      <Object?>[],
+      <Object?>['account'],
+      <Object?>[_account(1), Uint8List(32)],
+    ]) {
+      expect(
+        () => codec.encodeRequest(
+          method: 'viewAccountPrivateKey',
+          sessionId: 's',
+          requestSequence: 1,
+          fields: invalid,
+        ),
+        throwsException,
+      );
+    }
+    expect(
+      codec
+          .decodeResponse(
+            method: 'viewAccountPrivateKey',
+            raw: <Object?>[1, 's', 1, <Object?>[]],
+            expectedSessionId: 's',
+            expectedRequestSequence: 1,
+          )
+          .value,
+      isEmpty,
+    );
+    for (final invalid in <List<Object?>>[
+      <Object?>[Uint8List(32)],
+      <Object?>[1],
+      <Object?>[null],
+      <Object?>[
+        <String, Object?>{'privateKey': Uint8List(32)},
+      ],
+    ]) {
+      expect(
+        () => codec.decodeResponse(
+          method: 'viewAccountPrivateKey',
+          raw: <Object?>[1, 's', 1, invalid],
+          expectedSessionId: 's',
+          expectedRequestSequence: 1,
+        ),
+        throwsException,
+      );
+    }
   });
 
   test('sign只传公开账户和消息副本，返回公开64字节签名', () {

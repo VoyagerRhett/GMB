@@ -2,6 +2,7 @@ import Foundation
 
 internal enum CitizenSDKInputLimits {
     static let maximumHistoryAccounts = 1_990
+    static let maximumBalanceAccounts = 1_990
     static let maximumSigningPayloadBytes = 16 * 1_024 * 1_024
     static let maximumWalletSecretBytes = 1_024
     static let maximumAdditionalAccounts = 1_989
@@ -19,6 +20,13 @@ internal enum CitizenSDKInputLimits {
         let checked = try values.map { try accountID($0) }
         try CitizenSDKChecks.require(Set(checked).count == checked.count, "accountIDs must be unique")
         return checked
+    }
+
+    /// 批量余额不是历史订阅：允许空列表与重复账户，不排序或去重。
+    static func balanceAccountIDs(_ values: [Data]) throws -> [Data] {
+        try CitizenSDKChecks.require(values.count <= maximumBalanceAccounts,
+                                     "accountIDs must contain 0...\(maximumBalanceAccounts) entries")
+        return try values.map { try accountID($0) }
     }
 
     static func signingPayload(_ value: Data) throws -> Data {

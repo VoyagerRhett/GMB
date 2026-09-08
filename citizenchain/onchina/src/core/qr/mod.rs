@@ -1,6 +1,6 @@
 //! QR_V1 统一二维码协议 envelope。
 //!
-//! 唯一事实源：`shared/qr-protocol/registry.json`。
+//! 唯一事实源：`citizenchain/crates/qr-protocol/registry.json`。
 //! 本模块只保留 OnChina 后端需要的紧凑签名请求/响应结构。
 
 mod generated;

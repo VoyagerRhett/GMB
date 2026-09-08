@@ -60,6 +60,27 @@ internal final class CitizenSDKSecretVault: @unchecked Sendable {
     private let queue = DispatchQueue(label: "org.citizen.sdk.apple-vault", qos: .userInitiated)
     private let operationLock = NSLock()
     private var pendingUnwraps: Set<UInt64> = []
+    private var authenticationContexts: [UInt64: LAContext] = [:]
+    private var cancelledAuthentications: Set<UInt64> = []
+
+    /// 必须同时匹配实际 unwrap 与该 LAContext，不能用任意系统认证作为本视图的豁免。
+    func isAuthenticationActive(_ operationID: UInt64) -> Bool {
+        operationLock.lock(); defer { operationLock.unlock() }
+        return authenticationContexts[operationID] != nil && !cancelledAuthentications.contains(operationID)
+    }
+
+    func cancelAuthentication(_ operationID: UInt64) {
+        operationLock.lock()
+        cancelledAuthentications.insert(operationID)
+        let context = authenticationContexts[operationID]
+        operationLock.unlock()
+        // 仅撤销本次设备认证；不提前结束 accepted，也不释放 Rust 的借用输出。
+        context?.invalidate()
+    }
+    func releasePrivateKeyAuthentication(_ operationID: UInt64) {
+        operationLock.lock(); defer { operationLock.unlock() }
+        cancelledAuthentications.remove(operationID)
+    }
 
     init(secureStore: CitizenSDKSecureStore, applicationID: String) throws {
         self.applicationID = try CitizenSDKRecordKey.applicationID(applicationID)
@@ -177,6 +198,7 @@ internal final class CitizenSDKSecretVault: @unchecked Sendable {
             releasePending: { [self] in
             self.operationLock.lock()
             _ = self.pendingUnwraps.remove(operationID)
+            self.authenticationContexts.removeValue(forKey: operationID)
             self.operationLock.unlock()
             },
             completion: completion
@@ -191,6 +213,11 @@ internal final class CitizenSDKSecretVault: @unchecked Sendable {
                     let context = LAContext()
                     context.localizedReason = "授权 CitizenSDK 钱包操作以继续"
                     context.touchIDAuthenticationAllowableReuseDuration = 0
+                    self.operationLock.lock()
+                    let cancelled = self.cancelledAuthentications.contains(operationID)
+                    if !cancelled { self.authenticationContexts[operationID] = context }
+                    self.operationLock.unlock()
+                    guard !cancelled else { throw CitizenSDKError(.authenticationCancelled, "private key authentication was cancelled") }
                     guard let key = try self.copyPrivateKey(walletIndex: walletIndex, generation: generation,
                                                             context: context, allowInteraction: true) else {
                         throw CitizenSDKError(.keyInvalidated, "wallet KEK is unavailable")

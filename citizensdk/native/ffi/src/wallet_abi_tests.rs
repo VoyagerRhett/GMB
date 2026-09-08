@@ -51,6 +51,343 @@ impl Drop for PendingWalletTransfer {
     }
 }
 
+fn chain_query_runtime() -> Arc<crate::runtime::NativeRuntime> {
+    let assets = crate::assets::verify_assets(
+        include_bytes!("../../../assets/citizenchain/manifest.json"),
+        include_bytes!("../../../assets/citizenchain/chainspec.json"),
+        include_bytes!("../../../assets/citizenchain/light_sync_state.json"),
+    )
+    .expect("chain assets");
+    let runtime = unsafe {
+        crate::runtime::NativeRuntime::new_with_modules(
+            crate::handles::reserve_handle().expect("handle"),
+            Some(assets.combined_chain_spec),
+            "CitizenSDK-query-test".to_owned(),
+            "1.0.0".to_owned(),
+            None,
+            citizen_sdk_contracts::Modules::try_new(citizen_sdk_contracts::Modules::CHAIN)
+                .expect("chain module"),
+        )
+    }
+    .expect("chain-only runtime");
+    crate::handles::insert(Arc::clone(&runtime)).expect("instance registry");
+    runtime
+}
+
+unsafe extern "C" fn chain_query_event(
+    context: *mut std::ffi::c_void,
+    event: *const crate::abi::CitizenSdkEvent,
+) {
+    // 测试持有 channel 到 dispatcher 关闭；只复制公开完成事件，不借用事件指针。
+    let sender =
+        unsafe { &*context.cast::<std::sync::mpsc::Sender<crate::abi::CitizenSdkEvent>>() };
+    let event = unsafe { *event };
+    if event.event_type == crate::abi::CitizenSdkEventType::RequestCompleted as u32 {
+        let _ = sender.send(event);
+    }
+}
+
+#[test]
+fn chain_query_inputs_and_static_genesis_are_validated_without_starting_provider() {
+    use crate::abi::CitizenSdkAccountId;
+    let runtime = chain_query_runtime();
+    let handle = runtime.handle();
+    let mut genesis = [0xa5; 33];
+    let mut request = 999;
+    let account = CitizenSdkAccountId { bytes: [0x55; 32] };
+    unsafe {
+        assert_eq!(
+            super::citizensdk_get_genesis_hash(handle, genesis.as_mut_ptr()),
+            0
+        );
+        assert_eq!(
+            &genesis[..32],
+            citizen_sdk_contracts::ChainIdentity::citizenchain()
+                .genesis_hash()
+                .as_bytes()
+        );
+        assert_eq!(genesis[32], 0xa5);
+        assert_eq!(
+            super::citizensdk_get_genesis_hash(handle, std::ptr::null_mut()),
+            CitizenSdkErrorCode::InvalidArgument.as_i32()
+        );
+        assert_eq!(
+            super::citizensdk_get_genesis_hash(0, genesis.as_mut_ptr()),
+            CitizenSdkErrorCode::InvalidHandle.as_i32()
+        );
+        for count in [1991, u32::MAX] {
+            assert_eq!(
+                super::citizensdk_get_finalized_account_balances(
+                    handle,
+                    &account,
+                    count,
+                    &mut request
+                ),
+                CitizenSdkErrorCode::InvalidArgument.as_i32()
+            );
+            assert_eq!(request, 999);
+        }
+        assert_eq!(
+            super::citizensdk_get_finalized_account_balances(
+                handle,
+                std::ptr::null(),
+                1,
+                &mut request
+            ),
+            CitizenSdkErrorCode::InvalidArgument.as_i32()
+        );
+        assert_eq!(
+            super::citizensdk_get_finalized_account_balances(
+                handle,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut()
+            ),
+            CitizenSdkErrorCode::InvalidArgument.as_i32()
+        );
+        assert_eq!(
+            super::citizensdk_get_finalized_account_balances(0, std::ptr::null(), 0, &mut request),
+            CitizenSdkErrorCode::InvalidHandle.as_i32()
+        );
+        assert_eq!(crate::citizensdk_destroy(handle), 0);
+        assert_eq!(
+            super::citizensdk_get_genesis_hash(handle, genesis.as_mut_ptr()),
+            CitizenSdkErrorCode::InvalidHandle.as_i32()
+        );
+        assert_eq!(
+            super::citizensdk_get_finalized_account_balances(
+                handle,
+                std::ptr::null(),
+                0,
+                &mut request
+            ),
+            CitizenSdkErrorCode::InvalidHandle.as_i32()
+        );
+    }
+}
+
+#[test]
+fn empty_batch_is_accepted_but_cannot_bypass_engine_running_gate() {
+    let runtime = chain_query_runtime();
+    let (sender, receiver) = std::sync::mpsc::channel::<crate::abi::CitizenSdkEvent>();
+    let mut sender = Box::new(sender);
+    runtime
+        .set_event_callback(
+            Some(chain_query_event),
+            (&mut *sender as *mut std::sync::mpsc::Sender<crate::abi::CitizenSdkEvent>).cast(),
+        )
+        .expect("callback");
+    let mut request = 0;
+    unsafe {
+        assert_eq!(
+            super::citizensdk_get_finalized_account_balances(
+                runtime.handle(),
+                std::ptr::null(),
+                0,
+                &mut request
+            ),
+            0
+        );
+    }
+    let event = receiver
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("query completion");
+    assert_eq!(event.request_id, request);
+    let result = crate::ownership::get(event.result).expect("query result");
+    assert_eq!(result.code, CitizenSdkErrorCode::NotReady);
+    assert!(matches!(
+        result.payload,
+        crate::ownership::ResultPayload::Empty
+    ));
+    unsafe {
+        assert_eq!(
+            crate::citizensdk_destroy(runtime.handle()),
+            CitizenSdkErrorCode::Busy.as_i32()
+        );
+        assert_eq!(crate::citizensdk_result_release(event.result), 0);
+        assert_eq!(crate::citizensdk_destroy(runtime.handle()), 0);
+    }
+}
+
+#[test]
+fn finite_batch_admission_rejects_cancel_and_close_until_request_and_result_drain() {
+    let runtime = chain_query_runtime();
+    let (sender, receiver) = std::sync::mpsc::channel::<crate::abi::CitizenSdkEvent>();
+    let mut sender = Box::new(sender);
+    runtime
+        .set_event_callback(
+            Some(chain_query_event),
+            (&mut *sender as *mut std::sync::mpsc::Sender<crate::abi::CitizenSdkEvent>).cast(),
+        )
+        .expect("callback");
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let mut request = 0;
+    // 与公开批量入口共用唯一 finite admission；barrier 让取消/销毁断言不依赖竞速。
+    unsafe {
+        super::accept_and_write(
+            Arc::clone(&runtime),
+            &mut request,
+            move |_, _, cancellation| {
+                assert!(cancellation.is_none());
+                entered_tx.send(()).expect("entered");
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .expect("release");
+                Ok(crate::ownership::ResultPayload::AccountBalances(Vec::new()))
+            },
+        )
+        .expect("finite acceptance");
+    }
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("pending batch");
+    unsafe {
+        assert_eq!(
+            crate::citizensdk_cancel_request(runtime.handle(), request),
+            CitizenSdkErrorCode::Unsupported.as_i32()
+        );
+        assert_eq!(
+            crate::citizensdk_destroy(runtime.handle()),
+            CitizenSdkErrorCode::Busy.as_i32()
+        );
+    }
+    release_tx.send(()).expect("release pending batch");
+    let event = receiver
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("batch completion");
+    assert_eq!(event.request_id, request);
+    let mut count = u32::MAX;
+    unsafe {
+        assert_eq!(
+            super::citizensdk_result_get_account_balance_count(event.result, &mut count),
+            0
+        );
+        assert_eq!(count, 0);
+        assert_eq!(
+            crate::citizensdk_destroy(runtime.handle()),
+            CitizenSdkErrorCode::Busy.as_i32()
+        );
+        assert_eq!(crate::citizensdk_result_release(event.result), 0);
+        assert_eq!(crate::citizensdk_destroy(runtime.handle()), 0);
+    }
+    assert!(
+        receiver.try_recv().is_err(),
+        "finite batch completes exactly once"
+    );
+}
+
+#[test]
+fn batch_result_projection_preserves_order_u128_and_checks_type_size_bounds_and_release() {
+    use crate::{
+        abi::CitizenSdkAccountBalanceInfo,
+        ownership::{self, OwnedResult, ResultPayload},
+    };
+    use citizen_sdk_contracts::{
+        AccountId32, ChainIdentity, FinalizedAccountBalance, FinalizedBlockRef,
+    };
+    let block = FinalizedBlockRef::from_parts(Hash32::from_bytes([0xaa; 32]), 77);
+    let first = FinalizedAccountBalance::try_new(
+        &ChainIdentity::citizenchain(),
+        block,
+        AccountId32::from_bytes([0x55; 32]),
+        u128::MAX,
+        0,
+    )
+    .expect("first balance");
+    let second = FinalizedAccountBalance::try_new(
+        &ChainIdentity::citizenchain(),
+        block,
+        AccountId32::from_bytes([0x44; 32]),
+        7,
+        9,
+    )
+    .expect("second balance");
+    let result = ownership::insert(OwnedResult::success(
+        0,
+        ResultPayload::AccountBalances(vec![first, second, first]),
+    ))
+    .expect("batch result");
+    let wrong = ownership::insert(OwnedResult::success(
+        0,
+        ResultPayload::AccountBalance(first),
+    ))
+    .expect("single result");
+    let mut count = 999;
+    let mut info = CitizenSdkAccountBalanceInfo::default();
+    unsafe {
+        assert_eq!(
+            super::citizensdk_result_get_account_balance_count(result, &mut count),
+            0
+        );
+        assert_eq!(count, 3);
+        assert_eq!(
+            super::citizensdk_result_get_account_balance_count(result, std::ptr::null_mut()),
+            CitizenSdkErrorCode::InvalidArgument.as_i32()
+        );
+        for (index, balance) in [first, second, first].into_iter().enumerate() {
+            assert_eq!(
+                super::citizensdk_result_get_account_balance_at(result, index as u32, &mut info),
+                0
+            );
+            assert_eq!(info, super::account_balance_to_abi(balance));
+        }
+        let unchanged = info;
+        for index in [3, u32::MAX] {
+            assert_eq!(
+                super::citizensdk_result_get_account_balance_at(result, index, &mut info),
+                CitizenSdkErrorCode::InvalidArgument.as_i32()
+            );
+            assert_eq!(info, unchanged);
+        }
+        assert_eq!(
+            super::citizensdk_result_get_account_balance_at(result, 0, std::ptr::null_mut()),
+            CitizenSdkErrorCode::InvalidArgument.as_i32()
+        );
+        info.struct_size -= 1;
+        let too_short = info;
+        assert_eq!(
+            super::citizensdk_result_get_account_balance_at(result, 0, &mut info),
+            CitizenSdkErrorCode::InvalidArgument.as_i32()
+        );
+        assert_eq!(info, too_short);
+        info = unchanged;
+        info.abi_version += 1;
+        assert_eq!(
+            super::citizensdk_result_get_account_balance_at(result, 0, &mut info),
+            CitizenSdkErrorCode::Unsupported.as_i32()
+        );
+        info = unchanged;
+        count = 999;
+        assert_ne!(
+            super::citizensdk_result_get_account_balance_count(wrong, &mut count),
+            0
+        );
+        assert_eq!(count, 999);
+        assert_ne!(
+            super::citizensdk_result_get_account_balance_at(wrong, 0, &mut info),
+            0
+        );
+        assert_eq!(info, unchanged);
+        assert_ne!(
+            super::citizensdk_result_get_account_balance(result, &mut info),
+            0
+        );
+    }
+    ownership::release(wrong).expect("release single");
+    ownership::release(result).expect("release batch");
+    unsafe {
+        assert_eq!(
+            super::citizensdk_result_get_account_balance_at(result, 0, &mut info),
+            CitizenSdkErrorCode::InvalidHandle.as_i32()
+        );
+        assert_eq!(
+            super::citizensdk_result_get_account_balance_count(0, &mut count),
+            CitizenSdkErrorCode::InvalidHandle.as_i32()
+        );
+    }
+}
+
 #[test]
 fn portable_u128_round_trips_boundary_values() {
     for value in [0, 1, u64::MAX as u128, 1_u128 << 64, u128::MAX] {

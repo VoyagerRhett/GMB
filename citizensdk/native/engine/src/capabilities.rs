@@ -178,9 +178,8 @@ const fn dependencies(name: CapabilityName) -> &'static [CapabilityName] {
         // A complete signed extrinsic can be submitted without wallet/build
         // capabilities. Provider readiness remains an independent probe.
         CapabilityName::TransactionSubmit => &[ChainRead],
-        // Signer/vault/auth policy is reported by this capability's own
-        // runtime probe; the generic Engine does not require hardware.
-        LocalSigning => &[WalletProfile],
+        // 签名独立于钱包管理，但永远依赖真实设备金库与用户认证。
+        LocalSigning => &[HardwareVault, UserAuthentication],
         History => &[ChainRead],
         BackgroundSync => &[ChainRead, History],
     }

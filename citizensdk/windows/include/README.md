@@ -1,7 +1,15 @@
 # Windows 公共头边界
 
-`citizen_sdk/citizensdk_host.h` 是 13 项薄 Host C ABI，`citizen_sdk.hpp` 是不导出 STL ABI
-的 header-only C++ 所有权包装。根 `include/citizensdk.h` 的 70 项 Core ABI 保持不变。
+Config 使用唯一 `modules` 字段，默认 full。新增 `citizensdk_host_create_with_modules`
+不改变现有 C Host 配置结构的 `enable_wallet` 布局或布尔含义；旧入口按原默认组合与新入口
+进入同一私有装配函数。钱包管理与签名分开，未选 wallet 不得展示钱包 UI。
+本次第 2 步仅更新源码、注释、合同和测试，尚未执行新的真实构建、平台测试或硬件验收；下文旧分步运行记录保留为历史证据，不代表本次变更已验证。
+
+`citizen_sdk/citizensdk_host.h` 是 17 项薄 Host C ABI，`citizen_sdk.hpp` 是不导出 STL ABI
+的 header-only C++ 所有权包装。根 `include/citizensdk.h` 的 89 项 Core ABI 保持既有结构和数值；
+`citizensdk_qr_image.h` 另声明 3 项 ZXing-C++ 图像 ABI。
+`citizensdk_host_view_account_private_key` 和 C++ `view_account_private_key` 只控制 SDK 安全窗口，
+返回既有无秘密 WalletFlow，取消和真实排空语义不变。构建私有头不安装。
 七个 Host 头不暴露 CNG、SQLite、Win32 内部窗口对象或密钥材料。
 
 配置的 `hwnd` 仅借用当前进程/UI 线程父窗口；nullptr 明确表示无父窗口，不能作为已销毁

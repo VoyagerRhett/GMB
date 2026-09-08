@@ -29,6 +29,8 @@ struct PromptState final {
   std::thread::id ui_thread;
   GMainContext *ui_context{};
   GtkParentRef *parent{};
+  uint64_t host_operation_id{};
+  bool private_view_bound{};
   GtkWidget *dialog{};
   GtkWidget *password{};
   GtkWidget *second{};
@@ -175,6 +177,8 @@ gboolean build_prompt(gpointer context) noexcept {
       complete_prompt(state, CITIZENSDK_ERROR_UNAVAILABLE);
       return G_SOURCE_REMOVE;
     }
+    // 标记只存在本 SDK 原生对象，操作号来自 Core 真实 unwrap 调用。
+    g_object_set_data(G_OBJECT(state->dialog), "citizensdk-authentication", state.get());
     gtk_window_set_resizable(GTK_WINDOW(state->dialog), FALSE);
     GtkWidget *area =
         gtk_dialog_get_content_area(GTK_DIALOG(state->dialog));
@@ -228,6 +232,21 @@ gboolean build_prompt(gpointer context) noexcept {
       delete destroy_owner;
       throw std::bad_alloc();
     }
+    auto *focus_owner = new std::shared_ptr<PromptState>(state);
+    const gulong focus_signal = g_signal_connect_data(
+        state->dialog, "focus-out-event", G_CALLBACK((+[](GtkWidget *, GdkEventFocus *,
+                                                          gpointer context) -> gboolean {
+          const auto prompt = *static_cast<std::shared_ptr<PromptState> *>(context);
+          if (prompt->private_view_bound && prompt->dialog != nullptr) {
+            clear_controls(prompt);
+            complete_prompt(prompt, CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED);
+            destroy_dialog(prompt);
+          }
+          return FALSE;
+        })), focus_owner, +[](gpointer owner, GClosure *) noexcept {
+          delete static_cast<std::shared_ptr<PromptState> *>(owner);
+        }, static_cast<GConnectFlags>(0));
+    if (focus_signal == 0) { delete focus_owner; throw std::bad_alloc(); }
     gtk_widget_show_all(state->dialog);
   } catch (...) {
     destroy_dialog(state);
@@ -317,14 +336,36 @@ UserAuth::~UserAuth() {
 #endif
 }
 
+bool accept_private_key_authentication_window(
+    void *window, void *view_window, const void *owner, uint64_t host_operation_id) noexcept {
+#if CITIZENSDK_ENABLE_WALLET_UI
+  if (window == nullptr || view_window == nullptr || owner == nullptr ||
+      host_operation_id == 0) return false;
+  auto *state = static_cast<PromptState *>(g_object_get_data(
+      G_OBJECT(window), "citizensdk-authentication"));
+  if (state == nullptr || state->parent != owner ||
+      state->host_operation_id != host_operation_id || state->dialog != window)
+    return false;
+  gtk_window_set_transient_for(GTK_WINDOW(window), GTK_WINDOW(view_window));
+  state->private_view_bound = true;
+  return true;
+#else
+  (void)window; (void)view_window; (void)owner; (void)host_operation_id;
+  return false;
+#endif
+}
+
 bool UserAuth::available() const noexcept { return ui_available_; }
 
-AuthenticationResult UserAuth::create_vault_password() { return prompt(true); }
-AuthenticationResult UserAuth::unlock_vault_password() { return prompt(false); }
+AuthenticationResult UserAuth::create_vault_password() { return prompt(true, 0); }
+AuthenticationResult UserAuth::unlock_vault_password(uint64_t host_operation_id) {
+  return prompt(false, host_operation_id);
+}
 
-AuthenticationResult UserAuth::prompt(bool confirmation) {
+AuthenticationResult UserAuth::prompt(bool confirmation, uint64_t host_operation_id) {
 #if !CITIZENSDK_ENABLE_WALLET_UI
   (void)confirmation;
+  (void)host_operation_id;
   return {CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED, SensitiveBuffer()};
 #else
   if (!ui_available_) {
@@ -342,6 +383,7 @@ AuthenticationResult UserAuth::prompt(bool confirmation) {
   state->ui_context =
       g_main_context_ref(static_cast<GMainContext *>(ui_context_));
   state->parent = &parent_;
+  state->host_operation_id = host_operation_id;
   if (!attach_idle(state, build_prompt)) {
     return {CITIZENSDK_ERROR_UNAVAILABLE, SensitiveBuffer()};
   }

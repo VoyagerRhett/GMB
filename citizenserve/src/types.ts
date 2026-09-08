@@ -70,7 +70,7 @@ export interface SquareNotifyJob {
   cursor?: { created_at: number; cid_number: string };
 }
 
-/// Wrangler 根据 wrangler.toml 生成固定变量与资源绑定；发布期变量和 Secret 只保留名称契约，
+/// Wrangler 根据 scripts/wrangler.toml 生成固定变量与资源绑定；发布期变量和 Secret 只保留名称契约，
 /// 实际值由 TataConsole 分别通过 `--var` 与受保护 Secret FIFO 注入。
 interface WorkerSecretsAndOptionalVars {
   // ChatServer 私钥只签发短期 EdDSA JWT；服务地址是公开 HTTPS 配置。
@@ -130,7 +130,7 @@ type RuntimeBindings =
     NOTIFY?: Queue<SquareNotifyJob>;
   };
 
-/// Worker 唯一环境类型 = Wrangler 生成的真实绑定 + 不可写入 wrangler.toml 的 Secret 名称。
+/// Worker 唯一环境类型 = Wrangler 生成的真实绑定 + 不可写入 scripts/wrangler.toml 的 Secret 名称。
 export type Env = RuntimeBindings & WorkerSecretsAndOptionalVars;
 
 export interface SessionState {

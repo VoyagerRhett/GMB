@@ -1,7 +1,8 @@
 # GMB
 
 GMB 是公民链、公民移动端、公民服务端、公民钱包、CitizenSDK 和官网的开源产品仓库。产品源码、
-公开契约和本地测试可以从本仓库独立读取与执行；GitHub CI/Release 通过冻结的 TATA 提交消费统一
+公开契约和测试源码由本仓库维护；本机构建、测试和依赖准备统一经塔塔控制台执行，源码目录不保存生成物。
+GitHub CI/Release 通过冻结的 TATA 提交消费统一
 中央流程，GMB 不复制私人运维源码或第二套产品流水线。
 
 快速入口：
@@ -10,11 +11,16 @@ GMB 是公民链、公民移动端、公民服务端、公民钱包、CitizenSDK
 - 公民宪法唯一真源：链上立法院模块 [`citizenchain/runtime/public/legislation-yuan/`](citizenchain/runtime/public/legislation-yuan/)（`law_id=0`、`tier=宪法`，创世注入 + 立法投票修订；展示端从链上结构化法律重建）
 - 统一数据字典：TATA 私有仓库中的 [`dictionary/gmb`](https://github.com/VoyagerRhett/TATA/tree/main/dictionary/gmb)；
   GMB 门禁通过中央流程只读索引、共享分片和准确产品分片，本仓不保留副本。
-- 统一二维码协议：[`shared/qr-protocol/`](shared/qr-protocol/)
+- 统一二维码协议：[`citizenchain/crates/qr-protocol/`](citizenchain/crates/qr-protocol/)
+- 公民链内部组件位于 `citizenchain/crates/`；静态资源统一位于 `citizenchain/node/resources/`，
+  仅整合 Logo 母版、桌面图标和原有打包资源。
+  Cargo 链接配置统一放在公民链脚本目录 `citizenchain/scripts/config.toml`，公民链构建入口显式加载该文件。
+- 公民链构建、Logo 和账户派生工具位于 `citizenchain/scripts/`；公民治理机构数据生成器位于 `citizenapp/scripts/`。
+- 各产品独立维护脚本只放在本产品根 `scripts/`，禁止根层执行脚本及内部第二个脚本目录。没有维护脚本的产品不创建空目录；构建配置、测试源码和工具固定入口按其原有职责放置。
 - 产品与发布边界：[本文件“产品与发布边界”](#产品与发布边界)
 - GitHub Actions：[`repository.yml`](.github/workflows/repository.yml) 是唯一接受显式调度的入口，
-  它只调用可复用的 [`flow.yml`](.github/workflows/flow.yml)。`flow.yml` 校验短期租约、检出准确的
-  TATA 提交，再调用 `.tata-flow/tataconsole/flows/gmb/shared` 中的中央流程。GMB 一级产品根目录
+  直接校验短期租约、检出准确的 TATA 提交，再调用 `.tata-flow/tataconsole/flows/gmb/shared`
+  中的中央流程。GMB 一级产品根目录
   不保存 GMB 产品级 Workflow 副本；内嵌上游依赖保留的来源仓库 `.github` 元数据不会成为本仓
   可执行 Workflow。统一仓库门禁继续检查文档、残留、安全边界和新增代码的中文注释。
 

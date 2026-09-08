@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-const EXPECTED_EXPORTS: [&str; 73] = [
+const EXPECTED_EXPORTS: [&str; 89] = [
     "citizensdk_abi_version",
     "citizensdk_add_wallet_accounts",
     "citizensdk_cancel_request",
@@ -8,6 +8,9 @@ const EXPECTED_EXPORTS: [&str; 73] = [
     "citizensdk_create",
     "citizensdk_create_options_size",
     "citizensdk_create_with_host",
+    "citizensdk_create_with_modules",
+    "citizensdk_validate_modules",
+    "citizensdk_verify_signature",
     "citizensdk_delete_wallet",
     "citizensdk_delete_wallet_account",
     "citizensdk_destroy",
@@ -17,6 +20,8 @@ const EXPECTED_EXPORTS: [&str; 73] = [
     "citizensdk_get_best_head",
     "citizensdk_get_capabilities",
     "citizensdk_get_finalized_account_balance",
+    "citizensdk_get_finalized_account_balances",
+    "citizensdk_get_genesis_hash",
     "citizensdk_get_finalized_head",
     "citizensdk_get_lifecycle",
     "citizensdk_get_runtime_context_at",
@@ -32,12 +37,23 @@ const EXPECTED_EXPORTS: [&str; 73] = [
     "citizensdk_prepared_wallet_release",
     "citizensdk_reconcile_wallet_cleanup",
     "citizensdk_refresh_capabilities",
+    "citizensdk_qr_cancel_sign_request",
+    "citizensdk_qr_consume_sign_response",
+    "citizensdk_qr_create_sign_request",
+    "citizensdk_review_qr_sign_request",
+    "citizensdk_sign_qr_request",
+    "citizensdk_result_copy_qr",
+    "citizensdk_qr_encode_account_id",
+    "citizensdk_qr_encode_user_transfer",
+    "citizensdk_qr_parse",
     "citizensdk_rename_wallet_account",
     "citizensdk_result_copy_error_message",
     "citizensdk_result_copy_storage",
     "citizensdk_result_copy_storage_batch_item",
     "citizensdk_result_estimate_fee",
     "citizensdk_result_get_account_balance",
+    "citizensdk_result_get_account_balance_count",
+    "citizensdk_result_get_account_balance_at",
     "citizensdk_result_get_account_nonce",
     "citizensdk_result_get_block_ref",
     "citizensdk_result_get_execution",
@@ -93,6 +109,10 @@ fn rust_exports(source: &str) -> BTreeSet<String> {
             .nth(1)
             .and_then(|value| value.split(['(', '<']).next())
             .unwrap_or_else(|| panic!("cannot parse exported declaration: {declaration}"));
+        // 未编译 QR 的宏模板不是第十个符号；实例化只复用下方精确九个名字。
+        if function == "$name" {
+            continue;
+        }
         assert!(
             function.starts_with("citizensdk_"),
             "unexpected export {function}"
@@ -102,7 +122,30 @@ fn rust_exports(source: &str) -> BTreeSet<String> {
             "duplicate export {function}"
         );
     }
+    exports.retain(|name| !name.starts_with("citizensdk_internal_"));
     exports
+}
+
+#[test]
+fn private_bridge_has_exactly_four_separate_exports_and_no_public_declarations() {
+    let source = include_str!("../src/wallet_abi.rs");
+    let exports: BTreeSet<_> = source
+        .lines()
+        .filter_map(|line| line.split("fn citizensdk_internal_").nth(1))
+        .map(|tail| format!("citizensdk_internal_{}", tail.split('(').next().unwrap()))
+        .collect();
+    assert_eq!(
+        exports,
+        BTreeSet::from([
+            "citizensdk_internal_private_key_view_open".to_owned(),
+            "citizensdk_internal_private_key_view_reveal".to_owned(),
+            "citizensdk_internal_private_key_view_cancel".to_owned(),
+            "citizensdk_internal_private_key_view_finish".to_owned(),
+        ])
+    );
+    assert!(!include_str!("../../../include/citizensdk.h").contains("citizensdk_internal_"));
+    assert!(!include_str!("../../../include/citizensdk_types.h").contains("citizensdk_internal_"));
+    assert!(!include_str!("../src/abi.rs").contains("PrivateKeyView"));
 }
 
 fn without_block_comments(source: &str) -> String {
@@ -166,9 +209,17 @@ fn rust_and_c_publish_exactly_the_reviewed_product_symbols() {
         .collect();
     let mut rust = rust_exports(include_str!("../src/lib.rs"));
     let wallet = rust_exports(include_str!("../src/wallet_abi.rs"));
-    assert_eq!(rust.len(), 36, "base Rust export count changed");
-    assert_eq!(wallet.len(), 37, "wallet Rust export count changed");
+    let qr = rust_exports(include_str!("../src/qr_abi.rs"));
+    assert_eq!(rust.len(), 39, "base Rust export count changed");
+    assert_eq!(wallet.len(), 41, "wallet Rust export count changed");
     for export in wallet {
+        assert!(
+            rust.insert(export.clone()),
+            "duplicate Rust export {export}"
+        );
+    }
+    assert_eq!(qr.len(), 9, "QR Rust export count changed");
+    for export in qr {
         assert!(
             rust.insert(export.clone()),
             "duplicate Rust export {export}"
@@ -178,8 +229,8 @@ fn rust_and_c_publish_exactly_the_reviewed_product_symbols() {
         .into_keys()
         .collect();
 
-    assert_eq!(rust.len(), 73, "Rust export count changed");
-    assert_eq!(header.len(), 73, "C declaration count changed");
+    assert_eq!(rust.len(), 89, "Rust export count changed");
+    assert_eq!(header.len(), 89, "C declaration count changed");
     assert_eq!(rust, expected, "Rust export set changed");
     assert_eq!(header, expected, "C declaration set changed");
 }

@@ -1,9 +1,11 @@
 // This black-box test intentionally crosses the exported raw-pointer ABI.
 #![allow(unsafe_code)]
+// 此黑盒夹具验证真实链资产；纯本地模块不读取这些资产。
+#![cfg(feature = "chain")]
 
 use citizensdk::{
-    citizensdk_create, citizensdk_destroy, CitizenSdkBytesView, CitizenSdkCreateOptions,
-    CitizenSdkErrorCode, CitizenSdkHandle, CITIZENSDK_ABI_VERSION,
+    citizensdk_create_with_modules, citizensdk_destroy, CitizenSdkBytesView,
+    CitizenSdkCreateOptions, CitizenSdkErrorCode, CitizenSdkHandle, CITIZENSDK_ABI_VERSION,
 };
 
 const MANIFEST: &[u8] = include_bytes!("../../../assets/citizenchain/manifest.json");
@@ -35,12 +37,26 @@ fn assets_are_reverified_before_instance_creation() {
     drifted.push(b' ');
     let mut handle: CitizenSdkHandle = 0;
     // SAFETY: all views remain alive for the synchronous create call.
-    let drift_code = unsafe { citizensdk_create(&options(&drifted), &mut handle) };
+    let drift_code = unsafe {
+        citizensdk_create_with_modules(
+            &options(&drifted),
+            std::ptr::null(),
+            citizen_sdk_contracts::Modules::CHAIN,
+            &mut handle,
+        )
+    };
     assert_eq!(drift_code, CitizenSdkErrorCode::Integrity.as_i32());
     assert_eq!(handle, 0);
 
     // SAFETY: packaged static views and output pointer are valid.
-    let code = unsafe { citizensdk_create(&options(CHAIN_SPEC), &mut handle) };
+    let code = unsafe {
+        citizensdk_create_with_modules(
+            &options(CHAIN_SPEC),
+            std::ptr::null(),
+            citizen_sdk_contracts::Modules::CHAIN,
+            &mut handle,
+        )
+    };
     assert_eq!(code, CitizenSdkErrorCode::Ok.as_i32());
     assert_ne!(handle, 0);
     // SAFETY: handle was returned by create and has no requests/results.

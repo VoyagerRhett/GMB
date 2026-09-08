@@ -1,5 +1,11 @@
 # CitizenSDK Android 与 Apple 平台实现
 
+当前模块化实现共用同一 Rust 规则：wallet 管理、signing、chain、transactions、history、qr 可组合，
+默认 full；模块依赖与编译支持在任何平台业务资源创建前校验。现有正式 full 包仍包含完整链资产，
+运行期只在选中 chain 时加载；未选历史不初始化 history，wallet/signing 才创建安全存储与金库。
+signing-only 仅访问同一宿主已有的 SDK 安全账户归属资料，首次 provision 仍走 wallet 安全流程。
+模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
+
 ## 当前支持边界
 
 | 平台 | 当前状态 | 正式候选运行件 |
@@ -18,7 +24,7 @@ legacy `libsmoldot.dylib` 仅为外部 macOS `arm64` 差分测试宿主库，
 
 ## Dart 与 Flutter 公共边界
 
-根 Dart 入口只公开 `CitizenSdk` 及类型化 chain、wallet、transaction、history API。
+根 Dart 入口公开 `CitizenSdk` 及独立 chain、wallet、signing、transactions、history 门面。
 Android 与 Apple Flutter adapter 均使用固定：
 
 ```text
@@ -26,24 +32,54 @@ MethodChannel  citizen/sdk/core/v1
 EventChannel   citizen/sdk/events/v1
 ```
 
-Linux adapter 源码也只使用这两个 channel 和相同 22 方法 tuple；它不增加第 23 个方法、
-Map 旁路或 Linux 专用 Dart API。第 7.4 步公开入口使用同版已安装 Host/Core；跨平台实测仍
+Linux adapter 源码也只使用这两个 channel 和相同 36 方法 tuple；无会话验签是五端共享方法，
+不增加 Map 旁路或 Linux 专用 Dart API。第 7.4 步公开入口使用同版已安装 Host/Core；跨平台实测仍
 由后续统一 GitHub CI 增量缓存、Release 全量构建承担，保持同一产品版本与 ABI。
 
-Windows adapter 源码也复用这两个 channel 和全部 22 方法；五份绑定各自的权威常量/方法表
+Windows adapter 源码也复用这两个 channel 和全部 36 方法；五份绑定各自的权威常量/方法表
 独立对拍同一金标。Windows 不带入 GLib 实现，也不增加移动端参数或业务功能；其本地身份、
 路径和 HWND 只在原生环境层取得。第 8.4 步注册官方 Windows 插件，不增加新的协议或
 产品业务；注册源码不代表已在 Hosted 发布。
 
-协议只有 22 个方法。请求、响应、事件、错误和嵌套公开值都是固定长度、固定位置的 `List`
+协议共 36 个方法。新增的 10 个 QR 方法在五端名称、字段位置、上限和错误映射完全相同。
+请求、响应、事件、错误和嵌套公开值都是固定长度、固定位置的 `List`
 tuple；没有 `Map` 兼容旁路。request sequence 在接纳时严格连续，但并发响应可乱序并精确回显
 自己的序号；event sequence 独立递增。cancel/relisten 使用订阅代际和 sink identity，旧队列事件
 不能进入新 sink。Android 同笔交易的 bind 前后进度统一进入单派发者 FIFO，较晚事件不能
 越过尚在 drain 的早期事件；Apple Flutter 字节参数只接受 `FlutterStandardTypedData.uint8`，
 Int32/Int64/浮点 typed data 即使底层长度合适也会失败关闭。
-不得进入新订阅。
 
-每个 Flutter engine 只建立一个 EventChannel router，并在 native open 前订阅。早到事件按
+## 统一扫码与签名路径
+
+五端 SDK 相机采集与公开图像输入统一为 8 位亮度帧；扫码识别和二维码生成全部进入同一
+ZXing-C++ 3.1.1 窄包装，限定 QR Code Model 2、单码、UTF-8 和固定资源上限。没有 ML Kit、Vision、
+Windows 平台识别器或任何回退引擎。解出的文本继续由 Rust 严格解析 `QR_V1`，平台不解释协议。
+
+QR 模块和 signing 模块独立。扫描由 SDK 自有窗口提供：Apple 共用 AVFoundation，Android 使用
+CameraX；设备层只采集像素，不使用平台二维码识别。解析、图片解码和扫描返回 Core 的同一公开文档。
+链调用的 `signQrRequest` 显式组合 qr、signing、chain，内部完成可信审阅、原生确认和设备授权，
+调用方不再取得待签字节或拼装签名响应。QR-only 不访问金库，普通 signing-only 不要求链。
+相机权限按调用申请，窗口关闭、设备中断及迟到权限结果必须收口；不得后台继续采集。
+
+Apple 宿主须在自己的 Info.plist 声明 `NSCameraUsageDescription`；macOS 沙盒应用还须开启
+camera entitlement。SDK 不能代替宿主声明系统隐私用途，缺少声明时在打开设备之前明确拒绝。
+Android 相机权限及非导出扫描 Activity 由 AAR manifest 合并，运行时授权由 SDK 扫描窗口申请。
+这些是操作系统集成配置，不是要求产品自行实现相机或二维码识别。
+
+Flutter 插件和原生 Gradle 模块都声明相同 AndroidX 运行依赖。单独通过 `files(...)` 消费
+AAR 不会自动解析 Maven 传递依赖，须同时声明其既有 biometric、core-ktx、fragment-ktx 和
+CameraX core/camera2/lifecycle；准确坐标见 `android/native/build.gradle`。不把原始 AAR
+描述成自带 Maven 依赖元数据，也不为此增加另一套发布流程。
+
+## 无实例验签与会话路由
+
+open 只接受 `[1, modules]`。普通 session 方法仍使用原 session/sequence 外壳。
+`CitizenSigning.verify` 是无需 open 的静态入口：`verifySignature` 唯一请求为
+`[1, accountId, signature, payload]`，唯一响应为 `[1, bool]`；错误复用原
+PlatformException 形态，session/sequence 为 null。拒绝会话形状，不建立会话或事件订阅，
+不创建钱包、金库、链数据库或轻节点。
+
+需要 session 的入口中，每个 Flutter engine 只建立一个 EventChannel router，并在 native open 前订阅。早到事件按
 session 隔离进入有界缓冲；open 返回该 session 的 event baseline 后才按序交付，不能为每个
 session 在 open 后另建订阅，也不能让一个 session 的事件填满或越过另一个 session 的队列。
 
@@ -79,8 +115,10 @@ CITIZENSDK_ANDROID_BUILD_DIR
 CITIZENSDK_ANDROID_CORE_DIR
 ```
 
-本机路径必须位于 `/Users/rhett/TATA/tataconsole/target/GMB/citizensdk/SDK`，GitHub Actions 路径必须位于 checkout
+本机路径必须位于 `/Users/rhett/TATA/tataconsole/work/gmb/citizensdk`，GitHub Actions 路径必须位于 checkout
 之外。源码树不得产生 Gradle、CMake、SO、AAR 或测试报告。
+独立 AAR 的 `settings.gradle` 通过 `CITIZENSDK_WORK_DIR/gradle-project` 显式绑定 `:native`；即使入口脚本
+从源码目录 `apply from`，Gradle 也只把当前任务中的 `gradle-project/native` 当作可写项目目录。
 
 ## Android 钱包安全界面
 

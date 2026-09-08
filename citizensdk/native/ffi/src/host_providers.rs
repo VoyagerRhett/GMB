@@ -862,17 +862,27 @@ pub fn validate_public_store_v1(
         provider.abi_version,
         "public host store has an incompatible structure",
     )?;
-    if provider.chain_database_load.is_none()
-        || provider.chain_database_compare_and_swap.is_none()
-        || provider.runtime_cache_load.is_none()
-        || provider.runtime_cache_store.is_none()
-        || provider.runtime_cache_delete.is_none()
-        || provider.transaction_history_load.is_none()
-        || provider.transaction_history_compare_and_swap.is_none()
-    {
+    let chain = [
+        provider.chain_database_load.is_some(),
+        provider.chain_database_compare_and_swap.is_some(),
+    ];
+    let runtime = [
+        provider.runtime_cache_load.is_some(),
+        provider.runtime_cache_store.is_some(),
+        provider.runtime_cache_delete.is_some(),
+    ];
+    let history = [
+        provider.transaction_history_load.is_some(),
+        provider.transaction_history_compare_and_swap.is_some(),
+    ];
+    let partial = [&chain[..], &runtime[..], &history[..]]
+        .iter()
+        .any(|group| group.iter().any(|present| *present) && !group.iter().all(|present| *present));
+    let empty = !chain[0] && !runtime[0] && !history[0];
+    if partial || empty {
         return Err(HostProviderError::new(
             CitizenSdkErrorCode::InvalidArgument,
-            "public host store must provide every typed callback",
+            "public host store requires nonempty, complete typed callback groups",
         ));
     }
     Ok(())
@@ -924,8 +934,8 @@ pub fn validate_secret_vault_v1(
     Ok(())
 }
 
-/// The public provider is mandatory for a host-composed instance.  Secure
-/// storage and the vault are an all-or-none wallet bundle.
+/// Public storage is optional for wallet/signing-only instances. Secure
+/// account storage and the device vault remain an all-or-none security bundle.
 pub fn validate_host_services_presence(
     services: &CitizenSdkHostServicesV1,
 ) -> Result<(), HostProviderError> {
@@ -935,10 +945,13 @@ pub fn validate_host_services_presence(
         services.abi_version,
         "host services have an incompatible structure",
     )?;
-    if services.public_store.is_null() {
+    if services.public_store.is_null()
+        && services.secure_store.is_null()
+        && services.secret_vault.is_null()
+    {
         return Err(HostProviderError::new(
             CitizenSdkErrorCode::InvalidArgument,
-            "host services require the typed public store",
+            "host services must contain at least one typed resource group",
         ));
     }
     if services.secure_store.is_null() != services.secret_vault.is_null() {
@@ -1721,7 +1734,7 @@ fn codec_contract_error(error: HostCodecError) -> ContractError {
     ContractError::new(code, error.message())
 }
 
-fn host_error(code: CitizenSdkErrorCode, message: &'static str) -> ContractError {
+pub(crate) fn host_error(code: CitizenSdkErrorCode, message: &'static str) -> ContractError {
     let contract = match code {
         CitizenSdkErrorCode::InvalidArgument | CitizenSdkErrorCode::InvalidHandle => {
             ContractErrorCode::InvalidArgument
@@ -1779,7 +1792,7 @@ unsafe impl Sync for SendSecretVault {}
 struct HostBridge {
     owner_id: u64,
     operation_gate: Mutex<HostOperationGate>,
-    public: SendPublicStore,
+    public: Option<SendPublicStore>,
     secure: Option<SendSecureStore>,
     vault: Option<SendSecretVault>,
 }
@@ -1789,6 +1802,15 @@ struct HostOperationGate {
 }
 
 impl HostBridge {
+    fn public(&self) -> Result<SendPublicStore, ContractError> {
+        self.public.ok_or_else(|| {
+            ContractError::new(
+                ContractErrorCode::Unsupported,
+                "public store is not composed for these modules",
+            )
+        })
+    }
+
     /// Linearizes the accepting check and insertion into the global pending
     /// registry. Once `close_operation_gate` returns, no operation for this
     /// owner can be inserted until an explicit reopen.
@@ -2060,8 +2082,13 @@ impl HostServicesAdapter {
     pub unsafe fn try_from_ffi(services: &CitizenSdkHostServicesV1) -> Result<Self, ContractError> {
         validate_host_services_presence(services).map_err(host_provider_contract_error)?;
         // SAFETY: guaranteed by this constructor's caller contract.
-        let public = unsafe { *services.public_store };
-        validate_public_store_v1(&public).map_err(host_provider_contract_error)?;
+        let public = if services.public_store.is_null() {
+            None
+        } else {
+            let public = unsafe { *services.public_store };
+            validate_public_store_v1(&public).map_err(host_provider_contract_error)?;
+            Some(SendPublicStore(public))
+        };
         let (secure, vault) = if services.secure_store.is_null() {
             (None, None)
         } else {
@@ -2081,11 +2108,29 @@ impl HostServicesAdapter {
                     "host provider owner id space is exhausted",
                 )?,
                 operation_gate: Mutex::new(HostOperationGate { accepting: true }),
-                public: SendPublicStore(public),
+                public,
                 secure,
                 vault,
             }),
         })
+    }
+
+    pub fn has_chain_database(&self) -> bool {
+        self.bridge
+            .public
+            .is_some_and(|store| store.0.chain_database_load.is_some())
+    }
+
+    pub fn has_runtime_cache(&self) -> bool {
+        self.bridge
+            .public
+            .is_some_and(|store| store.0.runtime_cache_load.is_some())
+    }
+
+    pub fn has_history(&self) -> bool {
+        self.bridge
+            .public
+            .is_some_and(|store| store.0.transaction_history_load.is_some())
     }
 
     pub fn chain_database_store(&self) -> Arc<dyn ChainDatabaseStore> {
@@ -2126,6 +2171,20 @@ impl HostServicesAdapter {
         self.bridge.vault.map(|_| {
             Arc::new(HostSecretVault {
                 bridge: Arc::clone(&self.bridge),
+                authorizing: None,
+            }) as Arc<dyn SecretVault>
+        })
+    }
+
+    /// 只为当前查看创建值级观察器，仍共享本实例原 HostBridge/AES 路径；禁止全局认证标记。
+    pub(crate) fn private_key_view_vault(
+        &self,
+        authorizing: Arc<dyn Fn(u64) -> i32 + Send + Sync>,
+    ) -> Option<Arc<dyn SecretVault>> {
+        self.bridge.vault.map(|_| {
+            Arc::new(HostSecretVault {
+                bridge: Arc::clone(&self.bridge),
+                authorizing: Some(authorizing),
             }) as Arc<dyn SecretVault>
         })
     }
@@ -2176,6 +2235,7 @@ struct HostEncryptedSecretBlobStore {
 #[derive(Clone)]
 struct HostSecretVault {
     bridge: Arc<HostBridge>,
+    authorizing: Option<Arc<dyn Fn(u64) -> i32 + Send + Sync>>,
 }
 
 fn input_view(bytes: &[u8]) -> CitizenSdkBytesView {
@@ -2228,13 +2288,13 @@ async fn load_chain_database(
     bridge: &Arc<HostBridge>,
 ) -> Result<ChainDatabaseSnapshot, ContractError> {
     let callback = bridge
-        .public
+        .public()?
         .0
         .chain_database_load
         .ok_or_else(|| ContractError::new(ContractErrorCode::Internal, "chain load missing"))?;
     // Raw host contexts are never dereferenced by Rust.  Capture their numeric
     // value so the `Send` store future never carries a raw pointer over await.
-    let context = bridge.public.0.context as usize;
+    let context = bridge.public()?.0.context as usize;
     let completion = bridge
         .call_record(
             CitizenSdkHostRecordDomain::ChainDatabase,
@@ -2294,15 +2354,14 @@ impl ChainDatabaseStore for HostChainDatabaseStore {
             let encoded =
                 encode_chain_database_snapshot(&candidate).map_err(codec_contract_error)?;
             let attempt = async {
-                let callback =
-                    bridge
-                        .public
-                        .0
-                        .chain_database_compare_and_swap
-                        .ok_or_else(|| {
-                            ContractError::new(ContractErrorCode::Internal, "chain CAS missing")
-                        })?;
-                let context = bridge.public.0.context as usize;
+                let callback = bridge
+                    .public()?
+                    .0
+                    .chain_database_compare_and_swap
+                    .ok_or_else(|| {
+                        ContractError::new(ContractErrorCode::Internal, "chain CAS missing")
+                    })?;
+                let context = bridge.public()?.0.context as usize;
                 let completion = bridge
                     .call_record(
                         CitizenSdkHostRecordDomain::ChainDatabase,
@@ -2358,10 +2417,10 @@ async fn load_runtime_cache(
     bridge: &Arc<HostBridge>,
     block_hash: Hash32,
 ) -> Result<Option<RuntimeContext>, ContractError> {
-    let callback = bridge.public.0.runtime_cache_load.ok_or_else(|| {
+    let callback = bridge.public()?.0.runtime_cache_load.ok_or_else(|| {
         ContractError::new(ContractErrorCode::Internal, "runtime cache load missing")
     })?;
-    let context = bridge.public.0.context as usize;
+    let context = bridge.public()?.0.context as usize;
     let completion = bridge
         .call_record(
             CitizenSdkHostRecordDomain::RuntimeCache,
@@ -2417,10 +2476,10 @@ impl RuntimeCacheStore for HostRuntimeCacheStore {
             let block_hash = context.block().hash();
             let encoded = encode_runtime_context(&context).map_err(codec_contract_error)?;
             let attempt = async {
-                let callback = bridge.public.0.runtime_cache_store.ok_or_else(|| {
+                let callback = bridge.public()?.0.runtime_cache_store.ok_or_else(|| {
                     ContractError::new(ContractErrorCode::Internal, "runtime cache store missing")
                 })?;
-                let host_context = bridge.public.0.context as usize;
+                let host_context = bridge.public()?.0.context as usize;
                 let code = bridge
                     .call_status(|operation_id, sdk_context, complete| {
                         // SAFETY: copied callback/context contract.
@@ -2453,10 +2512,10 @@ impl RuntimeCacheStore for HostRuntimeCacheStore {
         let bridge = Arc::clone(&self.bridge);
         Box::pin(async move {
             let attempt = async {
-                let callback = bridge.public.0.runtime_cache_delete.ok_or_else(|| {
+                let callback = bridge.public()?.0.runtime_cache_delete.ok_or_else(|| {
                     ContractError::new(ContractErrorCode::Internal, "runtime cache delete missing")
                 })?;
-                let host_context = bridge.public.0.context as usize;
+                let host_context = bridge.public()?.0.context as usize;
                 let code = bridge
                     .call_status(|operation_id, sdk_context, complete| {
                         // SAFETY: copied callback/context contract.
@@ -2624,10 +2683,10 @@ async fn load_history_state(
     bridge: &Arc<HostBridge>,
 ) -> Result<TransactionHistoryState, ContractError> {
     let callback =
-        bridge.public.0.transaction_history_load.ok_or_else(|| {
+        bridge.public()?.0.transaction_history_load.ok_or_else(|| {
             ContractError::new(ContractErrorCode::Internal, "history load missing")
         })?;
-    let host_context = bridge.public.0.context as usize;
+    let host_context = bridge.public()?.0.context as usize;
     let completion = bridge
         .call_record(
             CitizenSdkHostRecordDomain::TransactionHistory,
@@ -2699,13 +2758,13 @@ impl TransactionHistoryStore for HostTransactionHistoryStore {
             let encoded = encode_transaction_history_state(&next).map_err(codec_contract_error)?;
             let attempt = async {
                 let callback = bridge
-                    .public
+                    .public()?
                     .0
                     .transaction_history_compare_and_swap
                     .ok_or_else(|| {
                         ContractError::new(ContractErrorCode::Internal, "history CAS missing")
                     })?;
-                let host_context = bridge.public.0.context as usize;
+                let host_context = bridge.public()?.0.context as usize;
                 let completion = bridge
                     .call_record(
                         CitizenSdkHostRecordDomain::TransactionHistory,
@@ -3075,6 +3134,7 @@ impl SecretVault for HostSecretVault {
         envelope: EncryptedSecretEnvelope,
     ) -> ContractFuture<'_, SecretBuffer> {
         let bridge = Arc::clone(&self.bridge);
+        let authorizing = self.authorizing.clone();
         Box::pin(async move {
             if envelope.format_version() != VAULT_ENVELOPE_FORMAT_VERSION {
                 return Err(ContractError::new(
@@ -3104,6 +3164,13 @@ impl SecretVault for HostSecretVault {
             let host_context = vault.0.context as usize;
             let (code, dek) = bridge
                 .call_unwrap_dek(|operation_id, output, sdk_context, complete| {
+                    // 操作号已保留但尚未派发；拒绝会走原 settle_production_dispatch 回收 pending/DEK。
+                    if let Some(authorizing) = authorizing.as_ref() {
+                        let status = authorizing(operation_id);
+                        if status != CitizenSdkErrorCode::Ok as i32 {
+                            return status;
+                        }
+                    }
                     // SAFETY: copied callback/context contract. `output` is
                     // owned by the pending registry until completion.
                     unsafe {
@@ -3380,7 +3447,7 @@ mod production_tests {
             owner_id: next_global_id(&NEXT_HOST_OWNER_ID, "test host owner id space is exhausted")
                 .unwrap_or_else(|error| panic!("test owner allocation failed: {error}")),
             operation_gate: Mutex::new(HostOperationGate { accepting: true }),
-            public: SendPublicStore(public),
+            public: Some(SendPublicStore(public)),
             secure: secure.map(SendSecureStore),
             vault: vault.map(SendSecretVault),
         })
@@ -3627,6 +3694,7 @@ mod production_tests {
     struct FakeVault {
         seen_plaintext_deks: Mutex<Vec<Vec<u8>>>,
         unwrap_mode: AtomicU8,
+        unwrap_operations: Mutex<Vec<u64>>,
     }
 
     unsafe fn fake_vault<'a>(context: *mut c_void) -> &'a FakeVault {
@@ -3731,6 +3799,11 @@ mod production_tests {
         sdk_context: *mut c_void,
         completion: CitizenSdkHostStatusCompletionV1,
     ) -> i32 {
+        unsafe { fake_vault(host_context) }
+            .unwrap_operations
+            .lock()
+            .unwrap_or_else(|_| panic!("测试操作记录锁损坏"))
+            .push(operation_id);
         assert_eq!(plaintext_dek_out.len, CITIZENSDK_HOST_DEK_BYTES);
         assert!(!plaintext_dek_out.data.is_null());
         // SAFETY: both views are valid for this callback, and the SDK-owned
@@ -3800,6 +3873,7 @@ mod production_tests {
         let bridge = test_bridge(CitizenSdkHostPublicStoreV1::default(), None, Some(vtable));
         let vault = HostSecretVault {
             bridge: Arc::clone(&bridge),
+            authorizing: None,
         };
         (fake, vault, bridge)
     }
@@ -3815,6 +3889,98 @@ mod production_tests {
             ciphertext,
         )
         .unwrap_or_else(|error| panic!("test envelope rebuild failed: {error}"))
+    }
+
+    #[test]
+    fn private_view_authorizing_uses_actual_operation_id_and_rejection_drains_without_unwrap() {
+        let (fake, ordinary, bridge) = vault_harness();
+        let secret_ref = test_secret_ref(7, 8, 9, 10);
+        // 复用既有公开测试材料，只记录非秘密 operation_id，不打印密钥或密文。
+        let envelope = block_on(ordinary.seal(
+            [11; 16],
+            secret_ref,
+            SecretBuffer::try_new(vec![0x37; 32]).unwrap_or_else(|_| panic!("公开测试材料")),
+        ))
+        .unwrap_or_else(|_| panic!("fixture seal"));
+        for code in [
+            CitizenSdkErrorCode::Cancelled as i32,
+            CitizenSdkErrorCode::Integrity as i32,
+            -1,
+        ] {
+            let notified = Arc::new(Mutex::new(Vec::new()));
+            let recorded = Arc::clone(&notified);
+            let view_vault = HostSecretVault {
+                bridge: Arc::clone(&bridge),
+                authorizing: Some(Arc::new(move |id| {
+                    recorded
+                        .lock()
+                        .unwrap_or_else(|_| panic!("测试通知记录锁损坏"))
+                        .push(id);
+                    code
+                })),
+            };
+            assert!(block_on(view_vault.open(secret_ref, envelope.clone())).is_err());
+            assert_eq!(
+                notified
+                    .lock()
+                    .unwrap_or_else(|_| panic!("测试通知记录锁损坏"))
+                    .len(),
+                1
+            );
+            assert!(fake
+                .unwrap_operations
+                .lock()
+                .unwrap_or_else(|_| panic!("测试操作记录锁损坏"))
+                .is_empty());
+            assert_eq!(
+                bridge.pending_count().unwrap_or_else(|_| panic!("pending")),
+                0
+            );
+        }
+        let notified = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&notified);
+        let view_vault = HostSecretVault {
+            bridge: Arc::clone(&bridge),
+            authorizing: Some(Arc::new(move |id| {
+                recorded
+                    .lock()
+                    .unwrap_or_else(|_| panic!("测试通知记录锁损坏"))
+                    .push(id);
+                0
+            })),
+        };
+        drop(
+            block_on(view_vault.open(secret_ref, envelope.clone()))
+                .unwrap_or_else(|_| panic!("view open")),
+        );
+        let notifications = notified
+            .lock()
+            .unwrap_or_else(|_| panic!("测试通知记录锁损坏"))
+            .clone();
+        assert_eq!(
+            notifications,
+            *fake
+                .unwrap_operations
+                .lock()
+                .unwrap_or_else(|_| panic!("测试操作记录锁损坏"))
+        );
+        assert_ne!(notifications[0], 0);
+        drop(
+            block_on(ordinary.open(secret_ref, envelope))
+                .unwrap_or_else(|_| panic!("ordinary open")),
+        );
+        assert_eq!(
+            notified
+                .lock()
+                .unwrap_or_else(|_| panic!("测试通知记录锁损坏"))
+                .len(),
+            1,
+            "同 HostBridge 普通认证不应误带查看归属"
+        );
+        assert_eq!(
+            bridge.pending_count().unwrap_or_else(|_| panic!("pending")),
+            0
+        );
     }
 
     #[test]

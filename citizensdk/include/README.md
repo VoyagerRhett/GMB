@@ -1,5 +1,8 @@
 # CitizenSDK C/C++ headers
 
+当前公共 Core 为 89 个函数；新增模块验证、显式模块构造、无实例验签、四个链查询/结果入口及九个 QR 入口，既有 ABI v1
+结构和数值保持。当前模块化与新增链查询仅完成源码、注释、合同和测试用例更新，尚未完成真实构建、平台测试或硬件验收；下文旧分步运行记录仅为历史证据。
+
 `citizensdk.h` is the only product header. It includes
 `citizensdk_types.h`; it deliberately does not include `smoldot.h` and exposes
 no raw smoldot client, arbitrary RPC, mnemonic, mini-secret or private-key
@@ -12,24 +15,22 @@ CitizenSDK ABI v1 supports the product's 64-bit target architectures.
 
 Typical host order:
 
-1. load and pass the three packaged `assets/citizenchain` files to
-   `citizensdk_create` for a chain-only session, or provide the typed platform
-   services to `citizensdk_create_with_host` for durable state and wallet use;
-2. install one event callback and optionally subscribe to capability changes;
-3. call `citizensdk_start` and consume its one completion result;
-4. check all ten capabilities before using a typed operation;
-5. inspect and release every nonzero event result exactly once;
-6. call `citizensdk_stop` and await success (host instances checkpoint first),
-   then release all results, clear the callback, and destroy; explicit
-   unsubscribe before stop is optional because stop also performs it.
+1. 先调用 `citizensdk_validate_modules`，由 Rust 检查模块闭集、依赖与编译支持；
+2. 仅为所选模块准备资源：chain 才加载链资产与 public 链数据库，history 才初始化历史，
+   wallet/signing 才准备配套 secure store 与 Vault，再调用 `citizensdk_create_with_modules`；
+3. 需要链时安装回调并调用 start，读取能力；无链的本地模块不启动轻节点；
+4. 每个非零事件结果按所有权合同释放一次；
+5. 已启动链的实例先成功 stop/checkpoint，再释放结果、清回调并 destroy。
+
+纯 `citizensdk_verify_signature` 直接接受公开账户、64 字节签名与消息，不创建实例或资源；
+它与签名模块使用同一 Rust 密码学实现，但不要求启用 signing。
 
 ## Host services v1
 
-`citizensdk_create_with_host` copies the three pointed-to vtables before the
-call returns. The public store is mandatory. The secure store and secret vault
-must either both be present or both be absent, so a partially wired wallet can
-never be advertised. Hosts cannot inject a chain signer, nonce implementation,
-arbitrary key/value store or RPC method.
+模块构造复制被选择的 Host vtable，借用上下文直到销毁成功；不改变 Host services ABI v1 布局。
+public store 仅在 chain/history 需要时提供；wallet/signing 的 secure store 与 secret vault
+必须配套存在。SigningService 只读 SDK 已安全建立账户的归属资料，不等于启用钱包管理或安全
+输入 UI；首次 provision 仍经 wallet 流程。宿主不能注入 signer、nonce、任意键值存储或 RPC。
 
 For a host-backed instance, start automatically restores the typed chain
 database before provider start; export and graceful stop persist an exact
@@ -167,8 +168,7 @@ The separate Linux Host ABI v1 is a closed set of 13 `citizensdk_host_*`
 composition/lifecycle functions; it does not duplicate any of the 70 Core
 product functions.
 
-The Linux Host supplies the five named stores and TPM-backed DEK vault required
-by `citizensdk_create_with_host`. It cannot access a child mini-secret through
+Linux Host 通过 `citizensdk_create_with_modules` 按选择提供具名 stores 与 TPM-backed DEK vault。 It cannot access a child mini-secret through
 those callbacks. LinuxARM and LinuxAMD runtime libraries are not stored in the
 source tree and were not built or validated in Step 7.1; public platform support
 must not be inferred merely from the presence of the convenience headers.
@@ -197,6 +197,6 @@ being installed remains lossless beyond 64 events and under concurrency.
 
 ## Windows 平台 Host 头
 
-`../windows/include/citizen_sdk/citizensdk_host.h` 提供 13 项资源装配 API，并不替代
-本目录 70 项 Core ABI。C++ Host 为 header-only 所有权包装，不导出 STL ABI。HWND
+`../windows/include/citizen_sdk/citizensdk_host.h` 提供 14 项资源装配 API，并不替代
+本目录 89 项 Core ABI。C++ Host 为 header-only 所有权包装，不导出 STL ABI。HWND
 仅作 UI owner 配置，设备口令、CNG 句柄及秘密不进入公开头。Windows 运行验收尚未执行。

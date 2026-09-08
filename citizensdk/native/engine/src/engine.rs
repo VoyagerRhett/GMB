@@ -11,35 +11,44 @@ use citizen_sdk_contracts::{
     },
     AccountId32, AccountNonce, AccountNonceSource, CapabilityName, CapabilityReason,
     CapabilitySnapshot, ChainSigner, ContractErrorCode, ExecutionConclusion, ExportedChainState,
-    ExtrinsicWatchEvent, FinalizedAccountBalance, FinalizedBlockRef, Hash32, RuntimeContext,
-    SecretBuffer, SecretVault, SignedExtrinsic, Sr25519Signature, StateImportReceipt,
-    SubmittedExtrinsic, UnverifiedReason, VerifiedBlockRef, VerifiedChainClient, WalletProfile,
+    ExtrinsicWatchEvent, FinalizedAccountBalance, FinalizedBlockRef, Hash32, Modules,
+    RuntimeContext, SecretBuffer, SecretVault, SignedExtrinsic, Sr25519Signature,
+    StateImportReceipt, SubmittedExtrinsic, UnverifiedReason, VerifiedBlockRef,
+    VerifiedChainClient, WalletProfile,
 };
 use zeroize::Zeroizing;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "chain"))]
 #[path = "chain_monitor_tests.rs"]
 mod chain_monitor_tests;
 
 use crate::{
-    account_state::{AccountStateService, BestFeeSnapshot},
     capabilities::{CapabilityProbe, CapabilityTracker},
     error::EngineError,
-    finalized_events::SYSTEM_EVENTS_STORAGE_KEY,
-    finalized_history_runtime::{FinalizedHistoryRunGuard, FinalizedHistoryRuntime},
     runtime_context::RuntimeContextCache,
     state_import::{
         validate_import_startup, validate_state_export, validate_state_import, EngineLifecycle,
         StateImportPolicy, StateImportRejection,
     },
+    wallet_derivation::{SystemWalletEntropy, WalletWordCount},
+    wallet_service::{
+        PreparedWalletCreation, SigningService, SystemWalletClock, WalletPrivateKeyView,
+        WalletService,
+    },
+    wallet_transfer_watch::{
+        NoopWalletTransferObserver, WalletTransferCancellation, WalletTransferObserver,
+        WalletTransferWatchResult,
+    },
+};
+
+#[cfg(feature = "chain")]
+use crate::{
+    account_state::{AccountStateService, BestFeeSnapshot},
+    finalized_events::SYSTEM_EVENTS_STORAGE_KEY,
+    finalized_history_runtime::{FinalizedHistoryRunGuard, FinalizedHistoryRuntime},
     transaction_history::TransactionHistoryService,
     transaction_outcome::{verify_transaction_outcome, TransactionEvidence},
-    wallet_derivation::{SystemWalletEntropy, WalletWordCount},
-    wallet_service::{PreparedWalletCreation, SystemWalletClock, WalletService},
-    wallet_transfer_watch::{
-        watch_recorded_transfer, NoopWalletTransferObserver, WalletTransferCancellation,
-        WalletTransferObserver, WalletTransferWatchResult,
-    },
+    wallet_transfer_watch::watch_recorded_transfer,
 };
 
 /// Engine async return type; the embedding layer chooses the executor.
@@ -47,11 +56,11 @@ pub type EngineFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, EngineError
 
 /// Typed providers and stores available in one host composition.
 ///
-/// Wallet and history components are optional so a read-only host can expose a
-/// truthful reduced capability set without fake implementations. The chain
-/// client is mandatory because this crate is the CitizenChain Engine.
+/// 每个实例只组合实际启用的模块；链与钱包都可以缺席，绝不注入假 provider。
+/// 完整装配与单模块装配使用同一实现，模块选择和组件存在性共同约束能力快照。
 pub struct EngineComponents {
-    chain_client: Arc<dyn VerifiedChainClient>,
+    chain_client: Option<Arc<dyn VerifiedChainClient>>,
+    modules: Modules,
     signer: Option<Arc<dyn ChainSigner>>,
     secret_vault: Option<Arc<dyn SecretVault>>,
     chain_database: Option<Arc<dyn ChainDatabaseStore>>,
@@ -65,7 +74,7 @@ pub struct EngineComponents {
 impl EngineComponents {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        chain_client: Arc<dyn VerifiedChainClient>,
+        chain_client: Option<Arc<dyn VerifiedChainClient>>,
         signer: Option<Arc<dyn ChainSigner>>,
         secret_vault: Option<Arc<dyn SecretVault>>,
         chain_database: Option<Arc<dyn ChainDatabaseStore>>,
@@ -76,6 +85,7 @@ impl EngineComponents {
     ) -> Self {
         Self {
             chain_client,
+            modules: Modules::full(),
             signer,
             secret_vault,
             chain_database,
@@ -87,11 +97,20 @@ impl EngineComponents {
         }
     }
 
+    /// 实例模块选择只在创建期间固定，运行时不得绕过资源边界动态启用。
+    pub fn with_modules(mut self, modules: Modules) -> Self {
+        self.modules = modules;
+        self
+    }
+
+    pub const fn modules(&self) -> Modules {
+        self.modules
+    }
+
     /// 注入绑定准确 best Runtime 的 CitizenChain AccountNonceApi provider。
     ///
     /// 该 API 不是交易池感知 nonce；钱包广播安全由历史仓储中同账户 durable
-    /// single-flight pending CAS 门保证。保留构造函数原签名，避免尚未切换的
-    /// FFI/测试被迫伪造实现。
+    /// single-flight pending CAS 门保证；没有该 provider 时不开放钱包交易构造。
     pub fn with_account_nonce_source(
         mut self,
         account_nonce_source: Arc<dyn AccountNonceSource>,
@@ -100,8 +119,13 @@ impl EngineComponents {
         self
     }
 
-    pub(crate) fn chain_client(&self) -> &Arc<dyn VerifiedChainClient> {
-        &self.chain_client
+    pub(crate) fn chain_client(&self) -> Result<&Arc<dyn VerifiedChainClient>, EngineError> {
+        if !self.modules.contains(Modules::CHAIN) {
+            return Err(component_missing("chain_module"));
+        }
+        self.chain_client
+            .as_ref()
+            .ok_or_else(|| component_missing("chain_client"))
     }
 
     pub(crate) fn runtime_cache(&self) -> Option<&Arc<dyn RuntimeCacheStore>> {
@@ -140,45 +164,78 @@ impl EngineComponents {
     ///
     /// 只要宿主开始组合钱包能力，原始 signed-extrinsic 提交入口就必须服从
     /// pending-before-broadcast 合同，不能因组件只装配了一部分而退回无历史旁路。
+    /// nonce provider 只读取公开链状态，不属于秘密组件；纯链提交不能因此被误判为钱包。
     fn has_any_wallet_transaction_component(&self) -> bool {
         self.signer.is_some()
             || self.secret_vault.is_some()
             || self.wallet_profiles.is_some()
             || self.encrypted_secrets.is_some()
-            || self.account_nonce_source.is_some()
     }
 
     fn enforce_component_presence(&self, probes: &mut [CapabilityProbe]) {
         for probe in probes {
-            let present = match probe.name {
-                CapabilityName::WalletProfile => self.wallet_profiles.is_some(),
-                CapabilityName::LocalSigning => {
+            let (compiled, selected, present) = match probe.name {
+                CapabilityName::WalletProfile => (
+                    cfg!(feature = "wallet"),
+                    self.modules.contains(Modules::WALLET),
+                    self.wallet_profiles.is_some(),
+                ),
+                CapabilityName::LocalSigning => (
+                    cfg!(feature = "signing"),
+                    self.modules.contains(Modules::SIGNING),
                     self.signer.is_some()
                         && self.secret_vault.is_some()
                         && self.wallet_profiles.is_some()
-                        && self.encrypted_secrets.is_some()
-                }
-                CapabilityName::HardwareVault => self.secret_vault.is_some(),
-                CapabilityName::History => self.transaction_history.is_some(),
-                CapabilityName::BackgroundSync => {
-                    self.chain_database.is_some() && self.transaction_history.is_some()
-                }
-                CapabilityName::TransactionBuild => {
-                    self.account_nonce_source.is_some()
+                        && self.encrypted_secrets.is_some(),
+                ),
+                CapabilityName::HardwareVault | CapabilityName::UserAuthentication => (
+                    cfg!(feature = "wallet") || cfg!(feature = "signing"),
+                    self.modules.bits() & (Modules::WALLET | Modules::SIGNING) != 0,
+                    self.secret_vault.is_some(),
+                ),
+                CapabilityName::History => (
+                    cfg!(feature = "history"),
+                    self.modules.contains(Modules::HISTORY),
+                    self.chain_client.is_some() && self.transaction_history.is_some(),
+                ),
+                CapabilityName::BackgroundSync => (
+                    cfg!(feature = "history"),
+                    self.modules.contains(Modules::HISTORY),
+                    self.chain_client.is_some()
+                        && self.chain_database.is_some()
+                        && self.transaction_history.is_some(),
+                ),
+                CapabilityName::TransactionBuild => (
+                    cfg!(feature = "transactions"),
+                    self.modules.contains(Modules::TRANSACTIONS),
+                    self.chain_client.is_some()
+                        && self.account_nonce_source.is_some()
                         && self.signer.is_some()
                         && self.secret_vault.is_some()
                         && self.wallet_profiles.is_some()
-                        && self.encrypted_secrets.is_some()
-                }
-                CapabilityName::ChainRead
-                | CapabilityName::TransactionSubmit
-                | CapabilityName::TransactionVerify => true,
-                CapabilityName::UserAuthentication => self.secret_vault.is_some(),
+                        && self.encrypted_secrets.is_some(),
+                ),
+                CapabilityName::TransactionSubmit | CapabilityName::TransactionVerify => (
+                    cfg!(feature = "transactions"),
+                    self.modules.contains(Modules::TRANSACTIONS),
+                    self.chain_client.is_some(),
+                ),
+                CapabilityName::ChainRead => (
+                    cfg!(feature = "chain"),
+                    self.modules.contains(Modules::CHAIN),
+                    self.chain_client.is_some(),
+                ),
             };
-            if !present {
-                // 组件未注入是宿主组合选择，不得误报成设备硬件不可用。
+            probe.supported &= compiled;
+            if !selected {
+                // 实例选择与资源就绪分开：未选模块才关闭 enabled。
                 probe.enabled = false;
                 probe.runtime_ready = false;
+                probe.not_ready_reason = Some(CapabilityReason::HostDisabled);
+            } else if !present {
+                // 例如纯链交易模块能提交外部签名交易，但无金库时不能构造本地钱包交易。
+                probe.runtime_ready = false;
+                probe.not_ready_reason = Some(CapabilityReason::DependencyNotReady);
             }
         }
     }
@@ -212,6 +269,10 @@ struct EngineState {
     /// finalized 历史的一次原子提交可能跨越多个 await。stop/dispose 只有在这里为
     /// 0 时才能切换代际，从而保证最后一个 CAS 也不能穿越 Engine 停止边界。
     inflight_history_operations: u64,
+    /// 内部安全查看从登记到 UI/认证双排空的租约；普通请求完成不能替代它。
+    private_key_views: u64,
+    /// QR 审阅/认证期间保持原 Engine 代际，停止必须等待真实 await 排空。
+    qr_operations: u64,
     history_paused: bool,
     history_cancel: Arc<crate::chain_monitor::MonitorCancellation>,
     history_drain_waiters: Vec<std::task::Waker>,
@@ -226,6 +287,8 @@ impl Default for EngineState {
             verified_finalized: None,
             export_in_progress: false,
             inflight_history_operations: 0,
+            private_key_views: 0,
+            qr_operations: 0,
             history_paused: false,
             history_cancel: Arc::new(crate::chain_monitor::MonitorCancellation::default()),
             history_drain_waiters: Vec::new(),
@@ -234,6 +297,47 @@ impl Default for EngineState {
 }
 
 impl CitizenEngine {
+    /// SDK 内部 SPI：仅登记受控查看，不暴露普通账户秘密读取能力。
+    #[doc(hidden)]
+    pub fn internal_private_key_view(
+        &self,
+        account_id: AccountId32,
+        private_key_view_vault: Option<Arc<dyn SecretVault>>,
+    ) -> Result<Arc<InternalPrivateKeyView>, EngineError> {
+        if !cfg!(feature = "wallet") || !self.components.modules.contains(Modules::WALLET) {
+            return Err(EngineError::contract(
+                ContractErrorCode::Unsupported,
+                "安全查看要求 wallet 模块",
+            ));
+        }
+        // FFI 只从本实例原 HostBridge 构造专属观察器金库；不是业务可注入的秘密 API。
+        let service = self
+            .wallet_service_from_components()?
+            .with_private_key_view_vault(private_key_view_vault);
+        let mut state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+        if !matches!(
+            state.lifecycle,
+            EngineLifecycle::Created | EngineLifecycle::Running | EngineLifecycle::Stopped
+        ) || state.private_key_views != 0
+        {
+            return Err(EngineError::contract(
+                ContractErrorCode::Conflict,
+                "实例不处于稳定生命周期或已有安全查看",
+            ));
+        }
+        state.private_key_views += 1;
+        let lease = EnginePrivateKeyViewLease {
+            state: Arc::clone(&self.state),
+            generation: state.generation,
+        };
+        Ok(Arc::new(InternalPrivateKeyView {
+            service,
+            account_id,
+            lease: Mutex::new(Some(lease)),
+            state: Mutex::new(InternalPrivateKeyViewState::default()),
+        }))
+    }
+
     pub fn new(components: EngineComponents) -> Self {
         Self {
             components,
@@ -264,6 +368,38 @@ impl CitizenEngine {
         Ok(snapshot)
     }
 
+    /// 公开链查询仅刷新真实 provider 就绪事实，不重新读取无关钱包/历史仓储。
+    /// 其余原始 probe 保留；模块、组件和 lifecycle 仍经过与全量刷新相同的门。
+    pub fn update_chain_readiness(
+        &self,
+        runtime_ready: bool,
+    ) -> Result<CapabilitySnapshot, EngineError> {
+        let state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+        let mut capabilities = self
+            .capabilities
+            .lock()
+            .map_err(|_| EngineError::StatePoisoned)?;
+        let mut probes = capabilities.base_probes.clone().ok_or_else(|| {
+            EngineError::CapabilityUnavailable(
+                "capability state has not been established".to_owned(),
+            )
+        })?;
+        let chain_read = probes
+            .iter_mut()
+            .find(|probe| probe.name == CapabilityName::ChainRead)
+            .ok_or_else(|| {
+                EngineError::CapabilityUnavailable("chain capability is missing".to_owned())
+            })?;
+        chain_read.runtime_ready = runtime_ready;
+        chain_read.not_ready_reason = (!runtime_ready).then_some(CapabilityReason::ChainUnsynced);
+        self.components.enforce_component_presence(&mut probes);
+        let snapshot = capabilities
+            .tracker
+            .update(probes_for_lifecycle(probes.clone(), state.lifecycle))?;
+        capabilities.base_probes = Some(probes);
+        Ok(snapshot)
+    }
+
     pub fn capabilities(&self) -> Result<Option<CapabilitySnapshot>, EngineError> {
         let _state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
         Ok(self
@@ -285,6 +421,24 @@ impl CitizenEngine {
             .lifecycle)
     }
 
+    /// 返回 SDK 固定链身份中的 genesis_hash，不调用 provider、网络或钱包仓储。
+    ///
+    /// 静态链身份不依赖 Running 或同步就绪，但仍要求已编译、已选择 chain 模块，
+    /// 且实例没有销毁；不能借此为未启用链功能的实例开放另一条链入口。
+    pub fn genesis_hash(&self) -> Result<Hash32, EngineError> {
+        if !cfg!(feature = "chain") || !self.components.modules.contains(Modules::CHAIN) {
+            return Err(EngineError::contract(
+                ContractErrorCode::Unsupported,
+                "genesis_hash requires the compiled and selected chain module",
+            ));
+        }
+        let state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+        if state.lifecycle == EngineLifecycle::Disposed {
+            return Err(lifecycle_error("genesis_hash requires a live Engine"));
+        }
+        Ok(citizen_sdk_contracts::ChainIdentity::citizenchain().genesis_hash())
+    }
+
     /// Read the provider's verified best head through the Engine capability
     /// and lifecycle gate. Bindings must use this method instead of retaining
     /// or exposing the provider itself.
@@ -292,7 +446,7 @@ impl CitizenEngine {
         Box::pin(async move {
             self.require_capabilities(&[CapabilityName::ChainRead])?;
             self.components
-                .chain_client()
+                .chain_client()?
                 .get_best_head()
                 .await
                 .map_err(EngineError::from)
@@ -304,7 +458,7 @@ impl CitizenEngine {
         Box::pin(async move {
             self.require_capabilities(&[CapabilityName::ChainRead])?;
             self.components
-                .chain_client()
+                .chain_client()?
                 .get_finalized_head()
                 .await
                 .map_err(EngineError::from)
@@ -320,7 +474,7 @@ impl CitizenEngine {
         Box::pin(async move {
             self.require_capabilities(&[CapabilityName::ChainRead])?;
             self.components
-                .chain_client()
+                .chain_client()?
                 .get_storage_at(block, key)
                 .await
                 .map_err(EngineError::from)
@@ -337,7 +491,7 @@ impl CitizenEngine {
         Box::pin(async move {
             self.require_capabilities(&[CapabilityName::ChainRead])?;
             self.components
-                .chain_client()
+                .chain_client()?
                 .get_storage_batch_at(block, keys)
                 .await
                 .map_err(EngineError::from)
@@ -345,6 +499,7 @@ impl CitizenEngine {
     }
 
     /// 从准确 finalized `System.Account` 读取一个账户的公开余额。
+    #[cfg(feature = "chain")]
     pub fn finalized_account_balance(
         &self,
         account_id: AccountId32,
@@ -352,7 +507,7 @@ impl CitizenEngine {
         Box::pin(async move {
             self.require_capabilities(&[CapabilityName::ChainRead])?;
             AccountStateService::new(
-                self.components.chain_client().as_ref(),
+                self.components.chain_client()?.as_ref(),
                 self.components
                     .account_nonce_source()
                     .map(|source| source.as_ref()),
@@ -363,6 +518,7 @@ impl CitizenEngine {
     }
 
     /// 批量余额保持输入顺序和重复项，底层只请求去重后的 storage key。
+    #[cfg(feature = "chain")]
     pub fn finalized_account_balances(
         &self,
         account_ids: Vec<AccountId32>,
@@ -370,7 +526,7 @@ impl CitizenEngine {
         Box::pin(async move {
             self.require_capabilities(&[CapabilityName::ChainRead])?;
             AccountStateService::new(
-                self.components.chain_client().as_ref(),
+                self.components.chain_client()?.as_ref(),
                 self.components
                     .account_nonce_source()
                     .map(|source| source.as_ref()),
@@ -381,14 +537,13 @@ impl CitizenEngine {
     }
 
     /// 读取绑定准确 best Runtime 的链 nonce；同账户并发由 durable pending 门串行化。
+    #[cfg(feature = "chain")]
     pub fn account_next_index(&self, account_id: AccountId32) -> EngineFuture<'_, AccountNonce> {
         Box::pin(async move {
-            self.require_capabilities(&[
-                CapabilityName::ChainRead,
-                CapabilityName::TransactionBuild,
-            ])?;
+            // 公开链 nonce 读取不接触私钥，不能要求交易构造或钱包模块。
+            self.require_capabilities(&[CapabilityName::ChainRead])?;
             AccountStateService::new(
-                self.components.chain_client().as_ref(),
+                self.components.chain_client()?.as_ref(),
                 self.components
                     .account_nonce_source()
                     .map(|source| source.as_ref()),
@@ -399,11 +554,12 @@ impl CitizenEngine {
     }
 
     /// 从同一准确 best Runtime metadata 解码费率、最低费和存在性存款。
+    #[cfg(feature = "chain")]
     pub fn best_fee_snapshot(&self) -> EngineFuture<'_, BestFeeSnapshot> {
         Box::pin(async move {
             self.require_capabilities(&[CapabilityName::ChainRead])?;
             AccountStateService::new(
-                self.components.chain_client().as_ref(),
+                self.components.chain_client()?.as_ref(),
                 self.components
                     .account_nonce_source()
                     .map(|source| source.as_ref()),
@@ -423,7 +579,6 @@ impl CitizenEngine {
     pub fn usable_wallet_profile(&self) -> EngineFuture<'_, Option<WalletProfile>> {
         let service = self.local_wallet_service(&[
             CapabilityName::WalletProfile,
-            CapabilityName::LocalSigning,
             CapabilityName::HardwareVault,
             CapabilityName::UserAuthentication,
         ]);
@@ -438,7 +593,6 @@ impl CitizenEngine {
     ) -> EngineFuture<'_, PreparedWalletCreation> {
         let service = self.local_wallet_service(&[
             CapabilityName::WalletProfile,
-            CapabilityName::LocalSigning,
             CapabilityName::HardwareVault,
             CapabilityName::UserAuthentication,
         ]);
@@ -452,7 +606,6 @@ impl CitizenEngine {
     ) -> EngineFuture<'_, WalletProfile> {
         let service = self.local_wallet_service(&[
             CapabilityName::WalletProfile,
-            CapabilityName::LocalSigning,
             CapabilityName::HardwareVault,
             CapabilityName::UserAuthentication,
         ]);
@@ -469,7 +622,6 @@ impl CitizenEngine {
     ) -> EngineFuture<'_, WalletProfile> {
         let service = self.local_wallet_service(&[
             CapabilityName::WalletProfile,
-            CapabilityName::LocalSigning,
             CapabilityName::HardwareVault,
             CapabilityName::UserAuthentication,
         ]);
@@ -487,7 +639,6 @@ impl CitizenEngine {
     ) -> EngineFuture<'_, Vec<citizen_sdk_contracts::WalletAccount>> {
         let service = self.local_wallet_service(&[
             CapabilityName::WalletProfile,
-            CapabilityName::LocalSigning,
             CapabilityName::HardwareVault,
             CapabilityName::UserAuthentication,
         ]);
@@ -514,19 +665,97 @@ impl CitizenEngine {
         Box::pin(async move { service?.rename_account(account_id, &name).await })
     }
 
-    /// 产品协议（例如 TUYU v1）可复用同一账户密钥签名，但不会被混成链上交易。
+    /// 使用 SDK 安全账户密文签名；公开签名模块独立于钱包管理模块。
     pub fn sign_wallet_payload(
         &self,
         account_id: AccountId32,
         message: Vec<u8>,
     ) -> EngineFuture<'_, Sr25519Signature> {
-        let service = self.local_wallet_service(&[
-            CapabilityName::WalletProfile,
-            CapabilityName::LocalSigning,
-            CapabilityName::HardwareVault,
-            CapabilityName::UserAuthentication,
-        ]);
-        Box::pin(async move { service?.sign(account_id, message).await })
+        Box::pin(async move {
+            self.require_local_capabilities(&[
+                CapabilityName::LocalSigning,
+                CapabilityName::HardwareVault,
+                CapabilityName::UserAuthentication,
+            ])?;
+            let service = SigningService::new(
+                self.components
+                    .signer()
+                    .cloned()
+                    .ok_or_else(|| component_missing("chain_signer"))?,
+                self.components
+                    .secret_vault()
+                    .cloned()
+                    .ok_or_else(|| component_missing("secret_vault"))?,
+                self.components
+                    .wallet_profiles()
+                    .cloned()
+                    .ok_or_else(|| component_missing("wallet_profile_store"))?,
+                self.components
+                    .encrypted_secrets()
+                    .cloned()
+                    .ok_or_else(|| component_missing("encrypted_secret_blob_store"))?,
+            );
+            service.sign(account_id, message).await
+        })
+    }
+
+    /// 已验证链调用审阅独立于钱包管理；不启动 provider，也不调用宿主传入的 metadata。
+    #[cfg(all(feature = "qr", feature = "chain"))]
+    pub fn review_qr_sign_request(&self, request: citizen_sdk_qr::SignRequest) -> EngineFuture<'_, crate::QrReview> {
+        Box::pin(async move {
+            let lease = self.begin_qr_operation()?;
+            let result = crate::qr_review::review_request(self.components.chain_client()?.as_ref(), request).await?;
+            lease.ensure_current()?;
+            Ok(result)
+        })
+    }
+
+    /// 用户确认后的唯一 QR 安全签名管线：复查相同 Runtime，复用 SigningService，最后再验真。
+    #[cfg(all(feature = "qr", feature = "chain"))]
+    pub fn sign_qr_review<'a>(
+        &'a self,
+        review: crate::QrReview,
+        ensure_current: impl Fn() -> Result<(), EngineError> + Send + Sync + 'a,
+    ) -> EngineFuture<'a, Sr25519Signature> {
+        Box::pin(async move {
+            let lease = self.begin_qr_operation()?;
+            self.require_local_capabilities(&[CapabilityName::LocalSigning, CapabilityName::HardwareVault, CapabilityName::UserAuthentication])?;
+            ensure_current()?;
+            let client = self.components.chain_client()?;
+            let current = crate::qr_review::review_request(client.as_ref(), review.request().clone()).await?;
+            if !review.matches(&current) { return Err(EngineError::contract(ContractErrorCode::Conflict, "确认后交易 Runtime 或检查点已改变")); }
+            let guard = || { lease.ensure_current()?; ensure_current() };
+            let service = SigningService::new(
+                self.components.signer().cloned().ok_or_else(|| component_missing("chain_signer"))?,
+                self.components.secret_vault().cloned().ok_or_else(|| component_missing("secret_vault"))?,
+                self.components.wallet_profiles().cloned().ok_or_else(|| component_missing("wallet_profile_store"))?,
+                self.components.encrypted_secrets().cloned().ok_or_else(|| component_missing("encrypted_secret_blob_store"))?,
+            );
+            let message = review.request().signing_message().map_err(|_| EngineError::contract(ContractErrorCode::Decode, "二维码签名载荷无效"))?;
+            let signature = service.sign_guarded(AccountId32::from_bytes(*review.request().signer_public_key.as_bytes()), message.clone(), &guard).await?;
+            guard()?;
+            let signer = self.components.signer().ok_or_else(|| component_missing("chain_signer"))?;
+            if !signer.verify(review.request().signer_public_key, message, signature).await? {
+                return Err(EngineError::contract(ContractErrorCode::Integrity, "二维码签名未通过原账户和已审阅载荷复核"));
+            }
+            guard()?;
+            let current = crate::qr_review::review_request(client.as_ref(), review.request().clone()).await?;
+            if !review.matches(&current) { return Err(EngineError::contract(ContractErrorCode::Conflict, "认证期间交易 Runtime 或检查点已改变")); }
+            guard()?;
+            Ok(signature)
+        })
+    }
+
+    #[cfg(all(feature = "qr", feature = "chain"))]
+    fn begin_qr_operation(&self) -> Result<EngineQrOperationLease, EngineError> {
+        if !self.components.modules.contains(Modules::QR | Modules::CHAIN) {
+            return Err(EngineError::contract(ContractErrorCode::Unsupported, "链调用审阅要求 qr 与 chain 模块"));
+        }
+        self.require_capabilities(&[CapabilityName::ChainRead])?;
+        let mut state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+        if state.lifecycle != EngineLifecycle::Running { return Err(lifecycle_error("二维码审阅要求已运行的 verified chain")); }
+        state.qr_operations = state.qr_operations.checked_add(1).ok_or_else(|| lifecycle_error("二维码操作数量耗尽"))?;
+        Ok(EngineQrOperationLease { state: Arc::clone(&self.state), generation: state.generation })
     }
 
     pub fn delete_wallet_account(&self, account_id: AccountId32) -> EngineFuture<'_, ()> {
@@ -560,6 +789,7 @@ impl CitizenEngine {
     ///
     /// 这是没有进度观察器的便利入口，仍会完整执行 submit-and-watch；它不是“只提交”
     /// API，也不返回可脱离历史状态机单独广播的 signed bytes。
+    #[cfg(feature = "chain")]
     pub fn transfer_with_remark(
         &self,
         source_account_id: AccountId32,
@@ -587,6 +817,7 @@ impl CitizenEngine {
     /// 取消仅通知本笔请求；调用方必须继续 await 到完成，确保已经开始的金库与 CAS
     /// 真正返回。取消后不再签发下一阶段广播，不影响并行请求和后台监控。
     #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "chain")]
     pub fn transfer_with_remark_and_watch(
         &self,
         source_account_id: AccountId32,
@@ -630,7 +861,7 @@ impl CitizenEngine {
             guard.ensure_current()?;
             if let Some(record) = resumable {
                 crate::wallet_transfer_watch::reconcile_before_rebroadcast(
-                    self.components.chain_client().as_ref(),
+                    self.components.chain_client()?.as_ref(),
                     &history_runtime,
                     &history,
                     &guard,
@@ -653,7 +884,7 @@ impl CitizenEngine {
                     })?;
                     crate::finalized_history_runtime::cancellable_chain(
                         crate::transaction_builder::validate_recorded_transfer(
-                            self.components.chain_client().as_ref(),
+                            self.components.chain_client()?.as_ref(),
                             signer.as_ref(),
                             &current,
                         ),
@@ -662,7 +893,7 @@ impl CitizenEngine {
                     .await??;
                 }
                 return watch_recorded_transfer(
-                    self.components.chain_client().as_ref(),
+                    self.components.chain_client()?.as_ref(),
                     &history_runtime,
                     &history,
                     &guard,
@@ -675,7 +906,7 @@ impl CitizenEngine {
             }
             let built = service
                 .build_transfer_with_remark(
-                    self.components.chain_client().as_ref(),
+                    self.components.chain_client()?.as_ref(),
                     nonce_source.as_ref(),
                     source_account_id,
                     destination,
@@ -686,7 +917,7 @@ impl CitizenEngine {
             guard.ensure_current()?;
             let hash_context = crate::finalized_history_runtime::cancellable_chain(
                 self.components
-                    .chain_client()
+                    .chain_client()?
                     .get_runtime_context_at(built.signed().payload().block()),
                 &guard,
             )
@@ -717,7 +948,7 @@ impl CitizenEngine {
                 .await?;
 
             watch_recorded_transfer(
-                self.components.chain_client().as_ref(),
+                self.components.chain_client()?.as_ref(),
                 &history_runtime,
                 &history,
                 &guard,
@@ -733,6 +964,7 @@ impl CitizenEngine {
     /// 把新纳入监控的账户游标原子初始化到调用时的当前 finalized head。
     ///
     /// 这是 Rust Core 的高层确定性入口；FFI/语言绑定当前不直接投影低层扫描服务。
+    #[cfg(feature = "chain")]
     pub fn initialize_finalized_history(
         &self,
         account_ids: Vec<AccountId32>,
@@ -748,13 +980,13 @@ impl CitizenEngine {
     }
 
     /// 确定性同步一批 finalized 历史；一次最多连续处理 120 个块，不创建 timer/thread。
+    #[cfg(feature = "chain")]
     pub fn sync_finalized_history_batch(
         &self,
         account_ids: Vec<AccountId32>,
     ) -> EngineFuture<'_, TransactionHistoryState> {
         let preparation = self.prepare_finalized_history_runtime(&[
             CapabilityName::ChainRead,
-            CapabilityName::TransactionVerify,
             CapabilityName::History,
         ]);
         Box::pin(async move {
@@ -764,6 +996,7 @@ impl CitizenEngine {
     }
 
     /// 把 provider typed watch 事实映射到本机 pending；该入口永不从 watch 伪造链上成功。
+    #[cfg(feature = "chain")]
     pub fn apply_transaction_watch_event(
         &self,
         account_id: AccountId32,
@@ -784,9 +1017,10 @@ impl CitizenEngine {
 
     /// 提交宿主在 SDK 外部完成签名的完整 extrinsic。
     ///
-    /// 这是供纯链客户端/C ABI 迁移使用的高级入口，不是 SDK 钱包交易入口。只要当前
+    /// 这是供已完成签名的纯链客户端使用的高级入口，不是 SDK 钱包交易入口。只要当前
     /// Engine 注入任一钱包交易栈组件，该交易哈希就必须已经由内部钱包路径写入 pending，
     /// 否则拒绝广播。交易池接受仍不等于链上执行成功。
+    #[cfg(feature = "chain")]
     pub fn submit_signed_extrinsic(
         &self,
         extrinsic: SignedExtrinsic,
@@ -798,10 +1032,10 @@ impl CitizenEngine {
             ])?;
             if self.components.has_any_wallet_transaction_component() {
                 self.require_capabilities(&[CapabilityName::History])?;
-                let best = self.components.chain_client().get_best_head().await?;
+                let best = self.components.chain_client()?.get_best_head().await?;
                 let context = self
                     .components
-                    .chain_client()
+                    .chain_client()?
                     .get_runtime_context_at(best)
                     .await?;
                 if context.block() != best {
@@ -815,7 +1049,7 @@ impl CitizenEngine {
                     .await?;
             }
             self.components
-                .chain_client()
+                .chain_client()?
                 .submit_extrinsic(extrinsic)
                 .await
                 .map_err(EngineError::from)
@@ -824,7 +1058,7 @@ impl CitizenEngine {
 
     /// 提交并监听宿主在 SDK 外部完成签名的完整 extrinsic。
     ///
-    /// 这是供纯链客户端/C ABI 迁移使用的兼容入口；底层 provider 的 watch 合同会广播
+    /// 这是供已完成签名的纯链客户端使用的高级入口；底层 provider 的 watch 合同会广播
     /// extrinsic，而不是只观察一个既有哈希。只要 Engine 注入任一钱包交易栈组件，就必须
     /// 改用内部高层钱包交易路径，避免绕过 pending-before-broadcast 合同。
     pub fn watch_signed_extrinsic(
@@ -838,11 +1072,12 @@ impl CitizenEngine {
                 "组合钱包组件后禁止原始 submit-and-watch；钱包交易必须使用高层交易入口",
             ));
         }
-        Ok(self.components.chain_client().watch_extrinsic(extrinsic))
+        Ok(self.components.chain_client()?.watch_extrinsic(extrinsic))
     }
 
     /// Reserve the one-way transition into provider startup.
     pub fn begin_provider_start(&self) -> Result<(), EngineError> {
+        self.components.chain_client()?;
         let mut state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
         if state.lifecycle != EngineLifecycle::Created || state.export_in_progress {
             return Err(lifecycle_error(
@@ -873,7 +1108,7 @@ impl CitizenEngine {
             });
         Box::pin(async move {
             let generation = generation?;
-            let identity = match self.components.chain_client().identity().await {
+            let identity = match self.components.chain_client()?.identity().await {
                 Ok(identity) => identity,
                 Err(error) => {
                     self.fail_start_if_current(generation)?;
@@ -887,7 +1122,7 @@ impl CitizenEngine {
                     "provider identity changed away from CitizenChain during startup".to_owned(),
                 ));
             }
-            let finalized = match self.components.chain_client().get_finalized_head().await {
+            let finalized = match self.components.chain_client()?.get_finalized_head().await {
                 Ok(finalized) => finalized,
                 Err(error) => {
                     self.fail_start_if_current(generation)?;
@@ -946,6 +1181,12 @@ impl CitizenEngine {
         if state.lifecycle == EngineLifecycle::Disposed {
             return Ok(());
         }
+        if state.private_key_views != 0 {
+            return Err(EngineError::contract(
+                ContractErrorCode::Conflict,
+                "安全查看尚未完成清理",
+            ));
+        }
         require_no_inflight_history_operations(&state, "engine dispose")?;
         state.lifecycle = EngineLifecycle::Disposed;
         state.generation = next_generation(state.generation)?;
@@ -976,7 +1217,7 @@ impl CitizenEngine {
 
             let context = self
                 .components
-                .chain_client()
+                .chain_client()?
                 .get_runtime_context_at(block)
                 .await
                 .map_err(EngineError::from)?;
@@ -1003,6 +1244,7 @@ impl CitizenEngine {
     /// finalized canonical chain before reading Runtime/body/events. A caller-provided finality bit
     /// can never manufacture `Success` or `Failed`, while historical finalized catch-up remains
     /// available after the head advances.
+    #[cfg(feature = "chain")]
     pub fn verify_transaction_at(
         &self,
         block: VerifiedBlockRef,
@@ -1028,7 +1270,7 @@ impl CitizenEngine {
             }
             let provider_finalized = match self
                 .components
-                .chain_client()
+                .chain_client()?
                 .resolve_finalized_block(block.hash(), block.number())
                 .await
             {
@@ -1066,7 +1308,7 @@ impl CitizenEngine {
             // Success/Failed 语义。
             let runtime_context = match self
                 .components
-                .chain_client()
+                .chain_client()?
                 .get_finalized_runtime_context_at(provider_finalized)
                 .await
             {
@@ -1081,7 +1323,7 @@ impl CitizenEngine {
             };
             let block_extrinsics = match self
                 .components
-                .chain_client()
+                .chain_client()?
                 .get_finalized_block_extrinsics_at(provider_finalized)
                 .await
             {
@@ -1096,7 +1338,7 @@ impl CitizenEngine {
             };
             let system_events = self
                 .components
-                .chain_client()
+                .chain_client()?
                 .get_finalized_storage_at(provider_finalized, SYSTEM_EVENTS_STORAGE_KEY.to_vec())
                 .await
                 .ok()
@@ -1178,7 +1420,7 @@ impl CitizenEngine {
             .map_err(state_rejection_error)?;
         let provider_identity = self
             .components
-            .chain_client()
+            .chain_client()?
             .identity()
             .await
             .map_err(EngineError::from)?;
@@ -1194,7 +1436,7 @@ impl CitizenEngine {
         reservation.mark_provider_invoked()?;
         let receipt = self
             .components
-            .chain_client()
+            .chain_client()?
             .import_state(imported)
             .await
             .map_err(EngineError::from)?;
@@ -1249,13 +1491,13 @@ impl CitizenEngine {
             };
             let before = self
                 .components
-                .chain_client()
+                .chain_client()?
                 .get_finalized_head()
                 .await
                 .map_err(EngineError::from)?;
             let provider_identity = self
                 .components
-                .chain_client()
+                .chain_client()?
                 .identity()
                 .await
                 .map_err(EngineError::from)?;
@@ -1276,13 +1518,13 @@ impl CitizenEngine {
             }
             let exported = self
                 .components
-                .chain_client()
+                .chain_client()?
                 .export_state()
                 .await
                 .map_err(EngineError::from)?;
             let after = self
                 .components
-                .chain_client()
+                .chain_client()?
                 .get_finalized_head()
                 .await
                 .map_err(EngineError::from)?;
@@ -1393,6 +1635,7 @@ impl CitizenEngine {
         self.wallet_service_from_components()
     }
 
+    #[cfg(feature = "chain")]
     fn history_service_from_components(&self) -> Result<TransactionHistoryService, EngineError> {
         let store = self
             .components
@@ -1405,6 +1648,7 @@ impl CitizenEngine {
         ))
     }
 
+    #[cfg(feature = "chain")]
     fn prepare_finalized_history_runtime(
         &self,
         required: &[CapabilityName],
@@ -1412,7 +1656,7 @@ impl CitizenEngine {
         self.require_capabilities(required)?;
         // 先解析全部组件，避免租约计数增加后因缺少 store 提前返回而泄漏。
         let runtime = FinalizedHistoryRuntime::new(
-            Arc::clone(self.components.chain_client()),
+            Arc::clone(self.components.chain_client()?),
             self.history_service_from_components()?,
         );
         let (generation, cancellation) = {
@@ -1501,10 +1745,270 @@ impl CitizenEngine {
     }
 }
 
+struct EnginePrivateKeyViewLease {
+    state: Arc<Mutex<EngineState>>,
+    generation: u64,
+}
+
+#[cfg(all(feature = "qr", feature = "chain"))]
+struct EngineQrOperationLease { state: Arc<Mutex<EngineState>>, generation: u64 }
+
+#[cfg(all(feature = "qr", feature = "chain"))]
+impl EngineQrOperationLease {
+    fn ensure_current(&self) -> Result<(), EngineError> {
+        let state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+        if state.lifecycle != EngineLifecycle::Running || state.generation != self.generation {
+            return Err(lifecycle_error("二维码操作越过已验证链代际"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "qr", feature = "chain"))]
+impl Drop for EngineQrOperationLease {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock() { state.qr_operations = state.qr_operations.saturating_sub(1); }
+    }
+}
+
+impl Drop for EnginePrivateKeyViewLease {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.private_key_views = state.private_key_views.saturating_sub(1);
+        }
+    }
+}
+
+#[derive(Default)]
+struct InternalPrivateKeyViewState {
+    bound: Option<Arc<WalletPrivateKeyView>>,
+    confirmed: bool,
+    revoked: bool,
+    ui_finished: bool,
+    working: bool,
+    displayed: bool,
+    notified: bool,
+    notifying: bool,
+    completed: bool,
+    outcome: Option<Result<(), EngineError>>,
+}
+
+/// SDK 内部跨 crate 控制对象。只能由受控平台桥接持有，不是普通钱包秘密 getter。
+#[doc(hidden)]
+pub struct InternalPrivateKeyView {
+    service: WalletService,
+    account_id: AccountId32,
+    lease: Mutex<Option<EnginePrivateKeyViewLease>>,
+    state: Mutex<InternalPrivateKeyViewState>,
+}
+
+impl InternalPrivateKeyView {
+    /// 只预留短阶段作业；空闲 UI 不占用工作线程。
+    pub fn reserve_work(&self) -> Result<bool, EngineError> {
+        let mut state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+        if state.completed
+            || state.working
+            || state.revoked
+            || state.outcome.is_some()
+            || (state.bound.is_some() && !state.confirmed)
+        {
+            return Ok(false);
+        }
+        state.working = true;
+        Ok(true)
+    }
+
+    pub fn confirm(&self) -> Result<(), EngineError> {
+        let mut state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+        if state.completed || state.revoked || state.confirmed || state.outcome.is_some() {
+            return Err(EngineError::contract(
+                ContractErrorCode::Conflict,
+                "查看已确认、撤销或结束",
+            ));
+        }
+        state.confirmed = true;
+        Ok(())
+    }
+
+    pub fn cancel(&self) -> Result<(), EngineError> {
+        let mut state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+        if state.completed {
+            return Err(lifecycle_error("查看已结束"));
+        }
+        state.revoked = true;
+        if state.outcome.as_ref().is_none_or(Result::is_ok) {
+            state.outcome = Some(Err(private_key_view_cancelled()));
+        }
+        Ok(())
+    }
+
+    pub fn finish(&self) -> Result<(), EngineError> {
+        let mut state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+        if state.completed {
+            return Err(lifecycle_error("查看已结束"));
+        }
+        state.ui_finished = true;
+        state.revoked = true;
+        if state.outcome.is_none() {
+            state.outcome = Some(if state.displayed {
+                Ok(())
+            } else {
+                Err(private_key_view_cancelled())
+            });
+        }
+        Ok(())
+    }
+
+    pub fn fail(&self, error: EngineError) -> Result<(), EngineError> {
+        let mut state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+        state.revoked = true;
+        if state.outcome.is_none() {
+            state.outcome = Some(Err(error));
+        }
+        Ok(())
+    }
+
+    /// prepare 成功保持静默；确认到达后才进入认证，认证 future 不参与 drop 式取消。
+    pub async fn run_work(
+        &self,
+        display: impl FnOnce(&[u8]) -> Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
+        let needs_prepare = {
+            let state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+            if !state.working || state.completed {
+                return Err(lifecycle_error("查看没有已登记作业"));
+            }
+            if state.revoked {
+                return Ok(());
+            }
+            state.bound.is_none()
+        };
+        if needs_prepare {
+            let bound = self
+                .service
+                .prepare_private_key_view(self.account_id)
+                .await?;
+            self.state
+                .lock()
+                .map_err(|_| EngineError::StatePoisoned)?
+                .bound = Some(bound);
+        }
+        let bound = {
+            let state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+            if state.revoked || !state.confirmed {
+                return Ok(());
+            }
+            state
+                .bound
+                .clone()
+                .ok_or_else(|| lifecycle_error("查看账户未绑定"))?
+        };
+        let outcome = self
+            .service
+            .reveal_private_key_view(
+                &bound,
+                || {
+                    let state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+                    if state.revoked || state.completed {
+                        Err(private_key_view_cancelled())
+                    } else {
+                        Ok(())
+                    }
+                },
+                |bytes| {
+                    // 同一 Core 门串行化 display 与 cancel/finish；display 合同禁止反调 SDK 或等 UI。
+                    let mut state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+                    if state.revoked || state.completed {
+                        return Err(private_key_view_cancelled());
+                    }
+                    let lease = self.lease.lock().map_err(|_| EngineError::StatePoisoned)?;
+                    let lease = lease
+                        .as_ref()
+                        .ok_or_else(|| lifecycle_error("查看租约已释放"))?;
+                    let engine = lease.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+                    if engine.lifecycle == EngineLifecycle::Disposed
+                        || engine.generation != lease.generation
+                    {
+                        return Err(lifecycle_error("查看实例代际已改变"));
+                    }
+                    drop(engine);
+                    display(bytes)?;
+                    state.displayed = true;
+                    Ok(())
+                },
+            )
+            .await;
+        let mut state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+        if state.outcome.is_none() {
+            state.outcome = Some(outcome);
+        }
+        Ok(())
+    }
+
+    pub fn release_work(&self) -> Result<(), EngineError> {
+        self.state
+            .lock()
+            .map_err(|_| EngineError::StatePoisoned)?
+            .working = false;
+        Ok(())
+    }
+
+    /// 唯一无秘密阶段通知；回调自身也计入排空，允许 settled 内安全调用 finish。
+    pub fn take_notification(&self) -> Result<Option<Result<(), EngineError>>, EngineError> {
+        let mut state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+        if state.notified {
+            return Ok(None);
+        }
+        let Some(outcome) = state.outcome.clone() else {
+            return Ok(None);
+        };
+        state.notified = true;
+        state.notifying = true;
+        Ok(Some(outcome))
+    }
+
+    pub fn finish_notification(&self) -> Result<(), EngineError> {
+        self.state
+            .lock()
+            .map_err(|_| EngineError::StatePoisoned)?
+            .notifying = false;
+        Ok(())
+    }
+
+    pub fn take_completion(&self) -> Result<Option<Result<(), EngineError>>, EngineError> {
+        let mut state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+        if state.completed
+            || !state.ui_finished
+            || state.working
+            || state.notifying
+            || !state.notified
+        {
+            return Ok(None);
+        }
+        state.completed = true;
+        state.bound.take();
+        self.lease
+            .lock()
+            .map_err(|_| EngineError::StatePoisoned)?
+            .take();
+        Ok(Some(
+            state
+                .outcome
+                .clone()
+                .unwrap_or_else(|| Err(private_key_view_cancelled())),
+        ))
+    }
+}
+
+fn private_key_view_cancelled() -> EngineError {
+    EngineError::Cancelled
+}
+
 impl CitizenEngine {
     /// 启动 SDK 自有钱包监控；没有钱包 profile 是合法的初始状态。
     pub fn start_chain_monitor(&self) -> EngineFuture<'_, ()> {
         Box::pin(async move {
+            self.require_capabilities(&[CapabilityName::ChainRead, CapabilityName::History])?;
             let state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
             if state.lifecycle != EngineLifecycle::Running || state.history_paused {
                 return Err(lifecycle_error(
@@ -1559,6 +2063,15 @@ impl CitizenEngine {
         &self,
         mutation: impl Future<Output = Result<T, EngineError>>,
     ) -> Result<T, EngineError> {
+        if !self
+            .components
+            .modules
+            .contains(Modules::CHAIN | Modules::HISTORY)
+            || self.components.chain_client.is_none()
+            || self.components.transaction_history.is_none()
+        {
+            return mutation.await;
+        }
         let (generation, cancellation) = {
             let mut state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
             if state.history_paused {
@@ -1597,6 +2110,7 @@ impl CitizenEngine {
         result
     }
 
+    #[cfg(feature = "chain")]
     pub fn refresh_chain_monitor_accounts(&self) -> EngineFuture<'_, bool> {
         Box::pin(async move {
             let (_, guard) = self.prepare_finalized_history_runtime(&[CapabilityName::History])?;
@@ -1631,6 +2145,7 @@ impl CitizenEngine {
     }
 
     /// 一个有界批次，复用准确 finalized/body/System.Events 核验；不重新广播 pending。
+    #[cfg(feature = "chain")]
     pub fn poll_chain_monitor(&self) -> EngineFuture<'_, crate::ChainMonitorUpdate> {
         Box::pin(async move {
             {
@@ -1709,7 +2224,7 @@ impl CitizenEngine {
             } else {
                 target = Some(
                     crate::finalized_history_runtime::cancellable_chain(
-                        self.components.chain_client().get_finalized_head(),
+                        self.components.chain_client()?.get_finalized_head(),
                         &guard,
                     )
                     .await??,
@@ -1784,6 +2299,7 @@ impl CitizenEngine {
 /// guard 从 prepare 开始一直活到所有 provider/store await 与最后一次 CAS 结束。只要
 /// guard 存活，stop/dispose 就会失败关闭；这比单纯在 await 前后比较 generation 更强，
 /// 因为代际切换无法插入最后一次检查与异步 CAS 之间。
+#[cfg(feature = "chain")]
 struct EngineHistoryOperationLease {
     state: Arc<Mutex<EngineState>>,
     generation: u64,
@@ -1791,6 +2307,7 @@ struct EngineHistoryOperationLease {
     request_cancellation: Option<WalletTransferCancellation>,
 }
 
+#[cfg(feature = "chain")]
 impl FinalizedHistoryRunGuard for EngineHistoryOperationLease {
     fn begin_watch(&self) {
         if let Some(token) = &self.request_cancellation {
@@ -1848,6 +2365,7 @@ impl FinalizedHistoryRunGuard for EngineHistoryOperationLease {
     }
 }
 
+#[cfg(feature = "chain")]
 impl Drop for EngineHistoryOperationLease {
     fn drop(&mut self) {
         // Drop 不能返回错误；锁若已 poisoned，Engine 后续所有状态入口本来也会失败。
@@ -1868,6 +2386,14 @@ fn require_no_inflight_history_operations(
     state: &EngineState,
     operation: &str,
 ) -> Result<(), EngineError> {
+    if state.qr_operations != 0 {
+        return Err(lifecycle_error(format!("{operation} requires QR authentication and review operations to drain")));
+    }
+    if state.private_key_views != 0 {
+        return Err(lifecycle_error(format!(
+            "{operation} requires the private-key view UI and authentication to drain"
+        )));
+    }
     if state.inflight_history_operations != 0 {
         return Err(lifecycle_error(format!(
             "{operation} requires all finalized history operations to drain"
@@ -1880,6 +2406,12 @@ fn probes_for_lifecycle(
     mut probes: Vec<CapabilityProbe>,
     lifecycle: EngineLifecycle,
 ) -> Vec<CapabilityProbe> {
+    if lifecycle == EngineLifecycle::Disposed {
+        for probe in &mut probes {
+            probe.runtime_ready = false;
+            probe.not_ready_reason = Some(CapabilityReason::EngineNotRunning);
+        }
+    }
     if lifecycle != EngineLifecycle::Running {
         if let Some(chain_read) = probes
             .iter_mut()
@@ -2139,5 +2671,60 @@ const fn unverified(
         block: Some(block),
         extrinsic_index,
         reason,
+    }
+}
+
+#[cfg(test)]
+mod chain_query_tests {
+    use super::*;
+
+    #[cfg(not(feature = "chain"))]
+    #[test]
+    fn static_genesis_does_not_enable_an_uncompiled_chain_module() {
+        let engine = CitizenEngine::new(EngineComponents::new(
+            None, None, None, None, None, None, None, None,
+        ));
+        assert!(
+            matches!(engine.genesis_hash(), Err(EngineError::Contract(error))
+            if error.code() == ContractErrorCode::Unsupported)
+        );
+    }
+
+    #[test]
+    fn chain_only_refresh_preserves_every_other_raw_probe() {
+        let engine = CitizenEngine::new(EngineComponents::new(
+            None, None, None, None, None, None, None, None,
+        ));
+        engine
+            .update_capabilities(
+                CapabilityName::ALL
+                    .into_iter()
+                    .map(CapabilityProbe::ready)
+                    .collect(),
+            )
+            .unwrap_or_else(|error| panic!("capability setup failed: {error}"));
+        let raw = || {
+            engine
+                .capabilities
+                .lock()
+                .unwrap_or_else(|error| panic!("capability lock failed: {error}"))
+                .base_probes
+                .clone()
+                .unwrap_or_else(|| panic!("base probes missing"))
+                .into_iter()
+                .filter(|probe| probe.name != CapabilityName::ChainRead)
+                .collect::<Vec<_>>()
+        };
+        let before = raw();
+        for ready in [false, true, false] {
+            engine
+                .update_chain_readiness(ready)
+                .unwrap_or_else(|error| panic!("chain update failed: {error}"));
+            assert_eq!(
+                raw(),
+                before,
+                "wallet/history/security facts must not be reprobed or overwritten"
+            );
+        }
     }
 }

@@ -7,7 +7,7 @@
 
 use std::{
     collections::BTreeSet,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -24,19 +24,66 @@ use zeroize::Zeroizing;
 
 use crate::{
     error::EngineError,
-    transaction_builder::{BuiltTransferWithRemark, TransactionBuilder},
     wallet_derivation::{
         derive_wallet_accounts, generate_mnemonic, mint_owner, WalletEntropySource, WalletWordCount,
     },
 };
 
+#[cfg(feature = "chain")]
+use crate::transaction_builder::{BuiltTransferWithRemark, TransactionBuilder};
+
 const MAX_CAS_ATTEMPTS: usize = 32;
 const MAX_CLEANUP_QUEUE: usize = 64;
 
 static WALLET_OPERATION_GATE: OnceLock<AsyncMutex<()>> = OnceLock::new();
+static PRIVATE_KEY_VIEW_LEASES: OnceLock<Mutex<BTreeSet<(u32, [u8; 16])>>> = OnceLock::new();
 
 fn wallet_operation_gate() -> &'static AsyncMutex<()> {
     WALLET_OPERATION_GATE.get_or_init(|| AsyncMutex::new(()))
+}
+
+fn private_key_view_leases() -> &'static Mutex<BTreeSet<(u32, [u8; 16])>> {
+    PRIVATE_KEY_VIEW_LEASES.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+/// 只包含公开账户归属；租约按持久 generation 隔离，跨实例不依赖 store Arc 地址。
+pub(crate) struct WalletPrivateKeyView {
+    account: WalletAccount,
+    wallet_index: u32,
+    generation: VaultGeneration,
+}
+
+impl Drop for WalletPrivateKeyView {
+    fn drop(&mut self) {
+        if let Ok(mut leases) = private_key_view_leases().lock() {
+            leases.remove(&(self.wallet_index, *self.generation.as_bytes()));
+        }
+    }
+}
+
+fn require_no_private_key_view(state: &WalletState) -> Result<(), EngineError> {
+    let leases = private_key_view_leases()
+        .lock()
+        .map_err(|_| EngineError::StatePoisoned)?;
+    let active =
+        |index: u32, generation: VaultGeneration| leases.contains(&(index, *generation.as_bytes()));
+    if state
+        .profile()
+        .is_some_and(|profile| active(profile.wallet_index(), profile.generation()))
+        || state
+            .provisioning()
+            .is_some_and(|plan| active(plan.wallet_index(), plan.generation()))
+        || state
+            .cleanup()
+            .is_some_and(|plan| active(plan.wallet_index(), plan.generation()))
+        || state
+            .cleanup_queue()
+            .iter()
+            .any(|plan| active(plan.wallet_index(), plan.generation()))
+    {
+        return Err(conflict("钱包安全查看尚未清理，拒绝关联钱包变更"));
+    }
+    Ok(())
 }
 
 /// 可注入的毫秒时钟；测试不依赖墙钟，正式实现使用 Unix epoch。
@@ -110,7 +157,219 @@ pub struct WalletService {
     clock: Arc<dyn WalletClock>,
 }
 
+/// 独立签名服务只读取 SDK 安全账户归属资料，不创建钱包、不执行备份或账户管理。
+/// 与钱包共用操作门和 exact generation/owner 复核，秘密仅由金库解锁至可清零缓冲区。
+#[derive(Clone)]
+pub(crate) struct SigningService {
+    signer: Arc<dyn ChainSigner>,
+    vault: Arc<dyn SecretVault>,
+    profiles: Arc<dyn WalletProfileStore>,
+    encrypted_secrets: Arc<dyn EncryptedSecretBlobStore>,
+}
+
+impl SigningService {
+    pub(crate) fn new(
+        signer: Arc<dyn ChainSigner>,
+        vault: Arc<dyn SecretVault>,
+        profiles: Arc<dyn WalletProfileStore>,
+        encrypted_secrets: Arc<dyn EncryptedSecretBlobStore>,
+    ) -> Self {
+        Self {
+            signer,
+            vault,
+            profiles,
+            encrypted_secrets,
+        }
+    }
+
+    /// 使用指定本机账户进行 sr25519 签名；不存在任何私钥导出旁路。
+    pub async fn sign(
+        &self,
+        account_id: AccountId32,
+        message: Vec<u8>,
+    ) -> Result<Sr25519Signature, EngineError> {
+        self.sign_guarded(account_id, message, &|| Ok(())).await
+    }
+
+    /// QR 在认证前后复查有效期与取消；已经派发的金库 future 必须实际排空。
+    pub(crate) async fn sign_guarded(
+        &self,
+        account_id: AccountId32,
+        message: Vec<u8>,
+        ensure_current: &(dyn Fn() -> Result<(), EngineError> + Send + Sync),
+    ) -> Result<Sr25519Signature, EngineError> {
+        let _guard = wallet_operation_gate().lock().await;
+        ensure_current()?;
+        require_secure_device(self.vault.as_ref()).await?;
+        let (profile, account) = current_account(self.profiles.as_ref(), account_id, None).await?;
+        let snapshot = self.encrypted_secrets.load(account.secret_ref()).await?;
+        let envelope = snapshot.envelope().cloned().ok_or_else(|| {
+            error(
+                ContractErrorCode::AuthenticationRequired,
+                "指定账户的设备密文不存在",
+            )
+        })?;
+        ensure_current()?;
+        let secret = self.vault.open(account.secret_ref(), envelope).await?;
+        ensure_current()?;
+
+        // 用户认证可能阻塞；解锁后再次核对 exact generation/owner，删除或重建不得越过签名。
+        let (_, current) = current_account(
+            self.profiles.as_ref(),
+            account_id,
+            Some((profile.generation(), account.secret_ref().owner())),
+        )
+        .await?;
+        if current.secret_ref() != account.secret_ref() {
+            return Err(conflict("签名账户 SecretRef 已改变"));
+        }
+        let public_key = self.signer.public_key(&secret).await?;
+        if public_key.as_bytes() != account_id.as_bytes() {
+            return Err(error(
+                ContractErrorCode::Integrity,
+                "设备密文与钱包 AccountId 不一致",
+            ));
+        }
+        ensure_current()?;
+        self.signer
+            .sign(&secret, message)
+            .await
+            .map_err(EngineError::from)
+    }
+}
+
+async fn require_secure_device(vault: &dyn SecretVault) -> Result<(), EngineError> {
+    match vault.availability().await? {
+        VaultAvailability::Available => Ok(()),
+        VaultAvailability::NoStrongUserAuthentication => Err(error(
+            ContractErrorCode::AuthenticationRequired,
+            "设备没有可用的强用户认证",
+        )),
+        VaultAvailability::Unsupported => Err(error(
+            ContractErrorCode::Unsupported,
+            "当前设备不支持 CitizenSDK 系统金库",
+        )),
+        VaultAvailability::Unavailable => Err(error(
+            ContractErrorCode::Unavailable,
+            "当前设备系统金库暂不可用",
+        )),
+    }
+}
+
+async fn current_account(
+    profiles: &dyn WalletProfileStore,
+    account_id: AccountId32,
+    expected: Option<(VaultGeneration, SecretOwner)>,
+) -> Result<(WalletProfile, WalletAccount), EngineError> {
+    let state = profiles.load().await?;
+    let profile =
+        stable_profile(&state).ok_or_else(|| error(ContractErrorCode::NotFound, "钱包不存在"))?;
+    let account = profile
+        .account_by_id(account_id)
+        .cloned()
+        .ok_or_else(|| error(ContractErrorCode::NotFound, "账户不存在"))?;
+    if let Some((generation, owner)) = expected {
+        if profile.generation() != generation || account.secret_ref().owner() != owner {
+            return Err(conflict("签名账户 generation/owner 已改变"));
+        }
+    }
+    Ok((profile, account))
+}
+
 impl WalletService {
+    /// 仅内部查看替换同一宿主的带归属观察器金库；普通钱包/签名实例不受影响。
+    pub(crate) fn with_private_key_view_vault(
+        mut self,
+        vault: Option<Arc<dyn SecretVault>>,
+    ) -> Self {
+        if let Some(vault) = vault {
+            self.vault = vault;
+        }
+        self
+    }
+
+    /// 内部查看准备只读取稳定归属，不认证、不解密、不执行恢复或持久写入。
+    pub(crate) async fn prepare_private_key_view(
+        &self,
+        account_id: AccountId32,
+    ) -> Result<Arc<WalletPrivateKeyView>, EngineError> {
+        let _guard = wallet_operation_gate().lock().await;
+        let state = self.profiles.load().await?;
+        if state.provisioning().is_some()
+            || state.cleanup().is_some()
+            || !state.cleanup_queue().is_empty()
+        {
+            return Err(conflict("钱包存在未完成操作，不能开始安全查看"));
+        }
+        let profile = state
+            .profile()
+            .ok_or_else(|| error(ContractErrorCode::NotFound, "钱包不存在"))?;
+        let account = profile
+            .account_by_id(account_id)
+            .cloned()
+            .ok_or_else(|| error(ContractErrorCode::NotFound, "账户不存在"))?;
+        let mut leases = private_key_view_leases()
+            .lock()
+            .map_err(|_| EngineError::StatePoisoned)?;
+        if !leases.insert((profile.wallet_index(), *profile.generation().as_bytes())) {
+            return Err(conflict("钱包已有安全查看会话"));
+        }
+        Ok(Arc::new(WalletPrivateKeyView {
+            account,
+            wallet_index: profile.wallet_index(),
+            generation: profile.generation(),
+        }))
+    }
+
+    /// 仅 SDK 内部状态机调用；授权期间用 generation 租约保护，不持钱包门等待系统 UI。
+    pub(crate) async fn reveal_private_key_view(
+        &self,
+        view: &WalletPrivateKeyView,
+        active: impl Fn() -> Result<(), EngineError>,
+        display: impl FnOnce(&[u8]) -> Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
+        active()?;
+        require_secure_device(self.vault.as_ref()).await?;
+        let snapshot = self
+            .encrypted_secrets
+            .load(view.account.secret_ref())
+            .await?;
+        let envelope = snapshot.envelope().cloned().ok_or_else(|| {
+            error(
+                ContractErrorCode::AuthenticationRequired,
+                "指定账户的设备密文不存在",
+            )
+        })?;
+        // 尚未进入真实授权时可以停止；一旦 open 已派发，必须把它实际排空。
+        active()?;
+        let secret = self.vault.open(view.account.secret_ref(), envelope).await?;
+        let _guard = wallet_operation_gate().lock().await;
+        let (_, current) = current_account(
+            self.profiles.as_ref(),
+            view.account.account_id(),
+            Some((view.generation, view.account.secret_ref().owner())),
+        )
+        .await?;
+        if current.secret_ref() != view.account.secret_ref() {
+            return Err(conflict("查看账户 SecretRef 已改变"));
+        }
+        if secret.with_secret(|bytes| bytes.len()) != 32 {
+            return Err(error(
+                ContractErrorCode::Integrity,
+                "账户秘密长度不符合安全查看合同",
+            ));
+        }
+        let public_key = self.signer.public_key(&secret).await?;
+        if public_key.as_bytes() != view.account.account_id().as_bytes() {
+            return Err(error(
+                ContractErrorCode::Integrity,
+                "设备密文与钱包 AccountId 不一致",
+            ));
+        }
+        // 借用仅在同步内部显示调用期间有效；无秘密返回值，结束后 SecretBuffer 析构清零。
+        secret.with_secret(display)
+    }
+
     pub fn new(
         signer: Arc<dyn ChainSigner>,
         vault: Arc<dyn SecretVault>,
@@ -149,7 +408,7 @@ impl WalletService {
         password: Zeroizing<String>,
     ) -> Result<PreparedWalletCreation, EngineError> {
         let _guard = wallet_operation_gate().lock().await;
-        self.require_secure_device().await?;
+        require_secure_device(self.vault.as_ref()).await?;
         let state = self.reconcile_locked().await?;
         if state.profile().is_some() {
             return Err(error(
@@ -171,7 +430,7 @@ impl WalletService {
         prepared: PreparedWalletCreation,
     ) -> Result<WalletProfile, EngineError> {
         let _guard = wallet_operation_gate().lock().await;
-        self.require_secure_device().await?;
+        require_secure_device(self.vault.as_ref()).await?;
         let state = self.reconcile_locked().await?;
         if state.profile().is_some() {
             return Err(error(
@@ -210,7 +469,7 @@ impl WalletService {
         password: &str,
     ) -> Result<WalletProfile, EngineError> {
         let _guard = wallet_operation_gate().lock().await;
-        self.require_secure_device().await?;
+        require_secure_device(self.vault.as_ref()).await?;
         let state = self.reconcile_locked().await?;
         if state.profile().is_some() {
             return Err(error(
@@ -256,7 +515,7 @@ impl WalletService {
                 "追加账户 index 列表不能为空",
             ));
         }
-        self.require_secure_device().await?;
+        require_secure_device(self.vault.as_ref()).await?;
         let state = self.reconcile_locked().await?;
         let profile = state
             .profile()
@@ -405,6 +664,7 @@ impl WalletService {
     ) -> Result<WalletProfile, EngineError> {
         let _guard = wallet_operation_gate().lock().await;
         let state = self.profiles.load().await?;
+        require_no_private_key_view(&state)?;
         if state.provisioning().is_some()
             || state.cleanup().is_some()
             || !state.cleanup_queue().is_empty()
@@ -427,46 +687,11 @@ impl WalletService {
             .ok_or_else(|| error(ContractErrorCode::Integrity, "重命名写入后 profile 缺失"))
     }
 
-    /// 使用指定本机账户进行 sr25519 签名；不存在任何私钥导出旁路。
-    pub async fn sign(
-        &self,
-        account_id: AccountId32,
-        message: Vec<u8>,
-    ) -> Result<Sr25519Signature, EngineError> {
-        let _guard = wallet_operation_gate().lock().await;
-        let (profile, account) = self.current_account(account_id, None).await?;
-        let snapshot = self.encrypted_secrets.load(account.secret_ref()).await?;
-        let envelope = snapshot.envelope().cloned().ok_or_else(|| {
-            error(
-                ContractErrorCode::AuthenticationRequired,
-                "指定账户的设备密文不存在",
-            )
-        })?;
-        let secret = self.vault.open(account.secret_ref(), envelope).await?;
-
-        // 用户认证可能阻塞；解锁后再次核对 exact generation/owner，删除或重建不得越过签名。
-        self.current_account(
-            account_id,
-            Some((profile.generation(), account.secret_ref().owner())),
-        )
-        .await?;
-        let public_key = self.signer.public_key(&secret).await?;
-        if public_key.as_bytes() != account_id.as_bytes() {
-            return Err(error(
-                ContractErrorCode::Integrity,
-                "设备密文与钱包 AccountId 不一致",
-            ));
-        }
-        self.signer
-            .sign(&secret, message)
-            .await
-            .map_err(EngineError::from)
-    }
-
     /// 在同一钱包操作门内解锁账户、复核 exact generation/owner，并交给准确 best Runtime
     /// 交易构造器。秘密不会成为返回值；返回对象只含公开 call、签名与 extrinsic，且保持
     /// crate-private，只能由 Engine 的 pending-before-submit-and-watch 闭环消费。
     #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "chain")]
     pub async fn build_transfer_with_remark(
         &self,
         chain_client: &dyn VerifiedChainClient,
@@ -477,7 +702,7 @@ impl WalletService {
         remark: impl Into<String>,
     ) -> Result<BuiltTransferWithRemark, EngineError> {
         let _guard = wallet_operation_gate().lock().await;
-        let (profile, account) = self.current_account(account_id, None).await?;
+        let (profile, account) = current_account(self.profiles.as_ref(), account_id, None).await?;
         let snapshot = self.encrypted_secrets.load(account.secret_ref()).await?;
         let envelope = snapshot.envelope().cloned().ok_or_else(|| {
             error(
@@ -486,7 +711,8 @@ impl WalletService {
             )
         })?;
         let secret = self.vault.open(account.secret_ref(), envelope).await?;
-        self.current_account(
+        current_account(
+            self.profiles.as_ref(),
             account_id,
             Some((profile.generation(), account.secret_ref().owner())),
         )
@@ -850,44 +1076,6 @@ impl WalletService {
         Ok(public_key.as_bytes() == secret_ref.account_id().as_bytes())
     }
 
-    async fn current_account(
-        &self,
-        account_id: AccountId32,
-        expected: Option<(VaultGeneration, SecretOwner)>,
-    ) -> Result<(WalletProfile, WalletAccount), EngineError> {
-        let state = self.profiles.load().await?;
-        let profile = stable_profile(&state)
-            .ok_or_else(|| error(ContractErrorCode::NotFound, "钱包不存在"))?;
-        let account = profile
-            .account_by_id(account_id)
-            .cloned()
-            .ok_or_else(|| error(ContractErrorCode::NotFound, "账户不存在"))?;
-        if let Some((generation, owner)) = expected {
-            if profile.generation() != generation || account.secret_ref().owner() != owner {
-                return Err(conflict("签名账户 generation/owner 已改变"));
-            }
-        }
-        Ok((profile, account))
-    }
-
-    async fn require_secure_device(&self) -> Result<(), EngineError> {
-        match self.vault.availability().await? {
-            VaultAvailability::Available => Ok(()),
-            VaultAvailability::NoStrongUserAuthentication => Err(error(
-                ContractErrorCode::AuthenticationRequired,
-                "设备没有可用的强用户认证",
-            )),
-            VaultAvailability::Unsupported => Err(error(
-                ContractErrorCode::Unsupported,
-                "当前设备不支持 CitizenSDK 系统金库",
-            )),
-            VaultAvailability::Unavailable => Err(error(
-                ContractErrorCode::Unavailable,
-                "当前设备系统金库暂不可用",
-            )),
-        }
-    }
-
     async fn delete_wallet_locked(
         &self,
         state: &WalletState,
@@ -929,6 +1117,7 @@ impl WalletService {
 
     async fn reconcile_locked(&self) -> Result<WalletState, EngineError> {
         let mut state = self.profiles.load().await?;
+        require_no_private_key_view(&state)?;
         // 与已验证 Dart 实现保持相同恢复优先级：先清理补偿队列，再完成活动 cleanup，
         // 最后才把崩溃遗留 provisioning 转成 cleanup。这样一个暂时失败的活动计划
         // 不会无限阻塞此前已经取得所有权的独立孤儿清理。
@@ -1232,6 +1421,7 @@ impl WalletService {
         cleanup: Option<WalletCleanupPlan>,
         cleanup_queue: Vec<WalletCleanupPlan>,
     ) -> Result<WalletState, EngineError> {
+        require_no_private_key_view(current)?;
         let next_revision = current
             .revision()
             .checked_add(1)

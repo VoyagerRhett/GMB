@@ -1,5 +1,11 @@
 # CitizenSDK 原生产物与候选打包
 
+当前闭集为 89 个 Core C 函数、Linux/Windows 各 17 个 Host C 函数、3 个
+ZXing-C++ 图像 C 函数和五端统一 36 个 Flutter 方法。新增符号不改变 ABI v1
+既有结构和数值。模块选择只影响运行时服务与
+资源装配，不是发布包裁剪：现有正式包装仍编译 full，并完整携带链资产。未选 chain 的实例
+不加载这些资产、不创建链数据库或启动 smoldot。模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
+
 ## SDK CI/Release 依赖接线
 
 固定 Flutter 提交先引导对应 Dart，Pub 预加载显式使用其实际 dart/dart.exe。中央预加载
@@ -125,7 +131,7 @@ CITIZENSDK_NATIVE_OUTPUT_DIR=<原生产物目录>
 `darwin/Sources/CitizenSDK` Swift 源码、根产品头、Privacy Manifest 与完整 CitizenChain 资产组合为一个
 `CitizenSDK.xcframework`。其闭集只有 iOS 设备变体、iOS 模拟器变体与 macOS；三个
 Apple machine slice 的架构元数据均为 `arm64`；
-每个 slice 精确导出产品头声明的 73 个符号，并拒绝 `smoldot_*`、`citizen_sr25519_*`、
+每个 slice 精确导出产品头声明的 89 个符号及 3 个 QR 图像符号，并拒绝 `smoldot_*`、`citizen_sr25519_*`、
 `account_crypto_*` 和其它架构。
 
 legacy `libsmoldot.dylib` 只允许作为源码树外的 macOS `arm64` 差分测试宿主库生成；它绝不进入
@@ -136,7 +142,8 @@ XCFramework、Hosted 或 GitHub 候选。其 `LC_ID_DYLIB` 是编译工作区的
 `include/citizensdk.h` 逐项比较，同时用 C11/C++17 编译合同核对全部公开布局；任何
 `smoldot_*`、`citizen_sr25519_*` 或 `account_crypto_*` 泄露都会失败。它只写入调用者指定的
 外部 `abi-host/` 目录，不加入 `all`，也不进入 Android/Apple 正式候选。
-产品 ABI v1 的闭集是原 36 个符号保持不变并追加 37 个符号，总计 73 个；构建产物与头文件
+产品 ABI v1 保持既有 73 个符号，再追加模块验证、模块构造和无实例验签三个符号，以及四个链查询/结果符号，
+QR 统一为 9 个协议、审阅、签名和结果符号，总计 89 个；构建产物与头文件
 任一缺失、额外或重复都必须失败关闭。
 
 Android Core 在进入 Gradle 前由固定 NDK 的 `llvm-strip --strip-unneeded` 显式处理一次；该同一
@@ -200,7 +207,7 @@ linux/lib/LinuxAMD/libcitizensdk.so
 linux/lib/LinuxAMD/libcitizensdk_host.so
 ```
 
-Core 必须精确导出 73 个根 `citizensdk_*`；Host 只装配 typed stores、TPM/认证、SDK-owned
+独立 Core 动态库必须精确导出89个公开函数及4个内部查看链接函数；Host只装配typed stores、TPM/认证、SDK-owned
 钱包流程和生命周期，不复制 smoldot、signer 或 Engine。Host 只能按 SONAME 依赖 Core 一次，
 两库不得出现绝对 `DT_NEEDED` 或构建机 RPATH/RUNPATH。CMake 公开目标固定为
 `CitizenSDK::Core` 与 `CitizenSDK::Host`，C++ convenience API 保持 header-only，不引入跨
@@ -231,11 +238,11 @@ CMake 安装投影包含根 C ABI
 不再注入内部 platform 或临时改写 pubspec。plugin 自己固定 `$ORIGIN`，删除测试 runner 的
 运行库查找代偿。
 
-两种平台各 19 项安装件在候选 `linux/` 下合并为 26 项；共享头和资产必须逐字节一致，平台
+两种平台各 20 项安装件在候选 `linux/` 下合并为 27 项；共享头和资产必须逐字节一致，平台
 库与 5 项 CMake 包配置按 `LinuxARM`、`LinuxAMD` 隔离。源码校验拒绝生成状态，候选校验只
-准入此准确投影，不覆盖漂移文件。Hosted 只保留这 26 项及插件所需的 12 项输入：Linux
+准入此准确投影，不覆盖漂移文件。Hosted 只保留这 27 项及插件所需的 12 项输入：Linux
 `CMakeLists.txt`、`cmake/CitizenSDKFlutter.cmake`、5 个 `.cc`、4 个 `.hpp` 和 Flutter 注册头；
-共 38 项，不包含 Host 私有源码、测试或原生构建模板，也不重建 Core/Host。发布器检查
+共 39 项，不包含 Host 私有源码、测试或原生构建模板，也不重建 Core/Host。发布器检查
 完整安装件、同版声明与 ELF 结构；真实构建来源、依赖和许可证证据仍须在后续统一
 CI/Release 补齐，证据缺失不得正式分发，不能把结构检查冒充来源证明。
 
@@ -246,7 +253,7 @@ CMake 的 Config 前缀、完整导入目标与 Release 属性按官方生成指
 已经得到完整依赖溯源。合成 ELF 测试仅证明这些检查有效，不证明平台执行或 TPM 功能。
 
 本机 Linux 构建与测试状态必须写入
-`/Users/rhett/TATA/tataconsole/target/.work/GMB/citizensdk/SDK` 下的任务独占工作目录；GitHub runner 使用统一
+`/Users/rhett/TATA/tataconsole/work/gmb/citizensdk` 下的任务独占工作目录；GitHub runner 使用统一
 工作流的 checkout 外独占目录，不照搬本机绝对路径。第 7.1 步只固定源码
 和 Release 源文件反向闭集；上述 Linux 安装、ELF、GLIBC、TPM 和两种机器运行门禁尚未执行，
 第 7.4 步候选 manifest 合同已同步为 Android、iOS、macOS、LinuxARM、LinuxAMD；这是源码
@@ -303,8 +310,8 @@ iOS 两种变体、XCFramework 其他位置和候选其他目录不允许任何�
 
 ## 本机 TataConsole
 
-CitizenSDK 的永久最终容器为 `/Users/rhett/TATA/tataconsole/target/GMB/citizensdk/SDK`，
-永久工作容器为 `/Users/rhett/TATA/tataconsole/target/.work/GMB/citizensdk/SDK`。
+CitizenSDK 的永久最终容器为 `/Users/rhett/TATA/tataconsole/target/gmb/citizensdk`，
+永久工作容器为 `/Users/rhett/TATA/tataconsole/work/gmb/citizensdk`。
 唯一 `release.mjs` 对 native 输入、候选输出和归档路径只接受上述两根的严格后代；拒绝
 永久根自身、旧根、相邻仓库/产品/平台、伪前缀、非规范路径及既存链接。只核验本次命中的
 根存在且为普通目录，不要求未使用的另一个根存在。GitHub 的隔离路径分支保持不变。
@@ -327,7 +334,7 @@ GMB 当前提交 SHA，再通过 `git archive <sha> citizensdk` 建立无生成�
 SHA-256 同时识别。它只允许作为准确历史前驱被完整备份、原子替换或失败恢复；任何其他
 324 行先前清单、部分集合或损坏字节均不在接受范围内并失败关闭。
 
-TataConsole 本机构建以 `.work/candidate-transaction.lock` 覆盖初始化、构建、提交和恢复的完整
+TataConsole 本机构建以 `work/gmb/citizensdk/candidate-transaction.lock` 覆盖初始化、构建、提交和恢复的完整
 跨进程事务。锁 owner 先以 noclobber 完整写入 PID 与随机 token，再由同文件系统硬链接原子
 声明固定普通文件锁，不存在空 owner 固定态。活动、非法或无法确认死亡的 owner 均失败关闭，
 失效锁只有在两种本机进程检查均证明 PID 已死亡后才可原子接管。退出清理只能移除逐字节属于
@@ -433,8 +440,8 @@ Hosted 包；Hosted Android 只保留根插件、共享 Kotlin 生产 facade 和
 工具，`.dart_tool`、`build`、`target` 与 `.gradle` 生成树也必须全部过滤。统一 CI 和 Release 的目标合同均执行
 `dart pub publish --dry-run`，任何缺失文件、不允许的依赖源或官方校验问题都会失败关闭。
 
-Hosted 的 Dart 运行时闭包精确为 17 个文件：`lib/citizen_sdk.dart`、`lib/src/api`
-六个 Dart 文件、`lib/src/crypto/account_codec.dart`、`lib/src/models` 五个 Dart 文件，以及
+Hosted 的 Dart 运行时闭包精确为 18 个文件：`lib/citizen_sdk.dart`、`lib/src/api`
+七个 Dart 文件、`lib/src/crypto/account_codec.dart`、`lib/src/models` 五个 Dart 文件，以及
 `lib/src/platform` 下 codec、sessions、platform contract 和 Flutter platform 四个文件。运行依赖只有
 Flutter SDK 与 `polkadart_keyring`；legacy/差分依赖是 dev-only，不进入 Hosted 运行时。
 
@@ -443,8 +450,7 @@ Flutter SDK 与 `polkadart_keyring`；legacy/差分依赖是 dev-only，不进�
 完全一致；版本升级必须先形成新的
 源码提交，不能只向 Release 输入另一个版本。本步骤不执行 Hosted 上传，在首次发布完成前
 不得宣称已经可由 `citizen_sdk: ^1.0.0` 获取。正式发布由 TataConsole 的 SDK 发布按钮触发；
-不接公民网下载，也不更新
-CitizenServe/CitizenWeb/Cloudflare 下载指针。Android、iOS、macOS、Linux 与 Windows 源码投影均使用同一
+不接任何产品下载指针。Android、iOS、macOS、Linux 与 Windows 源码投影均使用同一
 产品 ABI。此前已完成 Android AAR、Apple 单一 XCFramework、本机 Apple 编译、macOS XCTest
 和最终 smoke；本机无
 Simulator runtime 和真实 Apple 移动设备，因此不声称 iOS XCTest 已运行或真机硬件金库
@@ -555,7 +561,7 @@ Package.swift。Flutter 的 Xcode backend 会再次调用 bin/dart、bin/flutter
 来源、状态隔离或失败门禁；第 9.2 步本机开发范围可收尾，但不代表远程验收或发布完成。
 
 第 10.3 步的目录预检由同一构建器按执行环境选择：本机固定
-`/Users/rhett/TATA/tataconsole/target/.work/GMB/citizensdk/SDK/citizensdk`；当
+`/Users/rhett/TATA/tataconsole/work/gmb/citizensdk`；当
 `GITHUB_ACTIONS=true` 时固定 `RUNNER_TEMP/citizensdk`，必须提供 GitHub 官方
 `RUNNER_TEMP`、`GITHUB_WORKSPACE`，且 SDK 来源是该 checkout 的严格子目录。
 受控根与 checkout/SDK 源树在任一方向都不得交叠。根、输入目录和工作/输出容器须预先存在，
@@ -574,7 +580,7 @@ Hosted 归档监督器及原生构建器原样传递上述 Runner 环境，不�
 唯一 `build-native.sh Windows` 组合原有 `native/ffi` 与 Win32 Host；最低 Windows 11，
 MSVC 官方目标 `x86_64-pc-windows-msvc`，公开名称只有 Windows。安装的 bin/Windows
 保存 Core/Host DLL，lib/Windows 保存 import libraries 与 CMake，头和资产用公共布局。
-第 8.4 步在同一 `release.mjs` 接纳 21 项 Windows 安装件并纳入唯一候选平台集合。
+第 8.4 步在同一 `release.mjs` 接纳 21 项 Windows 安装件；第4步加入 QR 图像头后当前为 22 项，继续纳入唯一候选平台集合。
 七个 Host 头与源码重叠，必须逐字节一致，只注入其余十四项；不覆盖不同内容或接受多余
 文件。版本、PE/COFF、完整导出、导入依赖、CMake 引用和链资产一起验证。二进制结构
 校验不是来源 commit、静态依赖许可证或真实运行证明，证据仍须统一 CI/Release 闭合。
@@ -585,7 +591,7 @@ MSVC 官方目标 `x86_64-pc-windows-msvc`，公开名称只有 Windows。安装
 不重新编译 Host/Core。插件只捆绑这两个已安装 DLL，使用官方 Flutter wrapper。
 源树公开头为八个，其中 `citizen_sdk_plugin.h` 仅用于 Flutter 注册；纯原生安装仍为七个头。
 宿主在 generated_plugins.cmake 之前显式设置 `CITIZENSDK_APPLICATION_ID`；其合同见
-WINDOWS_PLATFORM.md。`.pubignore` 精确保留 33 项 Windows 运行输入（21 安装件 + 12
+WINDOWS_PLATFORM.md。`.pubignore` 精确保留 34 项 Windows 运行输入（22 安装件 + 12
 插件输入），排除 Host 私有源码和测试；未注入源码的可见集合是 19 项（七头 + 十二插件
 输入），源码门禁仍禁止原生产物。MSVC 运行时由宿主部署环境提供，不额外引入未登记 DLL。
 默认 `CitizenSdk` 与 pubspec 的官方 Windows 注册一起开放；这不是已执行 Hosted 上传。

@@ -23,7 +23,7 @@ import 'package:citizenwallet/signer/payload_decoder.dart';
 // 生成器:citizenchain/runtime/primitives/tests/scale_codec_golden.rs
 
 const String _vectorsPath =
-    '../citizenchain/runtime/primitives/tests/fixtures/scale_codec_vectors.json';
+    'test/signer/fixtures/scale_codec_vectors.json';
 
 /// transfer_with_remark 的 pallet/call 索引(与 payload_decoder_test.dart 同源)。
 const List<int> _transferCallPrefix = [0x04, 0x00];

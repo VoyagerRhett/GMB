@@ -2,8 +2,8 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:bip39_mnemonic/bip39_mnemonic.dart' as bip39m;
-import 'package:gmb_hardware_secretvault/hardware_secretvault.dart';
-import 'package:gmb_wallet_password/wallet_mini_secret.dart';
+import 'package:citizenwallet/security/hardware_secretvault.dart';
+import 'package:citizenwallet/wallet/wallet_mini_secret.dart';
 import 'package:isar_community/isar.dart';
 import 'package:polkadart_keyring/polkadart_keyring.dart';
 import 'package:citizenwallet/wallet/native_sr25519.dart';

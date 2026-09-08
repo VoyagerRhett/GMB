@@ -1,5 +1,37 @@
 # 公民SDK（CitizenSDK）
 
+## 当前模块化与链查询合同
+
+五端 iOS、Android、macOS、Windows、Linux 共用同一 Rust 实现，不包含 Web。
+`CitizenSdk.open(modules: ...)` 默认完整启用；`CitizenSdkModules` 提供六模块的具名常量，
+可按位组合，依赖与编译支持由 Rust 统一验证；数值与跨端合同以唯一 SDK 字典为准。
+钱包管理与签名不互相隐式启用，交易和历史各自需要链；完整本地转账仍使用完整组合，保持先持久化 pending 再广播。
+
+Dart 分别使用 `sdk.wallet`、`sdk.signing`、`sdk.chain`、`sdk.transactions`、`sdk.history`、`sdk.qr`；
+无状态 `CitizenSigning.verify` 不需 open、事件订阅、链数据库或设备金库。签名模块只使用
+同一宿主中已由 SDK 安全建立的账户归属资料与设备金库；首次建立账户仍通过钱包安全流程，
+不增加私钥、种子、child secret 或任意秘密导出接口。
+
+`sdk.chain.getGenesisHash()` 读取 Core 固定链身份，不要求启动或联网；
+`sdk.chain.getAccountBalances(accountIds)` 复用同一 finalized 批量读取，保留输入顺序和重复项。
+两项查询均要求选择 chain 模块，不依赖钱包或签名。
+`sdk.wallet.viewAccountPrivateKey(accountId)` 只启动 SDK 原生安全查看，返回完成、取消或错误；
+不把账户秘密交给宿主、Flutter 或可替换显示回调。它属于钱包模块，不要求链或签名模块。
+
+`sdk.qr` 是独立的区块链二维码模块：Rust 唯一实现 `QR_V1` 解析、编码、请求会话、
+过期/取消/单次消费与响应验签；图像识别和生成五端唯一使用 ZXing-C++ 3.1.1。
+`sdk.qr.scan()` 直接打开 SDK 扫描界面，返回 Core 解析后的公开字段。
+QR 与 signing 是两个模块：QR-only 不创建钱包、设备金库、链数据库或轻节点。
+链调用扫码签名使用 `qr + signing + chain`，调用 `sdk.signing.signQrRequest(text)` 即进入
+SDK 自有审阅、用户确认和设备授权，返回签名响应及二维码图像；不要求宿主拼接待签字节。
+审阅由 Rust 复用当前已验证链 metadata，不信任二维码展示文案，也不把测试夹具作为生产信任源。
+相机只属于 SDK 平台采集层，交付 8 位亮度帧；不接入其他识别器、兼容引擎或回退路径。
+
+模块选择是运行期资源装配，不等于裁剪发布包。现有正式包装仍编译 full 并携带完整链资产；
+未选链的实例不加载链资产、不创建链数据库或启动 smoldot，未选历史不初始化历史服务。
+模块位为 wallet=1、signing=2、chain=4、transactions=8、history=16、qr=32，full=63。
+模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
+
 SDK 原生后台监控复用 smoldot 现有 finalized 订阅；完整钱包组合启动后自动读取本机
 钱包账户集合、同步历史，并在没有新块时只读核验待确认交易。不会重新签名或广播。
 `historyChanged` 事件只表示历史应刷新，接收方使用已有历史查询；不携带秘密或账户快照。
@@ -36,7 +68,7 @@ import 'package:citizen_sdk/citizen_sdk.dart';
 
 final CitizenSdk sdk = await CitizenSdk.open();
 await sdk.start();
-// 通过 sdk.chain、sdk.wallet 和 sdk.transactions 使用公民链能力。
+// 分别通过 sdk.chain、sdk.wallet、sdk.signing、sdk.transactions、sdk.history 使用功能。
 await sdk.stop();
 await sdk.close();
 ```
@@ -57,15 +89,15 @@ iOS device Release 宿主和 Simulator ARM64 Swift 链接。移动端构建通�
 
 Rust 路径已经建立 `native/contracts`、`native/engine`、真实
 `native/smoldot/provider` 和产品级唯一 `native/ffi`。根 `include/citizensdk.h` 只公开
-`citizensdk_*`。ABI v1 保持 legacy `citizensdk_create` 路径原有 36 个符号及其数值、布局和
-单请求功能语义不变，再追加 37 个类型化
-符号，总计 73 个：除生命周期、异步请求、事件、所有权、能力快照、准确区块读取、已签名
-交易提交/观察、同块执行核验及 finalized database 导入导出外，还投影账户余额、准确 best
-nonce、费用、钱包生命周期/多账户、本地载荷签名、高层钱包转账和 finalized 历史。
-`citizensdk_create` 继续是兼容的 chain-only session 构造；`citizensdk_create_with_host` 通过
-五类具名 typed stores 与 KEK/DEK `SecretVault` 组合完整平台无关 Core。Provider 直接驱动
+`citizensdk_*`。ABI v1 既有 73 个符号、结构布局、数值与默认构造行为不变，
+新增模块验证、显式模块构造和无实例验签三个入口，再补充创世哈希、批量余额及两个批量结果读取入口，
+QR 公开合同统一为 9 个协议、审阅、签名及结果入口，当前总计 89 个。
+原待签字节获取和外部签名拼装入口已删除，不保留兼容接口。图像层另以 3 个稳定 C 函数包装 ZXing-C++。
+`citizensdk_create_with_modules` 是官方绑定的模块构造入口；既有构造也进入同一私有装配逻辑，
+不建立第二套状态机。链、钱包管理、签名、交易和历史按选择提供，宿主仅补齐所选功能必需的
+具名 typed stores 与 KEK/DEK `SecretVault`。仅启用链时 Provider 才直接驱动
 已收编的 smoldot 轻节点；任意 JSON-RPC 方法只存在于 crate 私有固定 allowlist，不能由
-Dart、Swift、Kotlin 或 C/C++ 传入。创建实例时 Rust 会再次核对随包资产摘要、正式链身份、
+Dart、Swift、Kotlin 或 C/C++ 传入。启用链的实例创建时 Rust 会再次核对随包资产摘要、正式链身份、
 完整 #0 header、genesis 和 state root，随后才构造轻节点。
 
 Engine 固定 `VerifiedChainClient`、`ChainSigner`、`SecretVault`、五类状态仓储、十项能力状态、
@@ -82,7 +114,7 @@ Engine 持有；`CHAIN_READ`、提交和核验只有在 Engine 为 `Running` 且
 显式处理坏导入后才能重新启动；SDK 不自动删除坏数据库或掩盖防回退失败。
 跨 Engine 或进程防回退仍要求 store provider 提供共享、耐久、强原子 CAS。
 
-只有 `citizensdk_create_with_host` 启用自动链数据库生命周期：`citizensdk_start` 在任何 provider
+启用链并装配持久 typed store 的实例使用同一自动链数据库生命周期：`citizensdk_start` 在任何 provider
 启动副作用前从 typed store 恢复并复核状态，`citizensdk_export_state` 在返回前 CAS 持久化同一
 稳定快照，`citizensdk_stop` 则在退订、停止产品服务和停止 provider 前先完成同一 checkpoint；
 持久化失败会保留 Running 状态和全部停止依赖，供宿主重试。直接 `citizensdk_destroy` 不是优雅
@@ -120,11 +152,10 @@ TUYU challenge、TuyuBooking 员工身份及其它业务授权不进入 SDK。�
 `CitizenSdk`；Android Flutter 插件与原生 AAR 都调用同一个 Kotlin facade、JNI 和
 Rust Core。iOS 与 macOS 共用 `darwin/` 的 Swift、Flutter adapter、typed SQLite stores 与
 `SecretVault`，并通过同一个 `CitizenSDK.xcframework` 消费产品 Core；各公开绑定均不运行
-legacy Dart 钱包或 legacy `libsmoldot`。完整 `citizensdk_create_with_host` 组合固定 smoldot provider、准确
-Runtime nonce 与唯一 `Sr25519SoftwareSigner`，并要求宿主提供 chain database、runtime
-cache、wallet profile、transaction history、encrypted secret blob 五类职责隔离的 store；
-secure store 与 `SecretVault` 必须全有或全无。原 `citizensdk_create` 则继续准确保持
-chain-only，不能把一个构造的能力快照冒充整个 ABI 的能力边界。
+legacy Dart 钱包或 legacy `libsmoldot`。模块化构造按需装配唯一 provider、nonce 与 signer，
+宿主的 chain database/runtime cache、wallet profile、transaction history、encrypted secret blob
+职责仍隔离。chain/history 才创建 public store；wallet/signing 才创建配套 secure store 与
+`SecretVault`。未选模块的调用明确拒绝，不因共享设备资源而开放该模块。
 
 第 7.1 步在 `linux/` 新增 LinuxARM、LinuxAMD 共用的 C/C++ Host 源码投影：它只负责
 HostBridge、五类 typed store、TPM 2.0 KEK/DEK Vault、SDK-owned GTK 钱包流程和 header-only
@@ -355,21 +386,21 @@ LinuxARM、LinuxAMD、Windows，仍只有 `gmb.citizensdk.sdk.ci` 一条 SDK 路
 
 GitHub Release 继续生成 `citizensdk.tgz`、`citizensdk-release.json`、`SHA256SUMS`，其中
 tgz 候选合同保留完整源码、测试、锁文件、文档与 Android/iOS/macOS 原生投影，并纳入 Linux
-Host 源码及两平台合并的 26 项安装投影、Windows Host/adapter 源码及 21 项安装投影，用于来源审计、校验和离线留档；
+Host 源码及两平台合并的 27 项安装投影、Windows Host/adapter 源码及 22 项安装投影，用于来源审计、校验和离线留档；
 Hosted Package 只交付 Flutter 运行时闭包、插件、链资产、Android/Apple/Linux/Windows 原生投影、README 和完整法律声明。
-其 Dart 运行闭包精确为 17 个文件：根入口 1 个、`lib/src/api` 6 个、
+其 Dart 运行闭包精确为 18 个文件：根入口 1 个、`lib/src/api` 7 个、
 `lib/src/crypto/account_codec.dart` 1 个、`lib/src/models` 5 个和 `lib/src/platform` 4 个；
 SDK 自有旧 Dart 链、钱包、交易及 Preferences 实现已删除；仅上游 smoldot 审计快照由 `.pubignore` 排除。
 Android 原生 AAR 只存在于 GitHub 审计候选；Hosted 包明确排除该 AAR、native 测试/C++/构建
 输入，但保留根 Flutter 插件直接编译的同一 Kotlin 生产 facade 和两份 `arm64-v8a` SO。两种分发读取
-同一源码提交和同一注入后候选。Linux Hosted 精确保留 38 项：26 项安装件及 12 项插件输入，
+同一源码提交和同一注入后候选。Linux Hosted 精确保留 39 项：27 项安装件及 12 项插件输入，
 排除 Host 私有源码、测试及构建模板，不在应用中重编 Host/Core。Windows Hosted 同样精确保留
-33 项：21 项安装件及 12 项插件输入。CitizenSDK 使用 TataConsole 的 SDK 发布按钮执行
+34 项：22 项安装件及 12 项插件输入。CitizenSDK 使用 TataConsole 的 SDK 发布按钮执行
 正式发布流程；不接入公民网下载。
 
 本机 CitizenSDK 最终产物容器固定为
-`/Users/rhett/TATA/tataconsole/target/GMB/citizensdk/SDK`，工作状态容器固定为
-`/Users/rhett/TATA/tataconsole/target/.work/GMB/citizensdk/SDK`。唯一发布器只接受两者的严格
+`/Users/rhett/TATA/tataconsole/target/gmb/citizensdk`，工作状态容器固定为
+`/Users/rhett/TATA/tataconsole/work/gmb/citizensdk`。唯一发布器只接受两者的严格
 子路径，不允许把永久容器本身作为写入目标；拒绝旧路径、越界、穿越和链接。
 第 9.1 步只补发布器的 Hosted 归档验真，不修改原生构建器、控制台事务或 GitHub 流程。
 本地打包快照由准确的已提交 Git `HEAD` 导出；
@@ -382,12 +413,12 @@ Android 原生 AAR 只存在于 GitHub 审计候选；Hosted 包明确排除该 
 第 7.1 步没有运行 Linux 编译与 CTest、Dart/Flutter/Cargo 测试、Git、远程 CI、Release 或
 Hosted 上传，也没有生成任何 Linux 原生产物；只运行获准的 Node Release 来源合同测试与
 脚本语法检查，不能据此声称 Linux 运行验证通过。后续本机 Linux 验证状态只能写入
-`/Users/rhett/TATA/tataconsole/target/.work/GMB/citizensdk/SDK` 下的任务独占目录；GitHub runner 使用统一工作流
+`/Users/rhett/TATA/tataconsole/work/gmb/citizensdk` 下的任务独占目录；GitHub runner 使用统一工作流
 的 checkout 外独占目录，不照搬本机绝对路径。Linux CTest 配置必须用 `CITIZENSDK_TEST_WORK_DIR`
 显式注入对应工作区中已存在、有效 UID 所有且权限
 为 `0700` 的绝对工作根；测试不回退到 `/tmp`、当前目录或用户目录。
 
-第 7.3 步的 Linux 安装检查使用单平台 19 文件技术闭集，第 7.4 步把两者合并为 26 项唯一安装
+第 7.3 步的 Linux 安装检查原使用单平台 19 文件技术闭集；第4步加入共享 QR 图像头后，当前每平台 20 项、合并为 27 项唯一安装
 投影，重叠头和资产必须逐字节一致。C/C++ 消费者只链接同版已安装 Core/Host；Flutter 消费者
 使用候选的正式 plugin 注册与 `CitizenSdk.open()`，运行标准 Release bundle 并检查超时、退出码
 和成功标记。上述 Linux 原生执行、编译器与静态依赖身份、许可证、Flutter/Pub 缓存及 GTK/TPM
@@ -406,7 +437,7 @@ Linux 环境才完成当前开发步骤。根包源码注册不代表已正式�
 实际编译/运行；第 8.4 步登记默认 Flutter 入口、DLL 候选投影和真实公开消费者，尚未正式分发，
 详见 [Windows 平台合同](docs/WINDOWS_PLATFORM.md)。
 
-Windows Flutter 只使用已有双通道和 22 方法，连接同版已安装 Host/Core。宿主需一次声明
+Windows Flutter 只使用统一双通道和 36 方法，连接同版已安装 Host/Core/QR 图像层。宿主需一次声明
 `CITIZENSDK_APPLICATION_ID`，原样作为稳定应用数据命名空间，不是业务账户或 Windows
 身份认证；无默认值，不从文件名或展示名推导。公开类型仍只有 `CitizenSdk`，Windows
 使用默认平台和官方自动注册；缺少同版插件立即失败，不注入替代实现。宿主仍需这一项
@@ -416,6 +447,6 @@ Windows Flutter 只使用已有双通道和 22 方法，连接同版已安装 Ho
 C11/C++17 程序仅消费公开头和已安装库，检查运行时 DLL 来源、异步结果所有权、启停及
 关闭重试。两个原生消费者关闭钱包和 HWND，不触发 TPM/钱包 UI 或交易。第 8.4 步继续
 运行六项 adapter 测试和官方 Flutter Release 消费者，全部通过后才向全新输出位置同卷
-导出；已有输出不覆盖。Hosted 精确保留 21 项安装件和 12 项插件输入，Host 私有实现不
+导出；已有输出不覆盖。Hosted 精确保留 22 项安装件和 12 项插件输入，Host 私有实现不
 进入运行包。Windows/MSVC 运行时由宿主部署环境提供。这些验证沿用唯一构建入口，实际运行仍待
 统一 GitHub CI/Release，本机 macOS 检查不替代 Windows 平台证据。

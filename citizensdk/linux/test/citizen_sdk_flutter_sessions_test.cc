@@ -32,6 +32,7 @@ class FakeTransport final : public csf::NativeTransport {
                                  citizensdk_request_id_t *out) override {
     accepted.push_back(native_method);
     public_methods.push_back(request.method);
+    if (native_method == csf::Method::get_account_balances) balance_count = request.account_ids.size();
     if (fail_accept) { *out = 0; return CITIZENSDK_ERROR_NETWORK; }
     if (native_method == csf::Method::start) lifecycle = CITIZENSDK_LIFECYCLE_RUNNING;
     if (native_method == csf::Method::stop) lifecycle = CITIZENSDK_LIFECYCLE_STOPPED;
@@ -51,6 +52,17 @@ class FakeTransport final : public csf::NativeTransport {
   }
   csf::Value copy_result(csf::Method method, citizensdk_result_handle_t) override {
     ++copied_results;
+    if (method == csf::Method::get_account_balances) {
+      csf::Value::List balances;
+      for (std::size_t index = 0; index < balance_count; ++index) {
+        balances.push_back(csf::Value::list({
+            csf::Value::string("0x" + std::string(64, '0')),
+            csf::Value::list({csf::Value::string("0x" + std::string(64, '0')),
+                             csf::Value::string("1"), csf::Value::string("finalized")}),
+            csf::Value::string("1"), csf::Value::string("0"), csf::Value::string("1")}));
+      }
+      return csf::Value::list({csf::Value::list(std::move(balances))});
+    }
     if (method == csf::Method::start || method == csf::Method::stop ||
         method == csf::Method::delete_wallet_account ||
         method == csf::Method::delete_wallet ||
@@ -62,6 +74,10 @@ class FakeTransport final : public csf::NativeTransport {
     return csf::Value::list({csf::Value::integer(sequence), csf::Value::string("broadcast")});
   }
   citizensdk_lifecycle_t lifecycle_state() override { return lifecycle; }
+  csf::Value genesis_hash() override {
+    ++genesis_queries;
+    return csf::Value::string("0x" + std::string(64, '0'));
+  }
   csf::Value capability_snapshot() override {
     return csf::Value::list({csf::Value::integer(10)});
   }
@@ -79,14 +95,21 @@ class FakeTransport final : public csf::NativeTransport {
     observer(event); ++released_results;
     deferred_id = 0;
   }
-  csf::WalletCancellation present(const citizen_sdk::WalletFlowRequest &request,
+  csf::WalletCancellation present(const csf::DecodedRequest &request,
                                    citizen_sdk::WalletFlowCompletion completion) override {
     ++wallet_presented;
-    assert(request.kind == citizen_sdk::WalletFlowKind::Create ||
-           request.kind == citizen_sdk::WalletFlowKind::Import ||
-           request.kind == citizen_sdk::WalletFlowKind::AddAccounts);
-    completion({citizen_sdk::WalletFlowStatus::Completed, CITIZENSDK_OK});
+    assert(request.method == csf::Method::view_account_private_key ||
+           request.method == csf::Method::create_wallet ||
+           request.method == csf::Method::import_wallet ||
+           request.method == csf::Method::add_wallet_accounts);
+    if (defer_wallet) wallet_completion = std::move(completion);
+    else completion({citizen_sdk::WalletFlowStatus::Completed, CITIZENSDK_OK});
     return [this] { ++wallet_cancelled; };
+  }
+  csf::WalletCancellation present_qr(const csf::DecodedRequest &request, QrCompletion completion) override {
+    assert(request.method == csf::Method::qr_scan || request.method == csf::Method::sign_qr_request);
+    ++qr_presented; qr_completion = std::move(completion);
+    return [this] { ++qr_cancelled; };
   }
   void close() override {
     if (fail_close) throw citizen_sdk::Error(CITIZENSDK_ERROR_STORAGE,
@@ -95,6 +118,8 @@ class FakeTransport final : public csf::NativeTransport {
   }
   void retire() noexcept override { ++retired; }
 
+  std::size_t balance_count{};
+  int genesis_queries{};
   Observer observer;
   citizensdk_lifecycle_t lifecycle{CITIZENSDK_LIFECYCLE_CREATED};
   citizensdk_request_id_t next_id{1};
@@ -104,6 +129,9 @@ class FakeTransport final : public csf::NativeTransport {
   int copied_results{};
   int released_results{};
   int cancelled{};
+  QrCompletion qr_completion;
+  int qr_presented{};
+  int qr_cancelled{};
   int wallet_presented{};
   int wallet_cancelled{};
   int closed{};
@@ -112,6 +140,8 @@ class FakeTransport final : public csf::NativeTransport {
   bool fail_close{};
   bool fail_accept{};
   bool defer_profile{};
+  bool defer_wallet{};
+  citizen_sdk::WalletFlowCompletion wallet_completion;
 };
 
 csf::DecodedRequest request(csf::Method method, const std::string &session,
@@ -134,18 +164,144 @@ void drain_tasks(std::vector<std::function<void()>> &queue) {
 }  // namespace
 
 int main() {
+
+  {
+    // 正式 Sessions 状态机：QR-only 不进入钱包或 Core 异步请求工厂；
+    // 关闭只发取消，真正原生终态前不释放 Host，不把晚到成功变成有效响应。
+    std::vector<std::function<void()>> qr_queue;
+    auto native = std::make_shared<FakeTransport>();
+    auto qr = csf::Sessions::create(
+        [](uint32_t modules) { assert(modules == CITIZENSDK_MODULE_QR); return csf::OpenEnvironment{}; },
+        [&](std::function<void()> work) { qr_queue.push_back(std::move(work)); },
+        [native](const citizen_sdk::Config &config) {
+          assert(config.modules == CITIZENSDK_MODULE_QR); return native;
+        });
+    auto open_qr = request(csf::Method::open, {}, 0); open_qr.modules = CITIZENSDK_MODULE_QR;
+    csf::Reply opened;
+    qr->dispatch(open_qr, [&](csf::Reply value) { opened = std::move(value); });
+    const auto id = text(items(opened.value)[1]);
+    int completions = 0; bool closed = false;
+    qr->dispatch(request(csf::Method::qr_scan, id, 1), [&](csf::Reply value) {
+      ++completions; assert(!value.success && value.error_code == CITIZENSDK_ERROR_CANCELLED);
+    });
+    assert(native->qr_presented == 1 && native->wallet_presented == 0 && native->accepted.empty());
+    qr->dispatch(request(csf::Method::close, id, 2), [&](csf::Reply value) { closed = value.success; });
+    assert(native->qr_cancelled == 1 && native->closed == 0 && completions == 0 && !closed);
+    auto late = native->qr_completion;
+    late(CITIZENSDK_OK, "{}");
+    drain_tasks(qr_queue);
+    assert(completions == 1 && closed && native->closed == 1 && qr->session_count() == 0);
+    late(CITIZENSDK_OK, "{}");
+    drain_tasks(qr_queue);
+    assert(completions == 1);
+  }
+  {
+    // 原生安全签名在认证等待中 detach：只撤销公开回调，继续保活直到真实终态。
+    std::vector<std::function<void()>> qr_queue;
+    auto native = std::make_shared<FakeTransport>();
+    auto qr = csf::Sessions::create(
+        [](uint32_t) { return csf::OpenEnvironment{}; },
+        [&](std::function<void()> work) { qr_queue.push_back(std::move(work)); },
+        [native](const citizen_sdk::Config &) { return native; });
+    csf::Reply opened;
+    qr->dispatch(request(csf::Method::open, {}, 0), [&](csf::Reply value) { opened = std::move(value); });
+    const auto id = text(items(opened.value)[1]);
+    bool replied = false;
+    qr->dispatch(request(csf::Method::sign_qr_request, id, 1), [&](csf::Reply) { replied = true; });
+    qr->detach();
+    assert(native->qr_cancelled == 1 && native->retired == 0 && !replied);
+    native->qr_completion(CITIZENSDK_ERROR_CANCELLED, {});
+    drain_tasks(qr_queue);
+    assert(native->retired == 1 && !replied && qr->session_count() == 0);
+  }
+
+  {
+    // 安全查看真实协调器：无额外 profile query，完成只允许空 tuple；
+    // detach/关闭请求取消后仍等原生最终回调，绝不提前释放 transport。
+    std::vector<std::function<void()>> view_queue;
+    auto native_view = std::make_shared<FakeTransport>();
+    native_view->defer_wallet = true;
+    auto view_sessions = csf::Sessions::create(
+        [](uint32_t modules) {
+          assert(modules == CITIZENSDK_MODULE_WALLET);
+          return csf::OpenEnvironment{};
+        },
+        [&](std::function<void()> work) { view_queue.push_back(std::move(work)); },
+        [native_view](const citizen_sdk::Config &) { return native_view; });
+    csf::DecodedRequest opening;
+    opening.method = csf::Method::open; opening.modules = CITIZENSDK_MODULE_WALLET;
+    csf::Reply opened_view;
+    view_sessions->dispatch(opening, [&](csf::Reply value) { opened_view = std::move(value); });
+    assert(opened_view.success);
+    const auto view_session = text(items(opened_view.value)[1]);
+    auto viewing = request(csf::Method::view_account_private_key, view_session, 1);
+    viewing.indices.clear(); viewing.account_ids.clear(); viewing.word_count = 0;
+    int completions = 0;
+    csf::Reply viewed;
+    view_sessions->dispatch(viewing, [&](csf::Reply value) {
+      ++completions; viewed = std::move(value);
+    });
+    drain_tasks(view_queue);
+    assert(completions == 0 && native_view->wallet_presented == 1);
+    native_view->wallet_completion({citizen_sdk::WalletFlowStatus::Completed, CITIZENSDK_OK});
+    drain_tasks(view_queue);
+    assert(completions == 1 && viewed.success && items(items(viewed.value)[3]).empty());
+    assert(native_view->accepted.empty() && native_view->copied_results == 0);
+    viewing.sequence = 2;
+    view_sessions->dispatch(viewing, [&](csf::Reply value) {
+      ++completions; viewed = std::move(value);
+    });
+    view_sessions->detach();
+    assert(native_view->wallet_cancelled == 1 && native_view->retired == 0 && completions == 1);
+    native_view->wallet_completion({citizen_sdk::WalletFlowStatus::Cancelled, CITIZENSDK_ERROR_CANCELLED});
+    drain_tasks(view_queue);
+    assert(native_view->retired == 1 && view_sessions->session_count() == 0);
+  }
+  {
+    // 未 open、未 listen：验签直接访问纯 Core，环境及原生资源工厂必须均为零次。
+    int environments = 0;
+    int transports = 0;
+    auto isolated = csf::Sessions::create(
+        [&](uint32_t) { ++environments; return csf::OpenEnvironment{}; },
+        [](std::function<void()> work) { work(); },
+        [&](const citizen_sdk::Config &) {
+          ++transports; return std::make_shared<FakeTransport>();
+        });
+    auto verification = request(csf::Method::verify_signature, "", 0);
+    constexpr uint8_t public_key[] = {
+        0x2a,0xfb,0xa9,0x27,0x8e,0x30,0xcc,0xf6,0xa6,0xce,0xb3,0xa8,0xb6,0xe3,0x36,0xb7,
+        0x00,0x68,0xf0,0x45,0xc6,0x66,0xf2,0xe7,0xf4,0xf9,0xcc,0x5f,0x47,0xdb,0x89,0x72};
+    for (std::size_t i = 0; i < sizeof(public_key); ++i)
+      verification.account_id.bytes[i] = public_key[i];
+    verification.signature.resize(64);
+    verification.signature.back() = 0x80;  // 编码有效但不匹配该账户的签名。
+    csf::Reply verified;
+    isolated->dispatch(verification, [&](csf::Reply value) { verified = std::move(value); });
+    assert(verified.success && items(verified.value).size() == 2);
+    assert(std::get<int64_t>(items(verified.value)[0].data) == 1);
+    assert(!std::get<bool>(items(verified.value)[1].data));
+    verification.signature.resize(63);
+    isolated->dispatch(verification, [&](csf::Reply value) { verified = std::move(value); });
+    assert(!verified.success && verified.error_code == CITIZENSDK_ERROR_INVALID_ARGUMENT);
+    assert(std::holds_alternative<std::monostate>(items(verified.value)[1].data));
+    assert(std::holds_alternative<std::monostate>(items(verified.value)[2].data));
+    assert(environments == 0 && transports == 0 && isolated->session_count() == 0);
+  }
   std::vector<std::function<void()>> queue;
   auto native = std::make_shared<FakeTransport>();
+  uint32_t received_modules = 0;
   auto sessions = csf::Sessions::create(
-      [] { return csf::OpenEnvironment{}; },
+      [&](uint32_t modules) { received_modules = modules; return csf::OpenEnvironment{}; },
       [&](std::function<void()> work) { queue.push_back(std::move(work)); },
-      [&](const citizen_sdk::Config &) { return native; });
+      [&](const citizen_sdk::Config &config) { assert(config.modules == received_modules); return native; });
 
   csf::Reply opened;
   csf::DecodedRequest open;
   open.method = csf::Method::open;
+  open.modules = CITIZENSDK_MODULE_SIGNING;
   sessions->dispatch(open, [&](csf::Reply value) { opened = std::move(value); });
   assert(opened.success && sessions->session_count() == 1);
+  assert(received_modules == CITIZENSDK_MODULE_SIGNING);
   const auto &wire = items(opened.value);
   assert(wire.size() == 4 && text(wire[1]).size() == 32);
   assert(text(items(wire[3])[0]) == "created");
@@ -157,7 +313,7 @@ int main() {
   auto invalid_initial_native = std::make_shared<FakeTransport>();
   invalid_initial_native->lifecycle = CITIZENSDK_LIFECYCLE_RUNNING;
   auto invalid_initial = csf::Sessions::create(
-      [] { return csf::OpenEnvironment{}; },
+      [](uint32_t) { return csf::OpenEnvironment{}; },
       [&](std::function<void()> work) { queue.push_back(std::move(work)); },
       [invalid_initial_native](const citizen_sdk::Config &) { return invalid_initial_native; });
   csf::Reply invalid_initial_reply;
@@ -184,7 +340,8 @@ int main() {
   // only methods which intentionally do not directly enter Core here.
   const std::vector<csf::Method> methods = {
       csf::Method::start, csf::Method::stop, csf::Method::get_capabilities,
-      csf::Method::get_finalized_head, csf::Method::get_account_balance,
+      csf::Method::get_finalized_head, csf::Method::get_genesis_hash,
+      csf::Method::get_account_balance, csf::Method::get_account_balances,
       csf::Method::get_account_nonce, csf::Method::get_fee_snapshot,
       csf::Method::get_wallet_profile, csf::Method::create_wallet,
       csf::Method::import_wallet, csf::Method::add_wallet_accounts,
@@ -203,6 +360,7 @@ int main() {
   }
   assert(replies == static_cast<int>(methods.size()));
   assert(native->wallet_presented == 3);
+  assert(native->genesis_queries == 1);
   assert(native->copied_results == native->released_results);
 
   // Event cancellation changes epoch without closing sessions. A queued old
@@ -241,7 +399,7 @@ int main() {
   auto failing_native = std::make_shared<FakeTransport>();
   failing_native->fail_close = true;
   auto retryable = csf::Sessions::create(
-      [] { return csf::OpenEnvironment{}; },
+      [](uint32_t) { return csf::OpenEnvironment{}; },
       [&](std::function<void()> work) { queue.push_back(std::move(work)); },
       [failing_native](const citizen_sdk::Config &) { return failing_native; });
   csf::Reply retry_open;
@@ -271,7 +429,7 @@ int main() {
   auto orphan_native = std::make_shared<FakeTransport>();
   orphan_native->defer_transfer = true;
   auto orphan = csf::Sessions::create(
-      [] { return csf::OpenEnvironment{}; },
+      [](uint32_t) { return csf::OpenEnvironment{}; },
       [&](std::function<void()> work) { queue.push_back(std::move(work)); },
       [orphan_native](const citizen_sdk::Config &) { return orphan_native; });
   csf::Reply orphan_open;
@@ -295,11 +453,11 @@ int main() {
   auto gate_native_b = std::make_shared<FakeTransport>();
   gate_native_a->defer_profile = true;
   auto gate_a = csf::Sessions::create(
-      [] { return csf::OpenEnvironment{}; },
+      [](uint32_t) { return csf::OpenEnvironment{}; },
       [&](std::function<void()> work) { queue.push_back(std::move(work)); },
       [gate_native_a](const citizen_sdk::Config &) { return gate_native_a; });
   auto gate_b = csf::Sessions::create(
-      [] { return csf::OpenEnvironment{}; },
+      [](uint32_t) { return csf::OpenEnvironment{}; },
       [&](std::function<void()> work) { queue.push_back(std::move(work)); },
       [gate_native_b](const citizen_sdk::Config &) { return gate_native_b; });
   csf::Reply gate_open_a, gate_open_b;

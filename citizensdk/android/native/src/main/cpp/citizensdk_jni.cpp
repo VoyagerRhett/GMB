@@ -13,6 +13,8 @@
 #include <vector>
 
 #include "citizensdk_host_bridge.hpp"
+#include "citizensdk_internal.h"
+#include "citizensdk_qr_image.h"
 
 namespace citizen::sdk::jni {
 namespace {
@@ -22,8 +24,67 @@ constexpr int32_t kOk = CITIZENSDK_OK;
 constexpr jsize kMaxWalletSecretBytes = 1024;
 constexpr jsize kMaxTransferRemarkBytes = 99;
 constexpr jsize kMaxWalletAccountIndices = 1989;
+constexpr size_t kMaxQrTextBytes = 2331;
+constexpr size_t kMaxQrReviewBytes = 1920;
+constexpr size_t kMaxQrImageBytes = 16U * 1024U * 1024U;
 std::mutex g_bridges_mutex;
 std::unordered_map<intptr_t, std::shared_ptr<CitizenSdkHostBridge>> g_bridges;
+
+// 私有显示 context 不进入公开头或普通结果编码；只在 Core 全生命周期请求结束后释放。
+struct PrivateKeyViewContext {
+  JavaVM *vm;
+  jobject owner;
+  jmethodID display;
+  jmethodID settled;
+  jmethodID authorizing;
+};
+
+class PrivateKeyViewEnv final {
+ public:
+  explicit PrivateKeyViewEnv(JavaVM *vm) : vm_(vm) {
+    const jint code = vm_->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+    if (code == JNI_EDETACHED) attached_ = vm_->AttachCurrentThread(&env, nullptr) == JNI_OK;
+    else if (code != JNI_OK) env = nullptr;
+  }
+  ~PrivateKeyViewEnv() { if (attached_) vm_->DetachCurrentThread(); }
+  JNIEnv *env = nullptr;
+ private:
+  JavaVM *vm_;
+  bool attached_ = false;
+};
+
+int32_t private_key_display(void *raw, uint64_t view_id, citizensdk_bytes_view_t bytes) {
+  auto *context = static_cast<PrivateKeyViewContext *>(raw);
+  if (bytes.len != 32 || bytes.data == nullptr) return CITIZENSDK_ERROR_INTEGRITY;
+  PrivateKeyViewEnv scope(context->vm);
+  if (scope.env == nullptr) return CITIZENSDK_ERROR_UNAVAILABLE;
+  // direct buffer 仅在同步调用期间借用 Rust 内存；JVM 立即转入 SDK 自有可擦字符数组。
+  auto buffer = scope.env->NewDirectByteBuffer(const_cast<uint8_t *>(bytes.data), 32);
+  if (buffer == nullptr) { scope.env->ExceptionClear(); return CITIZENSDK_ERROR_INTERNAL; }
+  const jint code = scope.env->CallIntMethod(context->owner, context->display,
+                                            static_cast<jlong>(view_id), buffer);
+  scope.env->DeleteLocalRef(buffer);
+  if (scope.env->ExceptionCheck()) { scope.env->ExceptionClear(); return CITIZENSDK_ERROR_INTERNAL; }
+  return code;
+}
+
+void private_key_settled(void *raw, uint64_t view_id, int32_t code) {
+  auto *context = static_cast<PrivateKeyViewContext *>(raw);
+  PrivateKeyViewEnv scope(context->vm);
+  if (scope.env == nullptr) return;
+  scope.env->CallVoidMethod(context->owner, context->settled, static_cast<jlong>(view_id), code);
+  if (scope.env->ExceptionCheck()) scope.env->ExceptionClear();
+}
+
+int32_t private_key_authorizing(void *raw, uint64_t view_id, uint64_t operation_id) {
+  auto *context = static_cast<PrivateKeyViewContext *>(raw);
+  PrivateKeyViewEnv scope(context->vm);
+  if (scope.env == nullptr) return CITIZENSDK_ERROR_UNAVAILABLE;
+  const jint code = scope.env->CallIntMethod(context->owner, context->authorizing,
+      static_cast<jlong>(view_id), static_cast<jlong>(operation_id));
+  if (scope.env->ExceptionCheck()) { scope.env->ExceptionClear(); return CITIZENSDK_ERROR_INTERNAL; }
+  return code;
+}
 
 std::shared_ptr<CitizenSdkHostBridge> bridge_from(JNIEnv *env, jlong raw) {
   const intptr_t key = static_cast<intptr_t>(raw);
@@ -353,16 +414,16 @@ bool account(JNIEnv *env, jbyteArray source, citizensdk_account_id_t *out) {
 }
 
 bool accounts(JNIEnv *env, jbyteArray source, jint count,
-              std::vector<citizensdk_account_id_t> *out) {
+              std::vector<citizensdk_account_id_t> *out, bool allow_empty = false) {
   std::vector<uint8_t> bytes;
-  if (count <= 0 || count > 1990 || !take_bytes(env, source, &bytes) ||
+  if (count < 0 || (!allow_empty && count == 0) || count > 1990 || !take_bytes(env, source, &bytes) ||
       bytes.size() != static_cast<size_t>(count) * 32) {
     throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT,
               "CitizenChain account array is invalid");
     return false;
   }
   out->resize(static_cast<size_t>(count));
-  std::memcpy(out->data(), bytes.data(), bytes.size());
+  if (!bytes.empty()) std::memcpy(out->data(), bytes.data(), bytes.size());
   return true;
 }
 
@@ -370,7 +431,7 @@ bool accounts(JNIEnv *env, jbyteArray source, jint count,
 
 jlong native_create(JNIEnv *env, jobject, jobject host_services,
                     jbyteArray manifest, jbyteArray chain_spec,
-                    jbyteArray sync_state) {
+                    jbyteArray sync_state, jint modules) {
   std::vector<uint8_t> manifest_bytes;
   std::vector<uint8_t> chain_bytes;
   std::vector<uint8_t> sync_bytes;
@@ -389,7 +450,7 @@ jlong native_create(JNIEnv *env, jobject, jobject host_services,
     throw_sdk(env, CITIZENSDK_ERROR_INTERNAL, "CitizenSDK JNI allocation failed");
     return 0;
   }
-  if (!bridge->create(env, manifest_bytes, chain_bytes, sync_bytes)) {
+  if (!bridge->create(env, manifest_bytes, chain_bytes, sync_bytes, static_cast<uint32_t>(modules))) {
     return 0;
   }
   {
@@ -465,12 +526,35 @@ jlong native_finalized_head(JNIEnv *env, jobject, jlong raw) {
       env, bridge, [](auto handle, auto *out) { return citizensdk_get_finalized_head(handle, out); });
 }
 
+jbyteArray native_genesis_hash(JNIEnv *env, jobject, jlong raw) {
+  auto bridge = bridge_from(env, raw);
+  if (bridge == nullptr) return nullptr;
+  std::vector<uint8_t> output(32);
+  const int32_t code = citizensdk_get_genesis_hash(bridge->handle(), output.data());
+  if (code != kOk) {
+    throw_sdk(env, code, "CitizenSDK genesis hash query failed");
+    return nullptr;
+  }
+  return to_byte_array(env, output);
+}
+
 jlong native_balance(JNIEnv *env, jobject, jlong raw, jbyteArray account_bytes) {
   auto bridge = bridge_from(env, raw);
   citizensdk_account_id_t value{};
   if (bridge == nullptr || !account(env, account_bytes, &value)) return 0;
   return begin_request(env, bridge, [&value](auto handle, auto *out) {
     return citizensdk_get_finalized_account_balance(handle, &value, out);
+  });
+}
+
+jlong native_balances(JNIEnv *env, jobject, jlong raw, jbyteArray account_bytes, jint count) {
+  auto bridge = bridge_from(env, raw);
+  std::vector<citizensdk_account_id_t> values;
+  if (bridge == nullptr || !accounts(env, account_bytes, count, &values, true)) return 0;
+  // 空列表也提交 Core，让模块与生命周期校验沿同一入口执行。
+  return begin_request(env, bridge, [&values](auto handle, auto *out) {
+    return citizensdk_get_finalized_account_balances(
+        handle, values.data(), static_cast<uint32_t>(values.size()), out);
   });
 }
 
@@ -495,6 +579,64 @@ jlong native_wallet_profile(JNIEnv *env, jobject, jlong raw) {
   return bridge == nullptr ? 0 : begin_request(env, bridge, [](auto handle, auto *out) {
     return citizensdk_get_wallet_profile(handle, out);
   });
+}
+
+jlongArray native_open_private_key_view(JNIEnv *env, jobject, jlong raw,
+                                       jbyteArray account_bytes, jobject owner) {
+  auto bridge = bridge_from(env, raw);
+  citizensdk_account_id_t value{};
+  if (!bridge || owner == nullptr || !account(env, account_bytes, &value)) return nullptr;
+  auto output = env->NewLongArray(3);
+  if (output == nullptr) return nullptr;
+  auto type = env->GetObjectClass(owner);
+  auto display = env->GetMethodID(type, "display", "(JLjava/nio/ByteBuffer;)I");
+  auto settled = env->GetMethodID(type, "settled", "(JI)V");
+  auto authorizing = env->GetMethodID(type, "authorizing", "(JJ)I");
+  env->DeleteLocalRef(type);
+  if (env->ExceptionCheck()) return nullptr;
+  auto context = std::unique_ptr<PrivateKeyViewContext>(new (std::nothrow) PrivateKeyViewContext{
+      bridge->vm(), env->NewGlobalRef(owner), display, settled, authorizing});
+  if (!context || context->owner == nullptr) return nullptr;
+  citizensdk_internal_private_key_view_v1_t view{};
+  view.struct_size = sizeof(view); view.abi_version = 1; view.context = context.get();
+  view.display = private_key_display; view.settled = private_key_settled;
+  view.authorizing = private_key_authorizing;
+  uint64_t view_id = 0;
+  citizensdk_request_id_t request_id = 0;
+  const int32_t code = citizensdk_internal_private_key_view_open(
+      bridge->handle(), &value, &view, &view_id, &request_id);
+  if (code != CITIZENSDK_OK) {
+    env->DeleteGlobalRef(context->owner);
+    throw_sdk(env, code, "Private key view admission failed");
+    return nullptr;
+  }
+  const jlong identities[] = {static_cast<jlong>(request_id), static_cast<jlong>(view_id),
+      static_cast<jlong>(reinterpret_cast<intptr_t>(context.release()))};
+  env->SetLongArrayRegion(output, 0, 3, identities);
+  return output;
+}
+
+void native_reveal_private_key_view(JNIEnv *env, jobject, jlong raw, jlong view_id) {
+  auto bridge = bridge_from(env, raw);
+  if (!bridge) return;
+  const int32_t code = citizensdk_internal_private_key_view_reveal(bridge->handle(), view_id);
+  if (code != CITIZENSDK_OK) throw_sdk(env, code, "Private key view reveal failed");
+}
+void native_cancel_private_key_view(JNIEnv *env, jobject, jlong raw, jlong view_id) {
+  auto bridge = bridge_from(env, raw);
+  if (!bridge) return;
+  const int32_t code = citizensdk_internal_private_key_view_cancel(bridge->handle(), view_id);
+  if (code != CITIZENSDK_OK) throw_sdk(env, code, "Private key view cancellation failed");
+}
+void native_finish_private_key_view(JNIEnv *env, jobject, jlong raw, jlong view_id) {
+  auto bridge = bridge_from(env, raw);
+  if (!bridge) return;
+  const int32_t code = citizensdk_internal_private_key_view_finish(bridge->handle(), view_id);
+  if (code != CITIZENSDK_OK) throw_sdk(env, code, "Private key view finish failed");
+}
+void native_release_private_key_view_context(JNIEnv *env, jobject, jlong raw) {
+  auto context = std::unique_ptr<PrivateKeyViewContext>(reinterpret_cast<PrivateKeyViewContext *>(raw));
+  if (context) env->DeleteGlobalRef(context->owner);
 }
 
 jlong native_set_active(JNIEnv *env, jobject, jlong raw, jbyteArray account_bytes) {
@@ -558,6 +700,37 @@ jlong native_sign(JNIEnv *env, jobject, jlong raw, jbyteArray account_bytes,
   return begin_request(env, bridge, [&value, &message](auto handle, auto *out) {
     return citizensdk_sign_wallet_payload(handle, &value, view(message), out);
   });
+}
+
+void native_validate_modules(JNIEnv *env, jclass, jint modules) {
+  const int32_t code = citizensdk_validate_modules(static_cast<uint32_t>(modules));
+  if (code != CITIZENSDK_OK) throw_sdk(env, code, "Invalid CitizenSDK modules");
+}
+
+// 验签无实例和金库依赖；JNI 只做有界公开输入复制与结果投影。
+jboolean native_verify(JNIEnv *env, jclass, jbyteArray account_bytes,
+                       jbyteArray signature_bytes, jbyteArray message_bytes) {
+  citizensdk_account_id_t value{};
+  std::vector<uint8_t> signature;
+  std::vector<uint8_t> message;
+  if (signature_bytes == nullptr || env->GetArrayLength(signature_bytes) != 64 ||
+      message_bytes == nullptr || env->GetArrayLength(message_bytes) > 16 * 1024 * 1024) {
+    throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT, "Verification input length is invalid");
+    return JNI_FALSE;
+  }
+  if (!account(env, account_bytes, &value) ||
+      !take_bytes(env, signature_bytes, &signature) || !take_bytes(env, message_bytes, &message)) return JNI_FALSE;
+  uint8_t valid = 0;
+  const int32_t code = citizensdk_verify_signature(&value, view(signature), view(message), &valid);
+  if (code != CITIZENSDK_OK) {
+    throw_sdk(env, code, "CitizenSDK signature verification failed");
+    return JNI_FALSE;
+  }
+  if (valid > 1) {
+    throw_sdk(env, CITIZENSDK_ERROR_INTEGRITY, "Invalid Core verification result");
+    return JNI_FALSE;
+  }
+  return valid == 1 ? JNI_TRUE : JNI_FALSE;
 }
 
 jlong native_transfer(JNIEnv *env, jobject, jlong raw, jbyteArray source_bytes,
@@ -771,6 +944,218 @@ void native_release_prepared(JNIEnv *env, jobject, jlong raw, jlong token) {
   }
 }
 
+template <typename Call>
+jbyteArray qr_core_bytes(JNIEnv *env,
+                         const std::shared_ptr<CitizenSdkHostBridge> &bridge,
+                         Call call, size_t prefix = 0, size_t maximum = kMaxQrTextBytes) {
+  (void)bridge;  // 保持 Host/Core 租约贯穿两次变长输出调用。
+  uint64_t required = 0;
+  int32_t code = call(nullptr, 0, &required);
+  if (code != kOk || required == 0 || required > maximum || prefix > 32) {
+    throw_sdk(env, code == kOk ? CITIZENSDK_ERROR_INTEGRITY : code,
+              "CitizenSDK QR output query failed");
+    return nullptr;
+  }
+  std::vector<uint8_t> output(prefix + static_cast<size_t>(required));
+  code = call(output.data() + prefix, required, &required);
+  if (code != kOk || prefix + required != output.size()) {
+    throw_sdk(env, code == kOk ? CITIZENSDK_ERROR_INTEGRITY : code,
+              "CitizenSDK QR output copy failed");
+    return nullptr;
+  }
+  return to_byte_array(env, output);
+}
+
+bool qr_input(JNIEnv *env, jbyteArray source, size_t maximum,
+              std::vector<uint8_t> *out, const char *message) {
+  if (source == nullptr || env->GetArrayLength(source) <= 0 ||
+      static_cast<size_t>(env->GetArrayLength(source)) > maximum ||
+      !take_bytes(env, source, out)) {
+    if (!env->ExceptionCheck())
+      throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT, message);
+    return false;
+  }
+  return true;
+}
+
+jbyteArray native_qr_parse(JNIEnv *env, jobject, jlong raw, jbyteArray text_bytes) {
+  auto bridge = bridge_from(env, raw);
+  std::vector<uint8_t> text;
+  if (!bridge ||
+      !qr_input(env, text_bytes, kMaxQrTextBytes, &text, "QR text is invalid")) return nullptr;
+  return qr_core_bytes(env, bridge,
+      [&](uint8_t *output, uint64_t capacity, uint64_t *required) {
+        return citizensdk_qr_parse(bridge->handle(), view(text), output, capacity, required);
+      }, 0, 65536);
+}
+
+jbyteArray native_qr_create_request(JNIEnv *env, jobject, jlong raw, jint action,
+                                    jbyteArray account_bytes, jbyteArray payload_bytes,
+                                    jlong ttl) {
+  auto bridge = bridge_from(env, raw);
+  citizensdk_account_id_t signer{};
+  std::vector<uint8_t> payload;
+  if (!bridge || action <= 0 || action > 0xffff || ttl <= 0 || ttl > 300 ||
+      !account(env, account_bytes, &signer) ||
+      !qr_input(env, payload_bytes, kMaxQrReviewBytes, &payload, "QR review payload is invalid")) return nullptr;
+  return qr_core_bytes(env, bridge,
+      [&](uint8_t *output, uint64_t capacity, uint64_t *required) {
+        return citizensdk_qr_create_sign_request(
+            bridge->handle(), static_cast<uint16_t>(action), &signer, view(payload),
+            static_cast<uint64_t>(ttl), output, capacity, required);
+      });
+}
+
+jlong native_review_qr_request(JNIEnv *env, jobject, jlong raw, jbyteArray text_bytes) {
+  auto bridge = bridge_from(env, raw);
+  std::vector<uint8_t> text;
+  if (!bridge || !qr_input(env, text_bytes, kMaxQrTextBytes, &text, "QR sign request is invalid")) return 0;
+  return begin_request(env, bridge, [&text](auto handle, auto *out) {
+    return citizensdk_review_qr_sign_request(handle, view(text), out);
+  });
+}
+
+jlong native_sign_qr_request(JNIEnv *env, jobject, jlong raw, jlong token) {
+  auto bridge = bridge_from(env, raw);
+  if (!bridge) return 0;
+  if (token <= 0 || !bridge->has_qr_review(static_cast<uint64_t>(token))) {
+    throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT, "QR review is not owned by this SDK");
+    return 0;
+  }
+  return begin_request(env, bridge, [token](auto handle, auto *out) {
+    return citizensdk_sign_qr_request(handle, static_cast<uint64_t>(token), out);
+  });
+}
+
+void native_release_qr_review(JNIEnv *env, jobject, jlong raw, jlong token) {
+  auto bridge = bridge_from(env, raw);
+  if (bridge && token > 0) bridge->release_qr_review(static_cast<uint64_t>(token));
+}
+
+jbyteArray native_qr_consume_response(JNIEnv *env, jobject, jlong raw, jbyteArray text_bytes) {
+  auto bridge = bridge_from(env, raw);
+  std::vector<uint8_t> text;
+  if (!bridge || !qr_input(env, text_bytes, kMaxQrTextBytes, &text, "QR sign response is invalid")) return nullptr;
+  std::vector<uint8_t> signature(64);
+  const auto code = citizensdk_qr_consume_sign_response(
+      bridge->handle(), view(text), signature.data());
+  if (code != kOk) { throw_sdk(env, code, "QR sign response was rejected"); return nullptr; }
+  return to_byte_array(env, signature);
+}
+
+jboolean native_qr_cancel_request(JNIEnv *env, jobject, jlong raw,
+                                  jbyteArray request_bytes) {
+  auto bridge = bridge_from(env, raw);
+  std::vector<uint8_t> request;
+  if (!bridge || !qr_input(env, request_bytes, 128, &request, "QR request ID is invalid")) return JNI_FALSE;
+  uint8_t cancelled = 0;
+  const auto code = citizensdk_qr_cancel_sign_request(bridge->handle(), view(request), &cancelled);
+  if (code != kOk || cancelled > 1) {
+    throw_sdk(env, code == kOk ? CITIZENSDK_ERROR_INTEGRITY : code, "QR request cancellation failed");
+    return JNI_FALSE;
+  }
+  return cancelled == 1 ? JNI_TRUE : JNI_FALSE;
+}
+
+jbyteArray native_qr_encode_account(JNIEnv *env, jobject, jlong raw,
+                                    jbyteArray account_bytes) {
+  auto bridge = bridge_from(env, raw);
+  citizensdk_account_id_t account_id{};
+  if (!bridge || !account(env, account_bytes, &account_id)) return nullptr;
+  return qr_core_bytes(env, bridge,
+      [&](uint8_t *output, uint64_t capacity, uint64_t *required) {
+        return citizensdk_qr_encode_account_id(bridge->handle(), &account_id,
+                                               output, capacity, required);
+      });
+}
+
+jbyteArray native_qr_encode_transfer(JNIEnv *env, jobject, jlong raw,
+    jbyteArray request_bytes, jlong expires, jbyteArray account_bytes,
+    jbyteArray amount_bytes, jbyteArray symbol_bytes, jbyteArray memo_bytes,
+    jbyteArray bank_bytes) {
+  auto bridge = bridge_from(env, raw);
+  citizensdk_account_id_t account_id{};
+  std::vector<uint8_t> request, amount, symbol, memo, bank;
+  if (!bridge || expires <= 0 || !account(env, account_bytes, &account_id) ||
+      !qr_input(env, request_bytes, 128, &request, "QR request ID is invalid") ||
+      !qr_input(env, amount_bytes, 64, &amount, "QR amount is invalid") ||
+      !qr_input(env, symbol_bytes, 16, &symbol, "QR symbol is invalid") ||
+      memo_bytes == nullptr || env->GetArrayLength(memo_bytes) > 256 || !take_bytes(env, memo_bytes, &memo) ||
+      !qr_input(env, bank_bytes, 32, &bank, "QR bank CID is invalid")) return nullptr;
+  return qr_core_bytes(env, bridge,
+      [&](uint8_t *output, uint64_t capacity, uint64_t *required) {
+        return citizensdk_qr_encode_user_transfer(bridge->handle(), view(request),
+            static_cast<uint64_t>(expires), &account_id, view(amount), view(symbol),
+            view(memo), view(bank), output, capacity, required);
+      });
+}
+
+citizensdk_error_code_t qr_image_error(citizensdk_qr_image_status_t status) {
+  switch (status) {
+    case CITIZENSDK_QR_IMAGE_INVALID_ARGUMENT:
+    case CITIZENSDK_QR_IMAGE_CAPACITY_EXCEEDED: return CITIZENSDK_ERROR_INVALID_ARGUMENT;
+    case CITIZENSDK_QR_IMAGE_NO_CODE: return CITIZENSDK_ERROR_NOT_FOUND;
+    case CITIZENSDK_QR_IMAGE_MULTIPLE_CODES: return CITIZENSDK_ERROR_CONFLICT;
+    case CITIZENSDK_QR_IMAGE_INVALID_UTF8: return CITIZENSDK_ERROR_DECODE;
+    default: return CITIZENSDK_ERROR_INTERNAL;
+  }
+}
+
+jbyteArray native_qr_decode_luminance(JNIEnv *env, jobject, jlong raw,
+    jbyteArray data_bytes, jint width, jint height, jint stride) {
+  auto bridge = bridge_from(env, raw);
+  std::vector<uint8_t> data;
+  if (!bridge || width <= 0 || height <= 0 || stride <= 0 ||
+      data_bytes == nullptr || env->GetArrayLength(data_bytes) <= 0 ||
+      env->GetArrayLength(data_bytes) > static_cast<jsize>(kMaxQrImageBytes) ||
+      !take_bytes(env, data_bytes, &data)) return nullptr;
+  size_t required = 0;
+  auto status = citizensdk_qr_image_decode_luminance(data.data(), data.size(),
+      static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(stride),
+      nullptr, 0, &required);
+  if (status != CITIZENSDK_QR_IMAGE_BUFFER_TOO_SMALL || required == 0 || required > kMaxQrTextBytes) {
+    throw_sdk(env, qr_image_error(status), "ZXing-C++ QR decode failed"); return nullptr;
+  }
+  std::vector<uint8_t> output(required);
+  status = citizensdk_qr_image_decode_luminance(data.data(), data.size(),
+      static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(stride),
+      output.data(), output.size(), &required);
+  if (status != CITIZENSDK_QR_IMAGE_OK) {
+    throw_sdk(env, qr_image_error(status), "ZXing-C++ QR decode failed"); return nullptr;
+  }
+  return to_byte_array(env, output);
+}
+
+jbyteArray native_qr_encode_image(JNIEnv *env, jobject, jlong raw,
+                                  jbyteArray text_bytes, jint scale) {
+  auto bridge = bridge_from(env, raw);
+  std::vector<uint8_t> text;
+  if (!bridge || scale < 1 || scale > 16 ||
+      !qr_input(env, text_bytes, kMaxQrTextBytes, &text, "QR text is invalid")) {
+    if (!env->ExceptionCheck() && (scale < 1 || scale > 16))
+      throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT, "QR scale must be 1..16");
+    return nullptr;
+  }
+  uint32_t width = 0, height = 0;
+  size_t required = 0;
+  auto status = citizensdk_qr_image_encode_text(text.data(), text.size(),
+      static_cast<uint32_t>(scale), nullptr, 0, &width, &height, &required);
+  if (status != CITIZENSDK_QR_IMAGE_BUFFER_TOO_SMALL || required == 0 || required > kMaxQrImageBytes) {
+    throw_sdk(env, qr_image_error(status), "ZXing-C++ QR encode failed"); return nullptr;
+  }
+  std::vector<uint8_t> output(required + 8);
+  for (uint32_t index = 0; index < 4; ++index) {
+    output[index] = static_cast<uint8_t>(width >> (index * 8));
+    output[index + 4] = static_cast<uint8_t>(height >> (index * 8));
+  }
+  status = citizensdk_qr_image_encode_text(text.data(), text.size(),
+      static_cast<uint32_t>(scale), output.data() + 8, required, &width, &height, &required);
+  if (status != CITIZENSDK_QR_IMAGE_OK) {
+    throw_sdk(env, qr_image_error(status), "ZXing-C++ QR encode failed"); return nullptr;
+  }
+  return to_byte_array(env, output);
+}
+
 void native_destroy(JNIEnv *env, jobject, jlong raw) {
   auto bridge = bridge_from(env, raw);
   if (bridge == nullptr || !bridge->destroy(env)) return;
@@ -788,8 +1173,10 @@ void native_complete_unwrap(JNIEnv *env, jclass, jlong raw,
 }
 
 const JNINativeMethod kMethods[] = {
+    {const_cast<char *>("validateModules"), const_cast<char *>("(I)V"), reinterpret_cast<void *>(native_validate_modules)},
+    {const_cast<char *>("verifySignature"), const_cast<char *>("([B[B[B)Z"), reinterpret_cast<void *>(native_verify)},
     {const_cast<char *>("nativeCreate"),
-     const_cast<char *>("(Lorg/citizen/sdk/internal/CitizenSdkHostServices;[B[B[B)J"),
+     const_cast<char *>("(Lorg/citizen/sdk/internal/CitizenSdkHostServices;[B[B[BI)J"),
      reinterpret_cast<void *>(native_create)},
     {const_cast<char *>("nativeBind"), const_cast<char *>("(J)V"), reinterpret_cast<void *>(native_bind)},
     {const_cast<char *>("nativeLifecycle"), const_cast<char *>("(J)I"), reinterpret_cast<void *>(native_lifecycle)},
@@ -799,16 +1186,34 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char *>("nativeStop"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_stop)},
     {const_cast<char *>("nativeCancel"), const_cast<char *>("(JJ)Z"), reinterpret_cast<void *>(native_cancel)},
     {const_cast<char *>("nativeGetFinalizedHead"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_finalized_head)},
+    {const_cast<char *>("nativeGetGenesisHash"), const_cast<char *>("(J)[B"), reinterpret_cast<void *>(native_genesis_hash)},
     {const_cast<char *>("nativeGetAccountBalance"), const_cast<char *>("(J[B)J"), reinterpret_cast<void *>(native_balance)},
+    {const_cast<char *>("nativeGetAccountBalances"), const_cast<char *>("(J[BI)J"), reinterpret_cast<void *>(native_balances)},
     {const_cast<char *>("nativeGetAccountNonce"), const_cast<char *>("(J[B)J"), reinterpret_cast<void *>(native_nonce)},
     {const_cast<char *>("nativeGetFeeSnapshot"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_fee)},
     {const_cast<char *>("nativeGetWalletProfile"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_wallet_profile)},
+    {const_cast<char *>("nativeOpenPrivateKeyView"), const_cast<char *>("(J[BLorg/citizen/sdk/ui/CitizenSdkPrivateKeyDisplayBuffer;)[J"), reinterpret_cast<void *>(native_open_private_key_view)},
+    {const_cast<char *>("nativeRevealPrivateKeyView"), const_cast<char *>("(JJ)V"), reinterpret_cast<void *>(native_reveal_private_key_view)},
+    {const_cast<char *>("nativeCancelPrivateKeyView"), const_cast<char *>("(JJ)V"), reinterpret_cast<void *>(native_cancel_private_key_view)},
+    {const_cast<char *>("nativeFinishPrivateKeyView"), const_cast<char *>("(JJ)V"), reinterpret_cast<void *>(native_finish_private_key_view)},
+    {const_cast<char *>("nativeReleasePrivateKeyViewContext"), const_cast<char *>("(J)V"), reinterpret_cast<void *>(native_release_private_key_view_context)},
     {const_cast<char *>("nativeSetActiveWalletAccount"), const_cast<char *>("(J[B)J"), reinterpret_cast<void *>(native_set_active)},
     {const_cast<char *>("nativeRenameWalletAccount"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_rename)},
     {const_cast<char *>("nativeDeleteWalletAccount"), const_cast<char *>("(J[B)J"), reinterpret_cast<void *>(native_delete_account)},
     {const_cast<char *>("nativeDeleteWallet"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_delete_wallet)},
     {const_cast<char *>("nativeReconcileWalletCleanup"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_reconcile)},
     {const_cast<char *>("nativeSignWalletPayload"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_sign)},
+    {const_cast<char *>("nativeQrParse"), const_cast<char *>("(J[B)[B"), reinterpret_cast<void *>(native_qr_parse)},
+    {const_cast<char *>("nativeQrCreateSignRequest"), const_cast<char *>("(JI[B[BJ)[B"), reinterpret_cast<void *>(native_qr_create_request)},
+    {const_cast<char *>("nativeReviewQrSignRequest"), const_cast<char *>("(J[B)J"), reinterpret_cast<void *>(native_review_qr_request)},
+    {const_cast<char *>("nativeSignQrRequest"), const_cast<char *>("(JJ)J"), reinterpret_cast<void *>(native_sign_qr_request)},
+    {const_cast<char *>("nativeReleaseQrReview"), const_cast<char *>("(JJ)V"), reinterpret_cast<void *>(native_release_qr_review)},
+    {const_cast<char *>("nativeQrConsumeSignResponse"), const_cast<char *>("(J[B)[B"), reinterpret_cast<void *>(native_qr_consume_response)},
+    {const_cast<char *>("nativeQrCancelSignRequest"), const_cast<char *>("(J[B)Z"), reinterpret_cast<void *>(native_qr_cancel_request)},
+    {const_cast<char *>("nativeQrEncodeAccountId"), const_cast<char *>("(J[B)[B"), reinterpret_cast<void *>(native_qr_encode_account)},
+    {const_cast<char *>("nativeQrEncodeUserTransfer"), const_cast<char *>("(J[BJ[B[B[B[B[B)[B"), reinterpret_cast<void *>(native_qr_encode_transfer)},
+    {const_cast<char *>("nativeQrDecodeLuminance"), const_cast<char *>("(J[BIII)[B"), reinterpret_cast<void *>(native_qr_decode_luminance)},
+    {const_cast<char *>("nativeQrEncode"), const_cast<char *>("(J[BI)[B"), reinterpret_cast<void *>(native_qr_encode_image)},
     {const_cast<char *>("nativeTransferWithRemark"), const_cast<char *>("(J[B[BJJ[B)J"), reinterpret_cast<void *>(native_transfer)},
     {const_cast<char *>("nativeInitializeFinalizedHistory"), const_cast<char *>("(J[BI)J"), reinterpret_cast<void *>(native_history_initialize)},
     {const_cast<char *>("nativeSyncFinalizedHistory"), const_cast<char *>("(J[BI)J"), reinterpret_cast<void *>(native_history_sync)},
@@ -946,10 +1351,20 @@ void write_execution(WireWriter *writer,
   }
 }
 
+// 单项与批量只共享公开余额结构的编码，不在 JNI 计算或查询链状态。
+void write_balance(WireWriter *writer, const citizensdk_account_balance_info_t &value) {
+  write_block(writer, value.block);
+  writer->fixed(value.account_id.bytes, 32);
+  writer->u64(value.free_fen.low); writer->u64(value.free_fen.high);
+  writer->u64(value.reserved_fen.low); writer->u64(value.reserved_fen.high);
+  writer->u64(value.total_fen.low); writer->u64(value.total_fen.high);
+}
+
 bool encode_result(citizensdk_result_handle_t result, uint64_t prepared_token,
                    WireWriter *writer,
-                   citizensdk_prepared_wallet_handle_t *prepared) {
+                   citizensdk_prepared_wallet_handle_t *prepared, bool *qr_review) {
   *prepared = 0;
+  *qr_review = false;
   auto info = info_value<citizensdk_result_info_t>();
   if (citizensdk_result_get_info(result, &info) != kOk) {
     write_internal_decode_failure(writer);
@@ -979,12 +1394,17 @@ bool encode_result(citizensdk_result_handle_t result, uint64_t prepared_token,
     case CITIZENSDK_RESULT_ACCOUNT_BALANCE: {
       auto value = info_value<citizensdk_account_balance_info_t>();
       valid = citizensdk_result_get_account_balance(result, &value) == kOk;
-      if (valid) {
-        write_block(&payload, value.block);
-        payload.fixed(value.account_id.bytes, 32);
-        payload.u64(value.free_fen.low); payload.u64(value.free_fen.high);
-        payload.u64(value.reserved_fen.low); payload.u64(value.reserved_fen.high);
-        payload.u64(value.total_fen.low); payload.u64(value.total_fen.high);
+      if (valid) write_balance(&payload, value);
+      break;
+    }
+    case CITIZENSDK_RESULT_ACCOUNT_BALANCES: {
+      uint32_t count = 0;
+      valid = citizensdk_result_get_account_balance_count(result, &count) == kOk && count <= 1990;
+      if (valid) payload.u32(count);
+      for (uint32_t index = 0; valid && index < count; ++index) {
+        auto value = info_value<citizensdk_account_balance_info_t>();
+        valid = citizensdk_result_get_account_balance_at(result, index, &value) == kOk;
+        if (valid) write_balance(&payload, value);
       }
       break;
     }
@@ -1040,6 +1460,19 @@ bool encode_result(citizensdk_result_handle_t result, uint64_t prepared_token,
     case CITIZENSDK_RESULT_TRANSACTION_HISTORY:
       valid = write_history(result, &payload);
       break;
+    case CITIZENSDK_RESULT_QR_REVIEW:
+    case CITIZENSDK_RESULT_QR_SIGNED: {
+      uint64_t required = 0;
+      valid = citizensdk_result_copy_qr(result, nullptr, 0, &required) == kOk && required > 0 && required <= 65536;
+      std::vector<uint8_t> json(valid ? static_cast<size_t>(required) : 0);
+      if (valid) valid = citizensdk_result_copy_qr(result, json.data(), required, &required) == kOk && required == json.size();
+      if (valid && info.kind == CITIZENSDK_RESULT_QR_REVIEW) {
+        valid = result > 0 && result <= static_cast<uint64_t>(INT64_MAX);
+        if (valid) payload.u64(result);
+      }
+      if (valid) payload.text(json);
+      break;
+    }
     default:
       valid = false;
       break;
@@ -1053,6 +1486,7 @@ bool encode_result(citizensdk_result_handle_t result, uint64_t prepared_token,
   writer->u32(info.kind);
   writer->text(message);
   writer->fixed(payload.data().data(), payload.data().size());
+  *qr_review = info.kind == CITIZENSDK_RESULT_QR_REVIEW;
   return true;
 }
 

@@ -80,6 +80,16 @@ int main() {
   operations.finish(7);
   assert(operations.empty());
 
+  // request 与 host operation 使用独立身份；错身份或另一认证的完成
+  // 不能消耗当前认证租约，取消后的晚完成只退休它自身的真实操作。
+  assert(operations.accept(71) && operations.accept(72));
+  operations.finish(9);
+  operations.finish(72);
+  assert(!operations.empty());
+  assert(!operations.accept(71));
+  operations.finish(71);
+  assert(operations.empty());
+
   RequestRouter router;
   int completions = 0;
   citizensdk_result_handle_t delivered = 0;

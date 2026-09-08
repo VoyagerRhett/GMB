@@ -1,4 +1,6 @@
 #include "citizen_sdk_wallet_flow.hpp"
+#include "citizen_sdk_qr_flow.hpp"
+#include "citizensdk_internal.h"
 
 #include <algorithm>
 #include <chrono>
@@ -118,11 +120,26 @@ void WalletFlow::start() {
       [weak] { if (const auto flow = weak.lock()) flow->action(); },
       [weak] { if (const auto flow = weak.lock()) flow->cancel(); });
   window_->show();
+  if (request_.account_id) begin_private_key_view();
 }
 
 void WalletFlow::action() {
   if (finished_.load()) return;
   try {
+    if (request_.account_id) {
+      if (private_view_displayed_) {
+        end_private_key_view(false, CITIZENSDK_OK);
+        return;
+      }
+      if (private_view_revealed_) return;
+      private_view_revealed_ = true;
+      window_->set_busy("正在进行设备认证，请勿离开安全查看窗口…");
+      uint64_t view_id = 0;
+      { std::lock_guard<std::mutex> guard(view_lock_); view_id = private_view_id_; }
+      const auto code = citizensdk_internal_private_key_view_reveal(host_->sdk(), view_id);
+      if (code != CITIZENSDK_OK) end_private_key_view(true, code);
+      return;
+    }
     if (request_.kind == CITIZENSDK_WALLET_FLOW_CREATE) {
       citizensdk_prepared_wallet_handle_t prepared = 0;
       {
@@ -140,6 +157,195 @@ void WalletFlow::action() {
     show_error(CITIZENSDK_ERROR_INTERNAL,
                "CitizenSDK wallet interface failed");
   }
+}
+
+void WalletFlow::begin_private_key_view() {
+  const auto self = shared_from_this();
+  citizensdk_internal_private_key_view_v1_t view{};
+  view.struct_size = sizeof(view); view.abi_version = 1;
+  view.context = this;
+  view.display = display_private_key;
+  view.settled = private_key_settled;
+  view.authorizing = private_key_authorizing;
+  uint64_t view_id = 0;
+  citizensdk_request_id_t request = 0;
+  operation_in_flight_.store(true);
+  const auto code = host_->submit_private(
+      [&](citizensdk_request_id_t *out) {
+        return citizensdk_internal_private_key_view_open(
+            host_->sdk(), &*request_.account_id, &view, &view_id, out);
+      },
+      [self](citizensdk_result_handle_t result) noexcept {
+        self->receive_private_key_terminal(result);
+      }, &request);
+  {
+    std::lock_guard<std::mutex> guard(view_lock_);
+    if (private_view_id_ != 0 && private_view_id_ != view_id) std::terminate();
+    private_view_id_ = view_id;
+  }
+  if (code == CITIZENSDK_OK && view_id != 0 && request != 0) return;
+  if (request == 0) {
+    operation_in_flight_.store(false);
+    throw HostError(code == CITIZENSDK_OK ? CITIZENSDK_ERROR_INTEGRITY : code,
+                    "CitizenSDK private-key view was not accepted");
+  }
+  // 接纳之后即使路由返回错误也不能释放 context；清屏确认后等待真实终态。
+  end_private_key_view(true, code);
+}
+
+int32_t WalletFlow::display_private_key(
+    void *context, uint64_t view_id, citizensdk_bytes_view_t value) noexcept {
+  auto *self = static_cast<WalletFlow *>(context);
+  if (self == nullptr || view_id == 0 || value.data == nullptr || value.len != 32)
+    return CITIZENSDK_ERROR_INTEGRITY;
+  try {
+    std::lock_guard<std::mutex> guard(self->view_lock_);
+    if (self->private_view_closed_ || self->cancel_requested_.load())
+      return CITIZENSDK_ERROR_CANCELLED;
+    if (self->private_view_id_ != 0 && self->private_view_id_ != view_id)
+      return CITIZENSDK_ERROR_INVALID_HANDLE;
+    if (self->private_display_accepted_) return CITIZENSDK_ERROR_INVALID_STATE;
+    self->private_view_id_ = view_id;
+    // 借用只在此短锁内复制，不派发 UI、不等待 UI、也不反调 Core。
+    self->private_key_ = SensitiveBuffer(value.data, 32);
+    self->private_display_accepted_ = true;
+    return CITIZENSDK_OK;
+  } catch (...) { return map_exception(); }
+}
+
+int32_t WalletFlow::private_key_authorizing(
+    void *context, uint64_t view_id, uint64_t host_operation_id) noexcept {
+  auto *self = static_cast<WalletFlow *>(context);
+  if (self == nullptr || view_id == 0 || host_operation_id == 0)
+    return CITIZENSDK_ERROR_INTEGRITY;
+  try {
+    std::lock_guard<std::mutex> guard(self->view_lock_);
+    if (self->private_view_closed_ || self->cancel_requested_.load())
+      return CITIZENSDK_ERROR_CANCELLED;
+    if ((self->private_view_id_ != 0 && self->private_view_id_ != view_id) ||
+        self->private_host_operation_id_ != 0 || !self->window_ || !self->host_)
+      return CITIZENSDK_ERROR_INTEGRITY;
+    self->private_view_id_ = view_id;
+    self->private_host_operation_id_ = host_operation_id;
+    return self->window_->authorize_private_key_view(
+        self->host_->authentication_owner(), host_operation_id)
+        ? CITIZENSDK_OK : CITIZENSDK_ERROR_CANCELLED;
+  } catch (...) { return map_exception(); }
+}
+
+void WalletFlow::private_key_settled(
+    void *context, uint64_t view_id, int32_t error) noexcept {
+  auto *self = static_cast<WalletFlow *>(context);
+  if (self == nullptr) std::terminate();
+  self->receive_private_key_settled(view_id, error);
+}
+
+void WalletFlow::receive_private_key_settled(
+    uint64_t view_id, citizensdk_error_code_t error) noexcept {
+  try {
+    const auto self = shared_from_this();
+    {
+      std::lock_guard<std::mutex> guard(view_lock_);
+      if (private_view_id_ != 0 && private_view_id_ != view_id) std::terminate();
+      private_view_id_ = view_id;
+    }
+    if (!window_->invoke([self, error] {
+          if (self->finished_.load()) return;
+          self->window_->finish_private_key_authentication();
+          SensitiveBuffer secret;
+          bool closed = false;
+          {
+            std::lock_guard<std::mutex> guard(self->view_lock_);
+            closed = self->private_view_closed_ || self->cancel_requested_.load();
+            secret = std::move(self->private_key_);
+          }
+          if (closed || error != CITIZENSDK_OK) {
+            secret.clear();
+            self->end_private_key_view(true, error);
+            return;
+          }
+          try {
+            self->window_->show_private_key(secret);
+            secret.clear();
+            self->private_view_displayed_ = true;
+          } catch (...) {
+            secret.clear();
+            self->end_private_key_view(true, map_exception());
+          }
+        })) {
+      finish(CITIZENSDK_WALLET_FLOW_FAILED, CITIZENSDK_ERROR_UNAVAILABLE);
+    }
+  } catch (...) {
+    finish(CITIZENSDK_WALLET_FLOW_FAILED, CITIZENSDK_ERROR_INTERNAL);
+  }
+}
+
+uint64_t WalletFlow::revoke_private_key_display() noexcept {
+  std::lock_guard<std::mutex> guard(view_lock_);
+  private_view_closed_ = true;
+  if (window_) window_->revoke_private_key_authorization();
+  private_key_.clear();
+  return private_view_id_;
+}
+
+void WalletFlow::end_private_key_view(
+    bool cancelled, citizensdk_error_code_t error) noexcept {
+  if (!window_ || !window_->on_ui_thread()) std::terminate();
+  if (cancelled) cancel_requested_.store(true);
+  const uint64_t view_id = revoke_private_key_display();
+  // 先清原生控件与自管缓冲，再向 Core 确认；窗口对象保留给最终回调调度。
+  window_->clear_secrets();
+  window_->destroy();
+  if (view_id == 0) {
+    if (operation_in_flight_.load()) std::terminate();
+    finish(CITIZENSDK_WALLET_FLOW_FAILED, error);
+    return;
+  }
+  if (cancelled)
+    (void)citizensdk_internal_private_key_view_cancel(host_->sdk(), view_id);
+  const auto code = citizensdk_internal_private_key_view_finish(host_->sdk(), view_id);
+  if (code == CITIZENSDK_OK || code == CITIZENSDK_ERROR_INVALID_HANDLE) return;
+  if (private_finish_supervised_.exchange(true)) return;
+  // 不能丢弃尚未接受的清屏确认；只监督短控制重试，不伪造请求完成。
+  const auto self = shared_from_this();
+  try {
+    std::thread([self, view_id]() noexcept {
+      auto delay = std::chrono::milliseconds(10);
+      for (;;) {
+        if (!self->operation_in_flight_.load()) return;
+        const auto retry = citizensdk_internal_private_key_view_finish(self->host_->sdk(), view_id);
+        if (retry == CITIZENSDK_OK || retry == CITIZENSDK_ERROR_INVALID_HANDLE) return;
+        try { std::this_thread::sleep_for(delay); } catch (...) {}
+        delay = std::min(delay * 2, std::chrono::milliseconds(5000));
+      }
+    }).detach();
+  } catch (...) { std::terminate(); }
+}
+
+void WalletFlow::receive_private_key_terminal(
+    citizensdk_result_handle_t result) noexcept {
+  ResultLease owner(result);
+  citizensdk_error_code_t code = CITIZENSDK_ERROR_INTERNAL;
+  try {
+    code = inspect_result(result).code;
+    if (code == CITIZENSDK_OK) {
+      citizensdk_result_info_t info{};
+      info.struct_size = sizeof(info); info.abi_version = 1;
+      if (citizensdk_result_get_info(result, &info) != CITIZENSDK_OK ||
+          info.kind != CITIZENSDK_RESULT_EMPTY) code = CITIZENSDK_ERROR_INTEGRITY;
+    }
+  } catch (...) { code = map_exception(); }
+  if (owner.release() != CITIZENSDK_OK) code = CITIZENSDK_ERROR_INTEGRITY;
+  {
+    std::lock_guard<std::mutex> guard(view_lock_);
+    private_view_closed_ = true;
+    private_key_.clear();
+    private_view_id_ = 0;
+  }
+  operation_in_flight_.store(false);
+  finish(code == CITIZENSDK_OK ? CITIZENSDK_WALLET_FLOW_COMPLETED
+         : code == CITIZENSDK_ERROR_CANCELLED ? CITIZENSDK_WALLET_FLOW_CANCELLED
+                                             : CITIZENSDK_WALLET_FLOW_FAILED, code);
 }
 
 void WalletFlow::begin_prepare() {
@@ -525,9 +731,14 @@ void WalletFlow::cancel() noexcept {
   try {
     if (finished_.load()) return;
     cancel_requested_.store(true);
+    if (request_.account_id) (void)revoke_private_key_display();
     const auto self = shared_from_this();
     if (!window_->invoke([self] {
     if (self->finished_.load()) return;
+    if (self->request_.account_id) {
+      self->end_private_key_view(true, CITIZENSDK_ERROR_CANCELLED);
+      return;
+    }
     self->window_->clear_secrets();
     citizensdk_prepared_wallet_handle_t prepared = 0;
     {
@@ -699,6 +910,10 @@ void WalletFlow::finish(citizensdk_wallet_flow_status_t status,
     }
     return;
   }
+  if (request_.account_id && operation_in_flight_.load()) {
+    end_private_key_view(true, code == CITIZENSDK_OK ? CITIZENSDK_ERROR_CANCELLED : code);
+    return;
+  }
   if (finished_.exchange(true)) return;
   if (window_) {
     try { window_->clear_secrets(); window_->destroy(); } catch (...) {}
@@ -711,15 +926,28 @@ void WalletFlow::finish(citizensdk_wallet_flow_status_t status,
   try { completion_(context_, &result); } catch (...) {}
 }
 
-citizensdk_error_code_t present_wallet_flow(
+citizensdk_wallet_flow_handle_t reserve_wallet_flow_handle() {
+  std::lock_guard<std::mutex> guard(flows_lock);
+  require(!flow_identity_exhausted, CITIZENSDK_ERROR_UNAVAILABLE, "UI 句柄已耗尽");
+  const auto handle = next_flow;
+  if (next_flow == std::numeric_limits<citizensdk_wallet_flow_handle_t>::max())
+    flow_identity_exhausted = true;
+  else ++next_flow;
+  return handle;
+}
+
+static citizensdk_error_code_t register_wallet_flow(
     const std::shared_ptr<HostBridge> &host,
-    const citizensdk_wallet_flow_request_v1_t &request, void *context,
+    const ValidatedWalletRequest &validated, void *context,
     citizensdk_wallet_flow_completion_v1_t completion,
     citizensdk_wallet_flow_handle_t *out_handle) {
   if (!host || completion == nullptr || out_handle == nullptr) {
     return CITIZENSDK_ERROR_INVALID_ARGUMENT;
   }
   *out_handle = 0;
+  // 独立签名也拥有金库，但不得因此开放未启用的钱包管理界面。
+  if ((host->modules() & CITIZENSDK_MODULE_WALLET) == 0)
+    return CITIZENSDK_ERROR_UNSUPPORTED;
   if (host->public_sdk() == 0) return CITIZENSDK_ERROR_NOT_READY;
   const auto vault = host->vault_availability();
   if (vault == CITIZENSDK_HOST_VAULT_UNSUPPORTED) {
@@ -730,29 +958,11 @@ citizensdk_error_code_t present_wallet_flow(
   }
   uint64_t token = 0;
   try {
-    const ValidatedWalletRequest validated = validate_wallet_request(request);
     token = host->reserve_wallet_flow();
-    citizensdk_wallet_flow_handle_t handle = 0;
+    const auto handle = reserve_wallet_flow_handle();
     std::shared_ptr<WalletFlow> flow;
     {
       std::lock_guard<std::mutex> guard(flows_lock);
-      if (flow_identity_exhausted) {
-        host->finish_wallet_flow(token);
-        token = 0;
-        return CITIZENSDK_ERROR_UNAVAILABLE;
-      }
-      handle = next_flow;
-      if (next_flow ==
-          std::numeric_limits<citizensdk_wallet_flow_handle_t>::max()) {
-        flow_identity_exhausted = true;
-      } else {
-        ++next_flow;
-      }
-      if (flows.count(handle) != 0) {
-        host->finish_wallet_flow(token);
-        token = 0;
-        return CITIZENSDK_ERROR_UNAVAILABLE;
-      }
       auto terminal = [](citizensdk_wallet_flow_handle_t completed) {
         std::lock_guard<std::mutex> lock(flows_lock);
         flows.erase(completed);
@@ -778,6 +988,28 @@ citizensdk_error_code_t present_wallet_flow(
   }
 }
 
+citizensdk_error_code_t present_wallet_flow(
+    const std::shared_ptr<HostBridge> &host,
+    const citizensdk_wallet_flow_request_v1_t &request, void *context,
+    citizensdk_wallet_flow_completion_v1_t completion,
+    citizensdk_wallet_flow_handle_t *out_handle) {
+  if (out_handle != nullptr) *out_handle = 0;
+  try {
+    return register_wallet_flow(host, validate_wallet_request(request), context,
+                                completion, out_handle);
+  } catch (...) { return map_exception(); }
+}
+
+citizensdk_error_code_t view_account_private_key(
+    const std::shared_ptr<HostBridge> &host,
+    const citizensdk_account_id_t &account_id, void *context,
+    citizensdk_wallet_flow_completion_v1_t completion,
+    citizensdk_wallet_flow_handle_t *out_handle) {
+  ValidatedWalletRequest request;
+  request.account_id = account_id;
+  return register_wallet_flow(host, request, context, completion, out_handle);
+}
+
 citizensdk_error_code_t cancel_wallet_flow(
     const std::shared_ptr<HostBridge> &host,
     citizensdk_wallet_flow_handle_t handle) noexcept {
@@ -786,9 +1018,9 @@ citizensdk_error_code_t cancel_wallet_flow(
     {
       std::lock_guard<std::mutex> guard(flows_lock);
       const auto found = flows.find(handle);
-      if (found == flows.end()) return CITIZENSDK_ERROR_INVALID_HANDLE;
-      flow = found->second;
+      if (found != flows.end()) flow = found->second;
     }
+    if (!flow) return cancel_qr_flow(host, handle);
     if (!flow->belongs_to(host)) return CITIZENSDK_ERROR_INVALID_HANDLE;
     flow->cancel();
     return CITIZENSDK_OK;

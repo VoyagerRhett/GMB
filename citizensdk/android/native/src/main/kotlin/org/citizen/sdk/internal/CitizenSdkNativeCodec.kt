@@ -35,15 +35,7 @@ internal object CitizenSdkNativeCodec {
         val result = when (kind) {
             0L -> CitizenSdkNativeResult.Empty
             1L -> CitizenSdkNativeResult.Block(reader.block())
-            9L -> CitizenSdkNativeResult.Balance(
-                CitizenAccountBalance(
-                    reader.block(),
-                    reader.fixed(32),
-                    reader.u128(),
-                    reader.u128(),
-                    reader.u128(),
-                ),
-            )
+            9L -> CitizenSdkNativeResult.Balance(reader.balance())
             10L -> CitizenSdkNativeResult.Nonce(
                 CitizenAccountNonce(reader.block(), reader.fixed(32), reader.u64Text()),
             )
@@ -56,6 +48,15 @@ internal object CitizenSdkNativeCodec {
             15L -> CitizenSdkNativeResult.Prepared(reader.positiveI64("prepared wallet token"))
             16L -> CitizenSdkNativeResult.Transfer(reader.walletTransfer())
             17L -> CitizenSdkNativeResult.History(reader.history())
+            18L -> CitizenSdkNativeResult.Balances(
+                List(reader.boundedCount(1990, "balance result count")) { reader.balance() },
+            )
+            19L -> CitizenSdkNativeResult.QrReview(reader.positiveI64("QR review token"), reader.text().also {
+                check(it.toByteArray(Charsets.UTF_8).size in 1..65536)
+            })
+            20L -> CitizenSdkNativeResult.QrSigned(CitizenQrDocument.parse(reader.text()).also {
+                check(it.kind == 2 && (it.signRequest?.toByteArray(Charsets.UTF_8)?.size ?: 0) in 1..2331)
+            })
             else -> throw CitizenSdkException(
                 CitizenSdkErrorCode.INTEGRITY,
                 "JNI returned unsupported result kind $kind",
@@ -63,6 +64,19 @@ internal object CitizenSdkNativeCodec {
         }
         reader.finish()
         Decoded(result, null)
+    }
+
+    /** 只检查传输完整性，不能在 Kotlin 重算余额或建立第二套链读取规则。 */
+    fun validateBalances(values: List<CitizenAccountBalance>, accountIds: Array<ByteArray>): List<CitizenAccountBalance> {
+        val block = values.firstOrNull()?.block
+        if (values.size != accountIds.size || values.size > 1990 || values.indices.any { index ->
+                val value = values[index]
+                !value.accountId().contentEquals(accountIds[index]) ||
+                    value.block.finality != CitizenFinality.FINALIZED || block == null ||
+                    value.block.number != block.number || !value.block.hash().contentEquals(block.hash())
+            }) throw CitizenSdkException(CitizenSdkErrorCode.INTEGRITY,
+                "Core balance results do not match one finalized request")
+        return values.toList()
     }
 
     fun decodeCapabilities(bytes: ByteArray): CitizenSdkCapabilities = decodeIntegrity("capability") {
@@ -151,6 +165,8 @@ internal object CitizenSdkNativeCodec {
             u64Text(),
             oneBasedEnum(CitizenFinality.entries, "finality"),
         )
+
+        fun balance(): CitizenAccountBalance = CitizenAccountBalance(block(), fixed(32), u128(), u128(), u128())
 
         fun walletProfile(): CitizenWalletProfile? {
             if (!bool()) return null

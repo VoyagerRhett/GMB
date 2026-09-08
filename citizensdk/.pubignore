@@ -21,7 +21,7 @@
 /darwin/Pods/
 /darwin/DerivedData/
 /linux/test/
-# Windows Hosted 精确保留 21 项同版安装件及 12 项插件输入；不重编 Host/Core。
+# Windows Hosted 精确保留 22 项同版安装件及 12 项插件输入；不重编 Host/Core。
 /windows/test/
 /windows/README.md
 /windows/include/README.md
@@ -38,7 +38,7 @@
 !/windows/src/citizen_sdk_flutter_environment.cc
 !/windows/src/citizen_sdk_flutter_environment.hpp
 
-# Linux Hosted 精确保留 26 项同版安装件及 12 项插件输入；不重编 Host/Core。
+# Linux Hosted 精确保留 27 项同版合并安装件及 12 项插件输入；不重编 Host/Core。
 # 父目录保持可遍历，只排除子项再逐文件恢复官方插件所需源码；实际文件闭集由发布器反向核验。
 /linux/README.md
 /linux/include/README.md

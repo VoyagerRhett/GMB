@@ -20,6 +20,77 @@ extern "C" {
 CITIZENSDK_API uint32_t citizensdk_abi_version(void);
 CITIZENSDK_API uint32_t citizensdk_create_options_size(void);
 
+/* Pure preflight. Rejects empty/unknown masks, missing chain dependencies and
+ * modules excluded from this build, before hosts create any device resources. */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_validate_modules(uint32_t modules);
+
+/* One composition path for full and selected modules. Existing ABI v1 structures
+ * are unchanged. Chain assets are required only when CHAIN is selected and must
+ * be empty otherwise. host_services may be NULL for public chain-only use.
+ * WALLET or SIGNING requires secure_store + secret_vault; HISTORY requires its
+ * typed public-store callbacks. Each public callback group is all-or-none.
+ * Vtables are copied; contexts live through successful destroy. */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_create_with_modules(
+    const citizensdk_create_options_t *options,
+    const citizensdk_host_services_v1_t *host_services, uint32_t modules,
+    citizensdk_handle_t *out_handle);
+
+/* Stateless sr25519 verification: no instance, wallet, vault or chain. The
+ * account is 32 bytes, signature exactly 64 bytes and message at most 16 MiB.
+ * On OK out_valid is 0 or 1; malformed encodings return INVALID_ARGUMENT.
+ * No output is written on error. Excluded signing builds return UNSUPPORTED. */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_verify_signature(
+    const citizensdk_account_id_t *account_id,
+    citizensdk_bytes_view_t signature, citizensdk_bytes_view_t message,
+    uint8_t *out_valid);
+
+/* QR-only instances initialize no wallet, vault, chain or light node. All QR
+ * text is strict UTF-8 QR_V1; query variable output with NULL/0. The image
+ * codec is the separate citizensdk_qr_image API and always uses ZXing-C++.
+ * Parsing returns the Core's expanded JSON, including canonical_text and kind.
+ * The SDK owns expiry time. No platform decodes QR_V1 wire fields itself. */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_qr_parse(
+    citizensdk_handle_t handle, citizensdk_bytes_view_t text,
+    uint8_t *output, uint64_t output_capacity, uint64_t *out_required);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_qr_create_sign_request(
+    citizensdk_handle_t handle, uint16_t action,
+    const citizensdk_account_id_t *signer_account_id,
+    citizensdk_bytes_view_t review_payload, uint64_t ttl_seconds,
+    uint8_t *output, uint64_t output_capacity, uint64_t *out_required);
+/* Review requires QR+CHAIN and a ready, explicitly started verified chain.
+ * It yields QR_REVIEW through the ordinary request/result lifecycle. */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_review_qr_sign_request(
+    citizensdk_handle_t handle, citizensdk_bytes_view_t sign_request,
+    citizensdk_request_id_t *out_request_id);
+/* Only call after the SDK review UI obtains explicit confirmation. The same
+ * instance's immutable review result is single-use; QR+SIGNING+CHAIN required.
+ * Keep review_result alive until this call returns. Cancellation drains real
+ * device authentication before completion and never emits a late signature. */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_sign_qr_request(
+    citizensdk_handle_t handle, citizensdk_result_handle_t review_result,
+    citizensdk_request_id_t *out_request_id);
+/* QR_REVIEW/QR_SIGNED expanded JSON, bounded and secret-free. */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_result_copy_qr(
+    citizensdk_result_handle_t result,
+    uint8_t *output, uint64_t output_capacity, uint64_t *out_required);
+/* Pure verification needs QR only. Writes exactly 64 bytes only after the
+ * response binds to this instance's request and atomically consumes it. */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_qr_consume_sign_response(
+    citizensdk_handle_t handle, citizensdk_bytes_view_t sign_response,
+    uint8_t *out_signature);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_qr_cancel_sign_request(
+    citizensdk_handle_t handle, citizensdk_bytes_view_t request_id,
+    uint8_t *out_cancelled);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_qr_encode_account_id(
+    citizensdk_handle_t handle, const citizensdk_account_id_t *account_id,
+    uint8_t *output, uint64_t output_capacity, uint64_t *out_required);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_qr_encode_user_transfer(
+    citizensdk_handle_t handle, citizensdk_bytes_view_t request_id,
+    uint64_t expires_at, const citizensdk_account_id_t *account_id,
+    citizensdk_bytes_view_t amount, citizensdk_bytes_view_t symbol,
+    citizensdk_bytes_view_t memo, citizensdk_bytes_view_t bank_cid_number,
+    uint8_t *output, uint64_t output_capacity, uint64_t *out_required);
+
 /* All input views are copied before return. Empty system_name/system_version
  * select CitizenSDK/1.0.0 defaults. The three verified chain assets are
  * mandatory and are revalidated before a smoldot provider is constructed. */
@@ -27,10 +98,10 @@ CITIZENSDK_API citizensdk_error_code_t
 citizensdk_create(const citizensdk_create_options_t *options,
                   citizensdk_handle_t *out_handle);
 
-/* Creates the wallet-capable product composition. CitizenSDK copies all three
- * pointed-to vtables before return. public_store is mandatory; secure_store
- * and secret_vault are an all-or-none wallet bundle. Callback contexts remain
- * host-owned and must live through successful instance destruction. */
+/* 默认耐久组合：提供安全组时选择完整模块，否则选择链／交易／历史。
+ * 显式按需集成使用 create_with_modules；两者进入同一内部装配。
+ * CitizenSDK copies all supplied vtables; secure_store and secret_vault are
+ * all-or-none. Host-owned contexts live through successful destroy. */
 CITIZENSDK_API citizensdk_error_code_t citizensdk_create_with_host(
     const citizensdk_create_options_t *options,
     const citizensdk_host_services_v1_t *host_services,
@@ -87,10 +158,10 @@ citizensdk_unsubscribe_capability_changes(citizensdk_handle_t handle);
  * cancellation is cooperative: REQUEST_COMPLETED waits for any already-entered
  * host store/CAS or vault operation to return. Cancellation is not withdrawal
  * and never clears a durable Pending/InBlock or proven execution record. */
-/* For create_with_host instances, start restores the typed chain database
+/* For instances with persistent host chain storage, start restores the database
  * before provider start. Stop first persists an exact revisioned snapshot;
  * persistence failure leaves unsubscribe/services/provider untouched. The
- * legacy create path retains its original lifecycle semantics. Host start,
+ * session-only store uses explicit import/export. Persistent host start,
  * stop and import use exclusive request admission: prior requests must finish,
  * and later requests, controls and destroy return BUSY through completion. */
 CITIZENSDK_API citizensdk_error_code_t
@@ -123,6 +194,16 @@ CITIZENSDK_API citizensdk_error_code_t citizensdk_get_runtime_context_at(
 /* Typed public account state. Nonce is exact-best Runtime state, not a
  * transaction-pool lease. The retained fee snapshot can be reused with
  * citizensdk_result_estimate_fee for the SDK's exact rounding semantics. */
+/* 固定链身份：同步写入 32 字节；要求 chain 已编译且已选择，不要求启动/联网。
+ * out_genesis_hash 不可为 NULL；调用期间不得并发销毁实例。 */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_get_genesis_hash(
+    citizensdk_handle_t handle, uint8_t *out_genesis_hash);
+/* 接受 0..1990 项，保留输入顺序和重复项，全部余额绑定同一 finalized 块。
+ * account_count 为 0 时 account_ids 可为 NULL；仍校验模块/生命周期，零存储读取。
+ * 非空数组在受理前复制；错误不产生部分余额。有限请求不支持取消，销毁前必须排空。 */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_get_finalized_account_balances(
+    citizensdk_handle_t handle, const citizensdk_account_id_t *account_ids,
+    uint32_t account_count, citizensdk_request_id_t *out_request_id);
 CITIZENSDK_API citizensdk_error_code_t
 citizensdk_get_finalized_account_balance(
     citizensdk_handle_t handle, const citizensdk_account_id_t *account_id,
@@ -278,6 +359,12 @@ CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_exported_state(
 
 CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_account_balance(
     citizensdk_result_handle_t result,
+    citizensdk_account_balance_info_t *out_info);
+/* 仅接受 ACCOUNT_BALANCES 结果；越界、错误结果或 ABI 前缀无效时不修改输出。 */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_account_balance_count(
+    citizensdk_result_handle_t result, uint32_t *out_count);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_account_balance_at(
+    citizensdk_result_handle_t result, uint32_t index,
     citizensdk_account_balance_info_t *out_info);
 CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_account_nonce(
     citizensdk_result_handle_t result,

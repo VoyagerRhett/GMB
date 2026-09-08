@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:citizen_sdk/src/api/citizen_sdk_error.dart';
 import 'package:citizen_sdk/src/api/citizen_sdk_events.dart';
 import 'package:citizen_sdk/src/models/citizen_capability.dart';
@@ -8,15 +10,84 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   const codec = CitizenSdkFlutterCodec();
 
-  test('历史通知只含 sequence，拒绝额外 payload 与无效顺序号', () {
-    final decoded = codec.decodeEvent(<Object?>[1, 'session', 7, 'historyChanged', <Object?>[]]);
-    expect(decoded.event, isA<CitizenSdkHistoryChanged>());
-    expect(decoded.event.sequence, 7);
-    expect(() => codec.decodeEvent(<Object?>[1, 'session', 8, 'historyChanged', <Object?>[1]]), throwsA(isA<Object>()));
-    expect(() => codec.decodeEvent(<Object?>[1, 'session', 0, 'historyChanged', <Object?>[]]), throwsA(isA<Object>()));
+  test('QR公开文档严格闭集，拒绝旧now tuple、外部签名拼装和非法结果', () {
+    final json = <String, Object?>{
+      'kind': 2,
+      'canonical_text': 'response',
+      'request_id': 'request-identifier',
+      'expires_at': 1700000000,
+      'signer_account_id': _account(1),
+      'signature': '0x${'ab' * 64}',
+    };
+    final document = codec.decodeQrDocument(jsonEncode(json));
+    expect(document.signature, hasLength(64));
+    expect(() => document.signature![0] = 1, throwsUnsupportedError);
+    expect(
+      () => codec.decodeQrDocument(
+        jsonEncode(<String, Object?>{...json, 'private_key': 'forbidden'}),
+      ),
+      throwsA(isA<CitizenSdkException>()),
+    );
+    expect(
+      () => codec.decodeQrDocument(
+        jsonEncode(<String, Object?>{...json, 'signature': '0x01'}),
+      ),
+      throwsA(isA<CitizenSdkException>()),
+    );
+    expect(
+      () => codec.decodeQrDocument(jsonEncode(json), signed: true),
+      throwsA(isA<CitizenSdkException>()),
+    );
+    expect(
+      () => codec.encodeRequest(
+        method: 'qrParse',
+        sessionId: 's',
+        requestSequence: 1,
+        fields: <Object?>['request', 10],
+      ),
+      throwsA(isA<CitizenSdkException>()),
+    );
+    expect(CitizenSdkFlutterCodec.methods, isNot(contains('qrSigningInput')));
+    expect(
+      CitizenSdkFlutterCodec.methods,
+      isNot(contains('qrCreateSignResponse')),
+    );
+    expect(CitizenSdkFlutterCodec.methods, isNot(contains('qrEncodeImage')));
   });
 
-  test('三平台 Flutter 的 22 个方法使用固定长度 tuple 且没有 Map 兼容旁路', () {
+  test('历史通知只含 sequence，拒绝额外 payload 与无效顺序号', () {
+    final decoded = codec.decodeEvent(<Object?>[
+      1,
+      'session',
+      7,
+      'historyChanged',
+      <Object?>[],
+    ]);
+    expect(decoded.event, isA<CitizenSdkHistoryChanged>());
+    expect(decoded.event.sequence, 7);
+    expect(
+      () => codec.decodeEvent(<Object?>[
+        1,
+        'session',
+        8,
+        'historyChanged',
+        <Object?>[1],
+      ]),
+      throwsA(isA<Object>()),
+    );
+    expect(
+      () => codec.decodeEvent(<Object?>[
+        1,
+        'session',
+        0,
+        'historyChanged',
+        <Object?>[],
+      ]),
+      throwsA(isA<Object>()),
+    );
+  });
+
+  test('五平台 Flutter 的固定方法使用固定长度 tuple 且没有 Map 兼容旁路', () {
     const expectedMethods = <String>{
       'open',
       'start',
@@ -24,10 +95,13 @@ void main() {
       'close',
       'getCapabilities',
       'getFinalizedHead',
+      'getGenesisHash',
       'getAccountBalance',
+      'getAccountBalances',
       'getAccountNonce',
       'getFeeSnapshot',
       'getWalletProfile',
+      'viewAccountPrivateKey',
       'createWallet',
       'importWallet',
       'addWalletAccounts',
@@ -37,12 +111,30 @@ void main() {
       'deleteWallet',
       'reconcileWalletCleanup',
       'signWalletPayload',
+      'verifySignature',
       'transferWithRemark',
       'initializeFinalizedHistory',
       'syncFinalizedHistory',
+      'qrParse',
+      'qrCreateSignRequest',
+      'qrConsumeSignResponse',
+      'qrCancelSignRequest',
+      'qrEncodeAccountId',
+      'qrEncodeUserTransfer',
+      'qrDecodeLuminance',
+      'qrEncode',
+      'qrScan',
+      'signQrRequest',
     };
     expect(CitizenSdkFlutterCodec.methods, expectedMethods);
-    expect(codec.encodeOpen(), <Object?>[1]);
+    expect(codec.encodeOpen(), <Object?>[1, CitizenSdkModules.full]);
+    expect(codec.encodeOpen(CitizenSdkModules.signing), <Object?>[1, 2]);
+    for (final invalid in <int>[0, -1, 0x100000000]) {
+      expect(
+        () => codec.encodeOpen(invalid),
+        throwsA(isA<CitizenSdkException>()),
+      );
+    }
 
     final account = _account(1);
     final requestFields = <String, List<Object?>>{
@@ -52,6 +144,7 @@ void main() {
         'close',
         'getCapabilities',
         'getFinalizedHead',
+        'getGenesisHash',
         'getFeeSnapshot',
         'getWalletProfile',
         'importWallet',
@@ -62,10 +155,14 @@ void main() {
       for (final method in <String>[
         'getAccountBalance',
         'getAccountNonce',
+        'viewAccountPrivateKey',
         'setActiveWalletAccount',
         'deleteWalletAccount',
       ])
         method: <Object?>[account],
+      'getAccountBalances': <Object?>[
+        <String>[account, account],
+      ],
       'createWallet': const <Object?>[24],
       'addWalletAccounts': const <Object?>[
         <int>[1, 7],
@@ -82,8 +179,76 @@ void main() {
       'syncFinalizedHistory': <Object?>[
         <String>[account],
       ],
+      'qrParse': <Object?>['{}'],
+      'qrCreateSignRequest': <Object?>[
+        0x0400,
+        account,
+        Uint8List.fromList(<int>[4, 0]),
+        120,
+      ],
+      'qrConsumeSignResponse': <Object?>['{}'],
+      'qrCancelSignRequest': <Object?>['abcdefghijklmnop'],
+      'qrEncodeAccountId': <Object?>[account],
+      'qrEncodeUserTransfer': <Object?>[
+        'abcdefghijklmnop',
+        10,
+        account,
+        '1',
+        'CNY',
+        '',
+        'bank-1',
+      ],
+      'qrDecodeLuminance': <Object?>[
+        Uint8List.fromList(<int>[0]),
+        1,
+        1,
+        1,
+      ],
+      'qrEncode': <Object?>['{}', 4],
+      'qrScan': <Object?>[],
+      'signQrRequest': <Object?>['{}'],
     };
-    expect(<String>{'open', ...requestFields.keys}, expectedMethods);
+    expect(<String>{
+      'open',
+      'verifySignature',
+      ...requestFields.keys,
+    }, expectedMethods);
+    expect(
+      codec.encodeVerification(
+        accountId: account,
+        signature: Uint8List(64),
+        payload: Uint8List(0),
+      ),
+      <Object?>[1, account, Uint8List(64), Uint8List(0)],
+    );
+    expect(
+      () => codec.encodeRequest(
+        method: 'verifySignature',
+        sessionId: 's',
+        requestSequence: 1,
+        fields: <Object?>[account, Uint8List(64), Uint8List(0)],
+      ),
+      throwsA(isA<CitizenSdkException>()),
+    );
+    expect(codec.decodeVerification(<Object?>[1, false]), isFalse);
+    expect(codec.decodeVerification(<Object?>[1, true]), isTrue);
+    for (final invalid in <Object?>[
+      <Object?>[
+        1,
+        's',
+        1,
+        <Object?>[false],
+      ],
+      <Object?>[1, 0],
+      <Object?>[1],
+      <Object?>[1, false, null],
+      <Object?>[2, false],
+    ]) {
+      expect(
+        () => codec.decodeVerification(invalid),
+        throwsA(isA<CitizenSdkException>()),
+      );
+    }
     for (final entry in requestFields.entries) {
       expect(
         codec.encodeRequest(
@@ -270,6 +435,59 @@ void main() {
       ),
       throwsA(isA<CitizenSdkException>()),
     );
+  });
+
+  test('创世哈希和批量余额响应使用既有session外壳并拒绝非法公开值', () {
+    final genesis = codec.decodeResponse(
+      method: 'getGenesisHash',
+      raw: <Object?>[
+        1,
+        's',
+        1,
+        <Object?>[_account(9)],
+      ],
+      expectedSessionId: 's',
+      expectedRequestSequence: 1,
+    );
+    expect(genesis.value.single, _account(9));
+    for (final invalid in <Object?>[
+      'invalid',
+      _account(9).toUpperCase(),
+      null,
+    ]) {
+      expect(
+        () => codec.decodeResponse(
+          method: 'getGenesisHash',
+          raw: <Object?>[
+            1,
+            's',
+            1,
+            <Object?>[invalid],
+          ],
+          expectedSessionId: 's',
+          expectedRequestSequence: 1,
+        ),
+        throwsA(isA<CitizenSdkException>()),
+      );
+    }
+    expect(codec.decodeBalances(<Object?>[]), isEmpty);
+    final balance = <Object?>[_account(1), _block(9), '1', '0', '1'];
+    expect(codec.decodeBalances(<Object?>[balance, balance]), hasLength(2));
+    for (final invalid in <Object?>[
+      <Object?>[
+        balance,
+        <Object?>[_account(1), _block(10), '1', '0', '1'],
+      ],
+      <Object?>[
+        <Object?>[_account(1), _block(9), '1', '0', '2'],
+      ],
+      List<Object?>.filled(1991, balance),
+    ]) {
+      expect(
+        () => codec.decodeBalances(invalid),
+        throwsA(isA<CitizenSdkException>()),
+      );
+    }
   });
 
   test('响应严格校验 session、request sequence、长度和整数规范形式', () {

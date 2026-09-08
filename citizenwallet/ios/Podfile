@@ -31,7 +31,7 @@ target 'Runner' do
 
   # sr25519 原生签名静态库（schnorrkel）。产物由
   # scripts/build-signer-native.sh ios 生成，实现来自
-  # shared/citizen-signer，与 CitizenApp 热端同一份源码。
+  # citizenwallet/rust/src/sr25519.rs，由公民钱包独立维护。
   pod 'citizenwallet_signer', :path => 'signer'
 
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))

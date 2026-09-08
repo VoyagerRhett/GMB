@@ -1,6 +1,9 @@
 #include "citizen_sdk_wallet_window.hpp"
+#include "citizen_sdk_user_auth.hpp"
 
+#include <atomic>
 #include <windows.h>
+#include <wtsapi32.h>
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -23,6 +26,7 @@ constexpr int kNextAccount = 106;
 constexpr int kAccountIndices = 107;
 constexpr int kSuggestionApply = 108;
 constexpr int kMnemonicState = 109;
+constexpr int kPrivateKey = 110;
 constexpr int kAction = IDOK;
 constexpr UINT kMnemonicChanged = WM_APP + 31;
 constexpr std::size_t kInputUnits = input_limits::kMaximumUnlockPasswordBytes;
@@ -414,6 +418,14 @@ struct WalletWindow::Impl final {
   std::wstring class_name;
   std::unique_ptr<SensitiveInput> mnemonic;
   std::unique_ptr<SensitiveInput> password;
+  std::unique_ptr<SensitiveInput> private_key;
+  std::atomic<const void *> private_auth_owner{nullptr};
+  std::atomic<uint64_t> private_auth_operation{0};
+  std::atomic<bool> private_authorization_closed{false};
+  bool private_key_mode{};
+  bool private_key_visible{};
+  bool session_registered{};
+  DWORD session_id{};
   Action action;
   Action cancel;
   citizensdk_wallet_flow_kind_t kind{};
@@ -426,12 +438,27 @@ struct WalletWindow::Impl final {
     if ((hwnd != nullptr || registered || mnemonic || password) &&
         !parent.on_ui_thread()) std::terminate();
     if (hwnd != nullptr || mnemonic || password) destroy();
-    password.reset(); mnemonic.reset();
+    password.reset(); mnemonic.reset(); private_key.reset();
     if (registered && !UnregisterClassW(class_name.c_str(), module)) std::terminate();
   }
   void clear() noexcept {
+    private_key_visible = false;
+    if (private_key) private_key->clear();
     if (mnemonic) mnemonic->clear();
     if (password) password->clear();
+  }
+  bool session_safe() const noexcept {
+    if (!session_registered) return false;
+    LPWSTR value = nullptr;
+    DWORD size = 0;
+    if (!WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session_id,
+                                     WTSInfoEx, &value, &size)) return false;
+    const auto *info = reinterpret_cast<const WTSINFOEXW *>(value);
+    const bool safe = value != nullptr && size >= sizeof(WTSINFOEXW) &&
+        info->Level == 1 && info->Data.WTSInfoExLevel1.SessionState == WTSActive &&
+        info->Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_UNLOCK;
+    if (value != nullptr) WTSFreeMemory(value);
+    return safe;
   }
   void restore_owner() noexcept {
     if (owner_disabled && parent.valid() && parent.get() != nullptr) {
@@ -440,9 +467,13 @@ struct WalletWindow::Impl final {
     owner_disabled = false;
   }
   void destroy() noexcept {
+    private_authorization_closed.store(true);
+    private_auth_operation.store(0);
     if (!parent.on_ui_thread()) std::terminate();
     destroying = true;
     clear();
+    if (session_registered && hwnd != nullptr) WTSUnRegisterSessionNotification(hwnd);
+    session_registered = false;
     if (hwnd != nullptr && !DestroyWindow(hwnd)) std::terminate();
     restore_owner();
     destroying = false;
@@ -456,6 +487,24 @@ struct WalletWindow::Impl final {
     }
     if (self == nullptr) return DefWindowProcW(hwnd, message, wp, lp);
     try {
+      if (self->private_key_mode &&
+          ((message == WM_ACTIVATE && LOWORD(wp) == WA_INACTIVE && !self->destroying &&
+               (self->private_key_visible || self->private_authorization_closed.load() ||
+                !accept_private_key_authentication_window(reinterpret_cast<void *>(lp), hwnd,
+                    self->private_auth_owner.load(), self->private_auth_operation.load()))) ||
+           (message == WM_SIZE && wp == SIZE_MINIMIZED) ||
+           (message == WM_SHOWWINDOW && wp == FALSE && !self->destroying) ||
+           (message == WM_POWERBROADCAST && wp == PBT_APMSUSPEND) ||
+           (message == WM_WTSSESSION_CHANGE &&
+               (wp == WTS_SESSION_LOCK || wp == WTS_SESSION_LOGOFF ||
+                wp == WTS_CONSOLE_DISCONNECT || wp == WTS_REMOTE_DISCONNECT)))) {
+        self->private_authorization_closed.store(true);
+        self->private_auth_operation.store(0);
+        self->clear();
+        const auto callback = self->cancel;
+        callback();
+        return 0;
+      }
       if (message == WM_COMMAND) {
         const int identity = LOWORD(wp);
         if (identity == IDCANCEL) { const auto callback = self->cancel; callback(); return 0; }
@@ -512,7 +561,11 @@ struct WalletWindow::Impl final {
       }
       if (message == WM_CLOSE) { const auto callback = self->cancel; callback(); return 0; }
       if (message == WM_DESTROY) {
+        self->private_authorization_closed.store(true);
+        self->private_auth_operation.store(0);
         self->clear();
+        if (self->session_registered) WTSUnRegisterSessionNotification(hwnd);
+        self->session_registered = false;
         const bool notify = !self->destroying;
         const auto callback = self->cancel;
         self->hwnd = nullptr;
@@ -540,6 +593,7 @@ WalletWindow::WalletWindow(WindowLease parent, const ValidatedWalletRequest &req
   require(impl_->parent.valid(), CITIZENSDK_ERROR_UNAVAILABLE,
           "CitizenSDK parent window was destroyed");
   impl_->kind = request.kind;
+  impl_->private_key_mode = request.account_id.has_value();
   impl_->action = std::move(action); impl_->cancel = std::move(cancel);
   impl_->module = module_for(Impl::procedure);
   impl_->class_name = L"CitizenSDK.Wallet." + std::to_wstring(reinterpret_cast<UINT_PTR>(impl_.get()));
@@ -552,6 +606,35 @@ WalletWindow::WalletWindow(WindowLease parent, const ValidatedWalletRequest &req
   require(SetWindowDisplayAffinity(impl_->hwnd, WDA_EXCLUDEFROMCAPTURE) != FALSE,
           CITIZENSDK_ERROR_UNAVAILABLE, "CitizenSDK sensitive display protection is unavailable");
   impl_->status = control(impl_->hwnd, impl_->module, L"STATIC", L"", SS_LEFT, 0, 20, 18, 570, 90);
+  if (impl_->private_key_mode) {
+    SetWindowTextW(impl_->hwnd, L"CitizenSDK 账户私钥安全查看");
+    SetWindowTextW(impl_->status,
+        L"私钥可控制此账户全部资产。确认周围无人且无录屏后，进行设备认证。"
+        L"不可复制、选择或导出；离开查看窗口、隐藏或锁屏即永久清除。");
+    // 仅公开账户审阅文本；秘密仍只进入下方可擦除自绘缓冲。
+    std::wstring account_text = L"账户：0x";
+    constexpr wchar_t account_digits[] = L"0123456789abcdef";
+    for (const uint8_t byte : request.account_id->bytes) {
+      account_text += account_digits[byte >> 4];
+      account_text += account_digits[byte & 15];
+    }
+    control(impl_->hwnd, impl_->module, L"STATIC", account_text.c_str(),
+        SS_LEFT, 0, 20, 105, 570, 40);
+    impl_->private_key = std::make_unique<SensitiveInput>(
+        impl_->hwnd, kPrivateKey, 20, 155, 570, 140, false, true);
+    impl_->private_key->set_read_only(true);
+    impl_->action_button = control(impl_->hwnd, impl_->module, L"BUTTON",
+        L"我已了解风险，认证并查看", BS_DEFPUSHBUTTON | WS_TABSTOP, kAction,
+        250, 350, 340, 40);
+    control(impl_->hwnd, impl_->module, L"BUTTON", L"取消",
+        BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL, 20, 350, 130, 40);
+    require(ProcessIdToSessionId(GetCurrentProcessId(), &impl_->session_id) &&
+                WTSRegisterSessionNotification(impl_->hwnd, NOTIFY_FOR_THIS_SESSION),
+            CITIZENSDK_ERROR_UNAVAILABLE, "无法建立当前设备锁屏监督");
+    impl_->session_registered = true;
+    require(impl_->session_safe(), CITIZENSDK_ERROR_UNAVAILABLE,
+            "设备会话已锁屏或无法确认锁屏监督");
+  } else {
   impl_->mnemonic = std::make_unique<SensitiveInput>(impl_->hwnd, kMnemonic, 20, 115, 570, 180, false, true);
   impl_->mnemonic_state = control(impl_->hwnd, impl_->module, L"STATIC",
       L"当前 0 / 选择 12；校验和尚未通过", SS_LEFT, kMnemonicState,
@@ -608,6 +691,7 @@ WalletWindow::WalletWindow(WindowLease parent, const ValidatedWalletRequest &req
     ShowWindow(impl_->account_indices, SW_HIDE);
   }
   ShowWindow(impl_->backup, SW_HIDE);
+  }
 }
 WalletWindow::~WalletWindow() = default;
 bool WalletWindow::on_ui_thread() const noexcept { return impl_->parent.on_ui_thread(); }
@@ -619,6 +703,10 @@ void WalletWindow::show() {
     EnableWindow(owner, FALSE); impl_->owner_disabled = true;
   }
   ShowWindow(impl_->hwnd, SW_SHOW);
+  if (impl_->private_key_mode) {
+    SetFocus(impl_->action_button);
+    return;
+  }
   SetFocus(static_cast<HWND>((impl_->kind == CITIZENSDK_WALLET_FLOW_CREATE ?
       impl_->password : impl_->mnemonic)->native_handle()));
 }
@@ -661,6 +749,47 @@ void WalletWindow::show_prepared_mnemonic(const SensitiveBuffer &mnemonic) {
   EnableWindow(impl_->action_button, TRUE);
   impl_->busy = false;
 }
+bool WalletWindow::authorize_private_key_view(
+    const void *owner, uint64_t host_operation_id) noexcept {
+  if (owner == nullptr || host_operation_id == 0 ||
+      impl_->private_authorization_closed.load()) return false;
+  impl_->private_auth_owner.store(owner);
+  impl_->private_auth_operation.store(host_operation_id);
+  return !impl_->private_authorization_closed.load();
+}
+
+void WalletWindow::revoke_private_key_authorization() noexcept {
+  impl_->private_authorization_closed.store(true);
+  impl_->private_auth_operation.store(0);
+}
+
+void WalletWindow::finish_private_key_authentication() noexcept {
+  impl_->private_auth_operation.store(0);
+}
+
+void WalletWindow::show_private_key(const SensitiveBuffer &private_key) {
+  require(on_ui_thread() && impl_->private_key_mode && impl_->hwnd != nullptr &&
+              impl_->parent.valid() && impl_->private_key && private_key.size() == 32 &&
+              !impl_->private_authorization_closed.load() &&
+              impl_->session_safe() && GetForegroundWindow() == impl_->hwnd,
+          CITIZENSDK_ERROR_UNAVAILABLE, "安全查看窗口不再可显示");
+  SensitiveBuffer text(67);
+  text.data()[0] = '0'; text.data()[1] = 'x';
+  constexpr char digits[] = "0123456789abcdef";
+  for (std::size_t index = 0; index < 32; ++index) {
+    text.data()[2 + index * 2] = static_cast<uint8_t>(digits[private_key.data()[index] >> 4]);
+    text.data()[3 + index * 2] = static_cast<uint8_t>(digits[private_key.data()[index] & 15]);
+  }
+  // 自绘控件内部有界复制并清零；不经过 std::string/EDIT/窗口文本消息。
+  SensitiveBuffer visible(text.data(), 66);
+  impl_->private_key->set_utf8(visible);
+  visible.clear(); text.clear();
+  impl_->private_key_visible = true;
+  SetWindowTextW(impl_->action_button, L"清除并关闭");
+  EnableWindow(impl_->action_button, TRUE);
+  impl_->busy = false;
+}
+
 bool WalletWindow::backup_confirmed() const noexcept {
   return on_ui_thread() && impl_->backup != nullptr &&
       SendMessageW(impl_->backup, BM_GETCHECK, 0, 0) == BST_CHECKED;

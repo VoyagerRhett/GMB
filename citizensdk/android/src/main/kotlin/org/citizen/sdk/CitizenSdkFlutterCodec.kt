@@ -18,22 +18,28 @@ internal object CitizenSdkFlutterCodec {
     const val PROTOCOL_VERSION = 1
     const val MAXIMUM_ADDITIONAL_WALLET_ACCOUNTS = 1989
     const val MAXIMUM_HISTORY_ACCOUNTS = 1990
+    const val MAXIMUM_BALANCE_ACCOUNTS = 1990
     const val MAXIMUM_SIGNING_PAYLOAD_BYTES = 16 * 1024 * 1024
+    const val MAXIMUM_QR_TEXT_BYTES = 2331
+    const val MAXIMUM_QR_REVIEW_BYTES = 1920
+    const val MAXIMUM_QR_IMAGE_BYTES = 16 * 1024 * 1024
 
     val methods: Set<String> = linkedSetOf(
         "open", "start", "stop", "close", "getCapabilities", "getFinalizedHead",
-        "getAccountBalance", "getAccountNonce", "getFeeSnapshot", "getWalletProfile",
+        "getGenesisHash", "getAccountBalance", "getAccountBalances", "getAccountNonce", "getFeeSnapshot", "getWalletProfile", "viewAccountPrivateKey",
         "createWallet", "importWallet", "addWalletAccounts", "setActiveWalletAccount",
         "renameWalletAccount", "deleteWalletAccount", "deleteWallet",
-        "reconcileWalletCleanup", "signWalletPayload", "transferWithRemark",
+        "reconcileWalletCleanup", "signWalletPayload", "verifySignature", "transferWithRemark",
         "initializeFinalizedHistory", "syncFinalizedHistory",
+        "qrParse", "qrCreateSignRequest", "qrConsumeSignResponse", "qrCancelSignRequest", "qrEncodeAccountId",
+        "qrEncodeUserTransfer", "qrDecodeLuminance", "qrEncode", "qrScan", "signQrRequest",
     )
 
     sealed interface Request {
         val sessionId: String?
         val requestSequence: Long
 
-        data object Open : Request {
+        data class Open(val modules: Int) : Request {
             override val sessionId: String? = null
             override val requestSequence: Long = 0
         }
@@ -45,6 +51,11 @@ internal object CitizenSdkFlutterCodec {
             override val sessionId: String,
             override val requestSequence: Long,
             val accountId: ByteArray,
+        ) : SessionRequest
+        data class Balances(
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val accountIds: List<ByteArray>,
         ) : SessionRequest
         data class CreateWallet(
             override val sessionId: String,
@@ -68,6 +79,14 @@ internal object CitizenSdkFlutterCodec {
             val accountId: ByteArray,
             val payload: ByteArray,
         ) : SessionRequest
+        data class VerifySignature(
+            val accountId: ByteArray,
+            val signature: ByteArray,
+            val payload: ByteArray,
+        ) : Request {
+            override val sessionId: String? = null
+            override val requestSequence: Long = 0
+        }
         data class TransferWithRemark(
             override val sessionId: String,
             override val requestSequence: Long,
@@ -82,6 +101,12 @@ internal object CitizenSdkFlutterCodec {
             override val requestSequence: Long,
             val accountIds: List<ByteArray>,
         ) : SessionRequest
+        data class Qr(
+            val method: String,
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val fields: List<Any>,
+        ) : SessionRequest
     }
 
     class ContractFailure(
@@ -92,7 +117,7 @@ internal object CitizenSdkFlutterCodec {
         val requestSequence: Long? = null,
     ) : IllegalArgumentException(message)
 
-    /** open=[1]; every session request=[1, sessionId, requestSequence, ...]. */
+    /** open 与公开验签无会话；其他请求保留版本、会话、序号和固定字段位置。 */
     fun decode(method: String, rawArguments: Any?): Request {
         if (method !in methods) throw failure(CitizenSdkErrorCode.UNSUPPORTED, "Unsupported method")
         val tuple = rawArguments as? List<*>
@@ -101,8 +126,18 @@ internal object CitizenSdkFlutterCodec {
             throw failure(CitizenSdkErrorCode.UNSUPPORTED, "Unsupported protocol version")
         }
         if (method == "open") {
-            requireLength(tuple, 1, null, null)
-            return Request.Open
+            requireLength(tuple, 2, null, null)
+            val modules = exactLong(tuple[1], "modules")
+            if (modules !in 0..0xffff_ffffL) throw failure(CitizenSdkErrorCode.INVALID_ARGUMENT, "modules must be uint32")
+            return Request.Open(modules.toInt())
+        }
+        if (method == "verifySignature") {
+            // 必须在会话字段解析前验证唯一无会话形状，旧形状一律拒绝。
+            requireLength(tuple, 4, null, null)
+            val signature = bytes(tuple[2], "signature", false, 64)
+            if (signature.size != 64) throw failure(CitizenSdkErrorCode.INVALID_ARGUMENT, "signature must contain 64 bytes")
+            return Request.VerifySignature(hash32(tuple[1]), signature,
+                bytes(tuple[3], "payload", true, MAXIMUM_SIGNING_PAYLOAD_BYTES))
         }
         if (tuple.size < 3) throw failure(CitizenSdkErrorCode.INVALID_ARGUMENT, "Truncated request")
         val sessionId = string(tuple[1], "sessionId", 1, 128)
@@ -111,16 +146,26 @@ internal object CitizenSdkFlutterCodec {
         fun length(expected: Int) = requireLength(tuple, expected, sessionId, sequence)
         return try {
             when (method) {
-                "start", "stop", "close", "getCapabilities", "getFinalizedHead",
+                "start", "stop", "close", "getCapabilities", "getFinalizedHead", "getGenesisHash",
                 "getFeeSnapshot", "getWalletProfile", "importWallet", "deleteWallet",
                 "reconcileWalletCleanup" -> {
                     length(3)
                     Request.Empty(method, sessionId, sequence)
                 }
                 "getAccountBalance", "getAccountNonce", "setActiveWalletAccount",
-                "deleteWalletAccount" -> {
+                "deleteWalletAccount", "viewAccountPrivateKey" -> {
                     length(4)
                     Request.Account(method, sessionId, sequence, hash32(tuple[3]))
+                }
+                "getAccountBalances" -> {
+                    length(4)
+                    val values = tuple[3] as? List<*>
+                        ?: badRequest("accountIds must be a tuple", sessionId, sequence)
+                    if (values.size > MAXIMUM_BALANCE_ACCOUNTS) {
+                        badRequest("accountIds must contain 0..1990 accounts", sessionId, sequence)
+                    }
+                    // 不去重、不排序；空列表也交由 Core 做模块与生命周期校验。
+                    Request.Balances(sessionId, sequence, values.map(::hash32))
                 }
                 "createWallet" -> {
                     length(4)
@@ -211,6 +256,62 @@ internal object CitizenSdkFlutterCodec {
                         badRequest("accountIds must be non-empty and unique", sessionId, sequence)
                     }
                     Request.History(method, sessionId, sequence, accounts)
+                }
+                "qrParse", "qrConsumeSignResponse", "signQrRequest" -> {
+                    length(4)
+                    Request.Qr(method, sessionId, sequence, listOf(qrText(tuple[3], "$method.text")))
+                }
+                "qrScan" -> { length(3); Request.Qr(method, sessionId, sequence, emptyList()) }
+                "qrCreateSignRequest" -> {
+                    length(7)
+                    val action = exactInt(tuple[3], "action")
+                    if (action !in 1..0xffff) badRequest("action must be uint16", sessionId, sequence)
+                    val payload = bytes(tuple[5], "reviewPayload", false, MAXIMUM_QR_REVIEW_BYTES)
+                    val ttl = exactLong(tuple[6], "ttlSeconds")
+                    if (ttl !in 1..300) badRequest("ttlSeconds must be 1..300", sessionId, sequence)
+                    Request.Qr(method, sessionId, sequence,
+                        listOf(action, hash32(tuple[4]), payload, ttl))
+                }
+                "qrCancelSignRequest" -> {
+                    length(4)
+                    Request.Qr(method, sessionId, sequence,
+                        listOf(string(tuple[3], "requestId", 16, 128)))
+                }
+                "qrEncodeAccountId" -> {
+                    length(4)
+                    Request.Qr(method, sessionId, sequence, listOf(hash32(tuple[3])))
+                }
+                "qrEncodeUserTransfer" -> {
+                    length(10)
+                    val requestId = string(tuple[3], "requestId", 16, 128)
+                    val expiresAt = exactLong(tuple[4], "expiresAt")
+                    if (expiresAt <= 0) badRequest("expiresAt must be positive", sessionId, sequence)
+                    val amount = utf8Text(tuple[6], "amount", 1, 64)
+                    val symbol = utf8Text(tuple[7], "symbol", 1, 16)
+                    val memo = utf8Text(tuple[8], "memo", 0, 256)
+                    val bank = utf8Text(tuple[9], "bankCidNumber", 1, 32)
+                    Request.Qr(method, sessionId, sequence, listOf(
+                        requestId, expiresAt, hash32(tuple[5]), amount, symbol, memo, bank,
+                    ))
+                }
+                "qrDecodeLuminance" -> {
+                    length(7)
+                    val pixels = bytes(tuple[3], "luminance", false, MAXIMUM_QR_IMAGE_BYTES)
+                    val width = positiveDimension(tuple[4], "width")
+                    val height = positiveDimension(tuple[5], "height")
+                    val stride = positiveDimension(tuple[6], "rowStride")
+                    val required = (height - 1L) * stride + width
+                    if (stride < width || pixels.size.toLong() < required) {
+                        badRequest("luminance dimensions are invalid", sessionId, sequence)
+                    }
+                    Request.Qr(method, sessionId, sequence, listOf(pixels, width, height, stride))
+                }
+                "qrEncode" -> {
+                    length(5)
+                    val scale = exactInt(tuple[4], "scale")
+                    if (scale !in 1..16) badRequest("scale must be 1..16", sessionId, sequence)
+                    Request.Qr(method, sessionId, sequence,
+                        listOf(qrText(tuple[3], "text"), scale))
                 }
                 else -> throw failure(CitizenSdkErrorCode.UNSUPPORTED, "Unsupported method")
             }
@@ -464,6 +565,28 @@ internal object CitizenSdkFlutterCodec {
         }
         return text
     }
+
+    private fun utf8Text(value: Any?, label: String, minimum: Int, maximum: Int): String {
+        val text = string(value, label, 0, maximum)
+        val size = text.toByteArray(StandardCharsets.UTF_8).size
+        if (size !in minimum..maximum) {
+            throw failure(CitizenSdkErrorCode.INVALID_ARGUMENT, "$label UTF-8 length is invalid")
+        }
+        return text
+    }
+
+    private fun qrText(value: Any?, label: String): String =
+        utf8Text(value, label, 1, MAXIMUM_QR_TEXT_BYTES)
+
+    private fun nonNegativeLong(value: Any?, label: String): Long =
+        exactLong(value, label).also {
+            if (it < 0) throw failure(CitizenSdkErrorCode.INVALID_ARGUMENT, "$label must be non-negative")
+        }
+
+    private fun positiveDimension(value: Any?, label: String): Long =
+        exactLong(value, label).also {
+            if (it !in 1..4096) throw failure(CitizenSdkErrorCode.INVALID_ARGUMENT, "$label must be 1..4096")
+        }
 
     private fun exactInt(value: Any?, label: String): Int {
         val result = exactLong(value, label)

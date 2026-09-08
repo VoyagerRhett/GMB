@@ -1,7 +1,7 @@
 #
 # CitizenWallet 冷钱包 sr25519 原生签名静态库（schnorrkel）。
 #
-# 实现来自 shared/citizen-signer（与 CitizenApp 热端同一份源码），
+# 实现来自 citizenwallet/rust/src/sr25519.rs（由公民钱包独立维护），
 # 由 scripts/build-signer-native.sh ios 交叉编译产出 libcitizenwallet_signer.a。
 #
 # 为什么用静态库而不是 dylib：裸 .dylib 需要嵌入 App 并单独代码签名，且 App Store
@@ -25,7 +25,7 @@ Pod::Spec.new do |s|
   s.summary          = 'CitizenWallet sr25519 原生签名静态库'
   s.description      = <<-DESC
 CitizenWallet 冷钱包 sr25519 原生签名（schnorrkel）。全端唯一实现，
-与 CitizenApp 热端共用 shared/citizen-signer 同一份源码。
+使用公民钱包内部 citizenwallet/rust/src/sr25519.rs。
                        DESC
   s.homepage         = 'https://github.com/VoyagerRhett/GMB'
   s.license          = { :type => 'MIT' }

@@ -1,5 +1,10 @@
 # CitizenSDK 钱包模型
 
+第 2 步钱包模块只管理热钱包和账户，签名单列 `SigningService`，两者不互相隐式启用。
+签名-only 仅使用同一宿主中已由 SDK 安全建立的账户归属资料与设备金库；首次 provision
+仍经钱包安全流程，不生成另一套身份或秘密存储，不提供秘密导出。纯验签无需钱包或实例。
+模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
+
 Apple 创建、导入及追加账户界面均允许空的可选 BIP-39 password；创建时两次输入必须相同。
 非空值继续执行 Core 的既有规范化与长度规则，设备金库认证与派生密码相互独立。
 
@@ -26,8 +31,8 @@ exact secrets 或当前 generation 的 wallet key。`WalletProfileStore` 只保�
 `ChainSigner` 是独立的 sr25519 合同，不能与系统金库合并成同一业务接口。
 
 第 4.1 步已经在 Rust Engine 实现钱包派生和完整生命周期：English BIP-39 12／18／24 词、可选
-NFKD password、`//0..//1989`，以及 create/import/add/usable/rename/activate/delete/sign/
-reconcile。create 不是“先落盘再返回助记词”的单阶段调用，而是
+NFKD password、`//0..//1989`，以及 create/import/add/usable/rename/activate/delete/
+reconcile；通用签名当前由独立 SigningService 承担。create 不是“先落盘再返回助记词”的单阶段调用，而是
 `prepare_wallet_creation`（profile/密文/KEK 零写入）→用户确认备份→
 `commit_wallet_creation_after_backup`；准备会话中的助记词和 password 析构清零。
 `WalletProfileStore` 以 revision CAS 在秘密写入前持久化 provisioning；
@@ -35,14 +40,12 @@ reconcile。create 不是“先落盘再返回助记词”的单阶段调用，�
 正常写入和写后抛错都由回读事实收敛。失败方只有先取得自己的 cleanup 所有权才可删除，未完
 清理进入最多 64 项的可重放队列，不能命中当前钱包或另一代秘密。
 
-产品 C ABI v1 保留原 36 个符号不变并追加 37 个账户、钱包、签名、转账和历史符号，总计
-73 个。原 `citizensdk_create` 仍是无钱包秘密持久化的 chain-only session；完整
-`citizensdk_create_with_host` 注入唯一 signer、准确 Runtime nonce、五类具名 typed stores 与
-all-or-none secure store/KEK-DEK Vault，并投影第 4.1 步钱包入口。旧构造的 unsupported
-能力只描述该构造，不能再写成整个产品 ABI 未投影。根 Dart、Android 与 Apple 共享 Darwin
-绑定已经切换到 host 构造、typed stores 与 Vault。Apple 使用分离的 typed public/secure SQLite，
-Secure Enclave 只保护 generation-scoped KEK，不执行 sr25519；legacy Dart
-`WalletService`/`WalletRepository`/`SecureSeedStore` 只作为归档差分基线，正式绑定不可达。
+产品 C ABI v1 当前共 89 个函数，既有结构、数值与默认构造保持。新增模块校验、显式模块构造
+和无实例纯验签入口，以及四个链查询/结果入口；所有构造都进入同一私有装配。官方绑定按 modules 创建同一 Rust 服务，
+chain/history 才需要 public store，wallet/signing 才需要配套 secure store 与 KEK/DEK Vault。
+未选 wallet 的调用必须在访问钱包管理服务或展示 UI 前拒绝。
+Apple 的分离 typed public/secure SQLite 与五端遵守同一合同；Secure Enclave 仅保护
+generation-scoped KEK，不执行 sr25519。
 
 Linux 第 7.1 步 Host 使用同一 `citizensdk_create_with_host` 和同一 Rust 钱包状态机，并以
 分离的 public/secure SQLite 与 TPM 2.0 generation-scoped KEK 实现平台合同。它不复制派生、
@@ -55,6 +58,13 @@ checkpoint 失败会阻止后续 stop 副作用，直接 destroy 不替代 grace
 采用独占 request admission，保证生命周期切换不能与另一项钱包/链异步请求穿插。
 
 ## 派生与存储
+
+账户私钥查看属于 wallet，不属于 signing。原生入口仅启动 SDK 自有安全界面；Flutter
+`sdk.wallet.viewAccountPrivateKey(accountId)` 只返回完成、取消或错误，不返回秘密。
+查看内容保持当前热钱包的 32 字节 child mini-secret 语义，不改为展开私钥或母种子。
+用户确认后才访问原设备金库，Core 重新验证账户、公钥与钱包代际。期间相关钱包修改和实例
+销毁不得越过活跃查看；关闭必须先清屏、清零原生缓冲，再等待真实认证和 Core 请求排空。
+回前台不会自动恢复已取消的秘密展示。平台差异仅在设备保护和原生控件，不另写钱包逻辑。
 
 ```text
 BIP-39 English mnemonic + optional NFKD password
@@ -191,7 +201,7 @@ provider 中断不会清除 durable Pending/InBlock single-flight。只有 canon
 ## 三种账户边界
 
 - 公民链账户由公钥、AccountId、SS58 和链上状态定义。
-- TUYU 账户授权可以选择同一公钥并调用钱包签名，但 challenge、授权记录和服务端会话属于
+- TUYU 账户授权可以选择同一公钥并调用独立签名模块，但 challenge、授权记录和服务端会话属于
   TUYU 账户体系。
 - TuyuBooking 员工登录属于商家上游员工账户体系，不因设备存在钱包而自动成为链账户或
   管理员。

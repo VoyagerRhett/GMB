@@ -331,6 +331,7 @@ class FakeTransport final : public csf::NativeTransport {
     if (close_attempted) { *out = 0; return CITIZENSDK_ERROR_INVALID_STATE; }
     accepted.push_back(native_method);
     public_methods.push_back(request.method);
+    if (native_method == csf::Method::get_account_balances) balance_count = request.account_ids.size();
     if (fail_accept) { *out = 0; return CITIZENSDK_ERROR_NETWORK; }
     if (native_method == csf::Method::start) lifecycle = CITIZENSDK_LIFECYCLE_RUNNING;
     if (native_method == csf::Method::stop) lifecycle = CITIZENSDK_LIFECYCLE_STOPPED;
@@ -356,6 +357,17 @@ class FakeTransport final : public csf::NativeTransport {
   }
   csf::Value copy_result(csf::Method method, citizensdk_result_handle_t) override {
     ++copied_results;
+    if (method == csf::Method::get_account_balances) {
+      csf::Value::List balances;
+      for (std::size_t index = 0; index < balance_count; ++index) {
+        balances.push_back(csf::Value::list({
+            csf::Value::string("0x" + std::string(64, '0')),
+            csf::Value::list({csf::Value::string("0x" + std::string(64, '0')),
+                             csf::Value::string("1"), csf::Value::string("finalized")}),
+            csf::Value::string("1"), csf::Value::string("0"), csf::Value::string("1")}));
+      }
+      return csf::Value::list({csf::Value::list(std::move(balances))});
+    }
     if (fail_copy) throw ContractFailure(CITIZENSDK_ERROR_INTEGRITY, "injected public result failure");
     if (method == csf::Method::start || method == csf::Method::stop ||
         method == csf::Method::delete_wallet_account ||
@@ -371,6 +383,10 @@ class FakeTransport final : public csf::NativeTransport {
     if (!core_present && csf::allow_close_without_core(close_attempted, checkpoint_state,
         CITIZENSDK_ERROR_NOT_READY, 0)) return checkpoint_state;
     return lifecycle;
+  }
+  csf::Value genesis_hash() override {
+    ++genesis_queries;
+    return csf::Value::string("0x" + std::string(64, '0'));
   }
   csf::Value capability_snapshot() override {
     if (close_attempted) throw citizen_sdk::Error(CITIZENSDK_ERROR_INVALID_STATE, "injected closed Core");
@@ -391,13 +407,14 @@ class FakeTransport final : public csf::NativeTransport {
     observer(event); ++released_results;
     deferred_id = 0;
   }
-  csf::WalletCancellation present(const citizen_sdk::WalletFlowRequest &request,
+  csf::WalletCancellation present(const csf::DecodedRequest &request,
                                    citizen_sdk::WalletFlowCompletion completion) override {
     if (close_attempted) throw citizen_sdk::Error(CITIZENSDK_ERROR_INVALID_STATE, "injected closed Core");
     ++wallet_presented;
-    assert(request.kind == citizen_sdk::WalletFlowKind::Create ||
-           request.kind == citizen_sdk::WalletFlowKind::Import ||
-           request.kind == citizen_sdk::WalletFlowKind::AddAccounts);
+    assert(request.method == csf::Method::view_account_private_key ||
+           request.method == csf::Method::create_wallet ||
+           request.method == csf::Method::import_wallet ||
+           request.method == csf::Method::add_wallet_accounts);
     if (defer_wallet) wallet_completion = std::move(completion);
     else completion({citizen_sdk::WalletFlowStatus::Completed, CITIZENSDK_OK});
     return [this] { ++wallet_cancelled; };
@@ -416,6 +433,8 @@ class FakeTransport final : public csf::NativeTransport {
   }
   void retire() noexcept override { ++retired; }
 
+  std::size_t balance_count{};
+  int genesis_queries{};
   Observer observer;
   citizensdk_lifecycle_t lifecycle{CITIZENSDK_LIFECYCLE_CREATED};
   citizensdk_request_id_t next_id{1};

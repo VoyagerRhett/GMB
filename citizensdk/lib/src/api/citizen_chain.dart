@@ -7,9 +7,18 @@ import '../models/citizen_chain_state.dart';
 abstract interface class CitizenChain {
   Future<CitizenCapabilitySnapshot> getCapabilities();
 
+  /// 返回 Core 固定链身份的创世哈希；chain 必须启用，但无需启动或同步。
+  Future<String> getGenesisHash();
+
   Future<CitizenBlockRef> getFinalizedHead();
 
   Future<CitizenAccountBalance> getAccountBalance(String accountId);
+
+  /// 从同一已验证 finalized 块读取 0..1990 个账户，保持顺序与重复项。
+  /// 空输入仍经过 Core 的模块/生命周期校验，不触发账户存储读取。
+  Future<List<CitizenAccountBalance>> getAccountBalances(
+    List<String> accountIds,
+  );
 
   Future<CitizenAccountNonce> getAccountNonce(String accountId);
 

@@ -64,7 +64,7 @@
       "sdk_only": [
         {
           "path": "Cargo.toml",
-          "sha256": "b2820243e0e29267a3d16bc93418221954c115f17c4265ac14e7264d1ecaf3fb"
+          "sha256": "709936ce2f9a781ff3dbeef6ef743c7b950db377403bb5ca9f471c10afa17426"
         },
         {
           "path": "README.md",

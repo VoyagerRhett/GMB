@@ -4,11 +4,36 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 
 class CitizenSdkFlutterSessionsTest {
+    @Test
+    fun `verification projection needs no context session activity or event subscription`() {
+        val request = CitizenSdkFlutterCodec.decode("verifySignature",
+            listOf(1, "0x" + "11".repeat(32), ByteArray(64), byteArrayOf())) as CitizenSdkFlutterCodec.Request.VerifySignature
+        var calls = 0
+        // 只替换密码学叶节点；生产使用同一静态分派，测试无需构造任何 Android 宿主。
+        repeat(2) {
+            val response = CitizenSdkFlutterSessions.verifySignature(request) { account, signature, payload ->
+                calls++
+                assertEquals(32, account.size)
+                assertEquals(64, signature.size)
+                assertTrue(payload.isEmpty())
+                false
+            }
+            assertEquals(listOf(1, false), response)
+        }
+        assertEquals(2, calls)
+        assertThrows(CitizenSdkException::class.java) {
+            CitizenSdkFlutterSessions.verifySignature(request) { _, _, _ ->
+                throw CitizenSdkException(CitizenSdkErrorCode.INTEGRITY, "fixture")
+            }
+        }
+    }
+
     @Test
     fun `transfer progress cannot overtake an early event while bind drains`() {
         val entered = CountDownLatch(1)

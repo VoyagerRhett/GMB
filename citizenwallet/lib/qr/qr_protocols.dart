@@ -3,8 +3,8 @@ export 'package:citizenwallet/qr/generated/qr_bodies.g.dart' show QrKind;
 
 /// QR_V1 统一二维码协议常量。
 ///
-/// 唯一事实源：`shared/qr-protocol/registry.json`。
-/// Golden fixtures:`shared/qr-protocol/tests/fixtures/*.json`
+/// 唯一事实源：`citizenchain/crates/qr-protocol/registry.json`。
+/// Golden fixtures:`citizenchain/crates/qr-protocol/tests/fixtures/*.json`
 ///
 /// 与 citizenapp/lib/qr/qr_protocols.dart 逐字节一致(两个独立 Flutter app,
 /// 无代码依赖,靠 fixture 对齐)。

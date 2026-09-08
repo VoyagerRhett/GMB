@@ -17,15 +17,15 @@ dependencies:
   # ss58 2.x，会造成解依赖冲突。两款移动产品统一锁定同一兼容版本。
   polkadart_keyring: 0.7.1
   bip39_mnemonic: 4.0.1
-  # 全仓 Flutter 产品统一通过共享适配器接入扫码设备。
+  # 通过本产品内部适配器接入扫码设备。
   gmb_scanner_flutter:
-    path: ../shared/scanner-flutter
-  # CitizenApp、CitizenWallet、iOS、Android 共用的钱包 password 规则与交互真源。
+    path: packages/scanner-flutter
+  # 本产品内部的钱包 password 规则与交互实现。
   gmb_wallet_password:
-    path: ../shared/wallet-password
-  # 两款移动产品共用的 StrongBox/TEE 与 Secure Enclave 钱包严档金库。
+    path: packages/wallet-password
+  # 本产品内部的 StrongBox/TEE 与 Secure Enclave 钱包严档金库。
   gmb_hardware_secretvault:
-    path: ../shared/hardware-secretvault
+    path: packages/hardware-secretvault
   qr: ^3.0.2
   qr_flutter: ^4.1.0
   flutter_svg: ^2.3.0

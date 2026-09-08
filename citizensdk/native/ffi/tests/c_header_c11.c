@@ -11,7 +11,7 @@
   static_assert(offsetof(type, field) == (expected), #type "." #field " ABI")
 #define ABI_FUNCTION(name, return_type, ...)                                    \
   using name##_signature_t = return_type (*)(__VA_ARGS__);                      \
-  static name##_signature_t const name##_reference = &(name);                   \
+  name##_signature_t const name##_reference = &(name);                          \
   static_assert(                                                               \
       std::is_same<decltype(&(name)), name##_signature_t>::value,               \
       #name " signature ABI")
@@ -24,7 +24,7 @@
   _Static_assert(offsetof(type, field) == (expected), #type "." #field " ABI")
 #define ABI_FUNCTION(name, return_type, ...)                                    \
   typedef return_type (*name##_signature_t)(__VA_ARGS__);                       \
-  static name##_signature_t const name##_reference = &(name);                   \
+  name##_signature_t const name##_reference = &(name);                          \
   _Static_assert(_Generic(&(name), name##_signature_t: 1, default: 0),          \
                  #name " signature ABI")
 #endif
@@ -424,6 +424,9 @@ _Static_assert(CITIZENSDK_RESULT_PREPARED_WALLET == 15, "result kind ABI");
 _Static_assert(CITIZENSDK_RESULT_WALLET_TRANSFER == 16, "result kind ABI");
 _Static_assert(CITIZENSDK_RESULT_TRANSACTION_HISTORY == 17,
                "result kind ABI");
+_Static_assert(CITIZENSDK_RESULT_ACCOUNT_BALANCES == 18, "result kind ABI");
+_Static_assert(CITIZENSDK_RESULT_QR_REVIEW == 19, "result kind ABI");
+_Static_assert(CITIZENSDK_RESULT_QR_SIGNED == 20, "result kind ABI");
 _Static_assert(CITIZENSDK_WALLET_WORDS_12 == 12, "wallet word count ABI");
 _Static_assert(CITIZENSDK_WALLET_WORDS_18 == 18, "wallet word count ABI");
 _Static_assert(CITIZENSDK_WALLET_WORDS_24 == 24, "wallet word count ABI");
@@ -447,6 +450,13 @@ _Static_assert(CITIZENSDK_TRANSFER_INCOMING == 2, "transfer direction ABI");
 
 ABI_FUNCTION(citizensdk_abi_version, uint32_t, void);
 ABI_FUNCTION(citizensdk_create_options_size, uint32_t, void);
+ABI_FUNCTION(citizensdk_validate_modules, citizensdk_error_code_t, uint32_t);
+ABI_FUNCTION(citizensdk_create_with_modules, citizensdk_error_code_t,
+             const citizensdk_create_options_t *,
+             const citizensdk_host_services_v1_t *, uint32_t, citizensdk_handle_t *);
+ABI_FUNCTION(citizensdk_verify_signature, citizensdk_error_code_t,
+             const citizensdk_account_id_t *, citizensdk_bytes_view_t,
+             citizensdk_bytes_view_t, uint8_t *);
 ABI_FUNCTION(citizensdk_create, citizensdk_error_code_t,
              const citizensdk_create_options_t *, citizensdk_handle_t *);
 ABI_FUNCTION(citizensdk_create_with_host, citizensdk_error_code_t,
@@ -488,11 +498,41 @@ ABI_FUNCTION(citizensdk_get_runtime_context_at, citizensdk_error_code_t,
 ABI_FUNCTION(citizensdk_get_finalized_account_balance,
              citizensdk_error_code_t, citizensdk_handle_t,
              const citizensdk_account_id_t *, citizensdk_request_id_t *);
+ABI_FUNCTION(citizensdk_get_genesis_hash, citizensdk_error_code_t,
+             citizensdk_handle_t, uint8_t *);
+ABI_FUNCTION(citizensdk_get_finalized_account_balances, citizensdk_error_code_t,
+             citizensdk_handle_t, const citizensdk_account_id_t *, uint32_t,
+             citizensdk_request_id_t *);
 ABI_FUNCTION(citizensdk_get_account_nonce, citizensdk_error_code_t,
              citizensdk_handle_t, const citizensdk_account_id_t *,
              citizensdk_request_id_t *);
 ABI_FUNCTION(citizensdk_get_best_fee_snapshot, citizensdk_error_code_t,
              citizensdk_handle_t, citizensdk_request_id_t *);
+ABI_FUNCTION(citizensdk_qr_parse, citizensdk_error_code_t,
+             citizensdk_handle_t, citizensdk_bytes_view_t,
+             uint8_t *, uint64_t, uint64_t *);
+ABI_FUNCTION(citizensdk_qr_create_sign_request, citizensdk_error_code_t,
+             citizensdk_handle_t, uint16_t, const citizensdk_account_id_t *,
+             citizensdk_bytes_view_t, uint64_t, uint8_t *, uint64_t,
+             uint64_t *);
+ABI_FUNCTION(citizensdk_review_qr_sign_request, citizensdk_error_code_t,
+             citizensdk_handle_t, citizensdk_bytes_view_t, citizensdk_request_id_t *);
+ABI_FUNCTION(citizensdk_sign_qr_request, citizensdk_error_code_t,
+             citizensdk_handle_t, citizensdk_result_handle_t, citizensdk_request_id_t *);
+ABI_FUNCTION(citizensdk_result_copy_qr, citizensdk_error_code_t,
+             citizensdk_result_handle_t, uint8_t *, uint64_t, uint64_t *);
+ABI_FUNCTION(citizensdk_qr_consume_sign_response, citizensdk_error_code_t,
+             citizensdk_handle_t, citizensdk_bytes_view_t, uint8_t *);
+ABI_FUNCTION(citizensdk_qr_cancel_sign_request, citizensdk_error_code_t,
+             citizensdk_handle_t, citizensdk_bytes_view_t, uint8_t *);
+ABI_FUNCTION(citizensdk_qr_encode_account_id, citizensdk_error_code_t,
+             citizensdk_handle_t, const citizensdk_account_id_t *, uint8_t *,
+             uint64_t, uint64_t *);
+ABI_FUNCTION(citizensdk_qr_encode_user_transfer, citizensdk_error_code_t,
+             citizensdk_handle_t, citizensdk_bytes_view_t, uint64_t,
+             const citizensdk_account_id_t *, citizensdk_bytes_view_t,
+             citizensdk_bytes_view_t, citizensdk_bytes_view_t,
+             citizensdk_bytes_view_t, uint8_t *, uint64_t, uint64_t *);
 ABI_FUNCTION(citizensdk_get_wallet_profile, citizensdk_error_code_t,
              citizensdk_handle_t, citizensdk_request_id_t *);
 ABI_FUNCTION(citizensdk_validate_wallet_password, citizensdk_error_code_t,
@@ -591,6 +631,10 @@ ABI_FUNCTION(citizensdk_result_get_exported_state, citizensdk_error_code_t,
              uint8_t *, uint64_t, uint64_t *);
 ABI_FUNCTION(citizensdk_result_get_account_balance, citizensdk_error_code_t,
              citizensdk_result_handle_t, citizensdk_account_balance_info_t *);
+ABI_FUNCTION(citizensdk_result_get_account_balance_count, citizensdk_error_code_t,
+             citizensdk_result_handle_t, uint32_t *);
+ABI_FUNCTION(citizensdk_result_get_account_balance_at, citizensdk_error_code_t,
+             citizensdk_result_handle_t, uint32_t, citizensdk_account_balance_info_t *);
 ABI_FUNCTION(citizensdk_result_get_account_nonce, citizensdk_error_code_t,
              citizensdk_result_handle_t, citizensdk_account_nonce_info_t *);
 ABI_FUNCTION(citizensdk_result_get_fee_snapshot, citizensdk_error_code_t,

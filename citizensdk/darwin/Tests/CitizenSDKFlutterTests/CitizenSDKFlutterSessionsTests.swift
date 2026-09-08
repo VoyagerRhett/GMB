@@ -3,9 +3,55 @@ import XCTest
 @testable import CitizenSDK
 @testable import CitizenSDKFlutter
 
+#if os(iOS)
+import Flutter
+#elseif os(macOS)
+import FlutterMacOS
+#endif
+
 @MainActor
 final class CitizenSDKFlutterSessionsTests: XCTestCase {
     private enum ProbeFailure: Error { case install, close }
+
+    func testVerificationDispatchDoesNotOpenSessionOrSubscribeToEvents() {
+        var calls = 0
+        let sessions = CitizenSdkFlutterSessions(verifySignature: { account, signature, payload in
+            calls += 1
+            XCTAssertEqual(account.count, 32)
+            XCTAssertEqual(signature.count, 64)
+            XCTAssertTrue(payload.isEmpty)
+            return false
+        })
+        let request = CitizenSdkFlutterCodec.Request.verify(
+            accountID: Data(repeating: 0, count: 32), signature: Data(repeating: 0, count: 64), payload: Data()
+        )
+        // 未 open、未订阅事件且没有设备金库，公开验签仍直接返回两项结果。
+        for _ in 0..<2 {
+            var response: [Any?]?
+            sessions.dispatch(request) { response = $0 as? [Any?] }
+            XCTAssertEqual(response?.count, 2)
+            XCTAssertEqual(response?[0] as? Int64, 1)
+            XCTAssertEqual(response?[1] as? Bool, false)
+        }
+        XCTAssertEqual(calls, 2)
+    }
+
+    func testVerificationFailureHasNoSessionOrSequence() {
+        let sessions = CitizenSdkFlutterSessions(verifySignature: { _, _, _ in
+            throw CitizenSDKError(.integrity, "fixture")
+        })
+        var failure: FlutterError?
+        sessions.dispatch(.verify(accountID: Data(repeating: 0, count: 32),
+                                  signature: Data(repeating: 0, count: 64), payload: Data())) {
+            failure = $0 as? FlutterError
+        }
+        XCTAssertEqual(failure?.code, "citizensdk.integrity")
+        let details = failure?.details as? [Any?]
+        XCTAssertEqual(details?.count, 5)
+        // FlutterError 的 Objective-C 桥接将元组中的空会话和空序号装箱为 NSNull。
+        XCTAssertTrue(details?[1] is NSNull)
+        XCTAssertTrue(details?[2] is NSNull)
+    }
 
     func testProtocolVersionRejectsBoolAndFloatingNumbers() {
         XCTAssertTrue(CitizenSdkFlutterSessions.exactProtocolVersion(NSNumber(value: 1)))

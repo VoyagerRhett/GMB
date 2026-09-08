@@ -1,5 +1,13 @@
 # CitizenSDK Linux Host 合同测试
 
+第 3 步增加创世哈希与批量 finalized 余额查询的 codec/session/公开消费者断言，
+覆盖无需启动的创世身份、空列表仍经过 Core、重复/顺序、超限、数量不匹配与跨块结果。
+这些新增断言尚未执行；不涉及私钥查看。
+
+本次补齐模块构造的合法/非法选择、无链时不读取链资产/创建 public 数据库、独立门面合同，
+以及未 open/listen 的纯验签 codec/session/plugin 测试：资源工厂调用必须为零，响应为
+`[1, bool]`，拒绝旧会话形状和非法签名字节。本次第 2 步仅更新源码、注释、合同和测试，尚未执行新的真实构建、平台测试或硬件验收；下文旧分步运行记录保留为历史证据，不代表本次变更已验证。
+
 本目录测试 LinuxARM、LinuxAMD 共用 Host/Flutter 投影和已安装包的真实消费者，不复制 Rust
 Core 的账户、钱包、轻节点、sr25519 或交易实现。Host 合同目标直接编译对应生产源码；原生
 消费者则只能使用安装目录的公开头和同版运行库，不能把私有源码编译进消费者。
@@ -8,7 +16,7 @@ Core 的账户、钱包、轻节点、sr25519 或交易实现。Host 合同目�
 五个生产实现文件，链接同版已安装 Host/Core，不建立测试专用 adapter、第二份 Host/Core 或
 下载测试框架：
 
-- `citizen_sdk_flutter_codec_test.cc`：22 方法、固定 tuple、整数/UTF-8/累计输入预算、标准 wire
+- `citizen_sdk_flutter_codec_test.cc`：36 方法、固定 tuple、整数/UTF-8/累计输入预算、标准 wire
   与内嵌 NUL 无损，以及钱包资料、交易终态、进度和历史返回值语义；
 - `citizen_sdk_flutter_sessions_test.cc`：全部路由、接受前早完成、失败保留、事件 epoch、关闭
   重试、跨 session/引擎的钱包变更门禁、删除后资料回读与 detach 所有权；
@@ -57,7 +65,7 @@ Host 磁盘用例使用 `citizen_sdk_test_support.hpp`；Flutter 用例使用不
 `citizen_sdk_flutter_test_support.hpp`，两者遵循相同的工作目录安全合同。配置测试时，调用方必须通过
 `-DCITIZENSDK_TEST_WORK_DIR=<绝对路径>` 注入一个已经存在、本次任务独占、有效 UID 所有且
 权限精确为 `0700` 的工作根；本机该路径必须位于
-`/Users/rhett/TATA/tataconsole/target/GMB/citizensdk/SDK` 下。CMake 把同名环境变量注入每个 CTest，
+`/Users/rhett/TATA/tataconsole/work/gmb/citizensdk` 下。CMake 把同名环境变量注入每个 CTest，
 helper 再逐级以 no-follow 方式验证该根，才用系统 CSPRNG 生成 128-bit 随机名称，并只通过
 已验证目录 fd 的 `mkdirat` 创建 `0700` 子目录。清理始终持有目录 fd，并只通过
 `openat`/`unlinkat` 处理已验证的精确 inode；不存在 `/tmp`、当前
@@ -78,8 +86,8 @@ helper 再逐级以 no-follow 方式验证该根，才用系统 CSPRNG 生成 12
   公开 `CitizenSdk.open()`，不注入内部 transport、不临时改写 pubspec；不创建钱包、不操作真实
   账户或提交交易。
 
-两种平台的 19 项安装件在同一候选中合并为 26 项，重叠文件必须逐字节一致。Hosted Linux
-精确运行集合为 38 项；真实消费者必须消费该同版本边界，不能从源码私有实现补齐缺项。
+两种平台的 20 项安装件在同一候选中合并为 27 项，重叠文件必须逐字节一致。Hosted Linux
+精确运行集合为 39 项；真实消费者必须消费该同版本边界，不能从源码私有实现补齐缺项。
 plugin 的 `$ORIGIN` 由生产 CMake 固定，不允许临时 runner 代偿库查找路径。
 
 后续统一 GitHub Linux 平台验证中，构建器分别精确核对 12 个 Host、6 个 adapter、2 个已安装
@@ -105,3 +113,7 @@ LinuxARM、LinuxAMD 实体 TPM 验收；adapter 测试源码也不能替代后�
 HostError 定义头，不依赖其它头文件的间接包含。可在 macOS 执行不依赖 Linux API 的
 路由、生命周期、记录键与公开秘密边界合同；磁盘/VFS 用例仍依赖 Linux OFD 锁与 getrandom，
 不得用系统 SQLite 内存查询或 macOS 便携合同冒充完整 Linux 存储测试。准确执行结果见任务卡。
+
+第 3 步既有测试补充安全查看的公开账户/空响应合同、Host 钱包模块拒绝、同步复制/重复回调拒绝、
+撤销后晚认证不可写入缓冲、真实认证操作关联拒绝、取消等待真实终态，以及 C/C++ 无秘密函数签名。缓冲与协调器测试
+不等于系统锁屏、原生窗口清屏或设备认证的实际验收；本轮桌面完整编译与运行仍未完成。

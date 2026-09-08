@@ -11,10 +11,44 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include <citizen_sdk/citizen_sdk.hpp>
+
+// 安装消费者直接核对根 C ABI；不为链查询复制 C++ Host 成员或业务逻辑。
+static_assert(std::is_same_v<decltype(&citizensdk_get_genesis_hash),
+    citizensdk_error_code_t (*)(citizensdk_handle_t, uint8_t *)>);
+static_assert(std::is_same_v<decltype(&citizensdk_get_finalized_account_balances),
+    citizensdk_error_code_t (*)(citizensdk_handle_t, const citizensdk_account_id_t *,
+                               uint32_t, citizensdk_request_id_t *)>);
+static_assert(std::is_same_v<decltype(&citizensdk_result_get_account_balance_count),
+    citizensdk_error_code_t (*)(citizensdk_result_handle_t, uint32_t *)>);
+static_assert(std::is_same_v<decltype(&citizensdk_result_get_account_balance_at),
+    citizensdk_error_code_t (*)(citizensdk_result_handle_t, uint32_t,
+                               citizensdk_account_balance_info_t *)>);
+static_assert(std::is_same_v<decltype(&citizensdk_host_view_account_private_key),
+    citizensdk_error_code_t (*)(citizensdk_host_handle_t, const citizensdk_account_id_t *,
+        void *, citizensdk_wallet_flow_completion_v1_t,
+        citizensdk_wallet_flow_handle_t *)>);
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::view_account_private_key),
+    citizen_sdk::WalletFlow (citizen_sdk::Host::*)(const citizensdk_account_id_t &,
+                                                citizen_sdk::WalletFlowCompletion)>);
+static_assert(CITIZENSDK_RESULT_ACCOUNT_BALANCES == 18);
+
+
+static_assert(std::is_same_v<decltype(&citizensdk_host_scan_qr),
+    citizensdk_error_code_t (*)(citizensdk_host_handle_t, void *,
+        citizensdk_qr_completion_v1_t, citizensdk_wallet_flow_handle_t *)>);
+static_assert(std::is_same_v<decltype(&citizensdk_host_sign_qr_request),
+    citizensdk_error_code_t (*)(citizensdk_host_handle_t, citizensdk_bytes_view_t,
+        void *, citizensdk_qr_completion_v1_t, citizensdk_wallet_flow_handle_t *)>);
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::scan_qr),
+    citizen_sdk::WalletFlow (citizen_sdk::Host::*)(citizen_sdk::QrFlowCompletion)>);
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::sign_qr_request),
+    citizen_sdk::WalletFlow (citizen_sdk::Host::*)(const std::string &, citizen_sdk::QrFlowCompletion)>);
+static_assert(CITIZENSDK_RESULT_QR_REVIEW == 19 && CITIZENSDK_RESULT_QR_SIGNED == 20);
 
 #ifdef NDEBUG
 #error "CitizenSDK consumer checks must remain enabled in Release"
@@ -177,7 +211,7 @@ int wmain(int argc, wchar_t **argv) {
     config.asset_root = argv[2];
     config.application_id = "org.citizensdk.cppconsumer";
     config.hwnd = nullptr;
-    config.enable_wallet = false;
+    config.modules = CITIZENSDK_MODULE_CHAIN | CITIZENSDK_MODULE_TRANSACTIONS | CITIZENSDK_MODULE_HISTORY;
     check_fresh_namespace(config.storage_root, L"org.citizensdk.cppconsumer");
     CHECK(config.asset_root.is_absolute());
     CHECK(citizensdk_abi_version() == CITIZENSDK_ABI_VERSION);
@@ -203,6 +237,14 @@ int wmain(int argc, wchar_t **argv) {
     host.open();
     CHECK(host.native_handle() == sdk);
     citizensdk_lifecycle_t lifecycle = 0;
+    // 同步创世身份不要求 start，也不应改变 Created 状态或越过输出边界。
+    uint8_t genesis_hash[34]{};
+    genesis_hash[0] = genesis_hash[33] = UINT8_C(0x5a);
+    CHECK(citizensdk_get_genesis_hash(sdk, genesis_hash + 1) == CITIZENSDK_OK);
+    CHECK(genesis_hash[0] == UINT8_C(0x5a) && genesis_hash[33] == UINT8_C(0x5a));
+    unsigned genesis_nonzero = 0;
+    for (unsigned index = 1; index <= 32; ++index) genesis_nonzero |= genesis_hash[index];
+    CHECK(genesis_nonzero != 0);
     CHECK(citizensdk_get_lifecycle(sdk, &lifecycle) == CITIZENSDK_OK);
     CHECK(lifecycle == CITIZENSDK_LIFECYCLE_CREATED);
     check_capabilities(host.capabilities());

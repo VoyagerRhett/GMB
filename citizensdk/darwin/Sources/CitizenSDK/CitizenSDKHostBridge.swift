@@ -1,29 +1,98 @@
 import Foundation
 
-/// Owns the five typed Apple host stores and the KEK/DEK vault projected into
-/// the frozen C ABI. All vtables are copied by Core during create; only this
-/// object's opaque context remains borrowed until successful Core destroy.
+/// 按模块延迟拥有 Apple 类型化存储与 KEK/DEK 金库，不创建未选择的系统资源。
+/// 核心在创建时复制回调表；上下文借用和已打开资源一直存活到核心成功销毁。
 internal final class CitizenSDKHostBridge {
-    private let publicStore: CitizenSDKPublicStore
-    private let secureStore: CitizenSDKSecureStore
-    private let vault: CitizenSDKSecretVault
+    private let modules: CitizenSDKModules
+    private let base: URL
+    private let applicationID: String
+    private let resourceLock = NSRecursiveLock()
+    private var publicStoreValue: CitizenSDKPublicStore?
+    private var secureStoreValue: CitizenSDKSecureStore?
+    private var vaultValue: CitizenSDKSecretVault?
+    private var privateKeyAuthentications: [UInt64: Bool] = [:]
     private var publicVTable = citizensdk_host_public_store_v1_t()
     private var secureVTable = citizensdk_host_secure_store_v1_t()
     private var vaultVTable = citizensdk_host_secret_vault_v1_t()
 
-    init(root: URL? = nil, applicationID: String? = Bundle.main.bundleIdentifier) throws {
-        // 即使测试显式指定存储目录，也必须提供有效宿主身份；校验失败不得创建任何文件。
-        let applicationID = try CitizenSDKRecordKey.applicationID(applicationID)
-        let base = try root ?? Self.defaultRoot(applicationID: applicationID)
-        publicStore = try CitizenSDKPublicStore(directory: base.appendingPathComponent("public", isDirectory: true))
-        secureStore = try CitizenSDKSecureStore(directory: base.appendingPathComponent("secure", isDirectory: true))
-        vault = try CitizenSDKSecretVault(secureStore: secureStore, applicationID: applicationID)
+    init(root: URL? = nil, applicationID: String? = Bundle.main.bundleIdentifier,
+         modules: CitizenSDKModules = .full) throws {
+        // 构造仅保存身份和路径，不创建文件、不探测硬件；核心先校验模块，再调用所需资源。
+        self.applicationID = try CitizenSDKRecordKey.applicationID(applicationID)
+        self.base = try root ?? Self.defaultRoot(applicationID: self.applicationID)
+        self.modules = modules
         configureVTables()
     }
 
     deinit {
-        publicStore.close()
-        secureStore.close()
+        publicStoreValue?.close()
+        secureStoreValue?.close()
+    }
+
+    private func publicStore() throws -> CitizenSDKPublicStore {
+        resourceLock.lock(); defer { resourceLock.unlock() }
+        guard modules.contains(.chain) else { throw CitizenSDKError(.unsupported, "chain store is not selected") }
+        if let value = publicStoreValue { return value }
+        try prepareStorageRoot()
+        let value = try CitizenSDKPublicStore(directory: base.appendingPathComponent("public", isDirectory: true))
+        publicStoreValue = value
+        return value
+    }
+
+    private func secureStore() throws -> CitizenSDKSecureStore {
+        resourceLock.lock(); defer { resourceLock.unlock() }
+        guard modules.usesSecrets else { throw CitizenSDKError(.unsupported, "secure store is not selected") }
+        if let value = secureStoreValue { return value }
+        try prepareStorageRoot()
+        let value = try CitizenSDKSecureStore(directory: base.appendingPathComponent("secure", isDirectory: true))
+        secureStoreValue = value
+        return value
+    }
+
+    /// 保留既有备份隔离，但只有实际启用持久化资源后才创建目录。
+    private func prepareStorageRoot() throws {
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var root = base
+        try root.setResourceValues(values)
+    }
+
+    private func vault() throws -> CitizenSDKSecretVault {
+        resourceLock.lock(); defer { resourceLock.unlock() }
+        if let value = vaultValue { return value }
+        let value = try CitizenSDKSecretVault(secureStore: secureStore(), applicationID: applicationID)
+        vaultValue = value
+        return value
+    }
+
+    func isAuthenticationActive(_ operationID: UInt64) -> Bool {
+        resourceLock.lock()
+        let allowed = privateKeyAuthentications[operationID] == false
+        let value = vaultValue
+        resourceLock.unlock()
+        return allowed && (value?.isAuthenticationActive(operationID) ?? false)
+    }
+    func cancelAuthentication(_ operationID: UInt64) {
+        resourceLock.lock()
+        guard privateKeyAuthentications[operationID] != nil else { resourceLock.unlock(); return }
+        privateKeyAuthentications[operationID] = true
+        let value = vaultValue
+        resourceLock.unlock()
+        value?.cancelAuthentication(operationID)
+    }
+    func registerPrivateKeyAuthentication(_ operationID: UInt64) -> Int32 {
+        resourceLock.lock(); defer { resourceLock.unlock() }
+        guard operationID != 0, privateKeyAuthentications[operationID] == nil else { return CitizenSDKErrorCode.integrity.rawValue }
+        privateKeyAuthentications[operationID] = false
+        return 0
+    }
+    func releasePrivateKeyAuthentication(_ operationID: UInt64) {
+        resourceLock.lock()
+        privateKeyAuthentications.removeValue(forKey: operationID)
+        let value = vaultValue
+        resourceLock.unlock()
+        value?.releasePrivateKeyAuthentication(operationID)
     }
 
     func withServices<T>(_ body: (UnsafePointer<citizensdk_host_services_v1_t>) throws -> T) rethrows -> T {
@@ -33,9 +102,9 @@ internal final class CitizenSDKHostBridge {
                     var services = citizensdk_host_services_v1_t()
                     services.struct_size = UInt32(MemoryLayout<citizensdk_host_services_v1_t>.size)
                     services.abi_version = 1
-                    services.public_store = publicPointer
-                    services.secure_store = securePointer
-                    services.secret_vault = vaultPointer
+                    services.public_store = modules.contains(.chain) ? publicPointer : nil
+                    services.secure_store = modules.usesSecrets ? securePointer : nil
+                    services.secret_vault = modules.usesSecrets ? vaultPointer : nil
                     return try withUnsafePointer(to: &services, body)
                 }
             }
@@ -52,8 +121,10 @@ internal final class CitizenSDKHostBridge {
         publicVTable.runtime_cache_load = citizenSDKRuntimeCacheLoad
         publicVTable.runtime_cache_store = citizenSDKRuntimeCacheStore
         publicVTable.runtime_cache_delete = citizenSDKRuntimeCacheDelete
-        publicVTable.transaction_history_load = citizenSDKTransactionHistoryLoad
-        publicVTable.transaction_history_compare_and_swap = citizenSDKTransactionHistoryCAS
+        if modules.contains(.history) {
+            publicVTable.transaction_history_load = citizenSDKTransactionHistoryLoad
+            publicVTable.transaction_history_compare_and_swap = citizenSDKTransactionHistoryCAS
+        }
 
         secureVTable.struct_size = UInt32(MemoryLayout<citizensdk_host_secure_store_v1_t>.size)
         secureVTable.abi_version = 1
@@ -87,62 +158,62 @@ internal final class CitizenSDKHostBridge {
         }
         // 沙盒外的 macOS Application Support 由同用户共享，必须先按宿主分区。
         let root = try storageRoot(applicationSupport: applicationSupport, applicationID: applicationID)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        var values = URLResourceValues()
-        values.isExcludedFromBackup = true
-        var mutable = root
-        try? mutable.setResourceValues(values)
         return root
     }
 
-    fileprivate func chainLoad() throws -> CitizenSDKHostRecord { try publicStore.chainDatabaseLoad() }
+    fileprivate func chainLoad() throws -> CitizenSDKHostRecord { try publicStore().chainDatabaseLoad() }
     fileprivate func chainCAS(expected: UInt64, candidate: Data) throws -> CitizenSDKHostRecord {
-        try publicStore.chainDatabaseCAS(expected: expected, candidate: candidate)
+        try publicStore().chainDatabaseCAS(expected: expected, candidate: candidate)
     }
-    fileprivate func runtimeLoad(hash: Data) throws -> CitizenSDKHostRecord { try publicStore.runtimeCacheLoad(hash: hash) }
-    fileprivate func runtimeStore(hash: Data, candidate: Data) throws { try publicStore.runtimeCacheStore(hash: hash, candidate: candidate) }
-    fileprivate func runtimeDelete(hash: Data) throws { try publicStore.runtimeCacheDelete(hash: hash) }
-    fileprivate func historyLoad() throws -> CitizenSDKHostRecord { try publicStore.transactionHistoryLoad() }
+    fileprivate func runtimeLoad(hash: Data) throws -> CitizenSDKHostRecord { try publicStore().runtimeCacheLoad(hash: hash) }
+    fileprivate func runtimeStore(hash: Data, candidate: Data) throws { try publicStore().runtimeCacheStore(hash: hash, candidate: candidate) }
+    fileprivate func runtimeDelete(hash: Data) throws { try publicStore().runtimeCacheDelete(hash: hash) }
+    fileprivate func historyLoad() throws -> CitizenSDKHostRecord { try publicStore().transactionHistoryLoad() }
     fileprivate func historyCAS(expected: UInt64, candidate: Data) throws -> CitizenSDKHostRecord {
-        try publicStore.transactionHistoryCAS(expected: expected, candidate: candidate)
+        try publicStore().transactionHistoryCAS(expected: expected, candidate: candidate)
     }
-    fileprivate func profileLoad() throws -> CitizenSDKHostRecord { try secureStore.walletProfileLoad() }
+    fileprivate func profileLoad() throws -> CitizenSDKHostRecord { try secureStore().walletProfileLoad() }
     fileprivate func profileCAS(expected: UInt64, candidate: Data) throws -> CitizenSDKHostRecord {
-        try secureStore.walletProfileCAS(expected: expected, candidate: candidate)
+        try secureStore().walletProfileCAS(expected: expected, candidate: candidate)
     }
     fileprivate func secretLoad(_ identity: CitizenSDKHostSecretIdentity) throws -> CitizenSDKHostRecord {
-        try secureStore.encryptedSecretLoad(walletIndex: identity.walletIndex, kind: identity.kind,
+        try secureStore().encryptedSecretLoad(walletIndex: identity.walletIndex, kind: identity.kind,
                                             generation: identity.generation, owner: identity.owner,
                                             accountID: identity.accountID)
     }
     fileprivate func secretCAS(_ identity: CitizenSDKHostSecretIdentity, expected: UInt64,
                                candidate: Data) throws -> CitizenSDKHostRecord {
-        try secureStore.encryptedSecretCAS(walletIndex: identity.walletIndex, kind: identity.kind,
+        try secureStore().encryptedSecretCAS(walletIndex: identity.walletIndex, kind: identity.kind,
                                            generation: identity.generation, owner: identity.owner,
                                            accountID: identity.accountID, expected: expected, candidate: candidate)
     }
-    fileprivate func vaultAvailability() -> CitizenSDKVaultAvailability { vault.availability() }
+    fileprivate func vaultAvailability() -> CitizenSDKVaultAvailability { (try? vault().availability()) ?? .unavailable }
     fileprivate func vaultEnsure(_ key: CitizenSDKHostWalletKey, operationID: Data) throws {
-        try vault.ensureWalletKEK(walletIndex: key.walletIndex, generation: key.generation,
+        try vault().ensureWalletKEK(walletIndex: key.walletIndex, generation: key.generation,
                                   provisioningOperationID: operationID)
     }
     fileprivate func vaultHas(_ key: CitizenSDKHostWalletKey) throws -> Bool {
-        try vault.hasWalletKEK(walletIndex: key.walletIndex, generation: key.generation)
+        try vault().hasWalletKEK(walletIndex: key.walletIndex, generation: key.generation)
     }
     fileprivate func vaultWrap(_ key: CitizenSDKHostWalletKey, operationID: Data,
                                plaintext: UnsafeRawBufferPointer) throws -> Data {
-        try vault.wrapDEK(walletIndex: key.walletIndex, generation: key.generation,
+        try vault().wrapDEK(walletIndex: key.walletIndex, generation: key.generation,
                           provisioningOperationID: operationID, plaintext: plaintext)
     }
     fileprivate func vaultUnwrap(hostOperationID: UInt64, key: CitizenSDKHostWalletKey,
                                  wrapped: Data, output: UnsafeMutableRawBufferPointer,
                                  completion: @escaping (CitizenSDKErrorCode) -> Void) throws {
-        try vault.unwrapDEK(operationID: hostOperationID, walletIndex: key.walletIndex,
+        // 持有短资源锁完成实际 Vault 的登记，防止取消落在“已通知但尚未派发”的窗口。
+        resourceLock.lock(); defer { resourceLock.unlock() }
+        guard privateKeyAuthentications[hostOperationID] != true else {
+            throw CitizenSDKError(.authenticationCancelled, "private key authentication was cancelled")
+        }
+        try vault().unwrapDEK(operationID: hostOperationID, walletIndex: key.walletIndex,
                             generation: key.generation, wrapped: wrapped, output: output,
                             completion: completion)
     }
     fileprivate func vaultRetire(_ key: CitizenSDKHostWalletKey, operationID: Data) throws {
-        try vault.retireWalletKEK(walletIndex: key.walletIndex, generation: key.generation,
+        try vault().retireWalletKEK(walletIndex: key.walletIndex, generation: key.generation,
                                   cleanupOperationID: operationID)
     }
 }

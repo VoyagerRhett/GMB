@@ -331,7 +331,9 @@ impl Db {
              );",
         )
         .map_err(|err| format!("init core schema failed: {}", postgres_error_text(&err)))?;
-        Self::init_subject_partition_schema(conn)
+        Self::init_subject_partition_schema(conn)?;
+        conn.batch_execute(crate::institution::subjects::photos::SCHEMA)
+            .map_err(|err| format!("init legal representative photos failed: {err}"))
     }
 
     fn init_subject_partition_schema(conn: &mut postgres::Client) -> Result<(), String> {

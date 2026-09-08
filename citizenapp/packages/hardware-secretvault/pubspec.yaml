@@ -1,0 +1,26 @@
+name: gmb_hardware_secretvault
+description: 本产品内部的硬件绑定钱包机密严档金库。
+publish_to: "none"
+version: 1.0.0
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: org.gmb.hardware_secretvault
+        pluginClass: HardwareSecretvaultPlugin
+      ios:
+        pluginClass: HardwareSecretvaultPlugin

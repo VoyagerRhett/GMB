@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # 编译 CitizenWallet 冷钱包原生密码学库，放到 Flutter 能自动打包的位置。
 #
-# sr25519 与账户用途钥实现分别来自 shared/citizen-signer、shared/account-crypto，
-# 均与 CitizenApp 共用；本库只是冷端 FFI 外壳（冷钱包永久离线、不需要链）。
+# sr25519 与账户用途钥实现分别来自 citizenwallet/rust/src/sr25519.rs、citizenwallet/rust/src/account_crypto.rs，
+# 均属于本产品；本库是冷端 FFI 外壳（冷钱包永久离线、不需要链）。
 #
 # 前置条件：安装 Rust (rustup)
 #   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -20,20 +20,18 @@ RUST_DIR="$WALLET_DIR/rust"
 LIB_NAME="libcitizenwallet_signer"
 TARGET="${1:-all}"
 
-if [[ "$TARGET" == ios || "$TARGET" == android ]]; then
-  if [[ -n "${TATA_CONSOLE_INCREMENTAL_CACHE_DIR:-}" ]]; then
-    export CARGO_TARGET_DIR="$TATA_CONSOLE_INCREMENTAL_CACHE_DIR/cargo-target"
-  elif [[ -n "${TATA_CONSOLE_WORK_DIR:-}" ]]; then
-    export CARGO_TARGET_DIR="$TATA_CONSOLE_WORK_DIR/native/cargo"
-  elif [[ "${CI:-}" == true ]]; then
-    export CARGO_TARGET_DIR="$RUST_DIR/target"
-    export TATA_CONSOLE_NATIVE_ANDROID_DIR="$WALLET_DIR/android/app/src/main/jniLibs"
-    export TATA_CONSOLE_NATIVE_IOS_DIR="$WALLET_DIR/ios/signer"
-  else
-    echo '本机原生库编译必须由TataConsole提供中央工作目录' >&2
-    exit 1
-  fi
+# 所有本机编译（包括宿主测试）都必须使用中央产物目录。
+if [[ "${CI:-}" == true ]]; then
+  export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${RUNNER_TEMP:?缺少CI任务临时目录}/citizenwallet/cargo-target}"
 fi
+: "${CARGO_TARGET_DIR:?必须由塔塔控制台提供CARGO_TARGET_DIR，禁止写入源码rust/target}"
+python3 - "$CARGO_TARGET_DIR" "$WALLET_DIR" <<'CHECK_TARGET'
+from pathlib import Path
+import sys
+target, source = map(Path, sys.argv[1:])
+if not target.is_absolute() or target.resolve().is_relative_to(source.resolve()):
+    raise SystemExit('原生产物目录必须为钱包源码之外的绝对路径')
+CHECK_TARGET
 
 ensure_target() {
   local target="$1"
@@ -69,7 +67,7 @@ verify_symbols() {
 }
 
 verify_android_package() {
-  local package="$1" expected="${TATA_CONSOLE_NATIVE_ANDROID_DIR:-$WALLET_DIR/android/app/src/main/jniLibs}/arm64-v8a/$LIB_NAME.so" entry temporary packaged
+  local package="$1" expected="${TATA_CONSOLE_NATIVE_ANDROID_DIR:?缺少中央Android原生库目录}/arm64-v8a/$LIB_NAME.so" entry temporary packaged
   [[ -f "$package" ]] || { echo "错误: Android 包不存在：$package"; return 1; }
   [[ -f "$expected" ]] || { echo "错误: Android 原生库不存在：$expected"; return 1; }
   case "$package" in
@@ -196,7 +194,7 @@ build_host() {
     Darwin) host_ext=dylib ;;
     *)      host_ext=so ;;
   esac
-  local host_lib="$RUST_DIR/target/release/$LIB_NAME.$host_ext"
+  local host_lib="$CARGO_TARGET_DIR/release/$LIB_NAME.$host_ext"
   echo "宿主库: $host_lib ($(wc -c < "$host_lib" | tr -d ' ') bytes)"
   verify_symbols "$host_lib" -g
 }

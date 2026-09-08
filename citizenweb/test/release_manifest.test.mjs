@@ -27,7 +27,7 @@ const temporaryRoots = [];
 const flowRoot = process.env.TATA_CONSOLE_FLOW_ROOT;
 if (!flowRoot) throw new Error('缺少 TATA_CONSOLE_FLOW_ROOT');
 // TataConsole 重构后每个产品只暴露自己的完整动作入口，测试不得恢复旧共享脚本路径。
-const releaseAction = resolve(flowRoot, 'gmb/citizenweb/release-web.mjs');
+const releaseAction = resolve(flowRoot, 'gmb/citizenweb/web/release.mjs');
 
 function runRelease(argumentsList) {
   const result = spawnSync(process.execPath, [releaseAction, 'citizenweb-release', ...argumentsList], {

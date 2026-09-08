@@ -12,13 +12,16 @@ REPO_ROOT="$(dirname "$CITIZENAPP_DIR")"
 export GMB_ROOT="$REPO_ROOT"
 FLUTTER_BIN="${FLUTTER_BIN:-flutter}"
 FLUTTER_ROOT="$CITIZENAPP_DIR"
+ANALYSIS_CONFIG=''
+TEST_CONFIG=''
+TEST_CONFIGS_STAGED=false
 
 if [[ "${CI:-}" != true ]]; then
   : "${TATA_CONSOLE_TARGET_ROOT:?本机检查必须由控制台提供中央产物根}"
   : "${TATA_CONSOLE_WORK_DIR:?本机检查必须由控制台提供当前任务目录}"
   : "${TATA_CONSOLE_FLUTTER_ROOT:?本机检查必须使用当前任务Flutter配置}"
   case "$TATA_CONSOLE_WORK_DIR" in
-    "$TATA_CONSOLE_TARGET_ROOT/.work/GMB/citizenapp/ios"|"$TATA_CONSOLE_TARGET_ROOT/.work/GMB/citizenapp/android") ;;
+    "${TATA_CONSOLE_TARGET_ROOT%/target}/work/gmb/citizenapp/ios"|"${TATA_CONSOLE_TARGET_ROOT%/target}/work/gmb/citizenapp/android") ;;
     *) echo 'CitizenApp 本机检查只能在所属移动端任务内执行' >&2; exit 1 ;;
   esac
   # 检查沿用调用方持有的本端身份；不抢占目录、不复制源码、不删除别的运行记录。
@@ -43,10 +46,17 @@ PY
     echo 'CitizenApp 检查缺少本端独立依赖配置' >&2; exit 1
   }
   FLUTTER_ROOT="$TATA_CONSOLE_FLUTTER_ROOT"
-  export CARGO_TARGET_DIR="$TATA_CONSOLE_WORK_DIR/cache/cargo-tests"
-  export PUB_CACHE="$TATA_CONSOLE_WORK_DIR/cache/dart-pub"
-  export XDG_CONFIG_HOME="$TATA_CONSOLE_WORK_DIR/cache/flutter-config"
-  export TMPDIR="$TATA_CONSOLE_WORK_DIR/"
+  : "${TATA_CONSOLE_BUILD_WORK_DIR:?CitizenApp检查缺少本轮编译目录}"
+  : "${TATA_CONSOLE_DEPENDENCY_WORK_DIR:?CitizenApp检查缺少本轮依赖目录}"
+  [[ "$TATA_CONSOLE_BUILD_WORK_DIR" == "$TATA_CONSOLE_WORK_DIR/build" \
+    && "$TATA_CONSOLE_DEPENDENCY_WORK_DIR" == "$TATA_CONSOLE_WORK_DIR/dependencies" ]] || {
+    echo 'CitizenApp检查目录职责不一致' >&2; exit 1
+  }
+  export CARGO_TARGET_DIR="$TATA_CONSOLE_BUILD_WORK_DIR/cargo-tests"
+  export PUB_CACHE="$TATA_CONSOLE_DEPENDENCY_WORK_DIR/dart-pub"
+  export XDG_CONFIG_HOME="$TATA_CONSOLE_DEPENDENCY_WORK_DIR/flutter-config"
+  export TMPDIR="$TATA_CONSOLE_BUILD_WORK_DIR/tmp"
+  mkdir -p "$TMPDIR"
   export DYLD_LIBRARY_PATH="$CARGO_TARGET_DIR/release:$CARGO_TARGET_DIR/debug"
   export LD_LIBRARY_PATH="$CARGO_TARGET_DIR/release:$CARGO_TARGET_DIR/debug"
 fi
@@ -117,11 +127,32 @@ release_native_build_lock() {
   NATIVE_BUILD_LOCK_KIND=""
 }
 
+cleanup_test_configs() {
+  if [[ "$TEST_CONFIGS_STAGED" == true ]]; then
+    rm -f -- "$ANALYSIS_CONFIG" "$TEST_CONFIG"
+  fi
+  release_native_build_lock
+}
+
 cd "$FLUTTER_ROOT"
+# Flutter 只从工程根发现这两类配置；源码真源统一放在 scripts，执行期间只在本次
+# CI 检出或塔塔工作目录短暂落盘，退出时必定清理。
+ANALYSIS_CONFIG="$FLUTTER_ROOT/analysis_options.yaml"
+TEST_CONFIG="$FLUTTER_ROOT/dart_test.yaml"
+trap cleanup_test_configs EXIT
+if [[ ! -e "$ANALYSIS_CONFIG" && ! -L "$ANALYSIS_CONFIG"
+  && ! -e "$TEST_CONFIG" && ! -L "$TEST_CONFIG" ]]; then
+  TEST_CONFIGS_STAGED=true
+  cp "$SCRIPT_DIR/analysis_options.yaml" "$ANALYSIS_CONFIG"
+  cp "$SCRIPT_DIR/dart_test.yaml" "$TEST_CONFIG"
+elif [[ "$FLUTTER_ROOT" == "$CITIZENAPP_DIR" || ! -f "$ANALYSIS_CONFIG" || -L "$ANALYSIS_CONFIG"
+  || ! -f "$TEST_CONFIG" || -L "$TEST_CONFIG" ]]; then
+  echo '错误: Flutter 工程根存在不受塔塔任务管理的分析或测试配置' >&2
+  exit 1
+fi
 # GitHub Runner 保持既有原生锁；本机由控制台的准确任务所有权隔离，不使用跨端共享锁。
 if [[ "${CI:-}" == true ]]; then
   acquire_native_build_lock
-  trap release_native_build_lock EXIT
 fi
 if rg -n --hidden --glob '!target/**' 'tatachat_sdk' "$CITIZENAPP_DIR/smoldot"; then
   echo '错误: CitizenApp Smoldot 目录仍包含 TataChatSDK 编译或链接依赖' >&2

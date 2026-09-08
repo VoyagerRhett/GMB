@@ -1,21 +1,19 @@
-//! CitizenSDK 产品内部组合边界。
+//! 所有原生入口共用唯一模块化产品装配。
 //!
-//! 宿主只注入平台存储与系统金库合同，不能注入 signer、nonce 来源或链客户端。
-//! `ProductWalletProviders` 在类型上把四个钱包依赖绑定成一组，避免半套钱包在生产
-//! 组合中被误报为可用。`citizensdk_create` 使用
-//! [`ProductHostProviders::public_abi_session`] 的 chain-only 组合；
-//! `citizensdk_create_with_host` 则复制并验证宿主的持久化/金库 vtable，完整钱包 bundle
-//! 缺任一项都会失败关闭。本模块不会创建进程内钱包、密文或金库替身。
+//! 钱包管理与签名只共享受保护的账户归属和设备金库，历史独立装配。
+//! 未选择模块时不创建替身链、内存钱包或软件金库。
 
 use std::sync::{Arc, Mutex};
 
 use citizen_sdk_contracts::{
     ChainDatabaseSnapshot, ChainDatabaseStore, ChainSigner, ContractError, ContractErrorCode,
-    ContractFuture, EncryptedSecretBlobStore, ExportedChainState, RuntimeCacheStore, SecretVault,
-    TransactionHistoryStore, VaultAvailability, WalletProfileStore,
+    ContractFuture, EncryptedSecretBlobStore, ExportedChainState, Modules, RuntimeCacheStore,
+    SecretVault, TransactionHistoryStore, VaultAvailability, WalletProfileStore,
 };
 use citizen_sdk_engine::{CitizenEngine, EngineComponents};
+#[cfg(feature = "chain")]
 use citizen_sdk_smoldot_provider::{SmoldotProviderConfig, SmoldotVerifiedChainClient};
+#[cfg(feature = "signing")]
 use citizen_signer::Sr25519SoftwareSigner;
 
 use crate::{
@@ -94,17 +92,13 @@ impl ChainDatabaseStore for SessionChainDatabaseStore {
     }
 }
 
-/// 平台必须整组提供的钱包安全边界。
-///
-/// 四个字段都没有 `Option`：金库、公开 profile、设备密文与交易历史任何一个缺失，
-/// 调用方就只能选择“不组合钱包”。signer 与 nonce 来源故意不在本结构中，宿主无权
-/// 替换 CitizenSDK 的 sr25519 口径或绑定准确 best Runtime 的 nonce 实现。
+/// 钱包管理与本地签名共享的账户安全边界，不包含交易历史。
+/// 密码学实现仍由 SDK 固定；宿主不能注入 signer 或 nonce 实现。
 #[derive(Clone)]
 pub(crate) struct ProductWalletProviders {
     secret_vault: Arc<dyn SecretVault>,
     wallet_profiles: Arc<dyn WalletProfileStore>,
     encrypted_secrets: Arc<dyn EncryptedSecretBlobStore>,
-    transaction_history: Arc<dyn TransactionHistoryStore>,
 }
 
 impl ProductWalletProviders {
@@ -112,189 +106,284 @@ impl ProductWalletProviders {
         secret_vault: Arc<dyn SecretVault>,
         wallet_profiles: Arc<dyn WalletProfileStore>,
         encrypted_secrets: Arc<dyn EncryptedSecretBlobStore>,
-        transaction_history: Arc<dyn TransactionHistoryStore>,
     ) -> Self {
         Self {
             secret_vault,
             wallet_profiles,
             encrypted_secrets,
-            transaction_history,
         }
     }
 }
 
-/// 宿主可提供的类型化持久化边界。
-///
-/// 公开轻节点数据库与 runtime cache 相互独立；钱包只有完整 bundle 一个可选项。这里
-/// 没有任意键值仓储，也没有可装入秘密字节的通用容器。
+/// 类型化宿主资源；资源存在不能代替不可变的模块选择或授权。
 pub(crate) struct ProductHostProviders {
     chain_database: Option<Arc<dyn ChainDatabaseStore>>,
     runtime_cache: Option<Arc<dyn RuntimeCacheStore>>,
     wallet: Option<ProductWalletProviders>,
+    history: Option<Arc<dyn TransactionHistoryStore>>,
 }
 
 impl ProductHostProviders {
-    /// 当前 `citizensdk_create` 的真实组合：只提供非耐久公开链会话状态，不提供钱包。
     pub(crate) fn public_abi_session() -> Self {
-        let chain_database: Arc<dyn ChainDatabaseStore> =
-            Arc::new(SessionChainDatabaseStore::new());
         Self {
-            chain_database: Some(chain_database),
+            chain_database: Some(Arc::new(SessionChainDatabaseStore::new())),
             runtime_cache: None,
             wallet: None,
+            history: None,
         }
     }
 
-    /// 平台绑定必须按这一完整形状组合；钱包四个依赖不允许逐项可选。
-    /// signer 与准确 Runtime nonce 仍由 CitizenSDK 内部固定，宿主不能替换。
     pub(crate) fn new(
         chain_database: Option<Arc<dyn ChainDatabaseStore>>,
         runtime_cache: Option<Arc<dyn RuntimeCacheStore>>,
         wallet: Option<ProductWalletProviders>,
+        history: Option<Arc<dyn TransactionHistoryStore>>,
     ) -> Self {
         Self {
             chain_database,
             runtime_cache,
             wallet,
+            history,
         }
     }
 }
 
-/// 一个 SDK 实例唯一拥有的 provider、Engine 与产品组件事实。
+/// 必须先校验，再读取资产、调用回调或创建设备存储与金库。
+pub(crate) fn validate_modules(bits: u32) -> FfiResult<Modules> {
+    let modules = Modules::try_new(bits)?;
+    let compiled = (if cfg!(feature = "wallet") {
+        Modules::WALLET
+    } else {
+        0
+    }) | (if cfg!(feature = "signing") {
+        Modules::SIGNING
+    } else {
+        0
+    }) | (if cfg!(feature = "chain") {
+        Modules::CHAIN
+    } else {
+        0
+    }) | (if cfg!(feature = "transactions") {
+        Modules::TRANSACTIONS
+    } else {
+        0
+    }) | (if cfg!(feature = "history") {
+        Modules::HISTORY
+    } else {
+        0
+    }) | (if cfg!(feature = "qr") { Modules::QR } else { 0 });
+    if bits & !compiled != 0 {
+        return Err(FfiError::new(
+            crate::abi::CitizenSdkErrorCode::Unsupported,
+            "requested modules are not compiled into this CitizenSDK build",
+        ));
+    }
+    Ok(modules)
+}
+
 pub(crate) struct ProductComposition {
-    provider: Arc<SmoldotVerifiedChainClient>,
+    #[cfg(feature = "chain")]
+    provider: Option<Arc<SmoldotVerifiedChainClient>>,
     engine: Arc<CitizenEngine>,
+    modules: Modules,
     wallet: Option<ProductWalletProviders>,
-    /// Keeps copied host callbacks and their process-global pending-operation
-    /// owner alive for the complete SDK instance lifetime.
+    history: Option<Arc<dyn TransactionHistoryStore>>,
     host_services: Option<HostServicesAdapter>,
 }
 
 impl ProductComposition {
-    /// 构造当前公开 ABI 的 chain-only 产品实例。
+    pub(crate) fn private_key_view_vault(
+        &self,
+        authorizing: Arc<dyn Fn(u64) -> i32 + Send + Sync>,
+    ) -> Option<Arc<dyn SecretVault>> {
+        self.host_services
+            .as_ref()
+            .and_then(|host| host.private_key_view_vault(authorizing))
+    }
+
+    #[cfg(all(test, feature = "chain", feature = "transactions"))]
     pub(crate) fn public_abi(
         combined_chain_spec: String,
         system_name: String,
         system_version: String,
     ) -> FfiResult<Self> {
-        let config =
-            SmoldotProviderConfig::try_new(combined_chain_spec, system_name, system_version)?
-                .with_bootstrap();
-        Self::try_new(config, ProductHostProviders::public_abi_session())
+        let modules = validate_modules(Modules::CHAIN | Modules::TRANSACTIONS)?;
+        // SAFETY: no host vtables are supplied.
+        unsafe {
+            Self::module_abi(
+                Some(combined_chain_spec),
+                system_name,
+                system_version,
+                None,
+                modules,
+            )
+        }
     }
 
-    /// Constructs the persistent host-backed product composition.
+    /// 所有公开构造最终进入此处；校验不调用宿主回调。
+    /// 真实就绪探测留在工作线程执行，避免主线程等待自身认证回调形成死锁。
     ///
     /// # Safety
-    /// Nested host vtable pointers must be readable for this call. Their
-    /// copied callback contexts/code must remain valid and thread-safe until
-    /// successful instance destruction returns.
-    pub(crate) unsafe fn host_abi(
-        combined_chain_spec: String,
+    /// See host_abi for the lifetime of non-null host vtables.
+    pub(crate) unsafe fn module_abi(
+        combined_chain_spec: Option<String>,
         system_name: String,
         system_version: String,
-        services: &CitizenSdkHostServicesV1,
+        services: Option<&CitizenSdkHostServicesV1>,
+        modules: Modules,
     ) -> FfiResult<Self> {
-        // SAFETY: forwarded from this constructor's documented caller
-        // contract; adapter construction copies every validated vtable.
-        let adapter =
-            unsafe { HostServicesAdapter::try_from_ffi(services) }.map_err(FfiError::from)?;
-        let wallet_profiles = adapter.wallet_profile_store();
-        let encrypted_secrets = adapter.encrypted_secret_blob_store();
-        let secret_vault = adapter.secret_vault();
-        let wallet = match (secret_vault, wallet_profiles, encrypted_secrets) {
-            (Some(secret_vault), Some(wallet_profiles), Some(encrypted_secrets)) => {
-                Some(ProductWalletProviders::new(
-                    secret_vault,
-                    wallet_profiles,
-                    encrypted_secrets,
-                    adapter.transaction_history_store(),
-                ))
-            }
-            (None, None, None) => None,
-            _ => {
-                return Err(FfiError::internal(
-                    "validated host wallet providers are not all-or-none",
+        validate_modules(modules.bits())?;
+        let adapter = services
+            .map(|services| unsafe { HostServicesAdapter::try_from_ffi(services) })
+            .transpose()
+            .map_err(FfiError::from)?;
+        let secure_selected = modules.bits() & (Modules::WALLET | Modules::SIGNING) != 0;
+        let host = if let Some(adapter) = adapter.as_ref() {
+            let wallet = if secure_selected {
+                match (adapter.secret_vault(), adapter.wallet_profile_store(), adapter.encrypted_secret_blob_store()) {
+                    (Some(vault), Some(profiles), Some(secrets)) =>
+                        Some(ProductWalletProviders::new(vault, profiles, secrets)),
+                    _ => return Err(FfiError::invalid(
+                        "wallet or local signing requires the device vault and secure account store")),
+                }
+            } else {
+                None
+            };
+            if modules.contains(Modules::CHAIN) && !adapter.has_chain_database() {
+                return Err(FfiError::invalid(
+                    "chain module requires typed chain database callbacks",
                 ));
             }
+            if modules.contains(Modules::HISTORY) && !adapter.has_history() {
+                return Err(FfiError::invalid(
+                    "history module requires typed history callbacks",
+                ));
+            }
+            ProductHostProviders::new(
+                (modules.contains(Modules::CHAIN) && adapter.has_chain_database())
+                    .then(|| adapter.chain_database_store()),
+                (modules.contains(Modules::CHAIN) && adapter.has_runtime_cache())
+                    .then(|| adapter.runtime_cache_store()),
+                wallet,
+                (modules.contains(Modules::HISTORY) && adapter.has_history())
+                    .then(|| adapter.transaction_history_store()),
+            )
+        } else {
+            if secure_selected || modules.contains(Modules::HISTORY) {
+                return Err(FfiError::invalid(
+                    "selected modules require typed host services",
+                ));
+            }
+            ProductHostProviders::public_abi_session()
         };
-        let host = ProductHostProviders::new(
-            Some(adapter.chain_database_store()),
-            Some(adapter.runtime_cache_store()),
-            wallet,
-        );
-        let config =
-            SmoldotProviderConfig::try_new(combined_chain_spec, system_name, system_version)?
-                .with_bootstrap();
-        let mut composition = Self::try_new(config, host)?;
-        composition.host_services = Some(adapter);
+        #[cfg(feature = "chain")]
+        let provider = if modules.contains(Modules::CHAIN) {
+            let config = SmoldotProviderConfig::try_new(
+                combined_chain_spec
+                    .ok_or_else(|| FfiError::invalid("chain assets are required"))?,
+                system_name,
+                system_version,
+            )?
+            .with_bootstrap();
+            Some(SmoldotVerifiedChainClient::new(config)?)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "chain"))]
+        let _ = (combined_chain_spec, system_name, system_version);
+        let mut composition = Self::compose(
+            #[cfg(feature = "chain")]
+            provider,
+            host,
+            modules,
+        )?;
+        composition.host_services = adapter;
         Ok(composition)
     }
 
-    /// 组合一个真实 provider 与宿主的类型化平台边界。
-    ///
-    /// wallet 存在时，signer 固定为 SDK 内唯一 [`Sr25519SoftwareSigner`]，nonce 固定从
-    /// 同一个 smoldot provider Arc 取得；二者都不在宿主参数中，因此不能被替换。
+    #[cfg(all(test, feature = "chain"))]
     pub(crate) fn try_new(
         provider_config: SmoldotProviderConfig,
         host: ProductHostProviders,
     ) -> FfiResult<Self> {
-        let provider = SmoldotVerifiedChainClient::new(provider_config)?;
-        let chain_client = provider.as_verified_chain_client();
+        let bits = if host.wallet.is_some() {
+            Modules::ALL
+        } else {
+            Modules::CHAIN
+                | Modules::TRANSACTIONS
+                | if host.history.is_some() {
+                    Modules::HISTORY
+                } else {
+                    0
+                }
+        };
+        let modules = validate_modules(bits)?;
+        Self::compose(
+            Some(SmoldotVerifiedChainClient::new(provider_config)?),
+            host,
+            modules,
+        )
+    }
 
-        let signer: Option<Arc<dyn ChainSigner>> = host
+    pub(crate) fn compose(
+        #[cfg(feature = "chain")] provider: Option<Arc<SmoldotVerifiedChainClient>>,
+        host: ProductHostProviders,
+        modules: Modules,
+    ) -> FfiResult<Self> {
+        #[cfg(feature = "chain")]
+        let chain_client = provider
+            .as_ref()
+            .map(|provider| provider.as_verified_chain_client());
+        #[cfg(not(feature = "chain"))]
+        let chain_client = None;
+        #[cfg(feature = "signing")]
+        let signer = host
             .wallet
             .as_ref()
             .map(|_| Arc::new(Sr25519SoftwareSigner) as Arc<dyn ChainSigner>);
-        let secret_vault = host
-            .wallet
-            .as_ref()
-            .map(|wallet| Arc::clone(&wallet.secret_vault));
-        let wallet_profiles = host
-            .wallet
-            .as_ref()
-            .map(|wallet| Arc::clone(&wallet.wallet_profiles));
-        let transaction_history = host
-            .wallet
-            .as_ref()
-            .map(|wallet| Arc::clone(&wallet.transaction_history));
-        let encrypted_secrets = host
-            .wallet
-            .as_ref()
-            .map(|wallet| Arc::clone(&wallet.encrypted_secrets));
-
+        #[cfg(not(feature = "signing"))]
+        let signer = None;
         let mut components = EngineComponents::new(
             chain_client,
             signer,
-            secret_vault,
+            host.wallet
+                .as_ref()
+                .map(|wallet| Arc::clone(&wallet.secret_vault)),
             host.chain_database,
             host.runtime_cache,
-            wallet_profiles,
-            transaction_history,
-            encrypted_secrets,
-        );
-        if host.wallet.is_some() {
+            host.wallet
+                .as_ref()
+                .map(|wallet| Arc::clone(&wallet.wallet_profiles)),
+            host.history.clone(),
+            host.wallet
+                .as_ref()
+                .map(|wallet| Arc::clone(&wallet.encrypted_secrets)),
+        )
+        .with_modules(modules);
+        #[cfg(feature = "chain")]
+        if let Some(provider) = provider.as_ref() {
             components = components.with_account_nonce_source(provider.as_account_nonce_source());
         }
-
-        let engine = Arc::new(CitizenEngine::new(components));
         let composition = Self {
+            #[cfg(feature = "chain")]
             provider,
-            engine,
+            engine: Arc::new(CitizenEngine::new(components)),
+            modules,
             wallet: host.wallet,
+            history: host.history,
             host_services: None,
         };
-        // 构造是同步 ABI，不能在这里调用可能异步完成的宿主存储或系统金库；否则
-        // Android/iOS 主线程可能等待一个必须回到同一线程的 completion。这里只提交
-        // “已完整组合但尚未探测”的事实，第一次工作线程 refresh 再读取真实 readiness。
-        let initial_facts = if composition.wallet.is_some() {
+        let facts = if composition.wallet.is_some() {
             ProductCapabilityFacts::wallet_configured()
         } else {
             ProductCapabilityFacts::chain_only()
         };
-        composition
-            .engine
-            .update_capabilities(product_probes(false, initial_facts))?;
+        composition.engine.update_capabilities(product_probes(
+            false,
+            facts,
+            modules,
+            composition.history.is_some(),
+        ))?;
         Ok(composition)
     }
 
@@ -302,15 +391,18 @@ impl ProductComposition {
         &self.engine
     }
 
-    pub(crate) fn provider(&self) -> &Arc<SmoldotVerifiedChainClient> {
-        &self.provider
+    pub(crate) const fn has_modules(&self, bits: u32) -> bool {
+        self.modules.contains(bits)
     }
 
-    /// Distinguishes the new persistent host constructor from the unchanged
-    /// legacy session constructor. Only the former may add automatic
-    /// store-restore/persist behavior to the original lifecycle ABI calls.
-    pub(crate) const fn uses_host_services(&self) -> bool {
-        self.host_services.is_some()
+    #[cfg(feature = "chain")]
+    pub(crate) fn provider(&self) -> Option<&Arc<SmoldotVerifiedChainClient>> {
+        self.provider.as_ref()
+    }
+
+    /// 只有实际耐久链仓储参与生命周期恢复／持久化，不能从任意宿主资源推断。
+    pub(crate) fn uses_host_services(&self) -> bool {
+        self.modules.contains(Modules::CHAIN) && self.host_services.is_some()
     }
 
     /// Orphaned host operations can outlive a cancelled Engine future. They
@@ -350,91 +442,76 @@ impl ProductComposition {
             .map_err(FfiError::from)
     }
 
-    /// 从真实平台组件读取能力事实。任何 vault 或持久化读取异常都只会关闭相关能力，
-    /// 绝不会用“组件存在”冒充“组件可用”。
     pub(crate) fn capability_probes(
         &self,
         provider_is_usable: bool,
     ) -> Vec<citizen_sdk_engine::CapabilityProbe> {
-        product_probes(provider_is_usable, self.wallet_capability_facts())
+        product_probes(
+            provider_is_usable,
+            self.wallet_capability_facts(),
+            self.modules,
+            self.history.is_some(),
+        )
     }
 
-    /// 在 provider 停止前关闭并排空产品侧后台工作。
-    ///
-    /// NativeRuntime 已先取消并 join 自有调度线程；此处等待 Engine 的真实存储租约
-    /// 和 provider 的 unsubscribe 应答，之后调用者才允许 remove_chain。
+    /// 本地仓储和金库的排空不需要 smoldot；仅对实际存在的 provider 排空订阅。
     pub(crate) fn stop_and_drain_product_services(&self) -> FfiResult<()> {
         self.engine.stop_chain_monitor()?;
-        self.provider
-            .drive(self.engine.drain_chain_monitor())?
-            .map_err(FfiError::from)?;
-        if matches!(
-            self.provider.lifecycle(),
-            Ok(citizen_sdk_smoldot_provider::ProviderLifecycle::Running)
-        ) {
-            self.provider
-                .drive(self.provider.drain_finalized_subscriptions())?
-                .map_err(FfiError::from)?;
+        futures_executor::block_on(self.engine.drain_chain_monitor()).map_err(FfiError::from)?;
+        #[cfg(feature = "chain")]
+        if let Some(provider) = self.provider.as_ref() {
+            if matches!(
+                provider.lifecycle(),
+                Ok(citizen_sdk_smoldot_provider::ProviderLifecycle::Running)
+            ) {
+                provider
+                    .drive(provider.drain_finalized_subscriptions())?
+                    .map_err(FfiError::from)?;
+            }
         }
         Ok(())
     }
 
     pub(crate) fn has_wallet_services(&self) -> bool {
-        self.wallet.is_some()
+        self.modules
+            .contains(Modules::WALLET | Modules::CHAIN | Modules::HISTORY)
+            && self.wallet.is_some()
+            && self.history.is_some()
     }
 
     fn wallet_capability_facts(&self) -> ProductCapabilityFacts {
+        let history_store_ready = self
+            .history
+            .as_ref()
+            .is_some_and(|history| futures_executor::block_on(history.load()).is_ok());
         let Some(wallet) = self.wallet.as_ref() else {
-            return ProductCapabilityFacts::chain_only();
+            return ProductCapabilityFacts::chain_only().with_history(history_store_ready, false);
         };
-
-        let vault_availability = match self.provider.drive(wallet.secret_vault.availability()) {
-            Ok(Ok(availability)) => availability,
-            Ok(Err(_)) | Err(_) => VaultAvailability::Unavailable,
-        };
-
-        let wallet_state = self
-            .provider
-            .drive(wallet.wallet_profiles.load())
-            .ok()
-            .and_then(Result::ok);
+        let vault_availability = futures_executor::block_on(wallet.secret_vault.availability())
+            .unwrap_or(VaultAvailability::Unavailable);
+        let wallet_state = futures_executor::block_on(wallet.wallet_profiles.load()).ok();
         let wallet_store_ready = wallet_state.is_some();
-
-        // 空钱包仍可以创建；已有 profile 时，每个账户必须已有精确 sealed envelope，
-        // 否则 local signing / transaction build 立即失败关闭。
+        // A missing envelope never grants signing readiness. Empty wallet state
+        // remains creatable; actual signing still requires a current account.
         let encrypted_secrets_ready = wallet_state.as_ref().is_some_and(|state| {
-            state.profile().is_none_or(|profile| {
-                profile.accounts().iter().all(|account| {
-                    matches!(
-                        self.provider
-                            .drive(wallet.encrypted_secrets.load(account.secret_ref())),
-                        Ok(Ok(snapshot)) if snapshot.envelope().is_some()
-                    )
-                })
-            })
+            state.profile().is_none_or(|profile| profile.accounts().iter().all(|account| {
+                matches!(futures_executor::block_on(wallet.encrypted_secrets.load(account.secret_ref())),
+                    Ok(snapshot) if snapshot.envelope().is_some())
+            }))
         });
-
-        // availability 不是 Available 时不继续触碰硬件 key 查询，避免能力刷新触发无谓
-        // 平台调用；相关能力使用 vault 的稳定失败原因关闭。
         let wallet_key_ready = vault_availability == VaultAvailability::Available
             && wallet_state.as_ref().is_some_and(|state| {
                 state.profile().is_none_or(|profile| {
                     matches!(
-                        self.provider.drive(
+                        futures_executor::block_on(
                             wallet
                                 .secret_vault
                                 .has_wallet_key(profile.wallet_index(), profile.generation())
                         ),
-                        Ok(Ok(true))
+                        Ok(true)
                     )
                 })
             });
-
-        let history_store_ready = matches!(
-            self.provider.drive(wallet.transaction_history.load()),
-            Ok(Ok(_))
-        );
-
         ProductCapabilityFacts::wallet(
             vault_availability,
             wallet_store_ready,

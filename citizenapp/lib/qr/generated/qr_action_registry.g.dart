@@ -1,4 +1,4 @@
-// 本文件由 shared/qr-protocol 生成，禁止手改。
+// 本文件由 citizenchain/crates/qr-protocol 生成，禁止手改。
 // 扫码签名动作、中文动作名、字段中文名和固定展示值的唯一真源在 registry/*.yaml。
 
 class GeneratedQrActionRegistry {

@@ -1,5 +1,16 @@
 # CitizenSDK Windows 平台合同
 
+扫码窗口由 SDK Host 提供，Media Foundation 仅用于设备采集和像素转换，二维码统一由
+同一 ZXing-C++ 识别。系统相机隐私权限关闭、无设备或设备断开都明确失败，不启用其它识别器。
+链调用的签名窗口只展示 Rust 已验证审阅，确认后消费同一 Core 结果并复用现有设备授权。
+
+当前为 89 个 Core 函数、17 个 Host 函数、3 个 QR 图像函数和五端统一 36 个 Flutter 方法。
+Config.modules 是唯一模块真源，旧 C Host 配置 enable_wallet 的布局/布尔含义保持。
+先由 Rust 验证模块，再按需创建 public/secure store 与 Vault；未选 chain 不加载链资产或创建
+链数据库，未选 history 不初始化历史。signing-only 不开放钱包管理/UI，只使用同宿主既有
+SDK 安全账户；首次 provision 仍须 wallet 流程。运行期选择不裁剪现有 full 包及链资产。
+模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
+
 Flutter 创建钱包只传 12／18／24 的 word_count；导入与追加账户显式传 0，不继承创建默认值。
 两种入口均经同一个原生 Host 参数校验器，不能静默忽略无关字段。
 
@@ -8,15 +19,14 @@ Flutter 创建钱包只传 12／18／24 的 word_count；导入与追加账户�
 第 8.1 步增加原生 C/C++ Host、Win32 自有 UI、系统存储、PCP/TPM 金库与构建/测试源码；
 第 8.2 步新增只连接这些既有能力的 Flutter adapter；第 8.3 步增加独立 C/C++ 安装消费合同。
 第 8.4 步同步接入默认 Flutter 注册、同版候选/Hosted 文件与真实公开 Flutter 消费者。
-不修改 CitizenApp、Rust Core、70 项根 ABI、22 个 Flutter 方法或其它平台；公开类型仍
-只有 `CitizenSdk`。Windows 尚未实际编译、运行或发布，源码注册不是平台验收通过。
+该阶段不修改 CitizenApp 或复制 Rust Core；当前第 2 步按五端统一模块合同扩展根 ABI 与验签方法。Windows 尚未实际编译、运行或发布，源码注册不是平台验收通过。
 
 | 边界 | 固定实现 |
 | --- | --- |
 | 产品、网络 | CitizenSDK / `citizensdk`；链 ID 和 protocol ID 都是 `citizenchain` |
 | 平台、机器 | Windows 11；公开名称 Windows；官方 Rust target `x86_64-pc-windows-msvc` |
 | 核心 | 现有 `native/ffi` 动态库；Host 不实现链、metadata、交易或 sr25519 算法 |
-| 原生入口 | 13 项 `citizensdk_host_*`；C++ `citizen_sdk::Host` header-only 包装 |
+| 原生入口 | 17 项 `citizensdk_host_*`；C++ `citizen_sdk::Host` header-only 包装 |
 | UI | SDK-owned Win32；父窗口所有权与消息分派均限创建线程 |
 | 金库 | Microsoft Platform Crypto Provider、TPM 2.0、用户级不可导出 RSA-2048 KEK |
 | 认证 | SDK 独立设备口令，PBKDF2-HMAC-SHA256 派生后通过 PCP 官方 PIN 属性授权 |
@@ -80,7 +90,7 @@ Win32 dispatcher 只传内部操作身份，不传秘密指针给公开回调。
 ```
 
 源包审计固定 Windows 的 62 个生产文件、28 个测试输入和平台文档，拒绝额外目录和任何
-生成状态。第 8.4 步候选按精确白名单注入安装件，Hosted 保留 33 项运行输入，不纳入
+生成状态。当前候选按精确白名单注入安装件，Hosted 保留 34 项运行输入，不纳入
 Host 私有源码。MSVC 运行时由宿主部署环境提供，SDK 不额外捆绑未登记运行库。
 MSVC/CTest、全量 PE 导出、UI、跨进程存储与真实 TPM 结果必须在后续统一 GitHub CI（增量）
 和 Release（全量）取得。当前源码检查、合成数据或 macOS 编译均不是这些运行证据。
@@ -88,7 +98,7 @@ MSVC/CTest、全量 PE 导出、UI、跨进程存储与真实 TPM 结果必须�
 ### 安装与 C/C++ 消费合同（第 8.3 步）
 
 唯一构建器保留 14 项原生 CTest，先安装到 work_dir/Windows/install。安装清单与磁盘
-反向枚举必须精确为 21 文件：9 个公开头、2 个 DLL、2 个 import library、5 个 CMake
+反向枚举必须精确为 22 文件：10 个公开头、2 个 DLL、2 个 import library、5 个 CMake
 文件和 3 个链资产；不含 Flutter 注册头。安装文件与源码/本轮 Core、Host、CMake 输出
 逐字节一致，SDK 版本、PE 机器格式与完整导出同时核验。
 
@@ -105,8 +115,12 @@ MSVC/CTest、全量 PE 导出、UI、跨进程存储与真实 TPM 结果必须�
 ## Flutter 绑定与应用身份（第 8.2 步）
 
 依赖为 `CitizenSdk → 标准双通道 → Windows adapter → 已安装 Host/Core`。官方
-StandardMethodCodec 的字符串保留精确长度，不引入 Linux GLib 的专用内部表示。22 个
+StandardMethodCodec 的字符串保留精确长度，不引入 Linux GLib 的专用内部表示。36 个
 方法与其它四份绑定按独立金标对齐，不增加 Windows 专用 Dart 参数或业务方法。
+
+open 只接受 `[1, modules]`；无会话 verifySignature 只接受
+`[1, accountId, signature, payload]`，返回 `[1, bool]`，错误 session/sequence 均 null。
+该方法在 session 查找与环境/Host 工厂前调用纯 C，无需 open、事件订阅、数据库或金库。
 
 宿主顶层 Windows CMake 在 generated_plugins.cmake 之前显式设置
 `CITIZENSDK_APPLICATION_ID`。它原样成为现有 Config.application_id，必须满足
@@ -125,7 +139,7 @@ Dart 返回 disposed，不能把一次 BUSY 当作完成或再次访问已释放
 
 CMake 只消费包内精确同版 DLL、import libraries、公开头与 Host→Core 依赖；插件和测试
 使用自身异常设置，不修改宿主全局编译选项。六项 adapter 测试与原生 14 项分支隔离，
-不重编第二份 Host/Core。第 8.4 步 Hosted 精确保留 21 项安装件与 12 项插件输入；七个
+不重编第二份 Host/Core。当前 Hosted 精确保留 22 项安装件与 12 项插件输入；七个
 Host 头与审计源码重叠，字节必须一致。纯源码默认检查仍拒绝 DLL/LIB 等生成内容。
 
 ## 正式 Flutter 消费者（第 8.4 步）

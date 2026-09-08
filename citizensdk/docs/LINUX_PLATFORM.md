@@ -1,7 +1,16 @@
 # CitizenSDK Linux 平台合同
 
+扫码窗口由 SDK Host 提供。GStreamer 仅用于设备发现、采集和像素转换，ZXing-C++ 是唯一
+二维码识别及生成实现；链调用解析、审阅与签名仍进入 Rust Core。
+系统保留 Debian 11 / GLIBC 2.31 基线，使用 GStreamer 1.18 或更高版本、base/good 插件，
+不强制提升到新系统。构建需要对应开发包，运行需要相机设备访问权和平台插件；缺少时明确报错。
+
+当前将六模块按统一 Rust 规则装配；钱包管理与签名互不隐式启用，history 和 qr 独立。
+签名模块仅使用同一宿主已有 SDK 安全账户与金库，首次 provision 仍须钱包流程。
+运行时模块选择不裁剪现有 full 包或链资产。模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
+
 本文固定 CitizenSDK 第 7 步的 LinuxARM、LinuxAMD 平台投影。Linux 平台不会复制或改写
-CitizenChain 轻节点、钱包、sr25519、Runtime 或交易实现；它只把根目录已经冻结的 73 个
+CitizenChain 轻节点、钱包、sr25519、Runtime 或交易实现；它只把根目录当前声明的 89 个
 `citizensdk_*` 产品 C ABI 与宿主操作系统能力组合起来。
 
 ## 当前状态
@@ -58,7 +67,7 @@ Flutter App           │       │
                      CitizenSDK Rust Core
 ```
 
-- `libcitizensdk.so` 是唯一 Rust Core，必须精确导出根产品头声明的 73 个符号。
+- `libcitizensdk.so` 是唯一 Rust Core，必须精确导出根产品头声明的89个符号及SDK内部查看的4个链接符号，私有声明不安装。
 - `libcitizensdk_host.so` 只实现 HostBridge、typed stores、TPM/认证、SDK-owned 钱包 UI 和
   生命周期装配；不得包含第二份 smoldot、signer、Engine 或 Core 导出。
 - CMake 公开导入目标固定为 `CitizenSDK::Core` 和 `CitizenSDK::Host`。
@@ -76,10 +85,10 @@ linux/lib/LinuxAMD/libcitizensdk.so
 linux/lib/LinuxAMD/libcitizensdk_host.so
 ```
 
-两种平台各 19 项安装投影合并为 26 项：`include/` 下根 C ABI 2 头与 7 个 Host/C++ 头、
+两种平台各 20 项安装投影合并为 27 项：`include/` 下根 C ABI 2 头、QR 图像头与 7 个 Host/C++ 头、
 `share/citizensdk/citizenchain/` 的 3 项资产只保留一份；重叠文件必须逐字节一致。每个平台
 `lib/<平台>/` 内保留 Core/Host 双库及 `cmake/CitizenSDK/` 的 5 项配置，不能跨平台覆盖。
-Hosted Linux 精确为上述 26 项加 12 项 plugin 输入：`CMakeLists.txt`、
+Hosted Linux 精确为上述 27 项加 12 项 plugin 输入：`CMakeLists.txt`、
 `cmake/CitizenSDKFlutter.cmake`、5 个 `.cc`、4 个内部 `.hpp` 和 `citizen_sdk_plugin.h`。
 Host 私有实现、测试、文档与原生构建模板只进入源码审计闭集，不进入 Hosted 运行包。
 源码校验继续拒绝生成库；只有候选校验准入准确安装投影。缺件、错版本、重叠字节漂移
@@ -88,7 +97,7 @@ CI/Release，不能只凭 ELF 结构、头文件或版本声明视为已取得�
 
 这些运行库由发布构造器从源码树外注入；`/Users/rhett/GMB/citizensdk` 永远不保存生成的
 `.so`、CMake cache、`build/` 或 `target/`。本机 CitizenSDK 生成状态只能进入
-`/Users/rhett/TATA/tataconsole/target/GMB/citizensdk/SDK` 下由任务独占的工作目录；GitHub runner 使用
+`/Users/rhett/TATA/tataconsole/work/gmb/citizensdk` 下由任务独占的工作目录；GitHub runner 使用
 统一工作流的 checkout 外独占目录，不照搬本机绝对路径。
 Linux 合同测试配置必须通过
 `-DCITIZENSDK_TEST_WORK_DIR=<绝对路径>` 显式注入其中一个已经存在、有效 UID 所有且权限精确
@@ -108,11 +117,11 @@ Linux 环境。
 
 ## Host 与 C ABI
 
-根产品 ABI 仍是 73 个 `citizensdk_*` 函数。Linux 薄 Host ABI v1 另外精确包含 13 个
+根产品 ABI 当前是89个公开函数。Linux薄Host ABI v1另外精确包含17个
 `citizensdk_host_*` 函数，用于 Host 创建、Core 借用、callback、父窗口、Vault 可用性、钱包
 流程、单调销毁/监督移交和错误复制；它不增加链、钱包、签名、交易或任意 RPC 的第二套语义。
 
-Linux Host 必须使用根 `citizensdk_create_with_host`，并实现完全相同的五类具名 store：
+Linux Host 使用 `citizensdk_create_with_modules`，按选择装配同一五类具名 store 合同：
 
 1. `CHAIN_DATABASE`：可重建的轻节点数据库及 finalized anchor；
 2. `RUNTIME_CACHE`：按准确 block hash 绑定的可替换 metadata/runtime cache；
@@ -122,7 +131,8 @@ Linux Host 必须使用根 `citizensdk_create_with_host`，并实现完全相同
 
 `CHAIN_DATABASE`、`RUNTIME_CACHE`、`TRANSACTION_HISTORY` 进入 public SQLite；
 `WALLET_PROFILE`、`ENCRYPTED_SECRET_BLOB` 及 Vault 对象引用进入独立 secure SQLite。两库
-不得合并。所有记录操作必须使用具名 domain 和结构化 key，不提供任意字符串键值逃生口。
+不得合并；仅 chain/history 需要 public store，仅 wallet/signing 需要 secure store/Vault。
+未选链时不加载链资产或创建链数据库，未选历史时不初始化历史。所有记录操作必须使用具名 domain 和结构化 key，不提供任意字符串键值逃生口。
 Host config 强制要求小写 reverse-DNS `application_id`，实际状态根固定为
 `storage_root/<application_id>/citizensdk/v1/{public,secure}`；不同宿主应用不得意外共用数据库，
 改变 application ID 也不是隐式迁移入口。
@@ -161,7 +171,9 @@ observer 正常返回或抛出后都通过 RAII 对每个非零 result 执行一
 ## Flutter adapter 源码合同
 
 Linux Flutter adapter 固定 `citizen/sdk/core/v1` 与 `citizen/sdk/events/v1`，精确复用 Dart、
-Android、Darwin 的 22 方法和 fixed tuple。一个 session 持有一个 Host/Core；Dart 只看见
+Android、Darwin 的 36 方法和 fixed tuple。open 为 `[1, modules]`；无会话验签为
+`[1, accountId, signature, payload]`，返回 `[1, bool]`，在 session 查找及环境工厂前调用纯 Core，
+不创建 Host、数据库或金库。其余方法的一个 session 持有一个 Host/Core；Dart 只看见
 随机 session ID。请求在 Core 接受前预置 route；callback 动态范围内复制公开 result，只有
 纯拥有值经非 inline 的 scheduler 回 UI 线程。原生终态到达与复制完成是两个独立状态；只有
 复制完成后才能移除 route。EventChannel cancel 只取消 sink，epoch 防止旧队列污染新订阅。
@@ -261,7 +273,7 @@ Linux Host 只为恢复词备份和恢复词/password 输入提供 SDK-owned GTK
 - 恢复词、BIP-39 password 与设备金库解锁口令分别执行 UTF-8/长度门禁；
 - 同一 CitizenSDK instance 的钱包流程与 close admission 原子互斥。
 
-钱包流程只在 Core 已成功打开后受理；Host config 的 `enable_wallet=false` 返回
+钱包流程只在 Core 已成功打开且显式选择 wallet 后受理；未选 wallet（包括 signing-only）返回
 `CITIZENSDK_ERROR_UNSUPPORTED`，已启用但 TPM/认证事实不是 `AVAILABLE` 时返回
 `CITIZENSDK_ERROR_UNAVAILABLE`，并且都必须发生在展示 GTK 界面之前。
 

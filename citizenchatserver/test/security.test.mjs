@@ -4,10 +4,10 @@ import test from 'node:test';
 
 const root = new URL('../', import.meta.url);
 const source = [
-  readFileSync(new URL('product.json', root), 'utf8'),
-  readFileSync(new URL('wrangler.jsonc', root), 'utf8'),
+  readFileSync(new URL('scripts/product.json', root), 'utf8'),
+  readFileSync(new URL('scripts/wrangler.jsonc', root), 'utf8'),
 ].join('\n');
-const wrangler = JSON.parse(readFileSync(new URL('wrangler.jsonc', root), 'utf8'));
+const wrangler = JSON.parse(readFileSync(new URL('scripts/wrangler.jsonc', root), 'utf8'));
 
 test('CitizenChatServer 只声明 HTTPS、WSS 与准确双端应用身份', () => {
   assert.equal(source.includes(['http', '://'].join('')), false);

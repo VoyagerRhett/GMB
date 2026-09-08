@@ -2257,7 +2257,12 @@ fn main() {
             )
             .route(
                 "/api/institutions/legal-representative/photo",
-                post(institution::subjects::admin::upload_legal_representative_photo),
+                post(institution::subjects::admin::upload_legal_representative_photo)
+                    .layer(axum::extract::DefaultBodyLimit::max(5 * 1024 * 1024 + 64 * 1024)),
+            )
+            .route(
+                "/api/institutions/legal-representative/photo/:photo_id",
+                get(institution::subjects::admin::read_legal_representative_photo),
             )
             .route(
                 "/api/institutions/create",

@@ -101,11 +101,18 @@ impl<'a> AccountStateService<'a> {
     /// 一次 batch 读取多个 finalized `System.Account`，返回顺序和重复项与输入完全一致。
     ///
     /// 相同 AccountId 只生成一个 storage key 并只向 provider 请求一次；空输入不会触发
-    /// 任何链访问。
+    /// 任何链访问。单次最多接受 1990 项，限制在去重前执行，避免大量重复项绕过
+    /// 输入/输出内存上限；直接使用 Rust 服务也执行与跨端绑定相同的边界。
     pub async fn finalized_account_balances(
         &self,
         account_ids: Vec<AccountId32>,
     ) -> Result<Vec<FinalizedAccountBalance>, EngineError> {
+        if account_ids.len() > 1990 {
+            return Err(EngineError::contract(
+                ContractErrorCode::InvalidArgument,
+                "finalized account balance batch 最多接受 1990 项",
+            ));
+        }
         if account_ids.is_empty() {
             return Ok(Vec::new());
         }

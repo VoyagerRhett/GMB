@@ -2,7 +2,7 @@
 members = [
     "node",                                  # 链节点程序
     "node/vendor",                           # 本地覆盖的 GRANDPA voter 持久化实现
-    "node/libp2p-websocket",                 # 本地覆盖的 libp2p WebSocket 传输(经 [patch.crates-io] 生效)
+    "node/libp2p",                 # 本地覆盖的 libp2p WebSocket 传输(经 [patch.crates-io] 生效)
     "onchina",                               # onchina 多机构统一控制台:CID 身份 + 链下明细 + 鉴权 + 颁发(ADR-029/030)
     "crates/blockchain-harness",             # 区块链真实验收与坏块构造测试工具（非生产路径）
     "crates/chain-signing",                  # Rust host 端链交易签名材料唯一真源
@@ -43,6 +43,8 @@ members = [
     "runtime/transaction/multisig",     # 交易-机构多签名地址转账模块 pallet
 
 ]
+# QR 协议位于本产品目录，由根部轻量工具 workspace 单独验证；节点通过 path 使用。
+exclude = ["crates/qr-protocol"]
 resolver = "2"
 
 [workspace.package]                                         # 子工作空间元信息
@@ -172,4 +174,4 @@ substrate-wasm-builder = { git = "https://github.com/VoyagerRhett/polkadot-sdk.g
 # 允许自签证书传输使用 rustls provider 验证握手签名；
 # 节点身份仍由 Noise 协议按 peer ID 校验。
 [patch.crates-io]
-libp2p-websocket = { path = "node/libp2p-websocket" }
+libp2p-websocket = { path = "node/libp2p" }

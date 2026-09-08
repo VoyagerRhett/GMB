@@ -5,6 +5,18 @@ CitizenSDK 组合了不同许可证覆盖的源码。根 `LICENSE` 是组件许�
 来源说明和锁文件；Hosted Package 只过滤开发输入，但继续携带本文件、根许可证入口、MIT、
 GPL with Classpath Exception 原文，以及根许可证入口中完整重现的 Apache-2.0 原文。
 
+## ZXing-C++ 与 libzint
+
+第4步的五端 QR 图像层静态链接未修改的 ZXing-C++ 3.1.1 官方完整源码，
+且为了 QR 生成启用其内置 libzint。ZXing-C++ 是 Apache-2.0，其官方顶层 `LICENSE`
+摘要为 `c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08`；根 `LICENSE`
+已保留 Apache-2.0 完整原文。libzint 的生产文件声明 BSD-3-Clause，完整分发条款也保留在根 `LICENSE`。
+
+Copyright (C) 2008-2025 Robin Stuart <rstuart114@gmail.com>
+
+SDK 源树只包含自有窄包装，不复制上游源码；官方归档、准确版本和 SHA256
+由 TATA 依赖合同固定。发布候选必须保留本声明和许可证，不得将上游著作权写成 CitizenSDK 自有实现。
+
 第 7.1 步新增的 `linux/` Host 与合同测试是 CitizenSDK 自有实现，适用根 MIT 许可证。该步只
 提交源码，没有在仓库中携带 TPM2-TSS、SQLite、GTK 或 C++ runtime 的第三方源码/二进制副本，
 也没有执行 Linux 编译或测试、没有生成 Linux `.so`。第 7.4 步把同版本安装投影与 Hosted

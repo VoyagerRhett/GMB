@@ -180,7 +180,7 @@ void FlutterEnvironment::detach() noexcept {
   state_->remove_watches();
 }
 
-Config FlutterEnvironment::resolve(const NativeEnvironmentInputs &inputs) {
+Config FlutterEnvironment::resolve(const NativeEnvironmentInputs &inputs, uint32_t modules) {
   absolute_path(inputs.executable);
   absolute_path(inputs.user_data);
   // 此处是打包/装配预检；精确存储权限与资产信任仍由已安装 Host/Core 验证。
@@ -194,28 +194,31 @@ Config FlutterEnvironment::resolve(const NativeEnvironmentInputs &inputs) {
   ordinary_path(inputs.user_data, true);
   const auto assets = inputs.executable.parent_path() / L"data" / L"flutter_assets" /
       L"packages" / L"citizen_sdk" / L"assets" / L"citizenchain";
-  ordinary_path(assets, true);
-  for (const auto *name : {L"manifest.json", L"chainspec.json", L"light_sync_state.json"}) {
-    const auto path = assets / name;
-    ordinary_path(path, false);
-    std::error_code error;
-    const auto size = std::filesystem::file_size(path, error);
-    require(!error && size > 0, CITIZENSDK_ERROR_INTEGRITY,
-            "CitizenSDK Flutter chain asset is empty or unreadable");
+  // 未选择链时不得探测包内链资产。
+  if ((modules & CITIZENSDK_MODULE_CHAIN) != 0) {
+    ordinary_path(assets, true);
+    for (const auto *name : {L"manifest.json", L"chainspec.json", L"light_sync_state.json"}) {
+      const auto path = assets / name;
+      ordinary_path(path, false);
+      std::error_code error;
+      const auto size = std::filesystem::file_size(path, error);
+      require(!error && size > 0, CITIZENSDK_ERROR_INTEGRITY,
+              "CitizenSDK Flutter chain asset is empty or unreadable");
+    }
   }
   Config config;
   config.storage_root = inputs.user_data;
   config.asset_root = assets;
   config.application_id = inputs.application_id;
-  config.enable_wallet = true;
+  config.modules = modules;
   return config;
 }
 
-OpenEnvironment FlutterEnvironment::open() const {
-  return open({executable_path(), user_data_path(), CITIZENSDK_APPLICATION_ID});
+OpenEnvironment FlutterEnvironment::open(uint32_t modules) const {
+  return open({executable_path(), user_data_path(), CITIZENSDK_APPLICATION_ID}, modules);
 }
 
-OpenEnvironment FlutterEnvironment::open(const NativeEnvironmentInputs &inputs) const {
+OpenEnvironment FlutterEnvironment::open(const NativeEnvironmentInputs &inputs, uint32_t modules) const {
   require(std::this_thread::get_id() == state_->ui_thread,
           CITIZENSDK_ERROR_INVALID_STATE,
           "CitizenSDK Flutter environment requires its UI thread");
@@ -223,9 +226,10 @@ OpenEnvironment FlutterEnvironment::open(const NativeEnvironmentInputs &inputs) 
           "CitizenSDK Flutter environment or registrar window is detached");
   require(!state_->had_view || same_ui_window(state_->parent, state_->thread),
           CITIZENSDK_ERROR_INVALID_STATE, "CitizenSDK Flutter parent is no longer available");
-  auto config = resolve(inputs);
+  auto config = resolve(inputs, modules);
   // 初始无 view 可以明确 rootless；曾经拥有的 view/父窗口销毁后必须拒绝，不能改成 rootless。
-  config.hwnd = state_->parent;
+  config.hwnd = (modules & (CITIZENSDK_MODULE_WALLET | CITIZENSDK_MODULE_SIGNING | CITIZENSDK_MODULE_QR)) != 0
+      ? state_->parent : nullptr;
   return {std::move(config), state_};
 }
 

@@ -8,6 +8,8 @@
 #include <thread>
 
 #include "citizen_sdk_lifecycle.hpp"
+#include "citizen_sdk_qr_flow.hpp"
+#include "citizen_sdk/citizen_sdk.hpp"
 
 #ifndef CITIZENSDK_WINDOWS_TEST_SOURCE_DIR
 #error "CITIZENSDK_WINDOWS_TEST_SOURCE_DIR must point at the Windows source root"
@@ -17,6 +19,30 @@
 #endif
 
 int main() {
+  // 正式原生 flow 使用的取消门；不模拟 GTK/Win32，也不把它冒充设备验收。
+  {
+    citizen_sdk::windows::QrFlowCancellation gate;
+    assert(gate.accepts() && !gate.cancelled() && !gate.closing());
+    gate.cancel();
+    assert(!gate.accepts() && gate.cancelled());
+    assert(!gate.begin_cleanup());
+    assert(gate.begin_cleanup());
+    gate.cancel();
+    assert(!gate.accepts() && gate.cancelled() && gate.closing());
+    citizen_sdk::windows::QrFlowCancellation completed;
+    assert(!completed.begin_cleanup());
+    assert(!completed.accepts() && !completed.cancelled());
+  }
+  // 只测试 Core 公共 JSON 的结构投影，业务校验与真实签名仍只由 Rust 测试覆盖。
+  assert(citizen_sdk::detail::qr_public_field(
+      R"({"kind":5,"canonical_text":"QR_\u00561"})", "canonical_text", 2331) == "QR_V1");
+  bool rejected_duplicate = false;
+  try { (void)citizen_sdk::detail::qr_public_field(
+      R"({"canonical_text":"a","canonical_text":"b"})", "canonical_text", 2331); }
+  catch (const citizen_sdk::Error &) { rejected_duplicate = true; }
+  assert(rejected_duplicate);
+
+
   using citizen_sdk::windows::HostError;
   using citizen_sdk::windows::Lifecycle;
 
@@ -128,6 +154,27 @@ int main() {
   }
   assert(closed_rejected_service);
 
+  // 安全查看取消/清屏不等于请求终态。运行正式 Lifecycle 验证：认证租约
+  // 排空后，查看仍须保留钱包租约，只有真实终态才释放；这不模拟原生 UI。
+  Lifecycle private_view;
+  const uint64_t private_view_token = private_view.reserve_wallet_flow();
+  private_view.begin_service();
+  for (const bool authentication_drained : {false, true}) {
+    if (authentication_drained) private_view.finish_service();
+    assert(private_view.wallet_active());
+    bool private_view_busy = false;
+    try { (void)private_view.begin_close(); }
+    catch (const HostError &error) { private_view_busy = error.code() == CITIZENSDK_ERROR_BUSY; }
+    assert(private_view_busy);
+  }
+  private_view.finish_wallet_flow(private_view_token + 1);
+  assert(private_view.wallet_active());
+  private_view.finish_wallet_flow(private_view_token);
+  assert(private_view.begin_close());
+  private_view.commit_closed();
+  private_view.finish_wallet_flow(private_view_token); // 重复晚终态不能复活状态。
+  assert(!private_view.begin_close() && !private_view.wallet_active());
+
   const auto read = [](const char *relative) {
     const std::string path = std::string(CITIZENSDK_WINDOWS_TEST_SOURCE_DIR) +
                              relative;
@@ -184,7 +231,14 @@ int main() {
     ++leased_entry_points;
     ++lease_cursor;
   }
-  assert(leased_entry_points == 9);
+  // 安全查看也使用唯一 Host lease；模块构造不新增另一套资源生命周期。
+  assert(leased_entry_points == 12);
+  const auto private_view_entry = host_api.find("citizensdk_host_view_account_private_key(");
+  const auto private_view_lease = host_api.find("auto host = acquire_host(", private_view_entry);
+  const auto private_view_call = host_api.find("view_account_private_key(host.entry()->host", private_view_lease);
+  assert(private_view_entry != std::string::npos && private_view_lease != std::string::npos &&
+         private_view_call != std::string::npos && private_view_entry < private_view_lease &&
+         private_view_lease < private_view_call);
   const auto retirement = host_api.find("begin_retirement(host_handle, host, false)");
   const auto host_close = host_api.find("code = host->close()", retirement);
   const auto registry_erase = host_api.find("registry().erase(found)", host_close);
@@ -216,7 +270,7 @@ int main() {
   const auto retire_secure =
       host_bridge.find("secure_store_->close()", retire_vault);
   const auto retire_public =
-      host_bridge.find("public_store_.close()", retire_secure);
+      host_bridge.find("if (public_store_) public_store_->close()", retire_secure);
   assert(foreign_boundary != std::string::npos &&
          lifecycle_query != std::string::npos &&
          unsubscribe != std::string::npos &&

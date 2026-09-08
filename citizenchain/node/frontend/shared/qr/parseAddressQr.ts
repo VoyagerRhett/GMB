@@ -1,6 +1,6 @@
 // 解析「扫码识别账户」二维码,用于治理提案的收款地址、手续费地址与安全基金地址。
 //
-// 唯一事实源：shared/qr-protocol/registry.json
+// 唯一事实源：citizenchain/crates/qr-protocol/registry.json
 // 当前入口用于地址框：只接受能明确提供账户的用户码(k=3)与账户码(k=5)。
 // 其它码型由当前业务入口拒绝；扫码内容不存在旧格式兜底。
 

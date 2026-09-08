@@ -1,5 +1,7 @@
 // This black-box test intentionally crosses the exported raw-pointer ABI.
 #![allow(unsafe_code)]
+// 此所有权用例使用真实 chain 读取；无链查看结果在组合测试单独覆盖。
+#![cfg(feature = "chain")]
 
 use std::{
     ffi::c_void,
@@ -8,9 +10,10 @@ use std::{
 };
 
 use citizensdk::{
-    citizensdk_create, citizensdk_destroy, citizensdk_get_best_head, citizensdk_result_release,
-    citizensdk_set_event_callback, CitizenSdkBytesView, CitizenSdkCreateOptions,
-    CitizenSdkErrorCode, CitizenSdkEvent, CitizenSdkEventType, CITIZENSDK_ABI_VERSION,
+    citizensdk_create_with_modules, citizensdk_destroy, citizensdk_get_best_head,
+    citizensdk_result_release, citizensdk_set_event_callback, CitizenSdkBytesView,
+    CitizenSdkCreateOptions, CitizenSdkErrorCode, CitizenSdkEvent, CitizenSdkEventType,
+    CITIZENSDK_ABI_VERSION,
 };
 
 const MANIFEST: &[u8] = include_bytes!("../../../assets/citizenchain/manifest.json");
@@ -53,7 +56,14 @@ fn options() -> CitizenSdkCreateOptions {
 fn owned_result_blocks_destroy_and_releases_exactly_once() {
     let mut handle = 0;
     assert_eq!(
-        unsafe { citizensdk_create(&options(), &mut handle) },
+        unsafe {
+            citizensdk_create_with_modules(
+                &options(),
+                std::ptr::null(),
+                citizen_sdk_contracts::Modules::CHAIN,
+                &mut handle,
+            )
+        },
         CitizenSdkErrorCode::Ok.as_i32()
     );
     assert_eq!(

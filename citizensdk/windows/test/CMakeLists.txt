@@ -73,11 +73,12 @@ target_compile_definitions(citizensdk_windows_test_support PUBLIC
 target_compile_definitions(citizensdk_windows_test_support PRIVATE CITIZENSDK_HOST_VERSION="${PROJECT_VERSION}")
 target_include_directories(citizensdk_windows_test_support PUBLIC
   "${CMAKE_CURRENT_LIST_DIR}/../include" "${CMAKE_CURRENT_LIST_DIR}/../src"
-  "${CITIZENSDK_CORE_INCLUDE_DIR}" "${CITIZENSDK_SQLITE_INCLUDE_DIR}")
+  "${CITIZENSDK_CORE_INCLUDE_DIR}" "${CITIZENSDK_SQLITE_INCLUDE_DIR}"
+  PRIVATE "${CITIZENSDK_INTERNAL_INCLUDE_DIR}")
 target_compile_options(citizensdk_windows_test_support PRIVATE /W4 /permissive- /utf-8 /EHsc
   $<$<BOOL:${CITIZENSDK_WARNINGS_AS_ERRORS}>:/WX>)
-target_link_libraries(citizensdk_windows_test_support PUBLIC CitizenSDK::Core
-  "${CITIZENSDK_SQLITE_ARCHIVE}" ncrypt bcrypt tbs advapi32 user32 gdi32 comctl32 ntdll)
+target_link_libraries(citizensdk_windows_test_support PUBLIC CitizenSDK::Core CitizenSDK::QrImage
+  "${CITIZENSDK_SQLITE_ARCHIVE}" ncrypt bcrypt tbs advapi32 user32 gdi32 comctl32 ntdll wtsapi32 mfplat mfreadwrite mfuuid ole32)
 
 set(CITIZENSDK_WINDOWS_CONTRACT_TESTS
   citizen_sdk_api_contract_test

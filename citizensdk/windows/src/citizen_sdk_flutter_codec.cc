@@ -311,14 +311,17 @@ constexpr std::size_t kMaximumRequestNodes = 4096;
 constexpr std::size_t kMaximumWireBytes =
     kMaximumRequestCopiedBytes + 9 * kMaximumRequestNodes + 6;
 constexpr const char *kMethods[] = {
-    "open", "start", "stop", "close", "getCapabilities", "getFinalizedHead",
-    "getAccountBalance", "getAccountNonce", "getFeeSnapshot", "getWalletProfile",
+    "open", "start", "stop", "close", "getCapabilities", "getFinalizedHead", "getGenesisHash",
+    "getAccountBalance", "getAccountBalances", "getAccountNonce", "getFeeSnapshot", "getWalletProfile", "viewAccountPrivateKey",
     "createWallet", "importWallet", "addWalletAccounts", "setActiveWalletAccount",
     "renameWalletAccount", "deleteWalletAccount", "deleteWallet",
-    "reconcileWalletCleanup", "signWalletPayload", "transferWithRemark",
+    "reconcileWalletCleanup", "signWalletPayload", "verifySignature", "transferWithRemark",
     "initializeFinalizedHistory", "syncFinalizedHistory",
+    "qrParse", "qrCreateSignRequest",
+    "qrConsumeSignResponse", "qrCancelSignRequest", "qrEncodeAccountId",
+    "qrEncodeUserTransfer", "qrDecodeLuminance", "qrEncode", "qrScan", "signQrRequest",
 };
-static_assert(std::size(kMethods) == 22);
+static_assert(std::size(kMethods) == 36);
 
 [[noreturn]] void fail(citizensdk_error_code_t code, const char *message) {
   throw ContractFailure(code, message);
@@ -502,9 +505,9 @@ const Value::List &list(const Value &value, std::size_t length) {
           CITIZENSDK_ERROR_INVALID_ARGUMENT, "Invalid fixed-position tuple length");
   return *items;
 }
-const Value::List &bounded_list(const Value &value, std::size_t maximum) {
+const Value::List &bounded_list(const Value &value, std::size_t maximum, std::size_t minimum = 1) {
   const auto *items = std::get_if<Value::List>(&value.data);
-  require(items != nullptr && !items->empty() && items->size() <= maximum,
+  require(items != nullptr && items->size() >= minimum && items->size() <= maximum,
           CITIZENSDK_ERROR_INVALID_ARGUMENT, "List count is outside the contract");
   return *items;
 }
@@ -678,13 +681,32 @@ DecodedRequest decode_request(const std::string &name,
       std::get_if<::flutter::EncodableList>(arguments);
   require(items != nullptr, CITIZENSDK_ERROR_INVALID_ARGUMENT, "Arguments must be a tuple");
   const auto count = items->size();
-  require(count >= 1 && count <= 7, CITIZENSDK_ERROR_INVALID_ARGUMENT,
+  require(count >= 1 && count <= 10, CITIZENSDK_ERROR_INVALID_ARGUMENT,
           "Invalid request tuple length");
   const Value root = from_encodable_value(*arguments);
   const auto &fields = std::get<Value::List>(root.data);
   require(integer(fields[0]) == kProtocolVersion, CITIZENSDK_ERROR_UNSUPPORTED,
           "Unsupported protocol version");
-  if (result.method == Method::open) { (void)list(root, 1); return result; }
+  if (result.method == Method::open) {
+    (void)list(root, 2);
+    const auto modules = integer(fields[1]);
+    require(modules > 0 && modules <= UINT32_MAX, CITIZENSDK_ERROR_INVALID_ARGUMENT,
+            "modules must be a nonzero uint32");
+    result.modules = static_cast<uint32_t>(modules);
+    return result;
+  }
+  // 纯验签在解析 session 前单独解码，只接受 [版本, 账户, 签名, 消息]。
+  if (result.method == Method::verify_signature) {
+    (void)list(root, 4); result.account_id = account(fields[1]);
+    const auto *signature = std::get_if<Value::Bytes>(&fields[2].data);
+    const auto *payload = std::get_if<Value::Bytes>(&fields[3].data);
+    require(signature != nullptr && signature->size() == 64 &&
+                payload != nullptr && payload->size() <= kMaximumBytes,
+            CITIZENSDK_ERROR_INVALID_ARGUMENT,
+            "Verification requires 64 signature bytes and at most 16 MiB");
+    result.signature = *signature; result.payload = *payload;
+    return result;
+  }
   require(count >= 3, CITIZENSDK_ERROR_INVALID_ARGUMENT, "Truncated session request");
   result.session = string(fields[1], 1, 128);
   result.sequence = integer(fields[2]);
@@ -693,14 +715,22 @@ DecodedRequest decode_request(const std::string &name,
             "requestSequence must be positive");
     switch (result.method) {
       case Method::start: case Method::stop: case Method::close:
-      case Method::get_capabilities: case Method::get_finalized_head:
+      case Method::get_capabilities: case Method::get_finalized_head: case Method::get_genesis_hash:
       case Method::get_fee_snapshot: case Method::get_wallet_profile:
       case Method::import_wallet: case Method::delete_wallet:
       case Method::reconcile_wallet_cleanup:
         (void)list(root, 3); break;
       case Method::get_account_balance: case Method::get_account_nonce:
+      case Method::view_account_private_key:
       case Method::set_active_wallet_account: case Method::delete_wallet_account:
         (void)list(root, 4); result.account_id = account(fields[3]); break;
+      case Method::get_account_balances: {
+        (void)list(root, 4);
+        // 只验证边界，不去重、不提前返回空列表；Core 统一决定生命周期与查询。
+        for (const auto &item : bounded_list(fields[3], 1990, 0))
+          result.account_ids.push_back(account(item));
+        break;
+      }
       case Method::create_wallet: {
         (void)list(root, 4); const auto words = integer(fields[3]);
         require(words == 12 || words == 18 || words == 24,
@@ -758,7 +788,60 @@ DecodedRequest decode_request(const std::string &name,
         }
         break;
       }
-      case Method::open: fail(CITIZENSDK_ERROR_INVALID_STATE, "open cannot be a session request");
+      case Method::qr_scan: (void)list(root, 3); break;
+      case Method::qr_parse: case Method::sign_qr_request:
+      case Method::qr_consume_sign_response: {
+        (void)list(root, 4); result.qr_text = string(fields[3], 1, 2331);
+        require(result.qr_text.size() <= 2331, CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                "QR text exceeds 2331 UTF-8 bytes"); break;
+      }
+      case Method::qr_create_sign_request: {
+        (void)list(root, 7); const auto action = integer(fields[3]);
+        const auto ttl = integer(fields[6]);
+        const auto *payload = std::get_if<Value::Bytes>(&fields[5].data);
+        require(action >= 1 && action <= UINT16_MAX && ttl >= 1 && ttl <= 300 &&
+                    payload != nullptr && !payload->empty() && payload->size() <= 1920,
+                CITIZENSDK_ERROR_INVALID_ARGUMENT, "Invalid QR signing request fields");
+        result.qr_action = static_cast<uint16_t>(action); result.account_id = account(fields[4]);
+        result.payload = *payload; result.qr_ttl = static_cast<uint64_t>(ttl); break;
+      }
+      case Method::qr_cancel_sign_request: {
+        (void)list(root, 4); result.qr_request_id = string(fields[3], 16, 128); break;
+      }
+      case Method::qr_encode_account_id: {
+        (void)list(root, 4); result.account_id = account(fields[3]); break;
+      }
+      case Method::qr_encode_user_transfer: {
+        (void)list(root, 10); result.qr_request_id = string(fields[3], 16, 128);
+        result.qr_expires_at = static_cast<uint64_t>(integer(fields[4]));
+        require(result.qr_expires_at > 0, CITIZENSDK_ERROR_INVALID_ARGUMENT, "QR expiry must be positive");
+        result.account_id = account(fields[5]); result.qr_amount = string(fields[6], 1, 64);
+        result.qr_symbol = string(fields[7], 1, 16); result.qr_memo = string(fields[8], 0, 256);
+        result.qr_bank_cid = string(fields[9], 1, 32);
+        require(result.qr_amount.size() <= 64 && result.qr_symbol.size() <= 16 &&
+                    result.qr_memo.size() <= 256 && result.qr_bank_cid.size() <= 32,
+                CITIZENSDK_ERROR_INVALID_ARGUMENT, "QR transfer text exceeds UTF-8 limits"); break;
+      }
+      case Method::qr_decode_luminance: {
+        (void)list(root, 7); const auto *pixels = std::get_if<Value::Bytes>(&fields[3].data);
+        const auto width = integer(fields[4]), height = integer(fields[5]), stride = integer(fields[6]);
+        require(pixels != nullptr && !pixels->empty() && pixels->size() <= 16U * 1024U * 1024U &&
+                    width >= 1 && width <= 4096 && height >= 1 && height <= 4096 &&
+                    stride >= width && stride <= 4096 &&
+                    pixels->size() >= static_cast<size_t>((height - 1) * stride + width),
+                CITIZENSDK_ERROR_INVALID_ARGUMENT, "Invalid QR luminance frame");
+        result.payload = *pixels; result.qr_width = static_cast<uint32_t>(width);
+        result.qr_height = static_cast<uint32_t>(height); result.qr_stride = static_cast<uint32_t>(stride); break;
+      }
+      case Method::qr_encode: {
+        (void)list(root, 5); result.qr_text = string(fields[3], 1, 2331);
+        const auto scale = integer(fields[4]);
+        require(result.qr_text.size() <= 2331 && scale >= 1 && scale <= 16,
+                CITIZENSDK_ERROR_INVALID_ARGUMENT, "Invalid QR image fields");
+        result.qr_scale = static_cast<uint32_t>(scale); break;
+      }
+      case Method::open: case Method::verify_signature:
+        fail(CITIZENSDK_ERROR_INVALID_STATE, "Stateless method cannot be a session request");
     }
   } catch (const ContractFailure &error) {
     throw ContractFailure(error.code, error.what(), result.session,
@@ -954,13 +1037,17 @@ Value profile(citizensdk_result_handle_t result) {
       hex(info.active_account_id.bytes), Value::list(std::move(accounts))});
 }
 
-Value copy_balance(citizensdk_result_handle_t result) {
-  auto value = prepared<citizensdk_account_balance_info_t>();
-  check_code(citizensdk_result_get_account_balance(result, &value)); check_abi(value);
+Value balance(const citizensdk_account_balance_info_t &value) {
+  check_abi(value);
   return tuple({hex(value.account_id.bytes), block(value.block),
                 Value::string(decimal_u128(value.free_fen)),
                 Value::string(decimal_u128(value.reserved_fen)),
                 Value::string(decimal_u128(value.total_fen))});
+}
+Value copy_balance(citizensdk_result_handle_t result) {
+  auto value = prepared<citizensdk_account_balance_info_t>();
+  check_code(citizensdk_result_get_account_balance(result, &value));
+  return balance(value);
 }
 Value copy_nonce(citizensdk_result_handle_t result) {
   auto value = prepared<citizensdk_account_nonce_info_t>();
@@ -1064,6 +1151,12 @@ Value copy_history(citizensdk_result_handle_t result) {
 
 }  // namespace
 
+Value copy_genesis_hash(citizensdk_handle_t sdk) {
+  uint8_t value[32]{};
+  check_code(citizensdk_get_genesis_hash(sdk, value));
+  return hex(value);
+}
+
 Value copy_public_result(Method method, citizensdk_result_handle_t result) {
   auto checked = [method](Value value) {
     // ABI 正确并不代表业务字段一致；在离开原生借用窗口前执行与 Dart 相同的后置校验。
@@ -1081,6 +1174,19 @@ Value copy_public_result(Method method, citizensdk_result_handle_t result) {
     case Method::get_account_balance:
       (void)inspect_result(result, CITIZENSDK_RESULT_ACCOUNT_BALANCE);
       return checked(tuple({copy_balance(result)}));
+    case Method::get_account_balances: {
+      (void)inspect_result(result, CITIZENSDK_RESULT_ACCOUNT_BALANCES);
+      uint32_t count = 0;
+      check_code(citizensdk_result_get_account_balance_count(result, &count));
+      require(count <= 1990, CITIZENSDK_ERROR_INTEGRITY, "Core balance count exceeds the contract");
+      Value::List balances; balances.reserve(count);
+      for (uint32_t index = 0; index < count; ++index) {
+        auto value = prepared<citizensdk_account_balance_info_t>();
+        check_code(citizensdk_result_get_account_balance_at(result, index, &value));
+        balances.push_back(balance(value));
+      }
+      return checked(tuple({Value::list(std::move(balances))}));
+    }
     case Method::get_account_nonce:
       (void)inspect_result(result, CITIZENSDK_RESULT_ACCOUNT_NONCE);
       return checked(tuple({copy_nonce(result)}));
@@ -1109,7 +1215,14 @@ Value copy_public_result(Method method, citizensdk_result_handle_t result) {
     case Method::initialize_finalized_history: case Method::sync_finalized_history:
       (void)inspect_result(result, CITIZENSDK_RESULT_TRANSACTION_HISTORY);
       return checked(tuple({copy_history(result)}));
-    case Method::open: case Method::close: case Method::get_capabilities:
+    case Method::view_account_private_key:
+    case Method::verify_signature:
+    case Method::open: case Method::close: case Method::get_capabilities: case Method::get_genesis_hash:
+    case Method::qr_parse: case Method::qr_create_sign_request:
+    case Method::qr_scan: case Method::sign_qr_request:
+    case Method::qr_consume_sign_response: case Method::qr_cancel_sign_request:
+    case Method::qr_encode_account_id: case Method::qr_encode_user_transfer:
+    case Method::qr_decode_luminance: case Method::qr_encode:
       fail(CITIZENSDK_ERROR_INVALID_STATE, "This method has no borrowed Core result");
   }
   fail(CITIZENSDK_ERROR_UNSUPPORTED, "Unsupported result method");
@@ -1133,8 +1246,48 @@ Value watch_payload(citizensdk_result_handle_t result, int64_t request_sequence)
   return payload;
 }
 
+void validate_account_balances(const DecodedRequest &request, const Value &value) {
+  validate_public_value(Method::get_account_balances, value);
+  const auto &balances = bounded_list(semantic_tuple(value, 1)[0], 1990, 0);
+  require(balances.size() == request.account_ids.size(), CITIZENSDK_ERROR_INTEGRITY,
+          "Balance response count differs from the request");
+  for (std::size_t index = 0; index < balances.size(); ++index) {
+    require(same_id(account(semantic_tuple(balances[index], 5)[0]), request.account_ids[index]),
+            CITIZENSDK_ERROR_INTEGRITY, "Balance accounts differ from request order");
+  }
+}
+
 void validate_public_value(Method method, const Value &value) {
+  if (method >= Method::qr_parse && method <= Method::sign_qr_request) {
+    const auto &fields = semantic_tuple(value, method == Method::qr_encode ? 3 : 1);
+    if (method == Method::qr_consume_sign_response) {
+      const auto *bytes = std::get_if<Value::Bytes>(&fields[0].data);
+      require(bytes != nullptr && bytes->size() == 64, CITIZENSDK_ERROR_INTEGRITY,
+              "QR consume must return the verified 64-byte signature");
+    } else if (method == Method::qr_cancel_sign_request) {
+      require(std::holds_alternative<bool>(fields[0].data), CITIZENSDK_ERROR_INTEGRITY,
+              "QR cancellation must be bool");
+    } else if (method == Method::qr_encode) {
+      const auto width = semantic_int(fields[0], 4096), height = semantic_int(fields[1], 4096);
+      const auto *bytes = std::get_if<Value::Bytes>(&fields[2].data);
+      require(width > 0 && height > 0 && bytes != nullptr &&
+                  bytes->size() == static_cast<std::size_t>(width * height),
+              CITIZENSDK_ERROR_INTEGRITY, "QR image dimensions do not match luminance");
+    } else {
+      const auto &text = string(fields[0], 1, 65536);
+      const bool document = method == Method::qr_parse || method == Method::qr_scan ||
+          method == Method::qr_decode_luminance || method == Method::sign_qr_request;
+      require(text.size() <= (document ? 65536U : 2331U), CITIZENSDK_ERROR_INTEGRITY,
+              "QR public text exceeds its UTF-8 limit");
+    }
+    return;
+  }
+
   try {
+    if (method == Method::view_account_private_key) {
+      (void)semantic_tuple(value, 0);
+      return;
+    }
     const auto &fields = semantic_tuple(value, 1);
     const auto &item = fields[0];
     switch (method) {
@@ -1146,6 +1299,20 @@ void validate_public_value(Method method, const Value &value) {
         require(semantic_block(balance[1]).finalized &&
                     sum_matches(semantic_u128(balance[2]), semantic_u128(balance[3]), semantic_u128(balance[4])),
                 CITIZENSDK_ERROR_INTEGRITY, "Balance finality or total is inconsistent"); return;
+      }
+      case Method::get_genesis_hash:
+        (void)account(item); return;
+      case Method::get_account_balances: {
+        const auto &balances = bounded_list(item, 1990, 0);
+        std::optional<SemanticBlock> anchor;
+        for (const auto &value : balances) {
+          validate_public_value(Method::get_account_balance, tuple({value}));
+          const auto current = semantic_block(semantic_tuple(value, 5)[1]);
+          require(!anchor || same_block(*anchor, current), CITIZENSDK_ERROR_INTEGRITY,
+                  "Balances must reference the same finalized block");
+          anchor = current;
+        }
+        return;
       }
       case Method::get_account_nonce: {
         const auto &nonce = semantic_tuple(item, 3); (void)account(nonce[0]);
@@ -1170,11 +1337,20 @@ void validate_public_value(Method method, const Value &value) {
         require(bytes != nullptr && bytes->size() == 64, CITIZENSDK_ERROR_INTEGRITY,
                 "sr25519 public signature must be 64 bytes"); return;
       }
+      case Method::verify_signature:
+        require(std::holds_alternative<bool>(item.data), CITIZENSDK_ERROR_INTEGRITY,
+                "Verification result must be bool"); return;
       case Method::transfer_with_remark: validate_transfer(item); return;
       case Method::initialize_finalized_history: case Method::sync_finalized_history:
         validate_history(item); return;
+      case Method::view_account_private_key:
       case Method::open: case Method::start: case Method::stop: case Method::close:
       case Method::get_capabilities:
+      case Method::qr_parse: case Method::qr_create_sign_request:
+      case Method::qr_scan: case Method::sign_qr_request:
+      case Method::qr_consume_sign_response: case Method::qr_cancel_sign_request:
+      case Method::qr_encode_account_id: case Method::qr_encode_user_transfer:
+      case Method::qr_decode_luminance: case Method::qr_encode:
         fail(CITIZENSDK_ERROR_INVALID_STATE, "This method uses its dedicated lifecycle/capability encoder");
     }
   } catch (const ContractFailure &error) {

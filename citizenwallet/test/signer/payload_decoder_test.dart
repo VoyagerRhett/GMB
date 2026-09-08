@@ -80,8 +80,7 @@ void main() {
 
   Map<String, dynamic> readRolePermissionFixture() {
     final candidates = [
-      File('../citizenchain/runtime/tests/fixtures/role_permission.json'),
-      File('citizenchain/runtime/tests/fixtures/role_permission.json'),
+      File('test/signer/fixtures/role_permission.json'),
     ];
     final file = candidates.firstWhere((candidate) => candidate.existsSync());
     return jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
@@ -2830,13 +2829,12 @@ void main() {
     });
     // 跨端 call data 字节一致性金标：
     // 当前金标固化公民账户投票交易与发行提案交易，统一真源在
-    // ../citizenchain/runtime/tests/fixtures/，CitizenWallet、CitizenApp 与 runtime
+    // test/signer/fixtures/（冻结自 runtime fixture），钱包与链协议
     // 三处必须产出同一序列。
     // 任何一端编码漂移 → 这里直接断言失败。
     Map<String, dynamic> readFixture() {
       final candidates = [
-        File('../citizenchain/runtime/tests/fixtures/call_data.json'),
-        File('citizenchain/runtime/tests/fixtures/call_data.json'),
+        File('test/signer/fixtures/call_data.json'),
       ];
       final file = candidates.firstWhere(
         (candidate) => candidate.existsSync(),

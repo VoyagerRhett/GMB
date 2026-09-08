@@ -1,5 +1,197 @@
 import Foundation
 
+/// 工作线程只在短锁内复制 32 字节；不等待主线程、不反调 Core，也不构造秘密 String。
+internal final class CitizenSDKPrivateKeyDisplayBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var characters = [UInt16](repeating: 0, count: 66)
+    private var viewID: UInt64 = 0
+    private var hostOperationID: UInt64?
+    private var registerAuthentication: ((UInt64) -> Int32)?
+    private var closed = false
+    private var populated = false
+    private var lastCode: Int32?
+    private var listener: (@Sendable (Int32) -> Void)?
+
+    func bind(_ id: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        precondition(id != 0 && (viewID == 0 || viewID == id))
+        viewID = id
+    }
+
+    func listen(_ value: @escaping @Sendable (Int32) -> Void) {
+        lock.lock(); listener = value; let code = lastCode; lock.unlock()
+        if let code { value(code) }
+    }
+
+    func bindAuthenticationRegistry(_ register: @escaping (UInt64) -> Int32) {
+        lock.lock(); defer { lock.unlock() }
+        registerAuthentication = register
+    }
+
+    /// 只登记本查看真实 unwrap 的身份；其它请求或重复关联不能获得焦点豁免。
+    func authorizing(viewID id: UInt64, hostOperationID operationID: UInt64) -> Int32 {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed else { return CitizenSDKErrorCode.cancelled.rawValue }
+        guard id != 0, id == viewID, operationID != 0, hostOperationID == nil else {
+            return CitizenSDKErrorCode.integrity.rawValue
+        }
+        guard let registerAuthentication else { return CitizenSDKErrorCode.integrity.rawValue }
+        let code = registerAuthentication(operationID)
+        guard code == 0 else { return code }
+        hostOperationID = operationID
+        return 0
+    }
+
+    var authenticationID: UInt64? {
+        lock.lock(); defer { lock.unlock() }
+        return hostOperationID
+    }
+
+    func display(viewID id: UInt64, bytes: citizensdk_bytes_view_t) -> Int32 {
+        guard bytes.len == 32, let source = bytes.data else { return CitizenSDKErrorCode.integrity.rawValue }
+        lock.lock()
+        guard !closed, !populated, id != 0, viewID == id else {
+            lock.unlock()
+            return CitizenSDKErrorCode.cancelled.rawValue
+        }
+        characters[0] = 48; characters[1] = 120
+        for index in 0..<32 {
+            let byte = source[index]
+            let high = UInt16(byte >> 4), low = UInt16(byte & 15)
+            characters[2 + index * 2] = high < 10 ? high + 48 : high + 87
+            characters[3 + index * 2] = low < 10 ? low + 48 : low + 87
+        }
+        populated = true
+        lock.unlock()
+        return 0
+    }
+
+    func settled(viewID id: UInt64, code: Int32) {
+        lock.lock()
+        guard id != 0, viewID == 0 || viewID == id else { lock.unlock(); return }
+        lastCode = code
+        let callback = listener
+        lock.unlock()
+        callback?(code)
+    }
+
+    /// 绘图只借用字符数组；调用者不能把它保存在文本控件、剪贴板或无障碍树中。
+    func withCharacters(_ body: (UnsafeBufferPointer<UInt16>) -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed, populated else { return }
+        characters.withUnsafeBufferPointer(body)
+    }
+
+    func clear() {
+        lock.lock(); defer { lock.unlock() }
+        closed = true; populated = false
+        for index in characters.indices { characters[index] = 0 }
+    }
+
+    var isClearedForTesting: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return closed && characters.allSatisfy { $0 == 0 }
+    }
+
+    deinit { clear() }
+}
+
+/// 单个 SDK 自有查看的所有权。阶段通知不完成公开操作；必须等 Core 请求与界面均真实结束。
+@MainActor
+internal final class CitizenSDKPrivateKeyView {
+    let buffer = CitizenSDKPrivateKeyDisplayBuffer()
+    private let sdk: CitizenSdk
+    private let reservation: UUID
+    private let viewID: UInt64
+    private let core: CitizenSDKOperation<Void>
+    private var ending = false
+    private var completed = false
+    private var cleanup: Task<Void, Never>?
+    var onReady: (() -> Void)?
+    var onClear: (() -> Void)?
+    var onTerminal: ((@escaping () -> Void) -> Void)?
+    lazy var operation = CitizenSDKOperation<Void> { [weak self] in
+        Task { @MainActor [weak self] in self?.finish(cancelled: true) }
+        return true
+    }
+
+    init(sdk: CitizenSdk, accountID: Data) throws {
+        let accountID = try CitizenSDKInputLimits.accountID(accountID)
+        try citizenSDKRequireWalletUI(sdk.capabilities())
+        self.sdk = sdk
+        reservation = try CitizenSDKWalletFlowRegistry.shared.reserve(sdk)
+        do {
+            (viewID, core) = try sdk.openPrivateKeyView(accountID: accountID, buffer: buffer)
+        } catch {
+            CitizenSDKWalletFlowRegistry.shared.finish(sdk, token: reservation)
+            throw error
+        }
+        buffer.bind(viewID)
+        buffer.listen { [weak self] code in
+            Task { @MainActor [weak self] in
+                guard let self, !self.ending else { return }
+                if code == 0 { self.onReady?() }
+                else { self.finish(cancelled: false) }
+            }
+        }
+        core.observe { [self] result in
+            Task { @MainActor [self] in
+                self.buffer.clear(); self.onClear?()
+                let close = { [self] in
+                    guard !self.completed else { return }
+                    self.completed = true
+                    CitizenSDKWalletFlowRegistry.shared.finish(self.sdk, token: self.reservation)
+                    self.operation.complete(result)
+                    self.onReady = nil; self.onClear = nil; self.onTerminal = nil
+                }
+                if let onTerminal = self.onTerminal { onTerminal(close) } else { close() }
+            }
+        }
+    }
+
+    func reveal() {
+        guard !ending else { return }
+        do { try sdk.revealPrivateKeyView(viewID) }
+        catch { finish(cancelled: false) }
+    }
+
+    var isAuthenticating: Bool {
+        guard !ending, let operationID = buffer.authenticationID else { return false }
+        return sdk.isPrivateKeyAuthenticationActive(operationID)
+    }
+
+    func finish(cancelled: Bool) {
+        guard !ending else { return }
+        ending = true
+        // 先撤销缓冲接收并清屏；迟到 display 会在同一串行门内被拒绝。
+        buffer.clear(); onClear?()
+        if let operationID = buffer.authenticationID { sdk.cancelPrivateKeyAuthentication(operationID) }
+        cleanup = Task { [self] in
+            while !self.completed {
+                do {
+                    if cancelled { try self.sdk.cancelPrivateKeyView(self.viewID) }
+                    try self.sdk.finishPrivateKeyView(self.viewID)
+                    return
+                } catch {
+                    // 控制失败不能伪造终态；保留所有者，直到 Core 接受 finish 或真实请求结束。
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+            }
+        }
+    }
+}
+
+/// 安全界面只读取核心已经解析的模块能力；未启用钱包时禁止创建窗口或接收秘密输入。
+internal func citizenSDKRequireWalletUI(_ snapshot: CitizenSDKCapabilities) throws {
+    let statuses = snapshot.statuses.filter { $0.name == .walletProfile }
+    guard statuses.count == 1, let status = statuses.first else {
+        throw CitizenSDKError(.integrity, "Core wallet capability is missing or duplicated")
+    }
+    guard status.supported && status.enabled else {
+        throw CitizenSDKError(.notReady, "wallet_profile is not ready")
+    }
+}
+
 /// Secret-free selection for the SDK-owned wallet interface.
 public enum CitizenSDKWalletFlowRequest: Sendable, Equatable {
     case create(wordCount: UInt32)

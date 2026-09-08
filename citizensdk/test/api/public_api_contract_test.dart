@@ -64,7 +64,11 @@ void main() {
     expect(CitizenSdk.open, isA<Function>());
     expect(isA<CitizenChain>(), isNotNull);
     expect(isA<CitizenWallet>(), isNotNull);
+    expect(isA<CitizenSigning>(), isNotNull);
+    expect(CitizenSdkModules.full, 63);
+    expect(CitizenSdkModules.qr, 32);
     expect(isA<CitizenTransactions>(), isNotNull);
+    expect(isA<CitizenHistory>(), isNotNull);
     expect(CitizenSdkErrorCode.values, hasLength(22));
     expect(CitizenCapabilityName.values, hasLength(10));
     expect(
@@ -73,10 +77,13 @@ void main() {
     );
   });
 
-  test('Flutter五种平台注册共用channel、22方法及无任意RPC/裸extrinsic闭集', () {
+  test('Flutter五种平台注册共用channel、固定方法及无任意RPC/裸extrinsic闭集', () {
     expect(FlutterCitizenSdkPlatform.methodChannelName, 'citizen/sdk/core/v1');
     expect(FlutterCitizenSdkPlatform.eventChannelName, 'citizen/sdk/events/v1');
-    expect(CitizenSdkFlutterCodec.methods, hasLength(22));
+    expect(CitizenSdkFlutterCodec.methods, hasLength(36));
+    expect(isA<CitizenQr>(), isNotNull);
+    expect(isA<CitizenQrDocument>(), isNotNull);
+    expect(isA<CitizenQrSigned>(), isNotNull);
     expect(CitizenSdkFlutterCodec.methods, isNot(contains('rpc')));
     expect(CitizenSdkFlutterCodec.methods, isNot(contains('submitExtrinsic')));
     expect(CitizenSdkFlutterCodec.methods, isNot(contains('watchExtrinsic')));
@@ -95,7 +102,7 @@ void main() {
         .setMockMethodCallHandler(core, (call) async {
           final arguments = call.arguments! as List<Object?>;
           if (call.method == 'open') {
-            expect(arguments, const <Object?>[1]);
+            expect(arguments, const <Object?>[1, CitizenSdkModules.full]);
             return <Object?>[
               1,
               'session-${++nextSession}',
@@ -189,7 +196,7 @@ void main() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(core, (call) async {
           expect(call.method, 'open');
-          expect(call.arguments, const <Object?>[1]);
+          expect(call.arguments, const <Object?>[1, CitizenSdkModules.full]);
           opens++;
           // 所有已开放平台都走官方通道；缺少插件时不得伪造原生 session。
           throw MissingPluginException('CitizenSDK plugin missing');

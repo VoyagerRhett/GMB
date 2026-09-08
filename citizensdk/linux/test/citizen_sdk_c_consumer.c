@@ -12,6 +12,38 @@
 
 #include <citizen_sdk/citizensdk_host.h>
 
+/* 仅从已安装公开头核对四项新增查询 ABI，不扩大 Host 门面职责。 */
+_Static_assert(_Generic(&citizensdk_get_genesis_hash,
+    citizensdk_error_code_t (*)(citizensdk_handle_t, uint8_t *): 1, default: 0),
+    "genesis query signature");
+_Static_assert(_Generic(&citizensdk_get_finalized_account_balances,
+    citizensdk_error_code_t (*)(citizensdk_handle_t, const citizensdk_account_id_t *,
+                               uint32_t, citizensdk_request_id_t *): 1, default: 0),
+    "batch balance query signature");
+_Static_assert(_Generic(&citizensdk_result_get_account_balance_count,
+    citizensdk_error_code_t (*)(citizensdk_result_handle_t, uint32_t *): 1, default: 0),
+    "batch balance count signature");
+_Static_assert(_Generic(&citizensdk_result_get_account_balance_at,
+    citizensdk_error_code_t (*)(citizensdk_result_handle_t, uint32_t,
+                               citizensdk_account_balance_info_t *): 1, default: 0),
+    "batch balance element signature");
+_Static_assert(_Generic(&citizensdk_host_view_account_private_key,
+    citizensdk_error_code_t (*)(citizensdk_host_handle_t, const citizensdk_account_id_t *,
+        void *, citizensdk_wallet_flow_completion_v1_t,
+        citizensdk_wallet_flow_handle_t *): 1, default: 0),
+    "private-key view returns only a public flow handle");
+_Static_assert(CITIZENSDK_RESULT_ACCOUNT_BALANCES == 18, "batch balance result kind");
+
+
+_Static_assert(_Generic(&citizensdk_host_scan_qr,
+    citizensdk_error_code_t (*)(citizensdk_host_handle_t, void *,
+        citizensdk_qr_completion_v1_t, citizensdk_wallet_flow_handle_t *): 1, default: 0),
+    "QR scan uses the native flow cancellation handle");
+_Static_assert(_Generic(&citizensdk_host_sign_qr_request,
+    citizensdk_error_code_t (*)(citizensdk_host_handle_t, citizensdk_bytes_view_t,
+        void *, citizensdk_qr_completion_v1_t, citizensdk_wallet_flow_handle_t *): 1, default: 0),
+    "QR review and signing expose only public Core documents");
+
 #ifdef NDEBUG
 #error "CitizenSDK consumer checks must remain enabled in Release"
 #endif
@@ -149,6 +181,14 @@ int main(int argc, char **argv) {
   citizensdk_handle_t borrowed = 0;
   CHECK(citizensdk_host_sdk(host, &borrowed) == CITIZENSDK_OK && borrowed == sdk);
   citizensdk_lifecycle_t lifecycle = 0;
+  /* Created 即可读取固定创世身份；前后哨兵验证输出恰为 32 字节。 */
+  uint8_t genesis_hash[34] = {0};
+  genesis_hash[0] = genesis_hash[33] = UINT8_C(0x5a);
+  CHECK(citizensdk_get_genesis_hash(sdk, genesis_hash + 1) == CITIZENSDK_OK);
+  CHECK(genesis_hash[0] == UINT8_C(0x5a) && genesis_hash[33] == UINT8_C(0x5a));
+  unsigned genesis_nonzero = 0;
+  for (unsigned index = 1; index <= 32; ++index) genesis_nonzero |= genesis_hash[index];
+  CHECK(genesis_nonzero != 0);
   CHECK(citizensdk_get_lifecycle(sdk, &lifecycle) == CITIZENSDK_OK);
   CHECK(lifecycle == CITIZENSDK_LIFECYCLE_CREATED);
   check_capabilities(sdk);

@@ -54,9 +54,10 @@ fn chain_read_failure_closes_chain_dependent_capabilities() {
 }
 
 #[test]
-fn submit_and_signing_do_not_invent_unrelated_dependencies() {
+fn signing_requires_device_security_but_not_wallet_management() {
     let mut probes = all_ready();
     probe_mut(&mut probes, CapabilityName::TransactionBuild).enabled = false;
+    probe_mut(&mut probes, CapabilityName::WalletProfile).enabled = false;
     probe_mut(&mut probes, CapabilityName::HardwareVault).supported = false;
     probe_mut(&mut probes, CapabilityName::UserAuthentication).supported = false;
 
@@ -67,7 +68,7 @@ fn submit_and_signing_do_not_invent_unrelated_dependencies() {
     assert!(snapshot
         .status(CapabilityName::TransactionSubmit)
         .is_some_and(|status| status.is_ready()));
-    assert!(snapshot
+    assert!(!snapshot
         .status(CapabilityName::LocalSigning)
         .is_some_and(|status| status.is_ready()));
     assert!(!snapshot
@@ -140,4 +141,15 @@ fn tracker_advances_only_for_a_complete_semantic_change() {
     let _ = invalid.pop();
     assert!(tracker.update(invalid).is_err());
     assert_eq!(tracker.current().map(CapabilitySnapshot::revision), Some(2));
+}
+
+#[test]
+fn disabling_wallet_management_does_not_disable_signing() {
+    let mut probes = all_ready();
+    probe_mut(&mut probes, CapabilityName::WalletProfile).enabled = false;
+    let snapshot = resolve_capabilities(1, probes).expect("完整能力合同");
+    assert!(snapshot
+        .status(CapabilityName::LocalSigning)
+        .unwrap()
+        .is_ready());
 }

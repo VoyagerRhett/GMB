@@ -1,10 +1,8 @@
 [workspace]         # 声明整个仓库的工作空间
 members = [
-    "shared/qr-protocol",       # QR_V1 协议、registry、生成器与跨端守卫唯一真源
-    "shared/citizen-signer",    # CitizenApp 与 CitizenWallet 共用 sr25519 签名实现
-    "shared/account-crypto",    # 冷热端共用账户数据用途钥派生与加密交付原语
+    "citizenchain/crates/qr-protocol",       # QR_V1 协议、registry、生成器与跨端守卫唯一真源
 ]
-# 各产品拥有自己的 Cargo workspace 和锁文件；根 workspace 只管理 shared Rust crate，
+# 各产品拥有自己的 Cargo workspace 和锁文件；根 workspace 只管理公民链 QR 协议工具 crate，
 # 禁止把产品内路径依赖自动吸入根 workspace 后错误继承根 package 元数据。
 exclude = [
     "citizenchain/**",

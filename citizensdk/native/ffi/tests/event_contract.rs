@@ -1,5 +1,7 @@
 // This black-box test intentionally crosses the exported raw-pointer ABI.
 #![allow(unsafe_code)]
+// 本文件用链读取请求验证事件合同；无链事件/查看排空由内部组合运行测试覆盖。
+#![cfg(feature = "chain")]
 
 use std::{
     ffi::c_void,
@@ -8,10 +10,10 @@ use std::{
 };
 
 use citizensdk::{
-    citizensdk_create, citizensdk_destroy, citizensdk_get_best_head, citizensdk_result_get_info,
-    citizensdk_result_release, citizensdk_set_event_callback, CitizenSdkBytesView,
-    CitizenSdkCreateOptions, CitizenSdkErrorCode, CitizenSdkEvent, CitizenSdkEventType,
-    CitizenSdkResultInfo, CITIZENSDK_ABI_VERSION,
+    citizensdk_create_with_modules, citizensdk_destroy, citizensdk_get_best_head,
+    citizensdk_result_get_info, citizensdk_result_release, citizensdk_set_event_callback,
+    CitizenSdkBytesView, CitizenSdkCreateOptions, CitizenSdkErrorCode, CitizenSdkEvent,
+    CitizenSdkEventType, CitizenSdkResultInfo, CITIZENSDK_ABI_VERSION,
 };
 
 const MANIFEST: &[u8] = include_bytes!("../../../assets/citizenchain/manifest.json");
@@ -53,7 +55,14 @@ fn options() -> CitizenSdkCreateOptions {
 fn every_accepted_request_has_one_completion_on_the_dispatch_thread() {
     let mut handle = 0;
     assert_eq!(
-        unsafe { citizensdk_create(&options(), &mut handle) },
+        unsafe {
+            citizensdk_create_with_modules(
+                &options(),
+                std::ptr::null(),
+                citizen_sdk_contracts::Modules::CHAIN,
+                &mut handle,
+            )
+        },
         CitizenSdkErrorCode::Ok.as_i32()
     );
     assert_eq!(

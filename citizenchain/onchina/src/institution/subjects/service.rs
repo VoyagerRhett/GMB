@@ -244,8 +244,8 @@ pub fn validate_legal_representative_required(
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .ok_or(ServiceError::BadInput("法定代表人证件照不能为空"))?;
-    if !photo_path.starts_with("data/legal-rep-photos/") {
-        return Err(ServiceError::BadInput("法定代表人证件照路径非法"));
+    if !super::photos::valid_photo_path(photo_path) {
+        return Err(ServiceError::BadInput("请重新上传法定代表人证件照"));
     }
     let photo_name = photo_name
         .map(str::trim)

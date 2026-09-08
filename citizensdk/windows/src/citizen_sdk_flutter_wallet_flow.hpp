@@ -13,7 +13,7 @@ namespace citizen_sdk::flutter {
 using Scheduler = std::function<void(std::function<void()>)>;
 using WalletCancellation = std::function<void()>;
 using WalletPresenter = std::function<WalletCancellation(
-    const WalletFlowRequest &, WalletFlowCompletion)>;
+    const DecodedRequest &, WalletFlowCompletion)>;
 
 // Owns only public flow identity and a native cancellation capability. The
 // presenter is the existing Host Win32 wallet flow; no mnemonic/password/private

@@ -6,7 +6,7 @@ import 'package:smoldot/smoldot.dart' show SmoldotPlatform;
 
 /// sr25519 原生签名（schnorrkel）的 Dart 侧唯一入口。
 ///
-/// 实现来自 `shared/citizen-signer`，与 CitizenWallet 冷端**共用同一份
+/// 实现来自 `citizenapp/native/citizen-signer`，与 CitizenWallet 冷端**共用同一份
 /// 源码**（冷热派生口径一旦分叉，同一助记词会算出不同账户）。热端的 FFI 外壳由
 /// `smoldot/ffi/src/lib.rs` 里的 `citizen_signer::export_citizen_signer_ffi!()` 导出，与
 /// smoldot 同处 `libsmoldot` 一个库，因此这里复用 `SmoldotPlatform.loadLibrary()`

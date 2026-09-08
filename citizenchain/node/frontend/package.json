@@ -15,25 +15,25 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@gmb/scanner-react": "file:../../../shared/scanner-react",
-    "@noble/hashes": "^2.0.1",
+    "@gmb/scanner-react": "file:../../crates/scanner-react",
+    "@noble/hashes": "2.0.1",
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-dialog": "2.6.0",
     "@tauri-apps/plugin-process": "2.3.1",
     "@tauri-apps/plugin-updater": "2.10.1",
-    "dompurify": "^3.4.12",
-    "marked": "^18.0.3",
-    "qrcode.react": "^4.2.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "dompurify": "3.4.13",
+    "marked": "18.0.3",
+    "qrcode.react": "4.2.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.4",
-    "@types/node": "^24.3.0",
-    "@types/react": "^18.3.18",
-    "@types/react-dom": "^18.3.5",
-    "@vitejs/plugin-react": "^4.4.1",
-    "typescript": "^5.7.3",
-    "vite": "^6.4.3"
+    "@types/node": "25.9.5",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.1",
+    "typescript": "6.0.2",
+    "vite": "8.0.4"
   }
 }

@@ -27,13 +27,13 @@ function unpackActionImplementation(wrapperPath: string): string {
 
 const ciImplementationPath = unpackActionImplementation(resolve(
   flowRoot,
-  'gmb/citizenserve/ci-cloudflare.mjs',
+  'gmb/citizenserve/cloudflare/ci.mjs',
 ));
 const ciModule = await import(ciImplementationPath);
 const { buildCitizenServeCloudflareRelease: buildCitizenServeCloudflareCI } = ciModule;
 const releaseImplementationPath = unpackActionImplementation(resolve(
   flowRoot,
-  'gmb/citizenserve/release-cloudflare.mjs',
+  'gmb/citizenserve/cloudflare/release.mjs',
 ));
 const releaseModule = await import(releaseImplementationPath);
 const {
@@ -64,7 +64,8 @@ function buildCandidate(root: string, name: string, sourceProject = projectPath)
 function fixtureProject(root: string): string {
   const fixture = join(root, 'project');
   mkdirSync(join(fixture, 'schema'), { recursive: true });
-  for (const path of ['package.json', 'package-lock.json', 'wrangler.toml']) {
+  mkdirSync(join(fixture, 'scripts'), { recursive: true });
+  for (const path of ['package.json', 'package-lock.json', 'scripts/wrangler.toml']) {
     copyFileSync(join(projectPath, path), join(fixture, path));
   }
   copyFileSync(join(projectPath, 'schema/citizenserve.sql'), join(fixture, 'schema/citizenserve.sql'));

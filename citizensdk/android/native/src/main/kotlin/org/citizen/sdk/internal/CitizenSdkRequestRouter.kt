@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicLong
 /** Exact request-ID admission bridge; no callback is associated by ordering. */
 internal class CitizenSdkRequestRouter(
     private val cancelNative: (Long) -> Boolean,
+    private val releaseResult: (CitizenSdkNativeResult) -> Unit = {},
 ) : AutoCloseable {
     private class Pending<T>(
         val operationId: String,
@@ -72,6 +73,7 @@ internal class CitizenSdkRequestRouter(
                 // Only one admission owns the gate. Any reentrant callback in
                 // these maps belongs to the failed admission and cannot be
                 // exposed because no operation was returned to the caller.
+                earlyCompletions.values.forEach { it.result?.let(releaseResult) }
                 earlyCompletions.clear()
                 earlyProgress.clear()
                 throw error
@@ -101,7 +103,7 @@ internal class CitizenSdkRequestRouter(
                     check(earlyCompletions.put(coreRequestId, decoded) == null) {
                         "Core delivered duplicate completion"
                     }
-                }
+                } else { decoded.result?.let(releaseResult) }
                 null
             } else {
                 val entry = checkNotNull(pending.remove(coreRequestId))
@@ -161,8 +163,9 @@ internal class CitizenSdkRequestRouter(
             return
         }
         try {
-            entry.future.complete(entry.decode(checkNotNull(decoded.result)))
+            if (!entry.future.complete(entry.decode(checkNotNull(decoded.result)))) decoded.result?.let(releaseResult)
         } catch (error: Throwable) {
+            decoded.result?.let(releaseResult)
             entry.future.completeExceptionally(
                 if (error is CitizenSdkException) error else CitizenSdkException(
                     CitizenSdkErrorCode.INTEGRITY,

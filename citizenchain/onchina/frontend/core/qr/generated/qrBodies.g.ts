@@ -1,4 +1,4 @@
-// 本文件由 shared/qr-protocol/registry/kinds.yaml 生成，禁止手改。
+// 本文件由 citizenchain/crates/qr-protocol/registry/kinds.yaml 生成，禁止手改。
 export const QR_BODY_SCHEMA = [
   {
     "fields": [

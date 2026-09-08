@@ -258,6 +258,14 @@ fn secure_store_and_vault_are_an_all_or_none_wallet_bundle() {
     };
     assert!(validate_host_services_presence(&wallet).is_ok());
 
+    // 钱包／签名可完全不提供公开链仓储，但设备安全组仍不可拆开。
+    let local_only = CitizenSdkHostServicesV1 {
+        public_store: std::ptr::null(),
+        ..wallet
+    };
+    assert!(validate_host_services_presence(&local_only).is_ok());
+    assert!(validate_host_services_presence(&CitizenSdkHostServicesV1::default()).is_err());
+
     let incomplete = CitizenSdkHostServicesV1 {
         public_store: &public,
         secure_store: &secure,
@@ -270,6 +278,40 @@ fn secure_store_and_vault_are_an_all_or_none_wallet_bundle() {
             .code(),
         CitizenSdkErrorCode::InvalidArgument
     );
+}
+
+#[test]
+fn public_store_groups_are_independent_and_each_group_is_complete() {
+    let complete = complete_public_store();
+    let chain = CitizenSdkHostPublicStoreV1 {
+        runtime_cache_load: None,
+        runtime_cache_store: None,
+        runtime_cache_delete: None,
+        transaction_history_load: None,
+        transaction_history_compare_and_swap: None,
+        ..complete
+    };
+    assert!(validate_public_store_v1(&chain).is_ok());
+    let history = CitizenSdkHostPublicStoreV1 {
+        chain_database_load: None,
+        chain_database_compare_and_swap: None,
+        runtime_cache_load: None,
+        runtime_cache_store: None,
+        runtime_cache_delete: None,
+        ..complete
+    };
+    assert!(validate_public_store_v1(&history).is_ok());
+    let partial_chain = CitizenSdkHostPublicStoreV1 {
+        chain_database_compare_and_swap: None,
+        ..chain
+    };
+    let partial_history = CitizenSdkHostPublicStoreV1 {
+        transaction_history_compare_and_swap: None,
+        ..history
+    };
+    assert!(validate_public_store_v1(&partial_chain).is_err());
+    assert!(validate_public_store_v1(&partial_history).is_err());
+    assert!(validate_public_store_v1(&CitizenSdkHostPublicStoreV1::default()).is_err());
 }
 
 #[test]

@@ -36,13 +36,27 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
     private var sink: FlutterEventSink?
     private let subscriptionEpoch = CitizenSdkFlutterSubscriptionEpoch()
     private var detached = false
+    private let verifySignature: (Data, Data, Data) throws -> Bool
+
+    init(verifySignature: @escaping (Data, Data, Data) throws -> Bool = {
+        try CitizenSigning.verify(accountID: $0, signature: $1, message: $2)
+    }) {
+        self.verifySignature = verifySignature
+        super.init()
+    }
 
     func dispatch(_ request: CitizenSdkFlutterCodec.Request, result: @escaping FlutterResult) {
         guard !detached, !subscriptionEpoch.isInvalidated else {
             fail(result, .unavailable, "CitizenSDK Flutter engine is detached", request)
             return
         }
-        if case .open = request { open(result); return }
+        if case let .verify(accountID, signature, payload) = request {
+            // 此分支不查会话、不占序号、不启动事件流，也不创建金库或链资源。
+            do { result([CitizenSdkFlutterCodec.version, try verifySignature(accountID, signature, payload)]) }
+            catch { fail(result, error, request) }
+            return
+        }
+        if case let .open(modules) = request { open(modules, result); return }
         guard let sessionID = request.sessionID, let sequence = request.sequence,
               let session = sessions[sessionID] else {
             fail(result, .notFound, "CitizenSDK session was not found", request)
@@ -148,9 +162,9 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
         return nil
     }
 
-    private func open(_ result: @escaping FlutterResult) {
+    private func open(_ modules: CitizenSDKModules, _ result: @escaping FlutterResult) {
         do {
-            let sdk = try CitizenSdk.open()
+            let sdk = try CitizenSdk.open(modules: modules)
             let session = Session(sdk)
             let epoch = subscriptionEpoch
             _ = try citizenSDKFlutterFinalizeOpen(
@@ -180,7 +194,7 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
                 emit(session, type: "capabilitiesChanged", payload: [CitizenSdkFlutterCodec.capabilities(capabilities)])
             }
         } catch {
-            fail(result, error, .open)
+            fail(result, error, .open(modules: modules))
         }
     }
 
@@ -202,6 +216,9 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
             case "getFinalizedHead": run(session, request, result) {
                 [CitizenSdkFlutterCodec.block(try await session.sdk.finalizedHead())]
             }
+            case "getGenesisHash":
+                do { success(result, request, [Self.hex(try session.sdk.genesisHash())]) }
+                catch { fail(result, error, request) }
             case "getFeeSnapshot": run(session, request, result) {
                 [CitizenSdkFlutterCodec.fee(try await session.sdk.feeSnapshot())]
             }
@@ -219,6 +236,11 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
             }
         case let .account(method, _, _, accountID):
             switch method {
+            case "viewAccountPrivateKey":
+                run(session, request, result, cancel: { [walletFlow] in walletFlow.cancelSession(session.sdk.sessionID) }) { [walletFlow] in
+                    try await walletFlow.viewAccountPrivateKey(sdk: session.sdk, request: request, accountID: accountID)
+                    return []
+                }
             case "getAccountBalance": run(session, request, result) {
                 [CitizenSdkFlutterCodec.balance(try await session.sdk.accountBalance(accountID: accountID))]
             }
@@ -233,12 +255,15 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
             }
             default: fail(result, .unsupported, "Unsupported method", request)
             }
+        case let .balances(_, _, accountIDs): run(session, request, result) {
+            [try await session.sdk.accountBalances(accountIDs: accountIDs).map(CitizenSdkFlutterCodec.balance)]
+        }
         case .create, .addAccounts: wallet(session, request, result)
         case let .rename(_, _, accountID, name): run(session, request, result) {
             [CitizenSdkFlutterCodec.profile(try await session.sdk.renameWalletAccount(accountID: accountID, name: name))]
         }
         case let .sign(_, _, accountID, payload): run(session, request, result) {
-            [CitizenSdkFlutterCodec.signature(try await session.sdk.signWalletPayload(accountID: accountID, message: payload))]
+            [CitizenSdkFlutterCodec.signature(try await session.sdk.signing.sign(accountID: accountID, message: payload))]
         }
         case let .transfer(_, sequence, source, destination, amount, remark):
             do {
@@ -264,7 +289,43 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
                 : try await session.sdk.syncFinalizedHistory(accountIDs: accountIDs)
             return [try CitizenSdkFlutterCodec.history(history)]
         }
-        case .open: fail(result, .invalidState, "open cannot be routed as a session request", request)
+        case let .qr(method, _, _, fields): run(session, request, result,
+            cancel: { [walletFlow] in walletFlow.cancelSession(session.sdk.sessionID) }) {
+            switch method {
+            case "qrParse":
+                return [try session.sdk.qrParse(fields[0] as! String).coreJSON]
+            case "qrCreateSignRequest":
+                return [try session.sdk.qrCreateSignRequest(
+                    action: UInt16(fields[0] as! Int64), signerAccountID: fields[1] as! Data,
+                    reviewPayload: fields[2] as! Data, ttlSeconds: UInt64(fields[3] as! Int64))]
+            case "qrConsumeSignResponse":
+                return [FlutterStandardTypedData(bytes: try session.sdk.qrConsumeSignResponse(fields[0] as! String))]
+            case "qrCancelSignRequest":
+                return [try session.sdk.qrCancelSignRequest(fields[0] as! String)]
+            case "qrEncodeAccountId":
+                return [try session.sdk.qrEncodeAccountID(fields[0] as! Data)]
+            case "qrEncodeUserTransfer":
+                return [try session.sdk.qrEncodeUserTransfer(
+                    requestID: fields[0] as! String, expiresAt: UInt64(fields[1] as! Int64),
+                    accountID: fields[2] as! Data, amount: fields[3] as! String,
+                    symbol: fields[4] as! String, memo: fields[5] as! String,
+                    bankCIDNumber: fields[6] as! String)]
+            case "qrDecodeLuminance":
+                return [try session.sdk.qrDecodeLuminance(fields[0] as! Data,
+                    width: UInt32(fields[1] as! Int64), height: UInt32(fields[2] as! Int64),
+                    rowStride: UInt32(fields[3] as! Int64)).coreJSON]
+            case "qrEncode":
+                let value = try session.sdk.qrEncode(fields[0] as! String,
+                    scale: UInt32(fields[1] as! Int64))
+                return [Int64(value.width), Int64(value.height),
+                        FlutterStandardTypedData(bytes: value.luminance)]
+            case "qrScan", "signQrRequest":
+                return [try await self.walletFlow.qr(sdk: session.sdk, request: request,
+                    signText: method == "signQrRequest" ? fields[0] as? String : nil).coreJSON]
+            default: throw CitizenSDKError(.unsupported, "Unsupported QR method")
+            }
+        }
+        case .open, .verify: fail(result, .invalidState, "A stateless request cannot be routed as a session request", request)
         }
     }
 

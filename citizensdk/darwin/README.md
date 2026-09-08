@@ -1,5 +1,24 @@
 # CitizenSDK Apple projection
 
+当前按 wallet、signing、chain、transactions、history、qr 六模块装配同一 Rust Core，
+默认 full。先调用统一模块校验，再仅创建所选服务的资源；chain 未选不加载链资产或创建链数据库，
+history 未选不初始化历史，wallet/signing 才使用配套 secure store/Vault。SigningService
+仅使用同宿主已有 SDK 安全账户归属资料，首次 provision 仍须钱包安全流程，秘密不导出。
+纯验签无需实例、钱包、金库或链；Flutter 五端共用 36 方法，open 仅 `[1, modules]`，
+`verifySignature` 请求仅 `[1, accountId, signature, payload]`、响应仅 `[1, bool]`，
+不建立 session 或事件订阅。运行期模块选择不裁剪现有正式 full 包及链资产。
+iOS/macOS 只将 8 位亮度帧交给同一 framework 中的 ZXing-C++ 3.1.1；不使用 Vision 或其他回退识别器。
+QR-only 只构造 Rust 协议/会话状态，不初始化钱包、Keychain/Secure Enclave 金库或轻节点。
+本次第 2 步仅更新源码、注释、合同和测试，尚未执行新的真实构建、平台测试或硬件验收；下文旧分步运行记录保留为历史证据，不代表本次变更已验证。
+
+第 3 步补充 `genesisHash()` 与 `accountBalances(accountIDs:)`：前者不要求轻节点启动，
+后者保留输入顺序和重复项，复用同一 Rust finalized 批量查询与现有余额结构。
+仅选择 chain 即可使用；空列表仍经 Core 状态校验。
+`viewAccountPrivateKey(from:accountID:)` 仅属于 wallet，返回 `CitizenSDKOperation<Void>`。
+四项私有控制连接 SDK 自有显示缓冲，普通结果没有私钥。确认、认证、后台撤销、清屏和 Core
+真实终态共用同一所有权边界；系统认证临时失焦只遮盖，真实后台或窗口销毁不恢复显示。
+私有声明仅由构建工作目录导入，不进入交付接口。新的平台运行态及硬件安全验收仍未完成。
+
 This directory is the single Apple source projection for CitizenSDK. The
 `CitizenSDK` Swift module is compiled together with the Rust product Core into
 one `CitizenSDK.xcframework`; `CitizenSDKFlutter` is only the Flutter adapter
@@ -56,8 +75,8 @@ into this directory by the canonical candidate builder. Build intermediates,
 archives, DerivedData, Pods, SwiftPM state and the XCFramework itself must stay
 under TataConsole's central CitizenSDK work directory and never be committed.
 本机当前工作根固定为
-`/Users/rhett/TATA/tataconsole/target/.work/GMB/citizensdk/SDK`，只使用本任务独占子目录。
-成功产物根为 `/Users/rhett/TATA/tataconsole/target/GMB/citizensdk/SDK`，已有产物不能被
+`/Users/rhett/TATA/tataconsole/work/gmb/citizensdk`，只使用本任务独占子目录。
+成功产物根为 `/Users/rhett/TATA/tataconsole/target/gmb/citizensdk`，已有产物不能被
 失败验收覆盖。第 6 步路径仅是任务卡内已结束的历史记录，不是当前生成目录。
 
 The Step 6 Flutter consumer built an Android release APK for ABI `arm64-v8a`, an unsigned iOS

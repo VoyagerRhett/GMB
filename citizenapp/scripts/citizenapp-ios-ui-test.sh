@@ -20,7 +20,7 @@ PROJECT="$TATA_CONSOLE_FLUTTER_ROOT/ios/Runner.xcodeproj"
 DERIVED_DATA="$BUILD_ROOT/DerivedData"
 RESULT_BUNDLE="$BUILD_ROOT/RunnerUITests.xcresult"
 
-[[ "$BUILD_ROOT" == "$TATA_CONSOLE_TARGET_ROOT/.work/GMB/citizenapp/ios" \
+[[ "$BUILD_ROOT" == "${TATA_CONSOLE_TARGET_ROOT%/target}/work/gmb/citizenapp/ios" \
   && "$TATA_CONSOLE_FLUTTER_ROOT" == "$BUILD_ROOT" \
   && -f "$PROJECT/project.pbxproj" && ! -L "$PROJECT/project.pbxproj" ]] || {
   echo "UI 测试缺少准确iOS任务配置：$BUILD_ROOT" >&2

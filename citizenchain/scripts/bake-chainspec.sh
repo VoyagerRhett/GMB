@@ -12,11 +12,11 @@
 #     --wasm-ci-run-id <RUN_ID> --wasm-ci-head-sha <HEAD_SHA>
 #
 # 正式模式会同步:
-#   1. citizenchain/node/chainspecs/citizenchain.plain.json   (节点冻结 SSOT)
+#   1. citizenchain/node/citizenchain.json   (节点冻结 SSOT)
 #   2. citizenapp/assets/chainspec.json                        (smoldot 轻形态:stateRootHash)
 #   3. citizenapp/assets/light_sync_state.json                 (smoldot checkpoint)
 #   4. citizenapp/assets/public_institutions/*.json            (块 0 公权机构缓存)
-#   5. citizenserve/wrangler.toml                     (公开链身份派生配置)
+#   5. citizenserve/scripts/wrangler.toml             (公开链身份派生配置)
 #
 # 流程:导出 plain spec → 临时节点物化创世(记录耗时)→ RPC 宪法创世检查
 #       → 读块 0 头生成轻形态与 lightSyncState → 从同一块生成公权机构缓存
@@ -26,7 +26,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CHAIN_ROOT="$(dirname "$SCRIPT_DIR")"
 REPO_ROOT="$(dirname "$CHAIN_ROOT")"
-OUT="$CHAIN_ROOT/target/chainspec/citizenchain.plain.json"
+OUT="$CHAIN_ROOT/target/chainspec/citizenchain.json"
 APP_OUT="$CHAIN_ROOT/target/chainspec/chainspec.app.json"
 APP_LIGHT_SYNC_STATE_OUT="$CHAIN_ROOT/target/chainspec/light_sync_state.json"
 APP_PUBLIC_INSTITUTION_OUT="$CHAIN_ROOT/target/chainspec/public_institutions"
@@ -110,7 +110,7 @@ Usage:
   citizenchain/scripts/bake-chainspec.sh --finalize --wasm FILE --wasm-ci-run-id ID --wasm-ci-head-sha SHA [--out FILE]
 
 Options:
-  --out FILE       生成 plain chainspec 的输出路径。默认 citizenchain/target/chainspec/citizenchain.plain.json
+  --out FILE       生成 plain chainspec 的输出路径。默认 citizenchain/target/chainspec/citizenchain.json
   --genesis-state-out DIR
                    生成已物化创世链状态包的输出目录。默认 citizenchain/target/chainspec/genesis-state
   --wasm FILE      GitHub WASM CI 产出的 runtime wasm。正式创世必须提供
@@ -216,7 +216,7 @@ trap cleanup EXIT
 echo "==> 导出 fresh plain chainspec..."
 (
     cd "$CHAIN_ROOT"
-    cargo run -p node -- export-chain-spec --chain citizenchain-fresh > "$TMP"
+    cargo run --config "$CHAIN_ROOT/config.toml" -p node -- export-chain-spec --chain citizenchain-fresh > "$TMP"
 )
 
 rpc() {
@@ -383,7 +383,7 @@ PYEOF
 echo "==> 公权机构缓存根: $PUBLIC_INSTITUTION_ROOT"
 
 echo "==> 暂存 Cloudflare 公开链身份配置..."
-python3 - "$REPO_ROOT/citizenserve/wrangler.toml" "$CLOUDFLARE_WRANGLER_OUT" "$GENESIS_HASH_STR" "$STATE_ROOT" <<'PYEOF'
+python3 - "$REPO_ROOT/citizenserve/scripts/wrangler.toml" "$CLOUDFLARE_WRANGLER_OUT" "$GENESIS_HASH_STR" "$STATE_ROOT" <<'PYEOF'
 import os
 import re
 import sys
@@ -496,11 +496,11 @@ if [[ "$FINALIZE" == "1" ]]; then
     CITIZENAPP_REQUIRE_STATE_ROOT=1 \
         "$REPO_ROOT/citizenapp/scripts/check-chainspec-frozen.sh"
 
-    NODE_SPEC="$CHAIN_ROOT/node/chainspecs/citizenchain.plain.json"
+    NODE_SPEC="$CHAIN_ROOT/node/citizenchain.json"
     APP_SPEC="$REPO_ROOT/citizenapp/assets/chainspec.json"
     APP_LIGHT_SYNC_STATE="$REPO_ROOT/citizenapp/assets/light_sync_state.json"
     APP_PUBLIC_INSTITUTION="$REPO_ROOT/citizenapp/assets/public_institutions"
-    CLOUDFLARE_WRANGLER="$REPO_ROOT/citizenserve/wrangler.toml"
+    CLOUDFLARE_WRANGLER="$REPO_ROOT/citizenserve/scripts/wrangler.toml"
     install -m 0644 "$OUT" "$NODE_SPEC"
     install -m 0644 "$APP_OUT" "$APP_SPEC"
     install -m 0644 "$APP_LIGHT_SYNC_STATE_OUT" "$APP_LIGHT_SYNC_STATE"

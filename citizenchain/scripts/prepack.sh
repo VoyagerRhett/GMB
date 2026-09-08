@@ -24,7 +24,7 @@ case "$(uname -s)" in
 esac
 
 echo "[prepack] build onchina (release)"
-( cd "$ROOT" && cargo build -p onchina --release )
+( cd "$ROOT" && cargo build -p onchina --release --config "$ROOT/config.toml" )
 
 echo "[prepack] build onchina frontend"
 ( cd "$ROOT/onchina/frontend" && npm ci && npm run build )

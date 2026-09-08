@@ -32,7 +32,19 @@ class WalletFlow final : public std::enable_shared_from_this<WalletFlow> {
   }
 
  private:
+  friend struct WalletFlowTestPeer;
+  uint64_t revoke_private_key_display() noexcept;
   void action();
+  void begin_private_key_view();
+  void end_private_key_view(bool cancelled, citizensdk_error_code_t error) noexcept;
+  void receive_private_key_settled(uint64_t view_id, citizensdk_error_code_t error) noexcept;
+  void receive_private_key_terminal(citizensdk_result_handle_t result) noexcept;
+  static int32_t display_private_key(void *context, uint64_t view_id,
+                                      citizensdk_bytes_view_t value) noexcept;
+  static int32_t private_key_authorizing(void *context, uint64_t view_id,
+                                          uint64_t host_operation_id) noexcept;
+  static void private_key_settled(void *context, uint64_t view_id,
+                                 int32_t error) noexcept;
   void begin_prepare();
   void commit_prepared();
   void begin_import_or_add();
@@ -69,13 +81,30 @@ class WalletFlow final : public std::enable_shared_from_this<WalletFlow> {
   std::atomic<bool> finish_scheduled_{false};
   std::atomic<bool> operation_in_flight_{false};
   std::atomic<bool> cleanup_supervised_{false};
+  // display 与关闭共用短锁；借用指针不跨回调，Core 终态前始终保留 context。
+  std::mutex view_lock_;
+  uint64_t private_view_id_{};
+  uint64_t private_host_operation_id_{};
+  SensitiveBuffer private_key_;
+  bool private_view_closed_{};
+  bool private_view_revealed_{};
+  bool private_view_displayed_{};
+  bool private_display_accepted_{};
+  std::atomic<bool> private_finish_supervised_{false};
   std::mutex prepared_lock_;
   citizensdk_prepared_wallet_handle_t prepared_{};
 };
 
+// 钱包与二维码 UI 共用同一单调句柄分配器，取消句柄不可能碰撞。
+citizensdk_wallet_flow_handle_t reserve_wallet_flow_handle();
 citizensdk_error_code_t present_wallet_flow(
     const std::shared_ptr<HostBridge> &host,
     const citizensdk_wallet_flow_request_v1_t &request, void *context,
+    citizensdk_wallet_flow_completion_v1_t completion,
+    citizensdk_wallet_flow_handle_t *out_handle);
+citizensdk_error_code_t view_account_private_key(
+    const std::shared_ptr<HostBridge> &host,
+    const citizensdk_account_id_t &account_id, void *context,
     citizensdk_wallet_flow_completion_v1_t completion,
     citizensdk_wallet_flow_handle_t *out_handle);
 citizensdk_error_code_t cancel_wallet_flow(

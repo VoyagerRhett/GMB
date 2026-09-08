@@ -2,6 +2,7 @@
 #define CITIZENSDK_CPP_HPP
 
 #include <exception>
+#include "citizensdk_qr_image.h"
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -67,6 +68,137 @@ inline void wallet_trampoline(
   } catch (...) {}
 }
 
+
+// 只读取 Core 输出 JSON 的字符串字段，不解释 QR_V1 或重新创建待签数据。
+inline std::string qr_json_string(const std::string &json, std::size_t &at) {
+  if (at >= json.size() || json[at++] != '"')
+    throw Error(CITIZENSDK_ERROR_INTEGRITY, "Core QR JSON string is missing");
+  std::string output;
+  const auto unit = [&]() -> uint32_t {
+    if (json.size() - at < 4) throw Error(CITIZENSDK_ERROR_INTEGRITY, "Core JSON escape is truncated");
+    uint32_t code = 0;
+    for (unsigned index = 0; index < 4; ++index) {
+      const char digit = json[at++];
+      const int value = digit >= '0' && digit <= '9' ? digit - '0'
+          : digit >= 'a' && digit <= 'f' ? digit - 'a' + 10
+          : digit >= 'A' && digit <= 'F' ? digit - 'A' + 10 : -1;
+      if (value < 0) throw Error(CITIZENSDK_ERROR_INTEGRITY, "Core JSON escape is invalid");
+      code = code * 16 + static_cast<uint32_t>(value);
+    }
+    return code;
+  };
+  while (at < json.size()) {
+    const auto ch = json[at++];
+    if (ch == '"') return output;
+    if (static_cast<unsigned char>(ch) < 0x20)
+      throw Error(CITIZENSDK_ERROR_INTEGRITY, "Core JSON contains a control byte");
+    if (ch != '\\') { output.push_back(ch); continue; }
+    if (at == json.size()) break;
+    switch (json[at++]) {
+      case '"': output.push_back('"'); break;
+      case '\\': output.push_back('\\'); break;
+      case '/': output.push_back('/'); break;
+      case 'b': output.push_back('\b'); break;
+      case 'f': output.push_back('\f'); break;
+      case 'n': output.push_back('\n'); break;
+      case 'r': output.push_back('\r'); break;
+      case 't': output.push_back('\t'); break;
+      case 'u': {
+        uint32_t code = unit();
+        if (code >= 0xd800 && code <= 0xdbff) {
+          if (json.size() - at < 2 || json[at++] != '\\' || json[at++] != 'u')
+            throw Error(CITIZENSDK_ERROR_INTEGRITY, "Core JSON surrogate is truncated");
+          const uint32_t low = unit();
+          if (low < 0xdc00 || low > 0xdfff)
+            throw Error(CITIZENSDK_ERROR_INTEGRITY, "Core JSON surrogate is invalid");
+          code = 0x10000 + ((code - 0xd800) << 10) + low - 0xdc00;
+        } else if (code >= 0xdc00 && code <= 0xdfff)
+          throw Error(CITIZENSDK_ERROR_INTEGRITY, "Core JSON surrogate is invalid");
+        if (code < 0x80) output.push_back(static_cast<char>(code));
+        else {
+          if (code >= 0x10000) output.push_back(static_cast<char>(0xf0 | (code >> 18)));
+          if (code >= 0x800) output.push_back(static_cast<char>(
+              (code >= 0x10000 ? 0x80 : 0xe0) | ((code >> 12) & 0x3f)));
+          output.push_back(static_cast<char>((code >= 0x800 ? 0x80 : 0xc0) | ((code >> 6) & 0x3f)));
+          output.push_back(static_cast<char>(0x80 | (code & 0x3f)));
+        }
+        break;
+      }
+      default: throw Error(CITIZENSDK_ERROR_INTEGRITY, "Core JSON escape is invalid");
+    }
+  }
+  throw Error(CITIZENSDK_ERROR_INTEGRITY, "Core JSON string is truncated");
+}
+inline std::string qr_public_field(const std::string &json, const char *field, std::size_t maximum) {
+  unsigned depth = 0;
+  std::string canonical;
+  bool found = false;
+  for (std::size_t at = 0; at < json.size();) {
+    const char ch = json[at];
+    if (ch == '{' || ch == '[') { ++depth; ++at; continue; }
+    if (ch == '}' || ch == ']') { if (depth == 0) break; --depth; ++at; continue; }
+    if (ch != '"') { ++at; continue; }
+    const auto name = qr_json_string(json, at);
+    while (at < json.size() && (json[at] == ' ' || json[at] == '\n' || json[at] == '\r' || json[at] == '\t')) ++at;
+    if (depth != 1 || at == json.size() || json[at] != ':' || name != field) continue;
+    ++at;
+    while (at < json.size() && (json[at] == ' ' || json[at] == '\n' || json[at] == '\r' || json[at] == '\t')) ++at;
+    if (found) throw Error(CITIZENSDK_ERROR_INTEGRITY, "Core QR canonical field is duplicated");
+    canonical = qr_json_string(json, at); found = true;
+  }
+  if (!found || canonical.empty() || canonical.size() > maximum)
+    throw Error(CITIZENSDK_ERROR_INTEGRITY, "Core QR canonical field is invalid");
+  return canonical;
+}
+inline QrImage qr_image(const std::string &text) {
+  QrImage image;
+  size_t required = 0;
+  auto code = citizensdk_qr_image_encode_text(reinterpret_cast<const uint8_t *>(text.data()),
+      text.size(), 4, nullptr, 0, &image.width, &image.height, &required);
+  if (code != CITIZENSDK_QR_IMAGE_BUFFER_TOO_SMALL || required == 0 || required > 16777216)
+    throw Error(CITIZENSDK_ERROR_INTEGRITY, "QR response image query failed");
+  image.luminance.resize(required);
+  code = citizensdk_qr_image_encode_text(reinterpret_cast<const uint8_t *>(text.data()),
+      text.size(), 4, image.luminance.data(), image.luminance.size(), &image.width, &image.height, &required);
+  if (code != CITIZENSDK_QR_IMAGE_OK || required != image.luminance.size())
+    throw Error(CITIZENSDK_ERROR_INTEGRITY, "QR response image encoding failed");
+  return image;
+}
+struct QrCompletionContext final { QrFlowCompletion completion; bool encode_response{}; };
+inline void qr_trampoline(void *context, citizensdk_error_code_t error,
+                            citizensdk_bytes_view_t document) noexcept {
+  std::unique_ptr<QrCompletionContext> state(static_cast<QrCompletionContext *>(context));
+  if (!state) return;
+  QrFlowResult result; result.error_code = error;
+  try {
+    if (error == CITIZENSDK_OK) {
+      if (document.data == nullptr || document.len == 0 || document.len > 65536)
+        throw Error(CITIZENSDK_ERROR_INTEGRITY, "Core QR document is invalid");
+      result.document.assign(reinterpret_cast<const char *>(document.data), static_cast<std::size_t>(document.len));
+      result.canonical_text = qr_public_field(result.document, "canonical_text", 2331);
+      if (state->encode_response) {
+        result.request_id = qr_public_field(result.document, "request_id", 128);
+        result.signer_account_id = qr_public_field(result.document, "signer_account_id", 66);
+        result.sign_request = qr_public_field(result.document, "sign_request", 2331);
+        const auto signature = qr_public_field(result.document, "signature", 130);
+        if (signature.size() != 130 || signature.compare(0, 2, "0x") != 0)
+          throw Error(CITIZENSDK_ERROR_INTEGRITY, "Core QR signature length is invalid");
+        const auto nibble = [](char digit) -> uint8_t {
+          if (digit >= '0' && digit <= '9') return static_cast<uint8_t>(digit - '0');
+          if (digit >= 'a' && digit <= 'f') return static_cast<uint8_t>(digit - 'a' + 10);
+          throw Error(CITIZENSDK_ERROR_INTEGRITY, "Core QR signature encoding is invalid");
+        };
+        result.signature.reserve(64);
+        for (std::size_t index = 2; index < signature.size(); index += 2)
+          result.signature.push_back(static_cast<uint8_t>((nibble(signature[index]) << 4) | nibble(signature[index + 1])));
+        result.qr_image = qr_image(result.canonical_text);
+      }
+    }
+  } catch (const Error &failure) { result = {}; result.error_code = failure.code(); }
+    catch (...) { result = {}; result.error_code = CITIZENSDK_ERROR_INTERNAL; }
+  try { state->completion(std::move(result)); } catch (...) {}
+}
+
 }  // namespace detail
 
 /* Header-only ownership wrapper. Construction owns only Host resources; open()
@@ -84,8 +216,8 @@ class Host final {
     native.asset_root_utf8 = bytes_view(assets);
     native.application_id_utf8 = bytes_view(config.application_id);
     native.hwnd = config.hwnd;
-    native.enable_wallet = config.enable_wallet ? 1 : 0;
-    throw_if_error(citizensdk_host_create(&native, &host_),
+    native.enable_wallet = (config.modules & (CITIZENSDK_MODULE_WALLET | CITIZENSDK_MODULE_SIGNING)) != 0 ? 1 : 0;
+    throw_if_error(citizensdk_host_create_with_modules(&native, config.modules, &host_),
                    "CitizenSDK Host creation failed");
   }
 
@@ -202,6 +334,33 @@ class Host final {
     return WalletFlow(host_, flow);
   }
 
+  // 返回的仍是无秘密取消能力；私有 view_id 与显示缓冲仅存在于 Host 内。
+  WalletFlow view_account_private_key(const citizensdk_account_id_t &account_id,
+                                      WalletFlowCompletion completion) {
+    if (!completion)
+      throw Error(CITIZENSDK_ERROR_INVALID_ARGUMENT, "wallet-flow completion is required");
+    auto state = std::make_unique<detail::WalletCompletionContext>();
+    state->completion = std::move(completion);
+    citizensdk_wallet_flow_handle_t flow = 0;
+    const auto code = citizensdk_host_view_account_private_key(
+        host_, &account_id, state.get(), detail::wallet_trampoline, &flow);
+    if (code != CITIZENSDK_OK)
+      throw Error(code, last_host_error("CitizenSDK private-key view failed"));
+    (void)state.release();
+    return WalletFlow(host_, flow);
+  }
+
+
+  // 原生窗口负责摄像头、审阅与设备认证；结果中只有 Core 公共 JSON 与响应图像。
+  WalletFlow scan_qr(QrFlowCompletion completion) {
+    return present_qr({}, std::move(completion), false);
+  }
+  WalletFlow sign_qr_request(const std::string &request, QrFlowCompletion completion) {
+    if (request.empty() || request.size() > 2331)
+      throw Error(CITIZENSDK_ERROR_INVALID_ARGUMENT, "QR sign request is empty or too large");
+    return present_qr(request, std::move(completion), true);
+  }
+
   void close() {
     if (host_ == 0) return;
     // Windows 窗口退休可以晚于 Core 销毁。上次 BUSY 后不能再查询已经
@@ -236,6 +395,19 @@ class Host final {
   }
 
  private:
+  WalletFlow present_qr(const std::string &request, QrFlowCompletion completion, bool signing) {
+    if (!completion) throw Error(CITIZENSDK_ERROR_INVALID_ARGUMENT, "QR completion is required");
+    auto state = std::make_unique<detail::QrCompletionContext>();
+    state->completion = std::move(completion); state->encode_response = signing;
+    citizensdk_wallet_flow_handle_t flow = 0;
+    const auto code = signing
+        ? citizensdk_host_sign_qr_request(host_, bytes_view(request), state.get(), detail::qr_trampoline, &flow)
+        : citizensdk_host_scan_qr(host_, state.get(), detail::qr_trampoline, &flow);
+    if (code != CITIZENSDK_OK) throw Error(code, last_host_error("CitizenSDK QR flow failed"));
+    (void)state.release();
+    return WalletFlow(host_, flow);
+  }
+
   void refresh_core_handle() {
     citizensdk_handle_t current = 0;
     const auto code = citizensdk_host_sdk(host_, &current);
