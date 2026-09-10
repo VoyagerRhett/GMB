@@ -333,6 +333,8 @@ export function LocalDocViewer({ doc }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [showToTop, setShowToTop] = useState(false);
   const html = useMemo(() => renderMarkdown(doc.markdown), [doc.markdown]);
+  // 正文目录移除和标题类由副作用直接写入 DOM；保持属性对象引用稳定，避免状态更新时 React 重写原始 HTML。
+  const htmlPayload = useMemo(() => ({ __html: html }), [html]);
   const flatToc = useMemo(() => flattenToc(tocItems), [tocItems]);
 
   useEffect(() => {
@@ -435,7 +437,7 @@ export function LocalDocViewer({ doc }: Props) {
             ref={articleRef}
             id="content"
             className="markdown-body"
-            dangerouslySetInnerHTML={{ __html: html }}
+            dangerouslySetInnerHTML={htmlPayload}
           />
         </main>
       </div>
