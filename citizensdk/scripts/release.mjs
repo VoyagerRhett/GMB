@@ -32,7 +32,7 @@ const PRODUCT_ID = 'citizensdk';
 const PACKAGE_NAME = 'citizen_sdk';
 // 本机仓库和平台目录取中央登记的小写身份；正式产品名和包内平台名称不随路径改变。
 const TATA_CONSOLE_TARGET_ROOT = '/Users/rhett/TATA/tataconsole/target/gmb/citizensdk';
-const TATA_CONSOLE_WORK_ROOT = '/Users/rhett/TATA/tataconsole/work/gmb/citizensdk';
+const TATA_CONSOLE_CACHE_ROOT = '/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk';
 // 独立于任何 binding 源码的 Flutter v1 公共面金标。五份绑定都必须从自己的
 // 权威常量/方法表解析并逐项匹配；不能用一端源码生成另一端预期值。
 const FLUTTER_METHOD_CHANNEL = 'citizen/sdk/core/v1';
@@ -359,9 +359,9 @@ const MOBILE_BINDING_SOURCE_FILES = Object.freeze({
   'android/native/src/main/kotlin/org/citizen/sdk/ui/CitizenSdkQrCoordinator.kt': '213bb08e1240aec35fbaabe5a02c3b714ef998692e47d63c88392ac887300fda',
   'android/native/src/main/kotlin/org/citizen/sdk/ui/CitizenSdkQrActivity.kt': '2ae1c5314c1595c247b6d80e65c70d92839254b869ea05a2a60dbe3e9a3976be',
   'darwin/Sources/CitizenSDK/CitizenSDKQrScanner.swift': '4ae2a37ae8ab25928d381f5f47339196ae03c387deab00b690de764e6a58f925',
-  'android/build.gradle': '7711286afd89c78d21e3debca87a2f1af2b1e9e568ad0037b9c422c676ba5b7d',
+  'android/build.gradle': 'e4e7a4becc499e3858bc7fbb4b6e29b32a04ba5d8844798fd7b9a9bc61858650',
   'android/gradle.properties': 'cf2c210cd35238888bb6c125c538bcadfebff01d28e97d664b83f96f31fa3160',
-  'android/native/build.gradle': '69e1f4e707cc65399bf5dc97a4d2900e30d02c8df2473f3612a93a1d561564ea',
+  'android/native/build.gradle': '96653596ad92073aa74f25bd0e156a0d2323e8bb3c1f91b47071cc80c104b706',
   'android/native/consumer-rules.pro': '81c0d229a083f6b87647b45708e1b19ad116a65c5eed33bf5152ac35def7f2c0',
   'android/native/src/main/AndroidManifest.xml': '70b610be6bb295f81b54e0a55d9e0171f2cbc022f3a318034a711813d12eff54',
   'android/native/src/main/cpp/CMakeLists.txt': 'b5dfbc71b58b50d40961edd3022ce70f98c8cf6e9163270d02458f0ecafb128f',
@@ -605,9 +605,9 @@ const DOCUMENTATION_SHA256 = Object.freeze({
   'docs/WINDOWS_PLATFORM.md': '92944a039778ec7f333a7386145a4dd6738561d317b1744cdb98c49ab313ac9d',
   'windows/README.md': '7d966ba47a7ed6531c97a025a4384e9ae82f3046b681a75ffe038d970c6f57c5',
   'windows/include/README.md': 'a7ae4d268d86b3bc10ff1984c0a764155cf96c68de2b0105f9ae3eb0569b65e8',
-  'README.md': '56b3f55b0fd882c7614fe22d3fd38d08fba62b749cda918df38e487b16c78c00',
-  'android/README.md': '27569acc31cc208b16fb3b8ab9eabc3c73056452afd2eb479dc3aaf0672bfa65',
-  'android/native/README.md': 'aa233ff6ddff88382ce4e338c14b204073f927f2151dcc659c7741dd34a95a49',
+  'README.md': '5794f06bcc2a2ff4b01a3524d7d477868f56095bbe6d95f4d4f219603e66d7cd',
+  'android/README.md': '348268045e496de7bc2ff31808ea9ee6c687b776daa9450d7fe4bdc35c05c50a',
+  'android/native/README.md': 'ee7626e85156f60acabcf66de5d03c03f5e1f91f8a1853bbca0d1bdfc51508a9',
   'android/native/src/main/cpp/README.md': 'ccbd436d19620fa3069f2407236765366358d27c8f4f72cddf0a6fd91044b289',
   'android/native/src/main/kotlin/README.md': 'c3d0c931f7b5f57ca2ebeeb37fa4ca7dedd96668735bb4cd7bc60f8255942bc8',
   'android/native/src/main/kotlin/org/README.md': '578730640cf686d61ae0855d726ca55de4e701be90241261197eb8b5c4f4c5b2',
@@ -618,22 +618,22 @@ const DOCUMENTATION_SHA256 = Object.freeze({
   'android/src/main/kotlin/README.md': 'cd06f97683e5b86c1a4ce4e5a5e19ca7e91239d2130b45594b58d27320582fdd',
   'android/src/main/kotlin/org/README.md': '74cbcbc590e49ae488097691b67911df3b001aba71b553f463e6dbd2eb36e53b',
   'android/src/main/kotlin/org/citizen/README.md': '1a7193606a774df8d6ad9d7c3c64dbb0b28a0cc7f6f61d0052a71726ec5400ef',
-  'darwin/README.md': 'd10c95bed64889ef52c1e27d3a05c114ef5c7de42848ea31d0c81ae4f9039eb8',
+  'darwin/README.md': '43b18f73885a3f232b051c56e4b5e69078fae7b37b8a5cb54d836bf3efcc8c29',
   'darwin/Sources/CitizenSDKFlutter/README.md': '249493844eab20102633b327249d791de8c1d6a6da9a7a19e848e4faf34994d0',
   'docs/ARCHITECTURE.md': '5f930415bb862221ffb8738a5465b61d0aa2f547da007c7eb994b833bb50f5b8',
   'docs/C_ABI.md': 'd4f4977499325ea54ddca96101c713eedbe4ef401585c5c4c509488d13f052d2',
   'docs/DART_API.md': '0f456eb17e5a7409b4fba79e8d08e351de1d677eb8157782dd114ece879b9fd4',
-  'docs/LINUX_PLATFORM.md': 'b1a742cac249842ee283a1195b8a24d96a441a25bd93ab0e4ae1291b809c7742',
-  'docs/MOBILE_PLATFORM.md': '92144bb323000add213d996da76e3712a72609a16e3ab68a490dee704bf03fff',
-  'docs/NATIVE_PACKAGING.md': '3526f151cd2bba3a7ce092daf62ad260ef8668edc64e17ef3c24d714a74b07a4',
-  'docs/SECURITY.md': 'd7f9884fd16c9c0c7a2fac321401be1ec6a3bfe67a59cd52ef0e8cbbefcdf64f',
-  'docs/SOURCE_PROVENANCE.md': '14839f14fc6bb83548aef53bf931954cceb131ff2a530f8ff5a9b3b891e48bda',
+  'docs/LINUX_PLATFORM.md': '4df51c1dd9787c7854605f34b7f5b27a6d055f5be9a970ebfe5a82d960857f3c',
+  'docs/MOBILE_PLATFORM.md': '7dca5e0203ab20757ffce2bba5a073f720200ff54c198ac24f855be3ea782b0b',
+  'docs/NATIVE_PACKAGING.md': 'dcd8a3fe861cc8eeb9e4696160521bddceac791f7a4244f96e53252d893ee8e4',
+  'docs/SECURITY.md': '62b2f38f0b76ae73adf6bef4d09a14b05b382645876aba5db634a04dfa985ec4',
+  'docs/SOURCE_PROVENANCE.md': '5f5a676d8c2cabc622788233154810dc4026562b5b5ba9cc96dee31e45d722cc',
   'docs/WALLET_MODEL.md': '8027715999869bfb5258679626ea51a8b0649353e48cf5d9a186b084c0c406c6',
   'lib/src/api/README.md': '045cc102ecd88c7b96dd125ebd24092e1cfc7b52c1e7c95ce04bd7560322d55d',
   'lib/src/crypto/README.md': 'd8779c37639121ed8e5e173d006ba5b882704405cd97710ed590c1a9d21b62df',
   'lib/src/models/README.md': '5506efb021f3c238a8c2cc2badebc7d1f442a5352c16182e5dcd9241b0a6224a',
   'lib/src/platform/README.md': '3b969924bea915aee693c62980e70882f5cfc24c2b9c97ba9d8cdd49d3cd4ac5',
-  'linux/README.md': '4e93fa68dcf634b5ad59e973567e3b630d9c8150a45e5784ebf7a74c29048ce3',
+  'linux/README.md': '10505155f3e871b84a70b089e688238e5e820afeb366b086bd3f7b35ff0b450f',
   'linux/include/README.md': '632943f0f42f70843dd71e1af43e3069af76bb182ee6bdd62346a34e8a277cb4',
 });
 // 根 Flutter、Core Rust/FFI、smoldot provider、signer、Android、Apple、
@@ -673,7 +673,7 @@ const SDK_SCRIPT_ENTRIES = Object.freeze({
 });
 const SDK_PRODUCTION_SCRIPT_FILES = Object.freeze({
   'scripts/analysis_options.yaml': '67a8f842d8b2c0eee53ab22db23c98e4deb3f8d3992a20d1a977870dc2e8218a',
-  'scripts/build-native.sh': '7027545acc168252eb728f9a4ef93abaf355f9013aec7001f9c706469e9dec0b',
+  'scripts/build-native.sh': '4caf1d969e02088e2fb0b66960ee79805b90fb3a327cc0fa4ef1d2b7050d433f',
 });
 const SDK_TEST_CONTRACT_FILES = Object.freeze({
   'native/engine/src/qr_review_tests.rs': 'b864b405e7817cf3eb30642429d4c898f320f1bec6851f7275d0e529fb58c120',
@@ -769,7 +769,7 @@ const SDK_TEST_CONTRACT_FILES = Object.freeze({
   'linux/test/citizen_sdk_cpp_consumer.cc': '676438754d9fa496fd8b91194b90b21d06c47fa74ad121a7f0216537f247f07f',
   'linux/test/citizen_sdk_flutter_consumer.dart': '5bd26b5bce151f00bd6f15e555a7bd72d848b933cdf912bf47e45c6e2c1a36fe',
   'linux/test/CMakeLists.txt': '8ef9fd28eadb361fa82da4bea975db4be6196134d2e8e1a8c7e01e9f39d4cf82',
-  'linux/test/README.md': '0dc948a7f48bb45dc313db971cd936b366b0ab6623151fb68cff5456770bfd9b',
+  'linux/test/README.md': 'ffe0eaed6f154724af7c2142a940cda6b00da2c818dd1786ae9e2bc973c83a30',
   'linux/test/citizen_sdk_api_contract_test.cc': 'f4955bbfd472eb906df7d668541f1fd28f9e363ac74ba350f145f5fccc1c82e0',
   'linux/test/citizen_sdk_assets_test.cc': '9d5b6f2ad9e23fc55c759deed22e0a50bdca8886608ebe53dd80d0696f5f9e08',
   'linux/test/citizen_sdk_host_operation_test.cc': '4ea3d5da48ea3c7e5d21eb6c80273eea94dd01589de4898ddf3f2afe727feda0',
@@ -834,7 +834,7 @@ const SDK_TEST_CONTRACT_FILES = Object.freeze({
   'native/smoldot/provider/tests/account_nonce_contract.rs': '13f2d194df11c94527fd5b513228cc1ec917f3735b12f3326c239b600821b754',
   'native/smoldot/provider/tests/legacy_parity.rs': '7db2b3ef4959a7bd1c83b22597666b0448f48b3079b82821f624efd2ccb7d9dc',
   'native/smoldot/provider/tests/verified_chain_client_contract.rs': '140e90e7e52b259919b0705c1df52d89366ef1e31c34ad672065201b4e18e308',
-  'scripts/release.test.mjs': 'e6ea49da7589ee12bb599a40da9aee0df8c09e615b44355bfd2396374c23db71',
+  'scripts/release.test.mjs': '7267833db761e76a1aad8caf58b0d25135f044eac00172e8320d083ee88704c4',
   'test/api/README.md': 'bd927ce1488fc609ab3d1199ef7e3c859c741fae14628d4ef4bd79aa8d8b7144',
   'test/api/citizen_sdk_test.dart': '27e0389b50c3fc52c6acc32186e17abb5363d6064b84db84495e980c12a42883',
   'test/api/citizen_transaction_test.dart': '82bb6dedf06a944b22b11470cdd6fae0295dbcb2d1bbcfeda3b5fa34f0e53219',
@@ -1019,7 +1019,7 @@ const CORE_RUST_FILES = Object.freeze({
   'native/contracts/tests/state_store_contract.rs': '71c582e47b278a5930ec8565c643a33c4c70f37f00bd76f8badf4dc86cd9b0cc',
   'native/contracts/tests/transaction_build_contract.rs': '5107e4fcaf11e4faa2ce60620e4916b09db9a40d62c2f049e270a58912ef353d',
   'native/engine/Cargo.toml': '7f1e456c0bc75f347ee27ba7afff341bfb717d845f0497e0e20ba555b78f9451',
-  'native/engine/README.md': '1de743ebd30c656017f2b2d796027896ba0a2f73e81fe9a403d5a45458ff313f',
+  'native/engine/README.md': '49f598db0f76469aa5e76135efe0f22d4a7bc3a6be698d4120e522dec9237e0b',
   'native/engine/src/account_state.rs': '55bfefcff2038ba1cdbe71846b3acc7d1ffa5177d95e057d029c0f1d1b5e78fd',
   'native/engine/src/capabilities.rs': 'c729aaef5559127aeb2185ea2793456a3bc73346724996a190cc66a97c58181e',
   'native/engine/src/engine.rs': '05f09e7f8b7788208720ddfa2fb1792c87d46d1d624784a14b9d88b5e0bbf10a',
@@ -1051,7 +1051,7 @@ const CORE_RUST_FILES = Object.freeze({
   'native/engine/tests/state_import.rs': '6937752568de3531a32b8ad35b1fd7270abad120c4b5aac423ae7df970d3f917',
   'native/engine/tests/transaction_outcome.rs': '68a05dfbdeedccaf70c22f83f88ad05131e8f65f9c2f355f12ce93d90e7d0645',
   'native/ffi/Cargo.toml': '2c09c8aed24f179823c8fef6abd4f14ed6b321683bd6145612b7b8cf17ea3fd1',
-  'native/ffi/README.md': '5674e7ead830b05848e354d3190e5e67062a09db10ea1beeb8155d14996711c9',
+  'native/ffi/README.md': 'c1106eec3059aabed7fcaca79a2eff483350d2ac0c8f0294715feca8ae6fc0c8',
   'native/ffi/src/abi.rs': 'd9ccb77bc902d72897549b8f810570c18779b3aec7828778859995e289483ef8',
   'native/ffi/src/assets.rs': '38ec1fc759746e68967ced815b7fcd4d1312be8ccc8da80cc4f8c60b4278ac67',
   'native/ffi/src/capabilities.rs': 'aefe8b51f182767c5ad713a117503a41b736d396619ba0542887d84c5fb11c12',
@@ -1113,7 +1113,7 @@ const CORE_RUST_BOUNDARY_FILES = Object.freeze({
   'Cargo.toml': '3bb213b37d2e0dedb467d1f170af33e0b9d3ee0c949d45345801abfe3907c8e7',
   'Cargo.lock': '865576ece46b0cdfad3749e3382ae10b57448d26f4cb4dcbfd368be39e0160c0',
   'docs/C_ABI.md': 'd4f4977499325ea54ddca96101c713eedbe4ef401585c5c4c509488d13f052d2',
-  'native/README.md': '99e5589d7ea1105aed3b7b0791b26509704af738a005a556fa6fa8bac1043709',
+  'native/README.md': 'a87b77d6b366fb28ddedc263d49612e71e10234fff63f3fc9ab5ca9acfc8be0e',
   'THIRD_PARTY_NOTICES.md': '3bba0c66cb5c4e382a658b5f7de7df58542ab2fceefb7df93cc863f7fef7cab3',
 });
 // 该清单离线固定 FFI、PoW workspace、light-base 与 lib 的完整文件闭集；
@@ -1348,10 +1348,10 @@ function assertLocalTarget(path, label) {
   const target = assertSafeTargetPath(path, label);
   if (process.env.GITHUB_ACTIONS === 'true') return target;
   // 仓库、产品和平台是永久容器，只允许写严格后代；仅核验本次命中的根。
-  const root = [TATA_CONSOLE_TARGET_ROOT, TATA_CONSOLE_WORK_ROOT]
+  const root = [TATA_CONSOLE_TARGET_ROOT, TATA_CONSOLE_CACHE_ROOT]
     .find((candidate) => target.startsWith(`${candidate}${sep}`));
   if (!root) {
-    fail(`${label} 的本地路径必须位于 ${TATA_CONSOLE_TARGET_ROOT} 或 ${TATA_CONSOLE_WORK_ROOT} 的严格子路径：${target}`);
+    fail(`${label} 的本地路径必须位于 ${TATA_CONSOLE_TARGET_ROOT} 或 ${TATA_CONSOLE_CACHE_ROOT} 的严格子路径：${target}`);
   }
   assertSafeTargetPath(root, 'TataConsole 中央目录');
   if (!existsSync(root) || !lstatSync(root).isDirectory()) {
@@ -4627,7 +4627,7 @@ export const CITIZENSDK_INTERNAL_SYMBOLS = Object.freeze([
   'citizensdk_internal_private_key_view_reveal',
 ]);
 
-/** 仅生成到构建工作目录；该声明及模块不能安装给SDK消费者。 */
+/** 仅生成到构建缓存目录；该声明及模块不能安装给SDK消费者。 */
 export function citizenSdkInternalHeader() {
   return `#ifndef CITIZENSDK_INTERNAL_H
 #define CITIZENSDK_INTERNAL_H
@@ -5501,7 +5501,7 @@ function runHostedDart(dart, args, cwd, env, signal) {
       if (error) rejectRun(error); else resolveRun(text);
     };
     const preserve = (cause) => {
-      const error = new Error('CitizenSDK Hosted 子进程未确认退出，保留工作目录', { cause });
+      const error = new Error('CitizenSDK Hosted 子进程未确认退出，保留缓存目录', { cause });
       error.preserveHostedOutput = true;
       finish(error);
     };
@@ -5575,19 +5575,19 @@ export async function buildCitizenSdkHosted({
   if (process.platform === 'win32') fail('CitizenSDK Hosted 归档需要 POSIX 进程组监督');
   const candidate = assertSafeTargetPath(candidatePath, 'Hosted 来源');
   const audit = assertSafeTargetPath(archivePath, '审计归档');
-  const output = assertLocalTarget(outputPath, 'Hosted 工作目录');
+  const output = assertLocalTarget(outputPath, 'Hosted 缓存目录');
   const dart = assertSafeTargetPath(dartPath, '官方 Dart');
   const flutter = assertSafeTargetPath(flutterRoot, 'Flutter SDK');
   const cache = assertLocalTarget(pubCachePath, '隔离 Pub cache');
   for (const input of [candidate, audit, dart, flutter, cache]) {
-    assertOutsideSource(input, output, 'Hosted 工作目录');
+    assertOutsideSource(input, output, 'Hosted 缓存目录');
     assertOutsideSource(output, input, 'Hosted 输入');
   }
   for (const input of [candidate, audit, dart, flutter]) {
     assertOutsideSource(input, cache, '隔离 Pub cache');
     assertOutsideSource(cache, input, 'Hosted 只读输入');
   }
-  if (lstatExists(output)) fail('CitizenSDK Hosted 工作目录已存在，拒绝覆盖');
+  if (lstatExists(output)) fail('CitizenSDK Hosted 缓存目录已存在，拒绝覆盖');
   if (!lstatExists(dart) || !lstatSync(dart).isFile()
       || !lstatExists(flutter) || !lstatSync(flutter).isDirectory()
       || !lstatExists(cache) || !lstatSync(cache).isDirectory()
@@ -5606,7 +5606,7 @@ export async function buildCitizenSdkHosted({
   const expected = hostedPackageEntries(candidate);
   const auditSha = sha256File(audit);
   const manifestSha = sha256File(join(candidate, 'citizensdk-release.json'));
-  ensureNewDirectory(output, candidate, 'Hosted 工作目录');
+  ensureNewDirectory(output, candidate, 'Hosted 缓存目录');
   const identity = lstatSync(output);
   try {
     const input = join(output, 'input');

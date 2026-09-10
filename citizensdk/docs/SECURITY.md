@@ -351,14 +351,14 @@ plugin 固定 `$ORIGIN`，不借助测试 runner 修补路径。同版产物缺�
 
 - SDK 源码树不得接收构建缓存、原生库或 Release 产物。
 - 本机 Linux 合同测试必须由 CMake/CTest 以 `CITIZENSDK_TEST_WORK_DIR` 注入
-  `/Users/rhett/TATA/tataconsole/work/gmb/citizensdk` 下有效 UID 所有、`0700`、任务独占的现有
+  `/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk` 下有效 UID 所有、`0700`、任务独占的现有
   绝对目录。测试 helper 逐级 no-follow 验证后，以 CSPRNG 随机名称和 `mkdirat` 只在已验证
   目录 fd 下创建子目录，不回退 `/tmp`、当前目录或用户目录，也不递归删除未经 fd 与 inode
   复核的路径。
 - 原生构建和 Release 在首次建目录前校验绝对规范路径及每一级既存祖先，拒绝路径穿越、
   符号链接祖先和非目录祖先；工作目录与产物目录必须成对通过预检，任一无效时保持零写入。
 - 本机发布器只接受 `/Users/rhett/TATA/tataconsole/target/gmb/citizensdk` 和
-  `/Users/rhett/TATA/tataconsole/work/gmb/citizensdk` 的严格后代；永久根本身、
+  `/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk` 的严格后代；永久根本身、
   旧根、邻产品/仓库/平台、伪前缀和最终链接均拒绝。只核验匹配根存在且为普通目录，
   未使用根缺失不影响本次请求。GitHub 隔离分支不变。该门禁不替代执行方对 UID、权限、
   任务归属和清理范围的检查；永久容器不得删除，不能清理别的任务内容。

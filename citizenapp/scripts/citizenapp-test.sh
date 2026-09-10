@@ -18,14 +18,14 @@ TEST_CONFIGS_STAGED=false
 
 if [[ "${CI:-}" != true ]]; then
   : "${TATA_CONSOLE_TARGET_ROOT:?本机检查必须由控制台提供中央产物根}"
-  : "${TATA_CONSOLE_WORK_DIR:?本机检查必须由控制台提供当前任务目录}"
+  : "${TATA_CONSOLE_CACHE_DIR:?本机检查必须由控制台提供当前任务目录}"
   : "${TATA_CONSOLE_FLUTTER_ROOT:?本机检查必须使用当前任务Flutter配置}"
-  case "$TATA_CONSOLE_WORK_DIR" in
-    "${TATA_CONSOLE_TARGET_ROOT%/target}/work/gmb/citizenapp/ios"|"${TATA_CONSOLE_TARGET_ROOT%/target}/work/gmb/citizenapp/android") ;;
+  case "$TATA_CONSOLE_CACHE_DIR" in
+    "${TATA_CONSOLE_TARGET_ROOT%/target}/cache/gmb/citizenapp/ios"|"${TATA_CONSOLE_TARGET_ROOT%/target}/cache/gmb/citizenapp/android") ;;
     *) echo 'CitizenApp 本机检查只能在所属移动端任务内执行' >&2; exit 1 ;;
   esac
   # 检查沿用调用方持有的本端身份；不抢占目录、不复制源码、不删除别的运行记录。
-  python3 - "$TATA_CONSOLE_WORK_DIR" "gmb.citizenapp.${TATA_CONSOLE_WORK_DIR##*/}.build" <<'PY'
+  python3 - "$TATA_CONSOLE_CACHE_DIR" "gmb.citizenapp.${TATA_CONSOLE_CACHE_DIR##*/}.build" <<'PY'
 import json, os, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 lock = root / '.owner'
@@ -38,7 +38,7 @@ if os.environ.get('TATA_CONSOLE_RUN_ID') != owner['runId']:
     raise SystemExit('CitizenApp 检查运行任务不匹配')
 os.kill(owner['pid'], 0)
 PY
-  [[ "$TATA_CONSOLE_FLUTTER_ROOT" == "$TATA_CONSOLE_WORK_DIR" \
+  [[ "$TATA_CONSOLE_FLUTTER_ROOT" == "$TATA_CONSOLE_CACHE_DIR" \
     && -f "$TATA_CONSOLE_FLUTTER_ROOT/pubspec.yaml" \
     && ! -L "$TATA_CONSOLE_FLUTTER_ROOT/pubspec.yaml" \
     && -f "$TATA_CONSOLE_FLUTTER_ROOT/pubspec_overrides.yaml" \
@@ -46,16 +46,16 @@ PY
     echo 'CitizenApp 检查缺少本端独立依赖配置' >&2; exit 1
   }
   FLUTTER_ROOT="$TATA_CONSOLE_FLUTTER_ROOT"
-  : "${TATA_CONSOLE_BUILD_WORK_DIR:?CitizenApp检查缺少本轮编译目录}"
-  : "${TATA_CONSOLE_DEPENDENCY_WORK_DIR:?CitizenApp检查缺少本轮依赖目录}"
-  [[ "$TATA_CONSOLE_BUILD_WORK_DIR" == "$TATA_CONSOLE_WORK_DIR/build" \
-    && "$TATA_CONSOLE_DEPENDENCY_WORK_DIR" == "$TATA_CONSOLE_WORK_DIR/dependencies" ]] || {
+  : "${TATA_CONSOLE_BUILD_CACHE_DIR:?CitizenApp检查缺少本轮编译目录}"
+  : "${TATA_CONSOLE_DEPENDENCY_CACHE_DIR:?CitizenApp检查缺少本轮依赖目录}"
+  [[ "$TATA_CONSOLE_BUILD_CACHE_DIR" == "$TATA_CONSOLE_CACHE_DIR/build" \
+    && "$TATA_CONSOLE_DEPENDENCY_CACHE_DIR" == "$TATA_CONSOLE_CACHE_DIR/dependencies" ]] || {
     echo 'CitizenApp检查目录职责不一致' >&2; exit 1
   }
-  export CARGO_TARGET_DIR="$TATA_CONSOLE_BUILD_WORK_DIR/cargo-tests"
-  export PUB_CACHE="$TATA_CONSOLE_DEPENDENCY_WORK_DIR/dart-pub"
-  export XDG_CONFIG_HOME="$TATA_CONSOLE_DEPENDENCY_WORK_DIR/flutter-config"
-  export TMPDIR="$TATA_CONSOLE_BUILD_WORK_DIR/tmp"
+  export CARGO_TARGET_DIR="$TATA_CONSOLE_BUILD_CACHE_DIR/cargo-tests"
+  export PUB_CACHE="$TATA_CONSOLE_DEPENDENCY_CACHE_DIR/dart-pub"
+  export XDG_CONFIG_HOME="$TATA_CONSOLE_DEPENDENCY_CACHE_DIR/flutter-config"
+  export TMPDIR="$TATA_CONSOLE_BUILD_CACHE_DIR/tmp"
   mkdir -p "$TMPDIR"
   export DYLD_LIBRARY_PATH="$CARGO_TARGET_DIR/release:$CARGO_TARGET_DIR/debug"
   export LD_LIBRARY_PATH="$CARGO_TARGET_DIR/release:$CARGO_TARGET_DIR/debug"

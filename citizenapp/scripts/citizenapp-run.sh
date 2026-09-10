@@ -22,9 +22,9 @@ PLATFORM="${1:?缺少目标平台，用法：$0 <ios|android>}"
   || { echo "目标平台或检查模式不合法：$PLATFORM" >&2; exit 1; }
 if [[ "$PLATFORM" == ios || "$PLATFORM" == android ]]; then
   : "${TATA_CONSOLE_TARGET_ROOT:?本机编译必须由 TataConsole 提供中央产物目录}"
-  : "${TATA_CONSOLE_WORK_DIR:?本机编译必须由 TataConsole 提供中央工作目录}"
-  case "$TATA_CONSOLE_WORK_DIR" in "${TATA_CONSOLE_TARGET_ROOT%/target}/work/gmb/citizenapp/$PLATFORM") ;; *)
-    echo "公民中央工作目录不合法：$TATA_CONSOLE_WORK_DIR" >&2; exit 1 ;;
+  : "${TATA_CONSOLE_CACHE_DIR:?本机编译必须由 TataConsole 提供中央工作目录}"
+  case "$TATA_CONSOLE_CACHE_DIR" in "${TATA_CONSOLE_TARGET_ROOT%/target}/cache/gmb/citizenapp/$PLATFORM") ;; *)
+    echo "公民中央工作目录不合法：$TATA_CONSOLE_CACHE_DIR" >&2; exit 1 ;;
   esac
   # 源码根只用于读取输入和调用原生脚本；Flutter 的所有可写配置由控制台在本端生成。
   [[ "$APP_ROOT" == "$REPO_ROOT/citizenapp" ]] || {
@@ -32,7 +32,7 @@ if [[ "$PLATFORM" == ios || "$PLATFORM" == android ]]; then
     exit 1
   }
   : "${TATA_CONSOLE_FLUTTER_ROOT:?缺少本端Flutter配置根}"
-  [[ "$TATA_CONSOLE_FLUTTER_ROOT" == "$TATA_CONSOLE_WORK_DIR" \
+  [[ "$TATA_CONSOLE_FLUTTER_ROOT" == "$TATA_CONSOLE_CACHE_DIR" \
     && ! -L "$TATA_CONSOLE_FLUTTER_ROOT" \
     && -f "$TATA_CONSOLE_FLUTTER_ROOT/pubspec.yaml" \
     && ! -L "$TATA_CONSOLE_FLUTTER_ROOT/pubspec.yaml" \
@@ -42,14 +42,14 @@ if [[ "$PLATFORM" == ios || "$PLATFORM" == android ]]; then
     exit 1
   }
   cd "$TATA_CONSOLE_FLUTTER_ROOT"
-  [[ "$(pwd -P)" == "$TATA_CONSOLE_WORK_DIR" ]] || {
+  [[ "$(pwd -P)" == "$TATA_CONSOLE_CACHE_DIR" ]] || {
     echo 'CitizenApp 中央工作根不得通过符号链接指向其它目录' >&2
     exit 1
   }
-  BUILD_WORK_DIR="${TATA_CONSOLE_BUILD_WORK_DIR:?缺少TataConsole本轮编译目录}"
-  DEPENDENCY_WORK_DIR="${TATA_CONSOLE_DEPENDENCY_WORK_DIR:?缺少TataConsole本轮依赖目录}"
-  [[ "$BUILD_WORK_DIR" == "$TATA_CONSOLE_WORK_DIR/build" \
-    && "$DEPENDENCY_WORK_DIR" == "$TATA_CONSOLE_WORK_DIR/dependencies" ]] || {
+  BUILD_WORK_DIR="${TATA_CONSOLE_BUILD_CACHE_DIR:?缺少TataConsole本轮编译目录}"
+  DEPENDENCY_WORK_DIR="${TATA_CONSOLE_DEPENDENCY_CACHE_DIR:?缺少TataConsole本轮依赖目录}"
+  [[ "$BUILD_WORK_DIR" == "$TATA_CONSOLE_CACHE_DIR/build" \
+    && "$DEPENDENCY_WORK_DIR" == "$TATA_CONSOLE_CACHE_DIR/dependencies" ]] || {
     echo "CitizenApp本轮目录身份无效" >&2
     exit 1
   }
@@ -63,7 +63,7 @@ if [[ "$PLATFORM" == ios || "$PLATFORM" == android ]]; then
   export PUB_CACHE="$DEPENDENCY_WORK_DIR/dart-pub"
   export GRADLE_USER_HOME="$DEPENDENCY_WORK_DIR/gradle"
   export CP_HOME_DIR="$DEPENDENCY_WORK_DIR/cocoapods"
-  export TMPDIR="$TATA_CONSOLE_WORK_DIR/"
+  export TMPDIR="$TATA_CONSOLE_CACHE_DIR/"
   export FLUTTER_SUPPRESS_ANALYTICS=true COCOAPODS_DISABLE_STATS=true
   mkdir -p "$XDG_CONFIG_HOME"
   # The central Worker has already prepared this task's Gradle Wrapper cache.
@@ -81,7 +81,7 @@ clean_platform_build_outputs() {
 
 # iOS Runner.app完成签名后只覆盖固定 `ios.app.zip`。
 retain_ios_local_artifact() {
-  local app_bundle="$1" staging="$TATA_CONSOLE_WORK_DIR/ios.app.zip" destination="$ARTIFACT_ROOT/ios.app.zip"
+  local app_bundle="$1" staging="$TATA_CONSOLE_CACHE_DIR/ios.app.zip" destination="$ARTIFACT_ROOT/ios.app.zip"
   rm -f "$staging"
   ditto -c -k --sequesterRsrc --keepParent "$app_bundle" "$staging"
   mkdir -p "$ARTIFACT_ROOT"
@@ -183,11 +183,11 @@ echo "==> 编译 Rust 原生库（${PLATFORM}）..."
 # 动态 TataChatSDK XCFramework 隔离 Rust runtime，Android 继续使用两个独立 .so。
 if [[ "$PLATFORM" == ios ]]; then
   # CocoaPods 插件根也属于本任务，不再把原生产物链接写进共享 SDK 源码。
-  [[ -f "$TATA_CONSOLE_WORK_DIR/dependencies/tatachatsdk/ios/tatachat_sdk.podspec" ]] || {
+  [[ -f "$TATA_CONSOLE_CACHE_DIR/dependencies/tatachatsdk/ios/tatachat_sdk.podspec" ]] || {
     echo 'CitizenApp 本端 TataChatSDK iOS 插件配置缺失' >&2
     exit 1
   }
-  TATACHATSDK_PACKAGE_IOS_DIR="$TATA_CONSOLE_WORK_DIR/dependencies/tatachatsdk/ios" \
+  TATACHATSDK_PACKAGE_IOS_DIR="$TATA_CONSOLE_CACHE_DIR/dependencies/tatachatsdk/ios" \
     "$TATACHATSDK_ROOT/scripts/build-native.sh" "$PLATFORM"
 else
   "$TATACHATSDK_ROOT/scripts/build-native.sh" "$PLATFORM"

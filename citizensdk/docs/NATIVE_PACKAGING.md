@@ -253,7 +253,7 @@ CMake 的 Config 前缀、完整导入目标与 Release 属性按官方生成指
 已经得到完整依赖溯源。合成 ELF 测试仅证明这些检查有效，不证明平台执行或 TPM 功能。
 
 本机 Linux 构建与测试状态必须写入
-`/Users/rhett/TATA/tataconsole/work/gmb/citizensdk` 下的任务独占工作目录；GitHub runner 使用统一
+`/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk` 下的任务独占工作目录；GitHub runner 使用统一
 工作流的 checkout 外独占目录，不照搬本机绝对路径。第 7.1 步只固定源码
 和 Release 源文件反向闭集；上述 Linux 安装、ELF、GLIBC、TPM 和两种机器运行门禁尚未执行，
 第 7.4 步候选 manifest 合同已同步为 Android、iOS、macOS、LinuxARM、LinuxAMD；这是源码
@@ -311,7 +311,7 @@ iOS 两种变体、XCFramework 其他位置和候选其他目录不允许任何�
 ## 本机 TataConsole
 
 CitizenSDK 的永久最终容器为 `/Users/rhett/TATA/tataconsole/target/gmb/citizensdk`，
-永久工作容器为 `/Users/rhett/TATA/tataconsole/work/gmb/citizensdk`。
+永久工作容器为 `/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk`。
 唯一 `release.mjs` 对 native 输入、候选输出和归档路径只接受上述两根的严格后代；拒绝
 永久根自身、旧根、相邻仓库/产品/平台、伪前缀、非规范路径及既存链接。只核验本次命中的
 根存在且为普通目录，不要求未使用的另一个根存在。GitHub 的隔离路径分支保持不变。
@@ -561,7 +561,7 @@ Package.swift。Flutter 的 Xcode backend 会再次调用 bin/dart、bin/flutter
 来源、状态隔离或失败门禁；第 9.2 步本机开发范围可收尾，但不代表远程验收或发布完成。
 
 第 10.3 步的目录预检由同一构建器按执行环境选择：本机固定
-`/Users/rhett/TATA/tataconsole/work/gmb/citizensdk`；当
+`/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk`；当
 `GITHUB_ACTIONS=true` 时固定 `RUNNER_TEMP/citizensdk`，必须提供 GitHub 官方
 `RUNNER_TEMP`、`GITHUB_WORKSPACE`，且 SDK 来源是该 checkout 的严格子目录。
 受控根与 checkout/SDK 源树在任一方向都不得交叠。根、输入目录和工作/输出容器须预先存在，

@@ -54,7 +54,7 @@ the compiler's legacy `linux` macro cannot replace an internal namespace.
 
 The source tree must not contain generated libraries, build directories,
 CMake caches, downloaded dependencies, or test reports. Every local generated
-item belongs under `/Users/rhett/TATA/tataconsole/work/gmb/citizensdk` in a
+item belongs under `/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk` in a
 task-exclusive directory selected by TataConsole or the caller. Linux CTest
 configuration requires that existing mode-`0700` directory through
 `-DCITIZENSDK_TEST_WORK_DIR=<absolute-path>`; the test helper rejects a missing,

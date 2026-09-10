@@ -21,9 +21,9 @@ if [[ "${CI:-}" != true && -z "${TATA_CONSOLE_RUN_ID:-}" ]]; then
     shared-check "$REPO_ROOT" "${1:-check}"
 fi
 : "${TATA_CONSOLE_TARGET_ROOT:?共享检查必须提供中央产物根}"
-: "${TATA_CONSOLE_WORK_DIR:?共享检查必须提供当前任务目录}"
-SHARED_WORK_DIR="$TATA_CONSOLE_WORK_DIR"
-[[ "$SHARED_WORK_DIR" == "${TATA_CONSOLE_TARGET_ROOT%/target}/work/gmb/shared/macos" ]] \
+: "${TATA_CONSOLE_CACHE_DIR:?共享检查必须提供当前任务目录}"
+SHARED_WORK_DIR="$TATA_CONSOLE_CACHE_DIR"
+[[ "$SHARED_WORK_DIR" == "${TATA_CONSOLE_TARGET_ROOT%/target}/cache/gmb/shared/macos" ]] \
   || { echo "[sync] 共享仓库中央工作目录不合法：${SHARED_WORK_DIR}" >&2; exit 1; }
 # 共享检查使用自己的任务所有权，不能冒用产品编译身份或删除整个共享平台容器。
 python3 - "$SHARED_WORK_DIR" <<'PY'
@@ -55,7 +55,7 @@ echo "[sync] 1/3 验证 account_derive canonical 金标 fixture ..."
 # 默认检查不得改写 Runtime 输入；只有调用者明确选择 --write 才启用原有导出开关。
 update=0
 [[ "$MODE" != write ]] || update=1
-ACCOUNT_DERIVE_UPDATE="$update" cargo test --config "$REPO_ROOT/citizenchain/scripts/config.toml" \
+ACCOUNT_DERIVE_UPDATE="$update" cargo test --config "$REPO_ROOT/citizenchain/config.toml" \
   --manifest-path "${PRIMITIVES_MANIFEST}" \
   --test account_derive_golden \
   -- --nocapture

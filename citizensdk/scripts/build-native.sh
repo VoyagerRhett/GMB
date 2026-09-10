@@ -21,7 +21,7 @@ hosted_consumer=false
 if [[ "$#" -gt 1 ]]; then hosted_consumer=true; fi
 tata_console_target_root="${TATA_CONSOLE_TARGET_ROOT:-/Users/rhett/TATA/tataconsole/target}"
 citizensdk_target_root="$tata_console_target_root/gmb/citizensdk"
-tata_console_work_root="${tata_console_target_root%/target}/work"
+tata_console_cache_root="${tata_console_target_root%/target}/cache"
 ios_deployment_target=16.0
 macos_deployment_target=13.0
 android_ndk_version=28.2.13676358
@@ -106,20 +106,20 @@ output_paths_preflight() {
 }
 
 local_build_path_is_allowed() {
-  local path="$1" task_work="${TATA_CONSOLE_WORK_DIR:-}" dependency_root
+  local path="$1" task_work="${TATA_CONSOLE_CACHE_DIR:-}" dependency_root
   case "$path/" in
     "$citizensdk_target_root/"*) return 0 ;;
   esac
   [[ -n "$task_work" ]] || return 1
-  assert_safe_directory_path "$task_work" TATA_CONSOLE_WORK_DIR
+  assert_safe_directory_path "$task_work" TATA_CONSOLE_CACHE_DIR
   # 中央仓库分类必须准确小写，禁止大小写不敏感磁盘接受旧目录文本。
   case "$task_work/" in
-    "$tata_console_work_root/gmb/"*|"$tata_console_work_root/tuyu/"*|"$tata_console_work_root/tata/"*) ;;
+    "$tata_console_cache_root/gmb/"*|"$tata_console_cache_root/tuyu/"*|"$tata_console_cache_root/tata/"*) ;;
     *) return 1 ;;
   esac
   # CitizenSDK 是中央登记的单平台产品，自身任务不重复增加 sdk 或 citizensdk 包装层；
   # 其他宿主产品仍只能在自己的任务目录中使用隔离的 citizensdk 子目录。
-  if [[ "$task_work" == "$tata_console_work_root/gmb/citizensdk" ]]; then
+  if [[ "$task_work" == "$tata_console_cache_root/gmb/citizensdk" ]]; then
     dependency_root="$task_work"
   else
     dependency_root="$task_work/citizensdk"
@@ -1077,7 +1077,7 @@ macos_hosted_root() {
     checkout="$GITHUB_WORKSPACE"
     assert_descendant_path "$checkout" "$sdk_dir" "CitizenSDK checkout"
   else
-    root="$tata_console_work_root/gmb/citizensdk/citizensdk"
+    root="$tata_console_cache_root/gmb/citizensdk/citizensdk"
     checkout="$(dirname "$sdk_dir")"
   fi
   assert_readonly_dependency_directory "$root" "macOS Hosted 受控根"

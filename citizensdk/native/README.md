@@ -133,7 +133,7 @@ Kotlin/Java 单元测试 Gradle 17 个 task 成功。
 
 任何编译状态和原生产物都必须写入源码树外的中央目录。本机成功产物容器是
 `/Users/rhett/TATA/tataconsole/target/gmb/citizensdk`，工作状态容器是
-`/Users/rhett/TATA/tataconsole/work/gmb/citizensdk`；永久容器保留，只清理本次
+`/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk`；永久容器保留，只清理本次
 有明确归属的子项，不能在产品源码内生成构建记录。
 
 ## Windows Host 与同一 Core

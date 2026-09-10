@@ -219,7 +219,7 @@ formatter 归一外不改行为；发布器继续对迁移闭集逐文件固定�
 `target` 命令不代表 CitizenSDK 当前交付合同，也不得作为 SDK 构建指引。CitizenSDK 当前产品
 ABI 投影覆盖 Android、iOS 与 macOS。当前 Android ABI 为 `arm64-v8a`；iOS 设备与模拟器变体
 及 macOS 的 Apple machine slice 架构值为 `arm64`。本机宿主测试库与全部生成记录只能写入
-`/Users/rhett/TATA/tataconsole/work/gmb/citizensdk` 下的任务独占目录；Linux 合同测试由
+`/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk` 下的任务独占目录；Linux 合同测试由
 `CITIZENSDK_TEST_WORK_DIR` 显式接收现有 `0700` 目录且没有 `/tmp` fallback。远程 Runner 也
 必须由统一流程显式注入其 checkout 外的任务独占构建根，不能让测试自行选择临时目录。
 legacy `libsmoldot.dylib` 仅允许 macOS `arm64` 差分测试；

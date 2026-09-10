@@ -13,7 +13,7 @@ void main() {
     expect(runner, contains('TATACHATSDK_PACKAGE_IOS_DIR='));
     expect(
       runner,
-      contains(r'TATACHATSDK_PACKAGE_IOS_DIR="$TATA_CONSOLE_WORK_DIR/dependencies/tatachatsdk/ios"'),
+      contains(r'TATACHATSDK_PACKAGE_IOS_DIR="$TATA_CONSOLE_CACHE_DIR/dependencies/tatachatsdk/ios"'),
     );
     expect(runner, contains(r'verify-ios-package "$IOS_APP"'));
     expect(pubspec, contains('tatachat_sdk:\n    path: ../../TATA/tatachatsdk'));

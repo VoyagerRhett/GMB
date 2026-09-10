@@ -25,7 +25,7 @@ QR_V1 发布/恢复签名载荷与现有 action 边界中的 `platform=cloudflar
 - 通用实现：TATA 仓库的 `tatachatserver`
 
 本机候选由中央 `flows/gmb/citizenchatserver/cloudflare/build.sh` 调用同目录 `ci.mjs`，在
-`TATA/tataconsole/work/gmb/citizenchatserver/cloudflare/stage/candidate/` 中装配。
+`TATA/tataconsole/cache/gmb/citizenchatserver/cloudflare/stage/candidate/` 中装配。
 流程消费并校验 TataChatServer 的正式 Cloudflare Release，复制其中的 Worker 与唯一 D1
 结构，再绑定当前 GMB `main` 的实例声明；不复制聊天源码或调用 `worker-build` 重新编译。
 验真后的候选由本机入口归档到准确产物库目录。候选只保留：

@@ -11,13 +11,13 @@ def sdkProductRoot = sdkSourceValue == null
 def androidSourceRoot = new File(sdkProductRoot, 'android')
 def tataConsoleTargetRoot = file('/Users/rhett/TATA/tataconsole/target').canonicalFile
 def localCitizenSdkRoots = { boolean buildOnly = false ->
-    def roots = [new File(tataConsoleTargetRoot.parentFile, 'work/gmb/citizensdk').canonicalFile]
+    def roots = [new File(tataConsoleTargetRoot.parentFile, 'cache/gmb/citizensdk').canonicalFile]
     // 编译只能写测试库；验真原件输入仍可消费产物库的正式成功文件。
     if (!buildOnly) roots.add(new File(tataConsoleTargetRoot, 'gmb/citizensdk').canonicalFile)
-    def taskWorkValue = System.getenv('TATA_CONSOLE_WORK_DIR')
+    def taskWorkValue = System.getenv('TATA_CONSOLE_CACHE_DIR')
     if (taskWorkValue != null && !taskWorkValue.trim().isEmpty()) {
         def taskWork = file(taskWorkValue).canonicalFile
-        def sharedWorkRoot = new File(tataConsoleTargetRoot.parentFile, 'work').canonicalFile
+        def sharedWorkRoot = new File(tataConsoleTargetRoot.parentFile, 'cache').canonicalFile
         if (taskWork.path.startsWith(sharedWorkRoot.path + File.separator)) {
             // 宿主产品只得到自己任务目录下的 CitizenSDK 工作空间，不获得任意外部写权限。
             roots.add(new File(taskWork, 'citizensdk').canonicalFile)

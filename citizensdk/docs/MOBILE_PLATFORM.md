@@ -115,7 +115,7 @@ CITIZENSDK_ANDROID_BUILD_DIR
 CITIZENSDK_ANDROID_CORE_DIR
 ```
 
-本机路径必须位于 `/Users/rhett/TATA/tataconsole/work/gmb/citizensdk`，GitHub Actions 路径必须位于 checkout
+本机路径必须位于 `/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk`，GitHub Actions 路径必须位于 checkout
 之外。源码树不得产生 Gradle、CMake、SO、AAR 或测试报告。
 独立 AAR 的 `settings.gradle` 通过 `CITIZENSDK_WORK_DIR/gradle-project` 显式绑定 `:native`；即使入口脚本
 从源码目录 `apply from`，Gradle 也只把当前任务中的 `gradle-project/native` 当作可写项目目录。

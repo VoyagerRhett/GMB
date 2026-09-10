@@ -78,9 +78,9 @@ import {
   verifyCitizenSdkRelease,
 } from './release.mjs';
 
-const workRoot = process.env.TATA_CONSOLE_WORK_DIR;
+const workRoot = process.env.TATA_CONSOLE_CACHE_DIR;
 if (!workRoot) {
-  throw new Error('CitizenSDK 发布测试缺少 TataConsole 中央工作目录');
+  throw new Error('CitizenSDK 发布测试缺少 TataConsole 中央缓存目录');
 }
 mkdirSync(workRoot, { recursive: true });
 
@@ -5474,7 +5474,7 @@ test('私钥扫描器不误报自身且仍拒绝真实 PEM 标记', () => {
 
 test('本机打包路径执行唯一门禁，只接受两固定根的严格后代并拒绝越界及链接', () => {
   const source = readFileSync(new URL('./release.mjs', import.meta.url), 'utf8');
-  const constantNames = ['TATA_CONSOLE_TARGET_ROOT', 'TATA_CONSOLE_WORK_ROOT'];
+  const constantNames = ['TATA_CONSOLE_TARGET_ROOT', 'TATA_CONSOLE_CACHE_ROOT'];
   const constants = constantNames.map((name) => {
     const matches = [...source.matchAll(new RegExp(`^const ${name} = '[^'\\r\\n]*';$`, 'gm'))];
     assert.equal(matches.length, 1, `唯一生产常量：${name}`);
@@ -5492,19 +5492,19 @@ test('本机打包路径执行唯一门禁，只接受两固定根的严格后�
   assert.match(functions[2], /const target = assertSafeTargetPath\(path, label\);\n  if \(process\.env\.GITHUB_ACTIONS === 'true'\) return target;/u);
   const expectedRoots = [
     '/Users/rhett/TATA/tataconsole/target/gmb/citizensdk',
-    '/Users/rhett/TATA/tataconsole/work/gmb/citizensdk',
+    '/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk',
   ];
   // 原生构建与打包路径同组校验，避免大小写不敏感磁盘掩盖严格字符串门禁冲突。
   const native = readFileSync(new URL('./build-native.sh', import.meta.url), 'utf8');
   assert.ok(native.includes('citizensdk_target_root="$tata_console_target_root/gmb/citizensdk"'));
-  assert.ok(native.includes('tata_console_work_root="${tata_console_target_root%/target}/work"'));
-  assert.ok(native.includes('if [[ "$task_work" == "$tata_console_work_root/gmb/citizensdk" ]]'));
+  assert.ok(native.includes('tata_console_cache_root="${tata_console_target_root%/target}/cache"'));
+  assert.ok(native.includes('if [[ "$task_work" == "$tata_console_cache_root/gmb/citizensdk" ]]'));
   assert.ok(native.includes('dependency_root="$task_work"'));
   // 测试库与产物库必须平级，旧隐藏工作树不得继续成为可写根。
   assert.equal(posix.dirname(expectedRoots[0].split('/gmb/')[0]), posix.dirname(expectedRoots[1].split('/gmb/')[0]));
   for (const relative of ['android/build.gradle', 'android/native/build.gradle']) {
     const gradle = readFileSync(new URL('../' + relative, import.meta.url), 'utf8');
-    assert.ok(gradle.includes("new File(tataConsoleTargetRoot.parentFile, 'work')"));
+    assert.ok(gradle.includes("new File(tataConsoleTargetRoot.parentFile, 'cache/gmb/citizensdk')"));
     assert.ok(gradle.includes("'gmb/citizensdk'"));
   }
 
@@ -5522,7 +5522,7 @@ test('本机打包路径执行唯一门禁，只接受两固定根的严格后�
   const contract = runInNewContext([
     ...constants,
     ...functions,
-    '({ assertLocalTarget, roots: [TATA_CONSOLE_TARGET_ROOT, TATA_CONSOLE_WORK_ROOT] })',
+    '({ assertLocalTarget, roots: [TATA_CONSOLE_TARGET_ROOT, TATA_CONSOLE_CACHE_ROOT] })',
   ].join('\n'), {
     resolve: posix.resolve,
     dirname: posix.dirname,
@@ -5609,13 +5609,13 @@ test('本机打包路径执行唯一门禁，只接受两固定根的严格后�
   for (const path of [
     '/Users/rhett/TATA/tataconsole/target/.work/gmb/citizensdk/sdk/candidate',
     '/Users/rhett/TATA/tataconsole/target/citizensdk/candidate',
-    '/Users/rhett/TATA/tataconsole/work/citizensdk/candidate',
+    '/Users/rhett/TATA/tataconsole/cache/citizensdk/candidate',
     '/Users/rhett/TATA/tataconsole/target/gmb/citizenapp/sdk/candidate',
-    '/Users/rhett/TATA/tataconsole/work/gmb/citizenapp/sdk/candidate',
+    '/Users/rhett/TATA/tataconsole/cache/gmb/citizenapp/sdk/candidate',
     '/Users/rhett/TATA/tataconsole/target/tuyu/citizensdk/sdk/candidate',
-    '/Users/rhett/TATA/tataconsole/work/tata/citizensdk/sdk/candidate',
+    '/Users/rhett/TATA/tataconsole/cache/tata/citizensdk/sdk/candidate',
     '/Users/rhett/TATA/tataconsole/target/gmb/citizensdk',
-    '/Users/rhett/TATA/tataconsole/work/gmb/citizensdk',
+    '/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk',
   ]) {
     assert.throws(() => check(path), /本地路径/u);
   }
@@ -5645,10 +5645,10 @@ test('Android两工程实际Groovy守卫只允许测试库编译并保留正式�
     assert.match(source, /staysInLocalCitizenSdkRoot\((?:androidBuildRoot|normalizedTarget), true\)/u);
     // 只装入生产路径闭包并调用其真实 Groovy 语义；没有 Gradle 工程、文件生成或包解析。
     const script = 'def file = { String value -> new File(value) };\n' + source.slice(start, end) + `
-def work = '/Users/rhett/TATA/tataconsole/work/gmb/citizensdk'
+def work = '/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk'
 def target = '/Users/rhett/TATA/tataconsole/target/gmb/citizensdk'
 assert staysInLocalCitizenSdkRoot(new File(work + '/android-build').canonicalFile, true)
-assert staysInLocalCitizenSdkRoot(new File(System.getenv('TATA_CONSOLE_WORK_DIR') + '/citizensdk/android-build').canonicalFile, true)
+assert staysInLocalCitizenSdkRoot(new File(System.getenv('TATA_CONSOLE_CACHE_DIR') + '/citizensdk/android-build').canonicalFile, true)
 assert !staysInLocalCitizenSdkRoot(new File(target + '/android-build').canonicalFile, true)
 assert staysInLocalCitizenSdkRoot(new File(target + '/verified-input').canonicalFile)
 assert !staysInLocalCitizenSdkRoot(new File('/Users/rhett/TATA/tataconsole/target/.work/gmb/citizensdk/sdk/android-build').canonicalFile, true)
@@ -5657,7 +5657,7 @@ println '中央测试库目录守卫通过'
 `;
     const result = spawnSync(installed.java.path, ['-XX:-UsePerfData', '-Dgroovy.grape.enable=false',
       '-cp', join(lib, jars[0]), 'groovy.ui.GroovyMain', '-e', script], {
-      env: { PATH: '/usr/bin:/bin', TATA_CONSOLE_WORK_DIR: '/Users/rhett/TATA/tataconsole/work/gmb/citizenapp/ios' },
+      env: { PATH: '/usr/bin:/bin', TATA_CONSOLE_CACHE_DIR: '/Users/rhett/TATA/tataconsole/cache/gmb/citizenapp/ios' },
       encoding: 'utf8', timeout: 30_000,
     });
     assert.equal(result.status, 0, result.stderr);
@@ -5857,7 +5857,7 @@ test('原生构建入口固定 Apple arm64 技术合同/最低版本且在 mkdir
       return declarations[0][0];
     });
     const predicateRoots = [
-      'tata_console_target_root', 'citizensdk_target_root', 'tata_console_work_root',
+      'tata_console_target_root', 'citizensdk_target_root', 'tata_console_cache_root',
     ].map((name) => {
       const declarations = [...nativeBuildScript.matchAll(new RegExp(
         `^${name}="[^"\\n]+"$`, 'gm',
@@ -5873,11 +5873,11 @@ test('原生构建入口固定 Apple arm64 技术合同/最低版本且在 mkdir
       'local_build_path_is_allowed "$1"',
     ].join('\n');
     assert.doesNotMatch(hostPredicate, /canonical_directory|\bmkdir\b/u);
-    const virtualHostTask = '/Users/rhett/TATA/tataconsole/work/gmb/citizenapp/ios';
+    const virtualHostTask = '/Users/rhett/TATA/tataconsole/cache/gmb/citizenapp/ios';
     const hostEnvironment = {
       ...process.env,
       GITHUB_ACTIONS: 'false',
-      TATA_CONSOLE_WORK_DIR: virtualHostTask,
+      TATA_CONSOLE_CACHE_DIR: virtualHostTask,
     };
     // GitHub 作业会为生产构建注入 Runner 专属根；本用例验证的是未注入时的
     // macOS 本机默认根，必须显式隔离外层作业环境，避免把 Hosted 根混入断言。
@@ -5900,7 +5900,7 @@ test('原生构建入口固定 Apple arm64 技术合同/最低版本且在 mkdir
       const rejected = spawnSync('/bin/bash', ['-c', hostPredicate,
         'citizensdk-host-path-contract', join(invalidTask, 'citizensdk/output')], {
         cwd: workRoot, encoding: 'utf8',
-        env: { ...hostEnvironment, TATA_CONSOLE_WORK_DIR: invalidTask },
+        env: { ...hostEnvironment, TATA_CONSOLE_CACHE_DIR: invalidTask },
       });
       assert.equal(rejected.status, 1, rejected.stderr);
     }
@@ -5923,7 +5923,7 @@ test('原生构建入口固定 Apple arm64 技术合同/最低版本且在 mkdir
       'utf8',
     );
     for (const gradle of [androidPlugin, androidNative]) {
-      assert.match(gradle, /TATA_CONSOLE_WORK_DIR/u);
+      assert.match(gradle, /TATA_CONSOLE_CACHE_DIR/u);
       assert.match(gradle, /new File\(taskWork, 'citizensdk'\)/u);
       assert.match(gradle, /startsWith\(sharedWorkRoot\.path \+ File\.separator\)/u);
     }
@@ -7245,7 +7245,7 @@ for (const github of process.platform === 'darwin' ? [false, true] : []) {
       const shell = [
         'set -euo pipefail',
         nativeShellFunctions(['fail', 'assert_safe_directory_path', 'assert_descendant_path', 'assert_readonly_dependency_directory', 'macos_hosted_root', 'macos_hosted_preflight']),
-        'tata_console_work_root="$1"; work_dir="$2"; output_dir="$3"; sdk_dir="$4"; shift 4',
+        'tata_console_cache_root="$1"; work_dir="$2"; output_dir="$3"; sdk_dir="$4"; shift 4',
         'uname() { if [[ "$1" == -s ]]; then printf "%s\\n" "${HOSTED_FIXTURE_OS:-Darwin}"; else printf "%s\\n" "${HOSTED_FIXTURE_ARCH:-arm64}"; fi; }',
         'macos_hosted_preflight "$@"',
       ].join('\n');
@@ -7303,7 +7303,7 @@ for (const github of process.platform === 'darwin' ? [false, true] : []) {
         rejects([candidateAlias, ...argumentsList.slice(1)]);
         rejects([...argumentsList.slice(0, 4), candidateAlias, input.tools]);
       }
-      // 工作根与 checkout/SDK 在任一方向交叠都拒绝，包括源码嵌入受控根的情况。
+      // 缓存根与 checkout/SDK 在任一方向交叠都拒绝，包括源码嵌入受控根的情况。
       rejects(argumentsList, { sdk: input.candidate, checkout: central });
       if (github) {
         rejects(argumentsList, { checkout: root });
@@ -7815,7 +7815,7 @@ test('Hosted 工具调度固定版本和两次独立命令，失败不上传且�
         preserveRoot = true;
         assert.equal(result.code, 1, stderr);
         assert.equal(result.name, null, stderr);
-        assert.match(stderr, /保留工作目录/u);
+        assert.match(stderr, /保留缓存目录/u);
       } else {
         assert.deepEqual(result, { code: expectedCode, name: null }, stderr);
       }
@@ -7824,7 +7824,7 @@ test('Hosted 工具调度固定版本和两次独立命令，失败不上传且�
       assert.deepEqual(readFileSync(audit), original);
     }
   } finally {
-    if (orphanAlive()) throw new Error('Hosted 夹具后代尚存活，保留其准确工作目录');
+    if (orphanAlive()) throw new Error('Hosted 夹具后代尚存活，保留其准确缓存目录');
     if (!preserveRoot) rmSync(root, { recursive: true, force: true });
   }
 });
@@ -7898,8 +7898,8 @@ if (process.env.CITIZENSDK_APPLE_NATIVE) {
       'set -euo pipefail',
       nativeShellFunctions(['fail', 'assert_safe_directory_path', 'assert_descendant_path',
         'assert_readonly_dependency_directory', 'macos_hosted_root']),
-      'tata_console_work_root="$1"; sdk_dir="$2"; macos_hosted_root',
-    ].join('\n'), 'macos-hosted-root', '/Users/rhett/TATA/tataconsole/work', resolve(citizenSdkRoot)], {
+      'tata_console_cache_root="$1"; sdk_dir="$2"; macos_hosted_root',
+    ].join('\n'), 'macos-hosted-root', '/Users/rhett/TATA/tataconsole/cache', resolve(citizenSdkRoot)], {
       cwd: workRoot, encoding: 'utf8', timeout: 10000,
       env: { PATH: process.env.CITIZENSDK_TOOL_PATH,
         GITHUB_ACTIONS: process.env.GITHUB_ACTIONS, RUNNER_TEMP: process.env.RUNNER_TEMP,
@@ -8009,7 +8009,7 @@ try {
           cwd: root, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
           env: {
             PATH: process.env.CITIZENSDK_TOOL_PATH,
-            TATA_CONSOLE_WORK_DIR: root,
+            TATA_CONSOLE_CACHE_DIR: root,
             CITIZENSDK_WORK_DIR: commandWork,
             CITIZENSDK_NATIVE_OUTPUT_DIR: commandOutput,
             GITHUB_ACTIONS: process.env.GITHUB_ACTIONS,
@@ -8083,17 +8083,17 @@ try {
       // 真实工具失败的细节位于独占 logs；不能在外层只收到退出码时删除根因证据。
       // 后续仅在复核准确目录身份、占用和诊断后清理，不影响普通格式夹具的清理。
       preserve = true;
-      context.diagnostic(`真实 macOS Hosted 验收失败，保留诊断与工作目录：${root}`);
+      context.diagnostic(`真实 macOS Hosted 验收失败，保留诊断与缓存目录：${root}`);
       throw error;
     } finally {
-      // 内部工具可能有独立进程组；除上面的父组退出，还须确认准确工作目录无在用文件。
+      // 内部工具可能有独立进程组；除上面的父组退出，还须确认准确缓存目录无在用文件。
       if (!preserve) {
         const opened = spawnSync('/usr/sbin/lsof', ['-t', '+D', root], {
           encoding: 'utf8', cwd: workRoot, timeout: 15000, killSignal: 'SIGTERM',
         });
         if (opened.error || opened.signal || opened.status !== 1 || opened.stdout.trim()) {
           preserve = true;
-          throw new Error(`macOS Hosted 工作目录占用状态不能确认，保留 ${root}`);
+          throw new Error(`macOS Hosted 缓存目录占用状态不能确认，保留 ${root}`);
         }
         rmSync(root, { recursive: true, force: true });
       }

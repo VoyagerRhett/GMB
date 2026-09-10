@@ -400,7 +400,7 @@ Android 原生 AAR 只存在于 GitHub 审计候选；Hosted 包明确排除该 
 
 本机 CitizenSDK 最终产物容器固定为
 `/Users/rhett/TATA/tataconsole/target/gmb/citizensdk`，工作状态容器固定为
-`/Users/rhett/TATA/tataconsole/work/gmb/citizensdk`。唯一发布器只接受两者的严格
+`/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk`。唯一发布器只接受两者的严格
 子路径，不允许把永久容器本身作为写入目标；拒绝旧路径、越界、穿越和链接。
 第 9.1 步只补发布器的 Hosted 归档验真，不修改原生构建器、控制台事务或 GitHub 流程。
 本地打包快照由准确的已提交 Git `HEAD` 导出；
@@ -413,7 +413,7 @@ Android 原生 AAR 只存在于 GitHub 审计候选；Hosted 包明确排除该 
 第 7.1 步没有运行 Linux 编译与 CTest、Dart/Flutter/Cargo 测试、Git、远程 CI、Release 或
 Hosted 上传，也没有生成任何 Linux 原生产物；只运行获准的 Node Release 来源合同测试与
 脚本语法检查，不能据此声称 Linux 运行验证通过。后续本机 Linux 验证状态只能写入
-`/Users/rhett/TATA/tataconsole/work/gmb/citizensdk` 下的任务独占目录；GitHub runner 使用统一工作流
+`/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk` 下的任务独占目录；GitHub runner 使用统一工作流
 的 checkout 外独占目录，不照搬本机绝对路径。Linux CTest 配置必须用 `CITIZENSDK_TEST_WORK_DIR`
 显式注入对应工作区中已存在、有效 UID 所有且权限
 为 `0700` 的绝对工作根；测试不回退到 `/tmp`、当前目录或用户目录。

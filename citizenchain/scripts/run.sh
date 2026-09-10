@@ -105,22 +105,24 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"   # citizenchain/
 GMB_REPOSITORY_ROOT="$(dirname "$REPO_ROOT")"
 : "${TATA_CONSOLE_TARGET_ROOT:?公民链本机编译必须由TataConsole提供中央产物目录}"
-: "${TATA_CONSOLE_WORK_DIR:?公民链本机编译必须由TataConsole提供中央工作目录}"
-[[ "$TATA_CONSOLE_WORK_DIR" == "${TATA_CONSOLE_TARGET_ROOT%/target}/work/gmb/citizenchain-node/macos" ]] || {
-    echo "    [error] 公民链中央工作目录不合法：$TATA_CONSOLE_WORK_DIR" >&2
+: "${TATA_CONSOLE_CACHE_DIR:?公民链本机编译必须由TataConsole提供中央工作目录}"
+[[ "$TATA_CONSOLE_CACHE_DIR" == "${TATA_CONSOLE_TARGET_ROOT%/target}/cache/gmb/citizenchain-node/macos" ]] || {
+    echo "    [error] 公民链中央工作目录不合法：$TATA_CONSOLE_CACHE_DIR" >&2
     exit 1
 }
-BUILD_WORK_DIR="${TATA_CONSOLE_BUILD_WORK_DIR:?公民链本机编译缺少本轮编译目录}"
-[[ "$BUILD_WORK_DIR" == "$TATA_CONSOLE_WORK_DIR/build" ]] || {
-    echo "    [error] 公民链编译目录必须位于$TATA_CONSOLE_WORK_DIR/build" >&2
+BUILD_WORK_DIR="${TATA_CONSOLE_BUILD_CACHE_DIR:?公民链本机编译缺少本轮编译目录}"
+[[ "$BUILD_WORK_DIR" == "$TATA_CONSOLE_CACHE_DIR/build" ]] || {
+    echo "    [error] 公民链编译目录必须位于$TATA_CONSOLE_CACHE_DIR/build" >&2
     exit 1
 }
 TARGET_DIR="$BUILD_WORK_DIR/cargo-target"
 export CARGO_TARGET_DIR="$TARGET_DIR"
-NODE_FRONTEND_DIST="$TATA_CONSOLE_WORK_DIR/node-frontend"
-ONCHINA_BUILD_DIST="$TATA_CONSOLE_WORK_DIR/onchina-frontend/dist"
-PACKAGE_RESOURCES="$TATA_CONSOLE_WORK_DIR/resources"
-ARTIFACT_DIR="$TATA_CONSOLE_TARGET_ROOT/gmb/citizenchain-node/macos"
+NODE_FRONTEND_DIST="$TATA_CONSOLE_CACHE_DIR/node-frontend"
+ONCHINA_BUILD_DIST="$TATA_CONSOLE_CACHE_DIR/onchina-frontend/dist"
+PACKAGE_RESOURCES="$TATA_CONSOLE_CACHE_DIR/resources"
+# Build 只能形成当前任务的候选 App。正式产物由塔塔控制台在完成验真与数据库记录后
+# 统一提交；此处绝不直写 target。
+ARTIFACT_DIR="$TATA_CONSOLE_CACHE_DIR"
 
 # 校验 Worker 注入的中央工具，并在当前任务目录离线安装原始锁文件中的依赖。
 source "$GMB_REPOSITORY_ROOT/citizenchain/scripts/prepare-toolchain.sh"
@@ -138,7 +140,7 @@ mkdir -p "$TARGET_DIR" "$npm_config_cache" "$PACKAGE_RESOURCES/onchina-bin" "$PA
 #   ② DB 用内嵌私有 PG(方案 A):借本机 PostgreSQL 二进制起一个 onchina 专属实例(127.0.0.1)。
 # 本机构的"系统签名钥 / 机构身份"是可选配置(签登录 QR / 签发凭证才需要),非启动前提。
 echo "==> 构建 OnChina 本机优化二进制 + 前端..."
-( cd "$REPO_ROOT" && CARGO_INCREMENTAL=1 cargo build --locked --offline --release -p onchina --config "$REPO_ROOT/config.toml" )
+( cd "$REPO_ROOT" && CARGO_INCREMENTAL=1 cargo build --locked --offline --release -p onchina --config "$REPO_ROOT/config.toml" --config "$TATA_RELY_CARGO_CONFIG" )
 echo "==> 构建链上中国平台前端产物..."
 ( cd "$ONCHINA_FRONTEND_PROJECT" && ONCHINA_FRONTEND_DIST="$ONCHINA_BUILD_DIST" npm run build )
 echo "==> 构建节点前端产物..."
@@ -192,7 +194,7 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     tauri_override="$(python3 -c 'import json,sys; print(json.dumps({"build":{"beforeBuildCommand":None,"frontendDist":sys.argv[1]},"bundle":{"resources":{sys.argv[2]+"/":"",sys.argv[3]+"/":"",sys.argv[4]:"china.sqlite"}}}))' "$NODE_FRONTEND_DIST" "$PACKAGE_RESOURCES" "$REPO_ROOT/node/resources" "$REPO_ROOT/onchina/src/cid/china/china.sqlite")"
     CITIZENCHAIN_FRONTEND_DIST="$NODE_FRONTEND_DIST" CARGO_INCREMENTAL=1 \
         node "$NODE_FRONTEND_PROJECT/node_modules/@tauri-apps/cli/tauri.js" build --config "$tauri_override" \
-        --no-bundle --ci -- --locked --config "$REPO_ROOT/config.toml"
+        --no-bundle --ci -- --locked --config "$REPO_ROOT/config.toml" --config "$TATA_RELY_CARGO_CONFIG"
     MACOS_APP_PENDING=1
     bundle_macos_app() {
         rm -rf -- "$app_bundle"
@@ -265,25 +267,16 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     }
     MACOS_APP_PENDING=0
     echo "    本机优化路径、新团队签名、Bundle ID、Hardened Runtime、安全时间戳与 entitlement 校验通过"
-    # 成功后只覆盖中央产品目录中的唯一App，不保留压缩副本、时间目录或历史代次。
+    # 成功后只保存本次缓存根的候选 App；不得触碰正式产物库。
     mkdir -p "$ARTIFACT_DIR"
-    previous_app="$TATA_CONSOLE_WORK_DIR/.previous-CitizenChain.app"
-    rm -rf "$previous_app"
-    if [[ -d "$ARTIFACT_DIR/CitizenChain.app" ]]; then
-        mv "$ARTIFACT_DIR/CitizenChain.app" "$previous_app"
-    fi
-    if ! mv "$app_bundle" "$ARTIFACT_DIR/CitizenChain.app"; then
-        [[ ! -d "$previous_app" ]] || mv "$previous_app" "$ARTIFACT_DIR/CitizenChain.app"
-        echo '    [error] 中央成功产物替换失败，已恢复上一次成功产物' >&2
-        exit 1
-    fi
-    rm -rf "$previous_app"
+    rm -rf "$ARTIFACT_DIR/CitizenChain.app"
+    mv "$app_bundle" "$ARTIFACT_DIR/CitizenChain.app"
     app_bundle="$ARTIFACT_DIR/CitizenChain.app"
     app_executable="$app_bundle/Contents/MacOS/citizenchain"
     export ONCHINA_FRONTEND_DIST="$app_bundle/Contents/Resources/onchina-frontend/dist"
     # Build只生成并验真中央产物，不终止旧实例，也不启动新实例。
     trap - EXIT INT TERM HUP
-    echo "    CitizenChain Node macOS中央产物构建完成；Build不会启动节点"
+    echo "    CitizenChain Node macOS候选产物构建完成；Build不会启动节点"
 else
     echo "    [error] 本入口只负责 macOS Build；其它平台使用控制台对应本机编译检查" >&2
     exit 1

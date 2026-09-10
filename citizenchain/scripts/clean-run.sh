@@ -46,8 +46,8 @@ GMB_REPOSITORY_ROOT="$(dirname "$CHAIN_ROOT")"
 # 在杀进程、清库之前先校验中央任务身份和工具，依赖只在本任务目录离线安装。
 # 本脚本不会自行创建任务或选择用户工具；未由控制台提供准确环境时立即失败。
 source "$GMB_REPOSITORY_ROOT/citizenchain/scripts/prepare-toolchain.sh"
-NODE_FRONTEND_DIST="$TATA_CONSOLE_WORK_DIR/node-frontend"
-ONCHINA_BUILD_DIST="$TATA_CONSOLE_WORK_DIR/onchina-frontend/dist"
+NODE_FRONTEND_DIST="$TATA_CONSOLE_CACHE_DIR/node-frontend"
+ONCHINA_BUILD_DIST="$TATA_CONSOLE_CACHE_DIR/onchina-frontend/dist"
 
 cleanup() {
     echo ""

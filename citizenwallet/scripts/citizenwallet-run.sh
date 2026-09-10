@@ -17,9 +17,9 @@ PLATFORM="${1:?缺少目标平台，用法：$0 <ios|android>}"
   || { echo "本机目标平台只接受 ios 或 android：$PLATFORM" >&2; exit 1; }
 
 : "${TATA_CONSOLE_TARGET_ROOT:?本机编译必须由 TataConsole 提供中央产物目录}"
-: "${TATA_CONSOLE_WORK_DIR:?本机编译必须由 TataConsole 提供中央工作目录}"
-case "$TATA_CONSOLE_WORK_DIR" in "${TATA_CONSOLE_TARGET_ROOT%/target}/work/gmb/citizenwallet/$PLATFORM") ;; *)
-  echo "公民钱包中央工作目录不合法：$TATA_CONSOLE_WORK_DIR" >&2; exit 1 ;;
+: "${TATA_CONSOLE_CACHE_DIR:?本机编译必须由 TataConsole 提供中央工作目录}"
+case "$TATA_CONSOLE_CACHE_DIR" in "${TATA_CONSOLE_TARGET_ROOT%/target}/cache/gmb/citizenwallet/$PLATFORM") ;; *)
+  echo "公民钱包中央工作目录不合法：$TATA_CONSOLE_CACHE_DIR" >&2; exit 1 ;;
 esac
 # 源码根只读；两个端的 Flutter、Pods 和 Gradle 状态分别由控制台生成。
 [[ "$CITIZENWALLET_DIR" == "$REPO_ROOT/citizenwallet" ]] || {
@@ -27,7 +27,7 @@ esac
   exit 1
 }
 : "${TATA_CONSOLE_FLUTTER_ROOT:?缺少本端Flutter配置根}"
-[[ "$TATA_CONSOLE_FLUTTER_ROOT" == "$TATA_CONSOLE_WORK_DIR" \
+[[ "$TATA_CONSOLE_FLUTTER_ROOT" == "$TATA_CONSOLE_CACHE_DIR" \
   && ! -L "$TATA_CONSOLE_FLUTTER_ROOT" \
   && -f "$TATA_CONSOLE_FLUTTER_ROOT/pubspec.yaml" \
   && ! -L "$TATA_CONSOLE_FLUTTER_ROOT/pubspec.yaml" ]] || {
@@ -35,14 +35,14 @@ esac
   exit 1
 }
 cd "$TATA_CONSOLE_FLUTTER_ROOT"
-[[ "$(pwd -P)" == "$TATA_CONSOLE_WORK_DIR" ]] || {
+[[ "$(pwd -P)" == "$TATA_CONSOLE_CACHE_DIR" ]] || {
   echo 'CitizenWallet 中央工作根不得通过符号链接指向其它目录' >&2
   exit 1
 }
-BUILD_WORK_DIR="${TATA_CONSOLE_BUILD_WORK_DIR:?缺少TataConsole本轮编译目录}"
-DEPENDENCY_WORK_DIR="${TATA_CONSOLE_DEPENDENCY_WORK_DIR:?缺少TataConsole本轮依赖目录}"
-[[ "$BUILD_WORK_DIR" == "$TATA_CONSOLE_WORK_DIR/build" \
-  && "$DEPENDENCY_WORK_DIR" == "$TATA_CONSOLE_WORK_DIR/dependencies" ]] || {
+BUILD_WORK_DIR="${TATA_CONSOLE_BUILD_CACHE_DIR:?缺少TataConsole本轮编译目录}"
+DEPENDENCY_WORK_DIR="${TATA_CONSOLE_DEPENDENCY_CACHE_DIR:?缺少TataConsole本轮依赖目录}"
+[[ "$BUILD_WORK_DIR" == "$TATA_CONSOLE_CACHE_DIR/build" \
+  && "$DEPENDENCY_WORK_DIR" == "$TATA_CONSOLE_CACHE_DIR/dependencies" ]] || {
   echo "CitizenWallet本轮目录身份无效" >&2
   exit 1
 }
@@ -56,7 +56,7 @@ export XDG_CONFIG_HOME="$DEPENDENCY_WORK_DIR/flutter-config"
 export PUB_CACHE="$DEPENDENCY_WORK_DIR/dart-pub"
 export GRADLE_USER_HOME="$DEPENDENCY_WORK_DIR/gradle"
 export CP_HOME_DIR="$DEPENDENCY_WORK_DIR/cocoapods"
-export TMPDIR="$TATA_CONSOLE_WORK_DIR/"
+export TMPDIR="$TATA_CONSOLE_CACHE_DIR/"
 export FLUTTER_SUPPRESS_ANALYTICS=true COCOAPODS_DISABLE_STATS=true
 mkdir -p "$XDG_CONFIG_HOME"
 # The central Worker has already prepared this task's Gradle Wrapper cache.
@@ -74,7 +74,7 @@ clean_platform_build_outputs() {
 }
 
 retain_ios_local_artifact() {
-  local app_bundle="$1" staging="$TATA_CONSOLE_WORK_DIR/ios.app.zip" destination="$ARTIFACT_ROOT/ios.app.zip"
+  local app_bundle="$1" staging="$TATA_CONSOLE_CACHE_DIR/ios.app.zip" destination="$ARTIFACT_ROOT/ios.app.zip"
   rm -f "$staging"
   ditto -c -k --sequesterRsrc --keepParent "$app_bundle" "$staging"
   mkdir -p "$ARTIFACT_ROOT"

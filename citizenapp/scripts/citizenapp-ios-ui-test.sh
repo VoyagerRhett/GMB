@@ -13,14 +13,14 @@ TARGET_BUNDLE_ID="ios.citizenapp"
 TEST_HOST_BUNDLE_ID="ios.citizenapp.UITestHost"
 TEST_RUNNER_BUNDLE_ID="ios.citizenapp.UITests.xctrunner"
 : "${TATA_CONSOLE_TARGET_ROOT:?UI检查必须由控制台提供中央产物根}"
-: "${TATA_CONSOLE_WORK_DIR:?UI检查必须由控制台提供当前iOS任务目录}"
+: "${TATA_CONSOLE_CACHE_DIR:?UI检查必须由控制台提供当前iOS任务目录}"
 : "${TATA_CONSOLE_FLUTTER_ROOT:?UI检查必须使用本端独立工程配置}"
-BUILD_ROOT="$TATA_CONSOLE_WORK_DIR"
+BUILD_ROOT="$TATA_CONSOLE_CACHE_DIR"
 PROJECT="$TATA_CONSOLE_FLUTTER_ROOT/ios/Runner.xcodeproj"
 DERIVED_DATA="$BUILD_ROOT/DerivedData"
 RESULT_BUNDLE="$BUILD_ROOT/RunnerUITests.xcresult"
 
-[[ "$BUILD_ROOT" == "${TATA_CONSOLE_TARGET_ROOT%/target}/work/gmb/citizenapp/ios" \
+[[ "$BUILD_ROOT" == "${TATA_CONSOLE_TARGET_ROOT%/target}/cache/gmb/citizenapp/ios" \
   && "$TATA_CONSOLE_FLUTTER_ROOT" == "$BUILD_ROOT" \
   && -f "$PROJECT/project.pbxproj" && ! -L "$PROJECT/project.pbxproj" ]] || {
   echo "UI 测试缺少准确iOS任务配置：$BUILD_ROOT" >&2

@@ -35,7 +35,7 @@ the native Android distribution; the Flutter plugin never embeds an AAR and
 never packages legacy `libsmoldot.so`.
 
 `CITIZENSDK_ANDROID_BUILD_DIR` selects the shared external build root. Local
-flows accept only descendants of `/Users/rhett/TATA/tataconsole/work/gmb/citizensdk`; GitHub
+flows accept only descendants of `/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk`; GitHub
 Actions may use any absolute path outside the SDK source tree. The Flutter and
 native modules use separate children below that root.
 

@@ -30,13 +30,13 @@ console.log(readCmake(platform).version);
 
 def tataConsoleTargetRoot = file('/Users/rhett/TATA/tataconsole/target').canonicalFile
 def localCitizenSdkRoots = { boolean buildOnly = false ->
-    def roots = [new File(tataConsoleTargetRoot.parentFile, 'work/gmb/citizensdk').canonicalFile]
+    def roots = [new File(tataConsoleTargetRoot.parentFile, 'cache/gmb/citizensdk').canonicalFile]
     // 编译只能写测试库；验真原件输入仍可消费产物库的正式成功文件。
     if (!buildOnly) roots.add(new File(tataConsoleTargetRoot, 'gmb/citizensdk').canonicalFile)
-    def taskWorkValue = System.getenv('TATA_CONSOLE_WORK_DIR')
+    def taskWorkValue = System.getenv('TATA_CONSOLE_CACHE_DIR')
     if (taskWorkValue != null && !taskWorkValue.trim().isEmpty()) {
         def taskWork = file(taskWorkValue).canonicalFile
-        def sharedWorkRoot = new File(tataConsoleTargetRoot.parentFile, 'work').canonicalFile
+        def sharedWorkRoot = new File(tataConsoleTargetRoot.parentFile, 'cache').canonicalFile
         if (taskWork.path.startsWith(sharedWorkRoot.path + File.separator)) {
             // 与 Flutter 插件工程使用同一中央目录边界，避免两个 Gradle 工程判断不一致。
             roots.add(new File(taskWork, 'citizensdk').canonicalFile)

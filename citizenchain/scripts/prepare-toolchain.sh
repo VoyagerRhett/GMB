@@ -7,17 +7,18 @@ PREPARE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GMB_REPOSITORY_ROOT="$(cd "$PREPARE_SCRIPT_DIR/../.." && pwd)"
 : "${TATA_ROOT:?缺少塔塔仓库根目录}"
 : "${TATA_CONSOLE_TARGET_ROOT:?缺少中央产物目录}"
-: "${TATA_CONSOLE_WORK_DIR:?缺少当前任务目录}"
+: "${TATA_CONSOLE_CACHE_DIR:?缺少当前任务目录}"
 : "${TATA_CONSOLE_RUN_ID:?缺少当前任务身份}"
-: "${TATA_CONSOLE_BUILD_WORK_DIR:?缺少当前任务编译目录}"
-: "${TATA_CONSOLE_DEPENDENCY_WORK_DIR:?缺少当前任务依赖目录}"
+: "${TATA_CONSOLE_BUILD_CACHE_DIR:?缺少当前任务编译目录}"
+: "${TATA_CONSOLE_DEPENDENCY_CACHE_DIR:?缺少当前任务依赖目录}"
+: "${TATA_RELY_ROOT:?缺少塔塔依赖库位置}"
+export npm_config_cache="${npm_config_cache:-$TATA_CONSOLE_DEPENDENCY_CACHE_DIR/npm}"
 [[ "${GITHUB_ACTIONS:-}" != true && "$(uname -s)" == Darwin \
     && "$TATA_CONSOLE_TARGET_ROOT" == "$TATA_ROOT/tataconsole/target" \
-    && "$TATA_CONSOLE_WORK_DIR" == "${TATA_CONSOLE_TARGET_ROOT%/target}/work/gmb/citizenchain-node/macos" \
-    && "$TATA_CONSOLE_BUILD_WORK_DIR" == "$TATA_CONSOLE_WORK_DIR/build" \
-    && "$TATA_CONSOLE_DEPENDENCY_WORK_DIR" == "$TATA_CONSOLE_WORK_DIR/dependencies" \
-    && "${npm_config_cache:-}" == "$TATA_CONSOLE_DEPENDENCY_WORK_DIR/npm" ]] || {
-    echo '[error] 节点工具准备必须使用 Worker 已预取的准确本机任务环境' >&2
+    && "$TATA_CONSOLE_CACHE_DIR" == "${TATA_CONSOLE_TARGET_ROOT%/target}/cache/gmb/citizenchain-node/macos" \
+    && "$TATA_CONSOLE_BUILD_CACHE_DIR" == "$TATA_CONSOLE_CACHE_DIR/build" \
+    && "$TATA_CONSOLE_DEPENDENCY_CACHE_DIR" == "$TATA_CONSOLE_CACHE_DIR/dependencies" ]] || {
+    echo '[error] 节点任务目录环境无效' >&2
     return 1 2>/dev/null || exit 1
 }
 
@@ -26,7 +27,7 @@ import fs from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 const [consoleRoot, source] = process.argv.slice(2);
-const work = process.env.TATA_CONSOLE_WORK_DIR;
+const work = process.env.TATA_CONSOLE_CACHE_DIR;
 const { loadTools, verifyTool } = await import(pathToFileURL(join(consoleRoot, 'worker/toolchain.mjs')));
 function directory(path) {
     const stat = fs.lstatSync(path);
@@ -63,7 +64,7 @@ fs.mkdirSync(project);
 const ignored = new Set(['.git', 'node_modules', 'target', 'build', 'dist', '.cache', 'coverage', '.vite', 'local-docs.generated.ts']);
 const config = name => ['package.json', 'package-lock.json', 'npm-shrinkwrap.json', '.npmrc'].includes(name)
     || /^(?:tsconfig(?:\.[^.]+)*\.json|[\w.-]+\.config\.(?:[cm]?[jt]s|json|jsonc))$/u.test(name);
-function visit(from, to) {
+function visit(from, to, materializeFiles = false) {
     directory(from);
     fs.mkdirSync(to, { recursive: true });
     directory(to);
@@ -71,7 +72,7 @@ function visit(from, to) {
         if (ignored.has(name) || name.endsWith('.tsbuildinfo')) continue;
         const input = join(from, name), output = join(to, name), stat = fs.lstatSync(input);
         if (stat.isSymbolicLink()) throw new Error('节点源码符号链接未登记：' + input);
-        if (stat.isDirectory()) visit(input, output);
+        if (stat.isDirectory()) visit(input, output, materializeFiles);
         else if (stat.isFile()) {
             if (config(name)) {
                 let content = fs.readFileSync(input, 'utf8');
@@ -85,11 +86,13 @@ function visit(from, to) {
                     content = content.replace(/("compilerOptions"\s*:\s*\{)/u, '$1\n    "preserveSymlinks": true,');
                 }
                 fs.writeFileSync(output, content, { flag: 'wx', mode: stat.mode & 0o777 });
-            } else fs.symlinkSync(input, output);
+            } else if (materializeFiles) fs.copyFileSync(input, output, fs.constants.COPYFILE_EXCL);
+            else fs.symlinkSync(input, output);
         } else throw new Error('节点源码对象类型未登记：' + input);
     }
 }
-for (const relative of ['citizenchain/crates/scanner-react', 'citizenchain/node/frontend', 'citizenchain/onchina/frontend', 'citizenweb/src']) visit(join(source, relative), join(project, relative));
+visit(join(source, 'citizenchain/crates/scanner-react'), join(project, 'citizenchain/crates/scanner-react'), true);
+for (const relative of ['citizenchain/node/frontend', 'citizenchain/onchina/frontend', 'citizenweb/src']) visit(join(source, relative), join(project, relative));
 // 生成器以自身位置寻找输入和输出；复制唯一工具脚本，避免向原始生成文件写入。
 const generator = 'citizenchain/scripts/generate-local-docs.mjs';
 fs.mkdirSync(dirname(join(project, generator)), { recursive: true });
@@ -100,22 +103,33 @@ NODE_PROJECT
 
 # npm/Vite 的官方可执行入口自身是链接，主入口必须正常解析；只保留业务模块的引用路径。
 export NODE_OPTIONS='--preserve-symlinks'
-export CARGO_TARGET_DIR="$TATA_CONSOLE_BUILD_WORK_DIR/cargo-target"
-: "${TATA_CONSOLE_CARGO_CONFIG:?缺少Worker准备的Cargo依赖配置}"
-[[ "${CARGO_NET_OFFLINE:-}" == true && -n "${CARGO_HOME:-}" \
-    && "$CARGO_HOME" == "$TATA_CONSOLE_WORK_DIR"/* \
-    && "$TATA_CONSOLE_CARGO_CONFIG" == "$CARGO_HOME/config.toml" \
-    && -f "$TATA_CONSOLE_CARGO_CONFIG" ]] || {
-    echo '[error] Cargo必须消费Worker准备的任务内锁定依赖并保持离线' >&2
+export CARGO_TARGET_DIR="$TATA_CONSOLE_BUILD_CACHE_DIR/cargo-target"
+# 公民链明确列出自己的锁文件；适配器只将这些锁定原件补齐到 rely 并物化到
+# 当前任务缓存。它不读取控制台产品清单，也不会因 rely 的旧索引拒绝本产品。
+RELY_BOOTSTRAP="$TATA_ROOT/tataconsole/flows/rely-bootstrap.mjs"
+TATA_RELY_CARGO_CONFIG="$(node "$RELY_BOOTSTRAP" \
+  --repository gmb --product citizenchain-node --platform macos \
+  --repository-root "$GMB_REPOSITORY_ROOT" --work "$TATA_CONSOLE_CACHE_DIR" \
+  --cargo-lock "$GMB_REPOSITORY_ROOT/citizenchain/Cargo.lock")"
+[[ -n "$TATA_RELY_CARGO_CONFIG" && -f "$TATA_RELY_CARGO_CONFIG" ]] || {
+    echo '[error] 公民链 Cargo 依赖物化未返回当前任务配置' >&2
     return 1 2>/dev/null || exit 1
 }
+export TATA_RELY_CARGO_CONFIG
+node "$RELY_BOOTSTRAP" \
+  --repository gmb --product citizenchain-node --platform macos \
+  --repository-root "$GMB_REPOSITORY_ROOT" --work "$TATA_CONSOLE_CACHE_DIR" \
+  --npm-lock "$GMB_REPOSITORY_ROOT/citizenchain/crates/scanner-react/package-lock.json" \
+  --npm-lock "$GMB_REPOSITORY_ROOT/citizenchain/node/frontend/package-lock.json" \
+  --npm-lock "$GMB_REPOSITORY_ROOT/citizenchain/onchina/frontend/package-lock.json" >/dev/null
+export CARGO_NET_OFFLINE=true
 export npm_config_audit=false
 export npm_config_fund=false
-NODE_FRONTEND_PROJECT="$TATA_CONSOLE_WORK_DIR/project/citizenchain/node/frontend"
-ONCHINA_FRONTEND_PROJECT="$TATA_CONSOLE_WORK_DIR/project/citizenchain/onchina/frontend"
+NODE_FRONTEND_PROJECT="$TATA_CONSOLE_CACHE_DIR/project/citizenchain/node/frontend"
+ONCHINA_FRONTEND_PROJECT="$TATA_CONSOLE_CACHE_DIR/project/citizenchain/onchina/frontend"
 for project in citizenchain/crates/scanner-react citizenchain/node/frontend citizenchain/onchina/frontend; do
     echo "==> 离线准备当前节点任务依赖：$project"
-    ( cd "$TATA_CONSOLE_WORK_DIR/project/$project" && npm ci --offline --no-audit --no-fund )
+    ( cd "$TATA_CONSOLE_CACHE_DIR/project/$project" && npm ci --offline --no-audit --no-fund )
 done
 [[ -f "$NODE_FRONTEND_PROJECT/node_modules/@tauri-apps/cli/tauri.js" ]] || {
     echo '[error] 当前节点任务缺少锁定 Tauri CLI' >&2
