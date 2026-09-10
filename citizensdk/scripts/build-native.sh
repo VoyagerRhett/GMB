@@ -22,6 +22,11 @@ if [[ "$#" -gt 1 ]]; then hosted_consumer=true; fi
 tata_console_target_root="${TATA_CONSOLE_TARGET_ROOT:-/Users/rhett/TATA/tataconsole/target}"
 citizensdk_target_root="$tata_console_target_root/gmb/citizensdk"
 tata_console_cache_root="${tata_console_target_root%/target}/cache"
+standalone_root="${TMPDIR:-/tmp}"
+standalone_root="${standalone_root%/}/citizensdk-${UID:-0}"
+: "${CITIZENSDK_WORK_DIR:=$standalone_root/work}"
+: "${CITIZENSDK_NATIVE_OUTPUT_DIR:=$standalone_root/output}"
+export CITIZENSDK_WORK_DIR CITIZENSDK_NATIVE_OUTPUT_DIR
 ios_deployment_target=16.0
 macos_deployment_target=13.0
 android_ndk_version=28.2.13676358
@@ -106,40 +111,22 @@ output_paths_preflight() {
 }
 
 local_build_path_is_allowed() {
-  local path="$1" task_work="${TATA_CONSOLE_CACHE_DIR:-}" dependency_root
-  case "$path/" in
-    "$citizensdk_target_root/"*) return 0 ;;
-  esac
-  [[ -n "$task_work" ]] || return 1
-  assert_safe_directory_path "$task_work" TATA_CONSOLE_CACHE_DIR
-  # 中央仓库分类必须准确小写，禁止大小写不敏感磁盘接受旧目录文本。
-  case "$task_work/" in
-    "$tata_console_cache_root/gmb/"*|"$tata_console_cache_root/tuyu/"*|"$tata_console_cache_root/tata/"*) ;;
-    *) return 1 ;;
-  esac
-  # CitizenSDK 是中央登记的单平台产品，自身任务不重复增加 sdk 或 citizensdk 包装层；
-  # 其他宿主产品仍只能在自己的任务目录中使用隔离的 citizensdk 子目录。
-  if [[ "$task_work" == "$tata_console_cache_root/gmb/citizensdk" ]]; then
-    dependency_root="$task_work"
-  else
-    dependency_root="$task_work/citizensdk"
-  fi
-  case "$path/" in
-    "$dependency_root/"*) return 0 ;;
-    *) return 1 ;;
-  esac
+  local path="$1"
+  # 产品入口只禁止写入自身源码；调用方可以选择任意其它绝对输出目录，
+  # 不要求安装或使用 TataConsole。
+  case "$path/" in "$sdk_dir/"*) return 1 ;; esac
+  [[ "$path" == /* && "$path" != / ]]
 }
 
 if [[ "$target_name" == Windows ]]; then windows_path_preflight; fi
 output_paths_preflight
 
-# 中文注释：CitizenSDK 自身任务使用固定产品目录；宿主本机任务只允许把 SDK
-# 中间状态放进当前中央工作目录的 citizensdk 子目录，绝不借此放宽到源码树或任意路径。
+# 本机调用只要求输出位于产品源码树之外；TataConsole 是可选调用方，不是产品门禁。
 if [[ "${GITHUB_ACTIONS:-}" != true ]]; then
   for path in "${CITIZENSDK_WORK_DIR:-}" "${CITIZENSDK_NATIVE_OUTPUT_DIR:-}"; do
     assert_safe_directory_path "$path" 本机构建目录
     local_build_path_is_allowed "$path" \
-      || fail "本机构建目录必须位于 $citizensdk_target_root 或当前中央任务的 citizensdk 子目录：${path:-<empty>}"
+      || fail "本机构建目录必须位于 CitizenSDK 源码树之外：${path:-<empty>}"
   done
 fi
 
@@ -157,16 +144,15 @@ else
   output_dir="$(canonical_directory "${CITIZENSDK_NATIVE_OUTPUT_DIR:-}" CITIZENSDK_NATIVE_OUTPUT_DIR)"
 fi
 
-# 中文注释：无论本机、TataConsole 还是 GitHub runner，都禁止把 Cargo、二进制或符号清单
-# 回写到 SDK 源码树；TataConsole 本机调用时两个目录必须位于 CitizenSDK 固定产品目录，
-# 或当前宿主任务的独占 citizensdk 工作目录。
+# 无论本机、TataConsole 还是 GitHub runner，都禁止把 Cargo、二进制或符号清单
+# 回写到 SDK 源码树；除此之外，产品入口不要求调用方使用特定控制台目录。
 for directory in "$work_dir" "$output_dir"; do
   case "$directory/" in
     "$sdk_dir/"*) fail "工作目录或产物目录位于 CitizenSDK 源码树：$directory" ;;
   esac
   if [[ "${GITHUB_ACTIONS:-}" != true ]]; then
     local_build_path_is_allowed "$directory" \
-      || fail "本机构建真实路径越出 CitizenSDK 中央目录或当前宿主任务：$directory"
+      || fail "本机构建真实路径必须位于 CitizenSDK 源码树之外：$directory"
   fi
 done
 

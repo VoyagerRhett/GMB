@@ -7,7 +7,7 @@
 # 而回落的那一端会被当成用户想编的那一端。塔塔控制台的「编译iOS端 / 编译Android端」
 # 两个按钮各自传死这个参数。与 citizenapp-run.sh 同口径。
 #
-# 本机中间文件只允许进入TataConsole中央`.work`，最终成功包覆盖中央产品产物目录中的固定文件。
+# 调用方可提供独立缓存目录；没有 TataConsole 时使用系统临时目录。
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CITIZENWALLET_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -16,38 +16,20 @@ PLATFORM="${1:?缺少目标平台，用法：$0 <ios|android>}"
 [[ "$PLATFORM" == ios || "$PLATFORM" == android ]] \
   || { echo "本机目标平台只接受 ios 或 android：$PLATFORM" >&2; exit 1; }
 
-: "${TATA_CONSOLE_TARGET_ROOT:?本机编译必须由 TataConsole 提供中央产物目录}"
-: "${TATA_CONSOLE_CACHE_DIR:?本机编译必须由 TataConsole 提供中央工作目录}"
-case "$TATA_CONSOLE_CACHE_DIR" in "${TATA_CONSOLE_TARGET_ROOT%/target}/cache/gmb/citizenwallet/$PLATFORM") ;; *)
-  echo "公民钱包中央工作目录不合法：$TATA_CONSOLE_CACHE_DIR" >&2; exit 1 ;;
-esac
+TATA_CONSOLE_CACHE_DIR="${TATA_CONSOLE_CACHE_DIR:-${TMPDIR:-/tmp}/citizenwallet-$PLATFORM}"
 # 源码根只读；两个端的 Flutter、Pods 和 Gradle 状态分别由控制台生成。
 [[ "$CITIZENWALLET_DIR" == "$REPO_ROOT/citizenwallet" ]] || {
   echo "citizenwallet本机Build源码身份无效：$CITIZENWALLET_DIR" >&2
   exit 1
 }
-: "${TATA_CONSOLE_FLUTTER_ROOT:?缺少本端Flutter配置根}"
-[[ "$TATA_CONSOLE_FLUTTER_ROOT" == "$TATA_CONSOLE_CACHE_DIR" \
-  && ! -L "$TATA_CONSOLE_FLUTTER_ROOT" \
-  && -f "$TATA_CONSOLE_FLUTTER_ROOT/pubspec.yaml" \
-  && ! -L "$TATA_CONSOLE_FLUTTER_ROOT/pubspec.yaml" ]] || {
-  echo 'CitizenWallet 必须使用本端独立生成的 Flutter 配置' >&2
-  exit 1
-}
+TATA_CONSOLE_FLUTTER_ROOT="${TATA_CONSOLE_FLUTTER_ROOT:-$CITIZENWALLET_DIR}"
+[[ -d "$TATA_CONSOLE_FLUTTER_ROOT" && -f "$TATA_CONSOLE_FLUTTER_ROOT/pubspec.yaml" ]] \
+  || { echo 'CitizenWallet Flutter 产品目录无效' >&2; exit 1; }
 cd "$TATA_CONSOLE_FLUTTER_ROOT"
-[[ "$(pwd -P)" == "$TATA_CONSOLE_CACHE_DIR" ]] || {
-  echo 'CitizenWallet 中央工作根不得通过符号链接指向其它目录' >&2
-  exit 1
-}
-BUILD_WORK_DIR="${TATA_CONSOLE_BUILD_CACHE_DIR:?缺少TataConsole本轮编译目录}"
-DEPENDENCY_WORK_DIR="${TATA_CONSOLE_DEPENDENCY_CACHE_DIR:?缺少TataConsole本轮依赖目录}"
-[[ "$BUILD_WORK_DIR" == "$TATA_CONSOLE_CACHE_DIR/build" \
-  && "$DEPENDENCY_WORK_DIR" == "$TATA_CONSOLE_CACHE_DIR/dependencies" ]] || {
-  echo "CitizenWallet本轮目录身份无效" >&2
-  exit 1
-}
+BUILD_WORK_DIR="${TATA_CONSOLE_BUILD_CACHE_DIR:-$TATA_CONSOLE_CACHE_DIR/build}"
+DEPENDENCY_WORK_DIR="${TATA_CONSOLE_DEPENDENCY_CACHE_DIR:-$TATA_CONSOLE_CACHE_DIR/dependencies}"
 BUILD_DIR="$BUILD_WORK_DIR/flutter-build"
-ARTIFACT_ROOT="$TATA_CONSOLE_TARGET_ROOT/gmb/citizenwallet/$PLATFORM"
+ARTIFACT_ROOT="$TATA_CONSOLE_CACHE_DIR"
 export TATA_CONSOLE_BUILD_DIR="$BUILD_DIR"
 export TATA_CONSOLE_NATIVE_ANDROID_DIR="$BUILD_WORK_DIR/native/android"
 export TATA_CONSOLE_NATIVE_IOS_DIR="$BUILD_WORK_DIR/native/ios"
@@ -59,10 +41,10 @@ export CP_HOME_DIR="$DEPENDENCY_WORK_DIR/cocoapods"
 export TMPDIR="$TATA_CONSOLE_CACHE_DIR/"
 export FLUTTER_SUPPRESS_ANALYTICS=true COCOAPODS_DISABLE_STATS=true
 mkdir -p "$XDG_CONFIG_HOME"
-# The central Worker has already prepared this task's Gradle Wrapper cache.
+# 产品按自身 Flutter 与 Gradle 配置构建；调用方只提供可写目录。
 flutter config --build-dir=cache/flutter-build >/dev/null
 
-# Flutter 版本及依赖配置由塔塔控制台入口统一选择并验真。
+# Flutter 版本及依赖配置由产品工程自行决定。
 
 # 仅清理本任务候选包；退出清理由控制台核对任务身份后执行，不触碰源码或另一端。
 clean_platform_build_outputs() {

@@ -104,17 +104,9 @@ resolve_macos_profile() {
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"   # citizenchain/
 GMB_REPOSITORY_ROOT="$(dirname "$REPO_ROOT")"
-: "${TATA_CONSOLE_TARGET_ROOT:?公民链本机编译必须由TataConsole提供中央产物目录}"
-: "${TATA_CONSOLE_CACHE_DIR:?公民链本机编译必须由TataConsole提供中央工作目录}"
-[[ "$TATA_CONSOLE_CACHE_DIR" == "${TATA_CONSOLE_TARGET_ROOT%/target}/cache/gmb/citizenchain-node/macos" ]] || {
-    echo "    [error] 公民链中央工作目录不合法：$TATA_CONSOLE_CACHE_DIR" >&2
-    exit 1
-}
-BUILD_WORK_DIR="${TATA_CONSOLE_BUILD_CACHE_DIR:?公民链本机编译缺少本轮编译目录}"
-[[ "$BUILD_WORK_DIR" == "$TATA_CONSOLE_CACHE_DIR/build" ]] || {
-    echo "    [error] 公民链编译目录必须位于$TATA_CONSOLE_CACHE_DIR/build" >&2
-    exit 1
-}
+TATA_CONSOLE_CACHE_DIR="${TATA_CONSOLE_CACHE_DIR:-${TMPDIR:-/tmp}/citizenchain-macos}"
+BUILD_WORK_DIR="${TATA_CONSOLE_BUILD_CACHE_DIR:-$TATA_CONSOLE_CACHE_DIR/build}"
+TATA_CONSOLE_DEPENDENCY_CACHE_DIR="${TATA_CONSOLE_DEPENDENCY_CACHE_DIR:-$TATA_CONSOLE_CACHE_DIR/dependencies}"
 TARGET_DIR="$BUILD_WORK_DIR/cargo-target"
 export CARGO_TARGET_DIR="$TARGET_DIR"
 NODE_FRONTEND_DIST="$TATA_CONSOLE_CACHE_DIR/node-frontend"
@@ -124,7 +116,7 @@ PACKAGE_RESOURCES="$TATA_CONSOLE_CACHE_DIR/resources"
 # 统一提交；此处绝不直写 target。
 ARTIFACT_DIR="$TATA_CONSOLE_CACHE_DIR"
 
-# 校验 Worker 注入的中央工具，并在当前任务目录离线安装原始锁文件中的依赖。
+# 产品自行使用当前环境中的工具，并按自己的锁文件准备依赖。
 source "$GMB_REPOSITORY_ROOT/citizenchain/scripts/prepare-toolchain.sh"
 
 # 本机Build脚本只使用当前工作区源码构建 runtime WASM，禁止接受外部 WASM 覆盖。
@@ -140,7 +132,7 @@ mkdir -p "$TARGET_DIR" "$npm_config_cache" "$PACKAGE_RESOURCES/onchina-bin" "$PA
 #   ② DB 用内嵌私有 PG(方案 A):借本机 PostgreSQL 二进制起一个 onchina 专属实例(127.0.0.1)。
 # 本机构的"系统签名钥 / 机构身份"是可选配置(签登录 QR / 签发凭证才需要),非启动前提。
 echo "==> 构建 OnChina 本机优化二进制 + 前端..."
-( cd "$REPO_ROOT" && CARGO_INCREMENTAL=1 cargo build --locked --offline --release -p onchina --config "$REPO_ROOT/config.toml" --config "$TATA_RELY_CARGO_CONFIG" )
+( cd "$REPO_ROOT" && CARGO_INCREMENTAL=1 cargo build --locked --release -p onchina --config "$REPO_ROOT/config.toml" )
 echo "==> 构建链上中国平台前端产物..."
 ( cd "$ONCHINA_FRONTEND_PROJECT" && ONCHINA_FRONTEND_DIST="$ONCHINA_BUILD_DIST" npm run build )
 echo "==> 构建节点前端产物..."
@@ -194,7 +186,7 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     tauri_override="$(python3 -c 'import json,sys; print(json.dumps({"build":{"beforeBuildCommand":None,"frontendDist":sys.argv[1]},"bundle":{"resources":{sys.argv[2]+"/":"",sys.argv[3]+"/":"",sys.argv[4]:"china.sqlite"}}}))' "$NODE_FRONTEND_DIST" "$PACKAGE_RESOURCES" "$REPO_ROOT/node/resources" "$REPO_ROOT/onchina/src/cid/china/china.sqlite")"
     CITIZENCHAIN_FRONTEND_DIST="$NODE_FRONTEND_DIST" CARGO_INCREMENTAL=1 \
         node "$NODE_FRONTEND_PROJECT/node_modules/@tauri-apps/cli/tauri.js" build --config "$tauri_override" \
-        --no-bundle --ci -- --locked --config "$REPO_ROOT/config.toml" --config "$TATA_RELY_CARGO_CONFIG"
+        --no-bundle --ci -- --locked --config "$REPO_ROOT/config.toml"
     MACOS_APP_PENDING=1
     bundle_macos_app() {
         rm -rf -- "$app_bundle"
