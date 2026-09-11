@@ -1,10 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-const EXPECTED_EXPORTS: [&str; 89] = [
+const EXPECTED_EXPORTS: [&str; 117] = [
     "citizensdk_abi_version",
     "citizensdk_add_wallet_accounts",
+    "citizensdk_begin_default_account_change",
+    "citizensdk_begin_signing",
+    "citizensdk_cancel_signing_session",
     "citizensdk_cancel_request",
     "citizensdk_commit_wallet_creation",
+    "citizensdk_consume_default_account_change",
+    "citizensdk_consume_external_signature",
     "citizensdk_create",
     "citizensdk_create_options_size",
     "citizensdk_create_with_host",
@@ -15,28 +20,40 @@ const EXPECTED_EXPORTS: [&str; 89] = [
     "citizensdk_delete_wallet_account",
     "citizensdk_destroy",
     "citizensdk_export_state",
+    "citizensdk_execute_prepared_transaction",
     "citizensdk_get_account_nonce",
     "citizensdk_get_best_fee_snapshot",
     "citizensdk_get_best_head",
+    "citizensdk_get_block_body_at",
+    "citizensdk_get_block_header_at",
     "citizensdk_get_capabilities",
     "citizensdk_get_finalized_account_balance",
     "citizensdk_get_finalized_account_balances",
     "citizensdk_get_genesis_hash",
     "citizensdk_get_finalized_head",
+    "citizensdk_get_finalized_block_at",
     "citizensdk_get_lifecycle",
     "citizensdk_get_runtime_context_at",
     "citizensdk_get_storage_at",
     "citizensdk_get_storage_batch_at",
+    "citizensdk_get_sync_status",
+    "citizensdk_get_system_events_at",
+    "citizensdk_get_transaction_history",
     "citizensdk_get_wallet_profile",
+    "citizensdk_get_wallet_state",
+    "citizensdk_import_cold_account_id",
+    "citizensdk_import_cold_account_ss58",
     "citizensdk_import_state",
     "citizensdk_import_wallet",
-    "citizensdk_initialize_finalized_history",
     "citizensdk_last_error_copy",
     "citizensdk_prepare_wallet_creation",
+    "citizensdk_prepare_transaction",
+    "citizensdk_prepared_transaction_release",
     "citizensdk_prepared_wallet_copy_mnemonic",
     "citizensdk_prepared_wallet_release",
     "citizensdk_reconcile_wallet_cleanup",
     "citizensdk_refresh_capabilities",
+    "citizensdk_resolve_finalized_block",
     "citizensdk_qr_cancel_sign_request",
     "citizensdk_qr_consume_sign_response",
     "citizensdk_qr_create_sign_request",
@@ -47,7 +64,11 @@ const EXPECTED_EXPORTS: [&str; 89] = [
     "citizensdk_qr_encode_user_transfer",
     "citizensdk_qr_parse",
     "citizensdk_rename_wallet_account",
+    "citizensdk_rename_account",
+    "citizensdk_delete_account",
+    "citizensdk_reorder_wallet_accounts_without_default_change",
     "citizensdk_result_copy_error_message",
+    "citizensdk_result_copy_block_body_extrinsic",
     "citizensdk_result_copy_storage",
     "citizensdk_result_copy_storage_batch_item",
     "citizensdk_result_estimate_fee",
@@ -56,23 +77,29 @@ const EXPECTED_EXPORTS: [&str; 89] = [
     "citizensdk_result_get_account_balance_at",
     "citizensdk_result_get_account_nonce",
     "citizensdk_result_get_block_ref",
+    "citizensdk_result_get_block_body_info",
+    "citizensdk_result_get_block_header",
     "citizensdk_result_get_execution",
     "citizensdk_result_get_exported_state",
     "citizensdk_result_get_fee_snapshot",
-    "citizensdk_result_get_finalized_transfer",
     "citizensdk_result_get_hash",
-    "citizensdk_result_get_history_cursor",
-    "citizensdk_result_get_history_info",
-    "citizensdk_result_get_history_record",
     "citizensdk_result_get_info",
     "citizensdk_result_get_prepared_wallet",
+    "citizensdk_result_get_prepared_transaction",
+    "citizensdk_result_get_transaction_execution",
+    "citizensdk_result_get_transaction_history_page",
+    "citizensdk_result_get_transaction_history_record",
     "citizensdk_result_get_runtime_context",
     "citizensdk_result_get_signature",
+    "citizensdk_result_get_signing_outcome",
     "citizensdk_result_get_storage_batch_count",
+    "citizensdk_result_get_sync_status",
     "citizensdk_result_get_wallet_account",
     "citizensdk_result_get_wallet_account_count",
     "citizensdk_result_get_wallet_profile",
-    "citizensdk_result_get_wallet_transfer",
+    "citizensdk_result_get_wallet_state",
+    "citizensdk_result_get_wallet_state_account",
+    "citizensdk_result_get_default_account_change",
     "citizensdk_result_get_watch_event",
     "citizensdk_result_release",
     "citizensdk_set_active_wallet_account",
@@ -82,8 +109,9 @@ const EXPECTED_EXPORTS: [&str; 89] = [
     "citizensdk_stop",
     "citizensdk_submit_extrinsic",
     "citizensdk_subscribe_capability_changes",
-    "citizensdk_sync_finalized_history_batch",
-    "citizensdk_transfer_with_remark",
+    "citizensdk_sync_transaction_history",
+    "citizensdk_transaction_execution_cancel",
+    "citizensdk_transaction_execution_consume_qr_response",
     "citizensdk_unsubscribe_capability_changes",
     "citizensdk_verify_transaction_at",
     "citizensdk_validate_wallet_password",
@@ -210,8 +238,9 @@ fn rust_and_c_publish_exactly_the_reviewed_product_symbols() {
     let mut rust = rust_exports(include_str!("../src/lib.rs"));
     let wallet = rust_exports(include_str!("../src/wallet_abi.rs"));
     let qr = rust_exports(include_str!("../src/qr_abi.rs"));
-    assert_eq!(rust.len(), 39, "base Rust export count changed");
-    assert_eq!(wallet.len(), 41, "wallet Rust export count changed");
+    let transaction = rust_exports(include_str!("../src/transaction_abi.rs"));
+    assert_eq!(rust.len(), 49, "base Rust export count changed");
+    assert_eq!(wallet.len(), 56, "wallet Rust export count changed");
     for export in wallet {
         assert!(
             rust.insert(export.clone()),
@@ -225,14 +254,27 @@ fn rust_and_c_publish_exactly_the_reviewed_product_symbols() {
             "duplicate Rust export {export}"
         );
     }
+    assert_eq!(
+        transaction.len(),
+        7,
+        "transaction Rust export count changed"
+    );
+    for export in transaction {
+        assert!(
+            rust.insert(export.clone()),
+            "duplicate Rust export {export}"
+        );
+    }
     let header: BTreeSet<_> = header_declarations(include_str!("../../../include/citizensdk.h"))
         .into_keys()
         .collect();
 
-    assert_eq!(rust.len(), 89, "Rust export count changed");
-    assert_eq!(header.len(), 89, "C declaration count changed");
+    assert_eq!(rust.len(), 121, "Rust export count changed");
+    assert_eq!(header.len(), 121, "C declaration count changed");
     assert_eq!(rust, expected, "Rust export set changed");
     assert_eq!(header, expected, "C declaration set changed");
+    assert!(!rust.contains("citizensdk_set_default_wallet_account"));
+    assert!(!header.contains("citizensdk_set_default_wallet_account"));
 }
 
 #[test]
@@ -330,6 +372,8 @@ fn product_exports_have_no_provider_rpc_or_secret_escape_hatch() {
     );
 
     let types = include_str!("../../../include/citizensdk_types.h");
-    assert!(types.contains("CITIZENSDK_CAPABILITY_COUNT UINT32_C(10)"));
-    assert!(types.contains("CITIZENSDK_HOST_SECRET_ACCOUNT_MINI_SECRET UINT32_C(1)"));
+    assert!(types.contains("CITIZENSDK_CAPABILITY_COUNT 10U"));
+    assert!(types.contains("CITIZENSDK_HOST_SECRET_ACCOUNT_MINI_SECRET 1U"));
+    assert!(!types.contains("UINT32_C("));
+    assert!(!types.contains("INT32_C("));
 }

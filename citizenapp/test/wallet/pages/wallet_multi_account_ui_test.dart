@@ -13,7 +13,7 @@ import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:citizenapp/wallet/pages/account_detail_page.dart';
 import 'package:citizenapp/wallet/pages/wallet_page.dart';
 import 'package:citizenapp/wallet/widgets/add_account_sheet.dart';
-import 'package:citizenapp/rpc/chain_tx_monitor.dart';
+import 'package:citizenapp/transaction/history/chain/wallet_transaction_history_sync.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/widgets/shimmer_loading.dart';
 

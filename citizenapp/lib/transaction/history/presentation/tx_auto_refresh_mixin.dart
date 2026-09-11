@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 
 import 'package:citizenapp/log/app_log.dart';
-import 'package:citizenapp/transaction/shared/local_tx_store.dart';
+import 'package:citizenapp/transaction/history/data/local_tx_store.dart';
 
 /// 交易记录展示页共用:订阅某账户在 Isar 里的交易记录变更,后台
 /// [ChainTxMonitor] 一把记录写成 finalized(已确认),列表就自动重刷 ——

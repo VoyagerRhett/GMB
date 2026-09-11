@@ -1,4 +1,4 @@
-//! Typed account, wallet and finalized-history projection for CitizenSDK ABI v1.
+//! Typed account and wallet projection for the stable CitizenSDK ABI.
 //!
 //! Secret inputs are copied synchronously into Rust-owned zeroizing containers
 //! before an asynchronous request is accepted. The only secret output is the
@@ -9,7 +9,6 @@
 
 use std::{
     collections::HashMap,
-    future::Future,
     panic::{catch_unwind, AssertUnwindSafe},
     ptr,
     sync::{
@@ -19,37 +18,29 @@ use std::{
 };
 
 use citizen_sdk_contracts::{
-    AccountId32, ExecutionConclusion, ExtrinsicWatchEvent, FinalizedAccountBalance,
-    FinalizedTransferRecord, HistoryTransactionStatus, SecretBuffer, TransactionHistoryRecord,
-    TransactionHistoryState, WalletAccount, WalletOrigin, WalletProfile,
+    AccountId32, FinalizedAccountBalance, Modules, SecretBuffer, SigningIntent, SigningTransform,
+    WalletAccount, WalletOrigin, WalletProfile, WalletSignMode,
 };
 #[cfg(feature = "chain")]
 use citizen_sdk_engine::BestFeeSnapshot;
-use citizen_sdk_engine::{
-    EngineError, PreparedWalletCreation, WalletTransferCancellation, WalletTransferObserver,
-    WalletTransferResolution, WalletTransferWatchResult, WalletTransferWatchStage,
-    WalletTransferWatchUpdate, WalletWordCount,
-};
-use futures_util::FutureExt;
+use citizen_sdk_engine::{EngineError, PreparedWalletCreation, WalletWordCount};
 use zeroize::Zeroizing;
 
 use crate::{
     abi::*,
-    accept_and_write, accept_and_write_watch, block_to_abi, copy_to_host, copy_view,
+    accept_and_write, block_to_abi, copy_to_host, copy_view,
     error::{FfiError, FfiResult},
-    execution_to_abi, ffi_status, handles,
-    ownership::{self, ResultPayload},
-    read_versioned,
-    requests::RequestCancellation,
-    require_output,
+    ffi_status, handles,
+    ownership::{self, DefaultAccountChangePayload, ResultPayload, SigningOutcomePayload},
+    read_versioned, require_output,
     runtime::NativeRuntime,
     validate_output_versioned, wrong_result, MAX_ABI_INPUT_BYTES,
 };
 
 const MAX_WALLET_SECRET_INPUT_BYTES: usize = 1024;
 const MAX_WALLET_NAME_BYTES: usize = 1024;
-const MAX_TRANSFER_REMARK_BYTES: usize = citizen_sdk_contracts::MAX_TRANSFER_REMARK_BYTES;
 const MAX_ACCOUNT_BATCH: usize = citizen_sdk_contracts::MAX_WALLET_ACCOUNT_INDEX as usize + 1;
+const MAX_WALLET_CATALOG_ACCOUNTS: usize = MAX_ACCOUNT_BATCH * 2;
 
 /// 仅 SDK 构建时生成的私有头声明此布局；禁止加入公开 ABI 类型和业务绑定。
 #[repr(C)]
@@ -463,70 +454,6 @@ pub(crate) unsafe extern "C" fn citizensdk_internal_private_key_view_finish(
         slot.core.finish()?;
         pump_private_key_view(&slot)
     })
-}
-
-/// 把 Engine 已经持久化或核验后的高层钱包阶段投影到 ABI v1 既有的
-/// `WATCH_UPDATE` 结果。`Pending` 尚无对应的 v1 watch 状态，`Interrupted`
-/// 也不能伪装成链状态，所以二者只保留在持久历史/终态错误中，不发失真事件。
-fn wallet_transfer_watch_event(stage: &WalletTransferWatchStage) -> Option<ExtrinsicWatchEvent> {
-    match stage {
-        WalletTransferWatchStage::Pending | WalletTransferWatchStage::Interrupted { .. } => None,
-        WalletTransferWatchStage::Ready => Some(ExtrinsicWatchEvent::Ready),
-        WalletTransferWatchStage::Broadcast { peer_count } => {
-            Some(ExtrinsicWatchEvent::Broadcast {
-                peer_count: *peer_count,
-            })
-        }
-        WalletTransferWatchStage::Future => Some(ExtrinsicWatchEvent::Future),
-        WalletTransferWatchStage::InBlock { block } => {
-            Some(ExtrinsicWatchEvent::InBlock { block: *block })
-        }
-        WalletTransferWatchStage::Retracted { block } => {
-            Some(ExtrinsicWatchEvent::Retracted { block: *block })
-        }
-        WalletTransferWatchStage::FinalityTimeout { block } => {
-            Some(ExtrinsicWatchEvent::FinalityTimeout { block: *block })
-        }
-        WalletTransferWatchStage::Dropped => Some(ExtrinsicWatchEvent::Dropped),
-        WalletTransferWatchStage::Finalized { conclusion } => {
-            let block = match conclusion {
-                ExecutionConclusion::Success { block, .. }
-                | ExecutionConclusion::Failed { block, .. } => (*block).try_into().ok(),
-                ExecutionConclusion::Unverified { block, .. } => {
-                    block.and_then(|value| value.try_into().ok())
-                }
-            }?;
-            Some(ExtrinsicWatchEvent::Finalized { block })
-        }
-        // ABI v1 已有 Invalid 和 Usurped；必须根据 Engine 保留的原始拒绝事实
-        // 原样投影，不得丢失替代交易哈希。
-        WalletTransferWatchStage::PoolRejected {
-            replacement_hash: Some(replacement_hash),
-            ..
-        } => Some(ExtrinsicWatchEvent::Usurped {
-            replacement_hash: *replacement_hash,
-        }),
-        WalletTransferWatchStage::PoolRejected {
-            replacement_hash: None,
-            ..
-        } => Some(ExtrinsicWatchEvent::Invalid),
-    }
-}
-
-struct AbiWalletTransferObserver {
-    runtime: Arc<NativeRuntime>,
-    request_id: CitizenSdkRequestId,
-}
-
-impl WalletTransferObserver for AbiWalletTransferObserver {
-    fn on_update(&self, update: WalletTransferWatchUpdate) {
-        let Some(event) = wallet_transfer_watch_event(update.stage()) else {
-            return;
-        };
-        // 观察器属于展示边界。队列关闭/满不能回滚已经持久化的交易事实，
-        // NativeRuntime 会在投递失败时回收刚创建的 result handle。
-        let _ = self.runtime.publish_watch_update(self.request_id, event);
-    }
 }
 
 struct PreparedWalletEntry {
@@ -1032,6 +959,207 @@ pub unsafe extern "C" fn citizensdk_get_wallet_profile(
 }
 
 #[no_mangle]
+/// Loads the stable, secret-free hot/cold account catalog in its global order.
+///
+/// # Safety
+/// `out_request_id` must be writable for one request identifier.
+pub unsafe extern "C" fn citizensdk_get_wallet_state(
+    handle: CitizenSdkHandle,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "wallet"))]
+    {
+        let _ = (handle, out_request_id);
+        ffi_status(|| Err(module_unsupported("wallet")))
+    }
+    #[cfg(feature = "wallet")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let state = runtime.drive(runtime.engine().wallet_state())??;
+                Ok(ResultPayload::WalletState(state))
+            })
+        })
+    }
+}
+
+#[no_mangle]
+/// Imports a public-only cold account from an exact AccountId32.
+///
+/// # Safety
+/// Inputs are borrowed only for this call and `out_request_id` is writable.
+pub unsafe extern "C" fn citizensdk_import_cold_account_id(
+    handle: CitizenSdkHandle,
+    account_id: *const CitizenSdkAccountId,
+    name: CitizenSdkBytesView,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "wallet"))]
+    {
+        let _ = (handle, account_id, name, out_request_id);
+        ffi_status(|| Err(module_unsupported("wallet")))
+    }
+    #[cfg(feature = "wallet")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            let account_id = account_id_from_pointer(account_id, "account_id")?;
+            let name = utf8(name, "cold account name", MAX_WALLET_NAME_BYTES)?;
+            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                runtime.drive(
+                    runtime
+                        .engine()
+                        .import_cold_wallet_account(account_id, name),
+                )??;
+                let state = runtime.drive(runtime.engine().wallet_state())??;
+                Ok(ResultPayload::WalletState(state))
+            })
+        })
+    }
+}
+
+#[no_mangle]
+/// Imports a public-only cold account from one canonical CitizenChain SS58 address.
+///
+/// # Safety
+/// Inputs are borrowed only for this call and `out_request_id` is writable.
+pub unsafe extern "C" fn citizensdk_import_cold_account_ss58(
+    handle: CitizenSdkHandle,
+    ss58_address: CitizenSdkBytesView,
+    name: CitizenSdkBytesView,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "wallet"))]
+    {
+        let _ = (handle, ss58_address, name, out_request_id);
+        ffi_status(|| Err(module_unsupported("wallet")))
+    }
+    #[cfg(feature = "wallet")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            let ss58_address = utf8(ss58_address, "cold account SS58", 64)?;
+            let name = utf8(name, "cold account name", MAX_WALLET_NAME_BYTES)?;
+            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                runtime.drive(runtime.engine().import_cold_wallet_ss58(ss58_address, name))??;
+                let state = runtime.drive(runtime.engine().wallet_state())??;
+                Ok(ResultPayload::WalletState(state))
+            })
+        })
+    }
+}
+
+#[no_mangle]
+/// Reorders the complete account catalog without changing its first/default item.
+///
+/// # Safety
+/// `account_ids` contains `account_count` readable entries and the output is writable.
+pub unsafe extern "C" fn citizensdk_reorder_wallet_accounts_without_default_change(
+    handle: CitizenSdkHandle,
+    expected_revision: u64,
+    account_ids: *const CitizenSdkAccountId,
+    account_count: u32,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "wallet"))]
+    {
+        let _ = (
+            handle,
+            expected_revision,
+            account_ids,
+            account_count,
+            out_request_id,
+        );
+        ffi_status(|| Err(module_unsupported("wallet")))
+    }
+    #[cfg(feature = "wallet")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            let account_ids = copy_wallet_catalog_account_ids(account_ids, account_count)?;
+            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let state = runtime.drive(
+                    runtime
+                        .engine()
+                        .reorder_wallet_accounts_without_default_change(
+                            expected_revision,
+                            account_ids,
+                        ),
+                )??;
+                Ok(ResultPayload::WalletState(state))
+            })
+        })
+    }
+}
+
+#[no_mangle]
+/// Renames either a hot or cold account through one public operation.
+///
+/// # Safety
+/// Inputs are borrowed only for this call and `out_request_id` is writable.
+pub unsafe extern "C" fn citizensdk_rename_account(
+    handle: CitizenSdkHandle,
+    account_id: *const CitizenSdkAccountId,
+    name: CitizenSdkBytesView,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "wallet"))]
+    {
+        let _ = (handle, account_id, name, out_request_id);
+        ffi_status(|| Err(module_unsupported("wallet")))
+    }
+    #[cfg(feature = "wallet")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            let account_id = account_id_from_pointer(account_id, "account_id")?;
+            let name = utf8(name, "wallet account name", MAX_WALLET_NAME_BYTES)?;
+            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let state = runtime
+                    .drive(runtime.engine().rename_wallet_account_any(account_id, name))??;
+                Ok(ResultPayload::WalletState(state))
+            })
+        })
+    }
+}
+
+#[no_mangle]
+/// Deletes either a hot or cold account while preserving each mode's safety rules.
+///
+/// # Safety
+/// `account_id` and `out_request_id` must be readable/writable respectively.
+pub unsafe extern "C" fn citizensdk_delete_account(
+    handle: CitizenSdkHandle,
+    account_id: *const CitizenSdkAccountId,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "wallet"))]
+    {
+        let _ = (handle, account_id, out_request_id);
+        ffi_status(|| Err(module_unsupported("wallet")))
+    }
+    #[cfg(feature = "wallet")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            let account_id = account_id_from_pointer(account_id, "account_id")?;
+            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let state =
+                    runtime.drive(runtime.engine().delete_wallet_account_any(account_id))??;
+                Ok(ResultPayload::WalletState(state))
+            })
+        })
+    }
+}
+
+#[no_mangle]
 /// Creates a non-persistent, SDK-owned recovery-phrase session.
 ///
 /// # Safety
@@ -1512,232 +1640,366 @@ pub unsafe extern "C" fn citizensdk_sign_wallet_payload(
     }
 }
 
-/// Drives the Engine's complete submit-and-watch future until a proven terminal
-/// result, or cooperatively cancels and drains the accepted request. Cancellation
-/// never drops the Engine future: an in-flight host store/CAS or vault operation
-/// must really return before its lease and request completion are released.
-/// This does not roll back a durable `Pending`/`InBlock` record.
-/// 同参数再次调用 transfer 会核验并恢复原始授权字节，
-/// 先同步 finalized 证据再决定是否重广播，不重新签名或更换 nonce。
-#[cfg(feature = "chain")]
-async fn wallet_transfer_or_cancellation<F>(
-    transfer: F,
-    cancellation: RequestCancellation,
-    transfer_cancellation: WalletTransferCancellation,
-) -> FfiResult<WalletTransferWatchResult>
-where
-    F: Future<Output = Result<WalletTransferWatchResult, EngineError>>,
-{
-    let budget_token = transfer_cancellation.clone();
-    wallet_transfer_or_cancellation_and_budget(
-        transfer,
-        cancellation,
-        transfer_cancellation,
-        wallet_transfer_budget(&budget_token),
-    )
-    .await
-}
-
-async fn wallet_transfer_or_cancellation_and_budget<F, B>(
-    transfer: F,
-    cancellation: RequestCancellation,
-    transfer_cancellation: WalletTransferCancellation,
-    budget: B,
-) -> FfiResult<WalletTransferWatchResult>
-where
-    F: Future<Output = Result<WalletTransferWatchResult, EngineError>>,
-    B: Future<Output = ()>,
-{
-    let transfer = transfer.fuse();
-    let cancellation = cancellation.fuse();
-    let budget = budget.fuse();
-    futures_util::pin_mut!(transfer, cancellation, budget);
-    futures_util::select_biased! {
-        _ = cancellation => {
-            transfer_cancellation.cancel();
-            // Keep polling the same future, including an already-entered CAS. Its
-            // generation/request guard stops further reads or broadcast after drain.
-            let _ = transfer.await;
-            Err(FfiError::new(
-                CitizenSdkErrorCode::Cancelled,
-                "wallet transfer watch was cancelled after draining; durable pending/in-block history was retained",
-            ))
-        },
-        result = transfer => result.map_err(FfiError::from),
-        _ = budget => {
-            transfer_cancellation.cancel();
-            let _ = transfer.await;
-            Err(FfiError::new(CitizenSdkErrorCode::Timeout,
-                "wallet transfer observation budget expired after draining; execution remains unverified and durable history was retained"))
-        },
+fn signing_transform(kind: u32, domain: Vec<u8>) -> FfiResult<SigningTransform> {
+    match kind {
+        value if value == CitizenSdkSigningTransform::Raw as u32 => {
+            if !domain.is_empty() {
+                return Err(FfiError::invalid("raw transform 不接受 domain"));
+            }
+            Ok(SigningTransform::Raw)
+        }
+        value if value == CitizenSdkSigningTransform::SubstrateSigningPayload as u32 => {
+            if !domain.is_empty() {
+                return Err(FfiError::invalid(
+                    "substrate signing payload transform 不接受 domain",
+                ));
+            }
+            Ok(SigningTransform::SubstrateSigningPayload)
+        }
+        value if value == CitizenSdkSigningTransform::Blake2Domain as u32 => {
+            let transform = SigningTransform::Blake2Domain(domain);
+            transform.validate().map_err(FfiError::from)?;
+            Ok(transform)
+        }
+        _ => Err(FfiError::invalid("未知 signing transform")),
     }
 }
 
-/// 计时器只唤醒协调取消，不拥有 Engine future；阶段切换由 Engine 的真实 watch 事实驱动。
-#[cfg(feature = "chain")]
-async fn wallet_transfer_budget(token: &WalletTransferCancellation) {
-    loop {
-        let remaining = token
-            .remaining_budget()
-            .unwrap_or(std::time::Duration::from_secs(1));
-        if remaining.is_zero() {
-            return;
-        }
-        tokio::time::sleep(remaining.min(std::time::Duration::from_secs(1))).await;
+fn external_transport(value: u32) -> FfiResult<CitizenSdkExternalSignerTransport> {
+    match value {
+        0 => Ok(CitizenSdkExternalSignerTransport::None),
+        1 => Ok(CitizenSdkExternalSignerTransport::QrV1),
+        _ => Err(FfiError::invalid("未知 external signer transport")),
     }
 }
 
 #[no_mangle]
-/// Builds, signs, records-before-broadcast, submits and verifies one transfer.
-/// No signed extrinsic bytes are returned to the host. The complete terminal
-/// watch uses the dedicated long-lived pool and may be cancelled without
-/// clearing an already durable `Pending`/`InBlock` record. 已持久的完整授权与构造事实
-/// 同次 CAS 写入；恢复不会把取消误作撤回，也不会从交易哈希重造另一笔转账。
+/// Starts one product-independent signing intent and routes it from stored WalletState.
 ///
 /// # Safety
-/// Account IDs/views are borrowed only for this call; output is writable.
-pub unsafe extern "C" fn citizensdk_transfer_with_remark(
+/// All input views are borrowed only for this call; `out_request_id` must be writable.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn citizensdk_begin_signing(
     handle: CitizenSdkHandle,
-    source_account_id: *const CitizenSdkAccountId,
-    destination_account_id: *const CitizenSdkAccountId,
-    amount_fen: CitizenSdkU128,
-    remark: CitizenSdkBytesView,
+    account_id: *const CitizenSdkAccountId,
+    payload: CitizenSdkBytesView,
+    transform: u32,
+    domain: CitizenSdkBytesView,
+    external_signer_transport: u32,
+    opaque_action: u16,
+    ttl_seconds: u64,
     out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
-    #[cfg(not(all(
-        feature = "wallet",
-        feature = "signing",
-        feature = "chain",
-        feature = "transactions",
-        feature = "history"
-    )))]
+    #[cfg(not(all(feature = "wallet", feature = "signing")))]
     {
         let _ = (
             handle,
-            source_account_id,
-            destination_account_id,
-            amount_fen,
-            remark,
+            account_id,
+            payload,
+            transform,
+            domain,
+            external_signer_transport,
+            opaque_action,
+            ttl_seconds,
             out_request_id,
         );
-        ffi_status(|| {
-            Err(FfiError::new(
-                CitizenSdkErrorCode::Unsupported,
-                "当前构建不包含所需模块",
-            ))
-        })
+        ffi_status(|| Err(module_unsupported("wallet signing")))
     }
-    #[cfg(all(
-        feature = "wallet",
-        feature = "signing",
-        feature = "chain",
-        feature = "transactions",
-        feature = "history"
-    ))]
+    #[cfg(all(feature = "wallet", feature = "signing"))]
     {
         ffi_status(|| {
             let runtime = handles::get(handle)?;
-            let source = account_id_from_pointer(source_account_id, "source_account_id")?;
-            let destination =
-                account_id_from_pointer(destination_account_id, "destination_account_id")?;
-            let remark = utf8(remark, "transfer remark", MAX_TRANSFER_REMARK_BYTES)?;
-            let amount_fen = u128_from_abi(amount_fen);
-            accept_and_write_watch(
-                runtime,
-                out_request_id,
-                move |runtime, request_id, cancellation| {
-                    runtime.refresh_provider_capabilities()?;
-                    let cancellation = cancellation.ok_or_else(|| {
-                        FfiError::internal("wallet transfer cancellation channel is missing")
+            let account_id = account_id_from_pointer(account_id, "account_id")?;
+            let payload = copy_view(payload, "opaque signing payload", MAX_ABI_INPUT_BYTES)?;
+            let domain = copy_view(
+                domain,
+                "signing domain",
+                citizen_sdk_contracts::MAX_SIGNING_DOMAIN_BYTES,
+            )?;
+            let transform = signing_transform(transform, domain)?;
+            let transport = external_transport(external_signer_transport)?;
+            if ttl_seconds == 0
+                || ttl_seconds > citizen_sdk_contracts::MAX_EXTERNAL_SIGNING_TTL_SECONDS
+            {
+                return Err(FfiError::invalid("signing ttl 必须位于 1..300 秒"));
+            }
+            let intent = SigningIntent::try_new(account_id, payload, transform)?;
+            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let mode = runtime
+                    .drive(runtime.engine().wallet_account_sign_mode(account_id))??
+                    .ok_or_else(|| {
+                        FfiError::new(CitizenSdkErrorCode::NotFound, "签名账户不存在")
                     })?;
-                    let observer: Arc<dyn WalletTransferObserver> =
-                        Arc::new(AbiWalletTransferObserver {
-                            runtime: Arc::clone(runtime),
-                            request_id,
-                        });
-                    let transfer_cancellation = WalletTransferCancellation::default();
-                    let transfer = runtime.drive(wallet_transfer_or_cancellation(
-                        runtime.engine().transfer_with_remark_and_watch(
-                            source,
-                            destination,
-                            amount_fen,
-                            remark,
-                            observer,
-                            transfer_cancellation.clone(),
-                        ),
-                        cancellation,
-                        transfer_cancellation,
+                match mode {
+                    WalletSignMode::Hot => {
+                        let completion =
+                            runtime.drive(runtime.engine().sign_wallet_intent(intent))??;
+                        Ok(ResultPayload::SigningOutcome(
+                            SigningOutcomePayload::Completed(completion),
+                        ))
+                    }
+                    WalletSignMode::Cold => {
+                        if transport != CitizenSdkExternalSignerTransport::QrV1 {
+                            return Err(FfiError::new(
+                                CitizenSdkErrorCode::Unsupported,
+                                "冷账户需要明确选择可用 external signer transport",
+                            ));
+                        }
+                        #[cfg(not(feature = "qr"))]
+                        {
+                            let _ = (opaque_action, ttl_seconds, intent);
+                            Err(module_unsupported("qr external signer transport"))
+                        }
+                        #[cfg(feature = "qr")]
+                        {
+                            if !runtime.has_modules(Modules::QR) {
+                                return Err(FfiError::new(
+                                    CitizenSdkErrorCode::Unsupported,
+                                    "实例没有 QR external signer transport",
+                                ));
+                            }
+                            let pending = crate::qr_abi::create_external_qr_session(
+                                handle,
+                                opaque_action,
+                                &intent,
+                                ttl_seconds,
+                            )?;
+                            Ok(ResultPayload::SigningOutcome(
+                                SigningOutcomePayload::ExternalPending(pending),
+                            ))
+                        }
+                    }
+                }
+            })
+        })
+    }
+}
+
+#[no_mangle]
+/// Accepts and verifies one response for the exact instance-local external signing session.
+///
+/// # Safety
+/// Text views are borrowed only for this call; `out_request_id` must be writable.
+pub unsafe extern "C" fn citizensdk_consume_external_signature(
+    handle: CitizenSdkHandle,
+    session_id: CitizenSdkBytesView,
+    response: CitizenSdkBytesView,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "qr"))]
+    {
+        let _ = (handle, session_id, response, out_request_id);
+        ffi_status(|| Err(module_unsupported("qr external signer transport")))
+    }
+    #[cfg(feature = "qr")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            if !runtime.has_modules(Modules::QR) {
+                return Err(FfiError::new(
+                    CitizenSdkErrorCode::Unsupported,
+                    "实例没有 QR external signer transport",
+                ));
+            }
+            let session_id = utf8(session_id, "signing session_id", 128)?;
+            let response = utf8(
+                response,
+                "external signing response",
+                citizen_sdk_qr::MAX_QR_TEXT_BYTES,
+            )?;
+            accept_and_write(runtime, out_request_id, move |_, _, _| {
+                let completion =
+                    crate::qr_abi::consume_external_qr_session(handle, &session_id, &response)?;
+                Ok(ResultPayload::SigningOutcome(
+                    SigningOutcomePayload::Completed(completion),
+                ))
+            })
+        })
+    }
+}
+
+#[no_mangle]
+/// Cancels an unconsumed unified signing or default-account external session.
+///
+/// # Safety
+/// `session_id` is borrowed and `out_cancelled` must be writable for one byte.
+pub unsafe extern "C" fn citizensdk_cancel_signing_session(
+    handle: CitizenSdkHandle,
+    session_id: CitizenSdkBytesView,
+    out_cancelled: *mut u8,
+) -> i32 {
+    #[cfg(not(feature = "qr"))]
+    {
+        let _ = (handle, session_id, out_cancelled);
+        ffi_status(|| Err(module_unsupported("qr external signer transport")))
+    }
+    #[cfg(feature = "qr")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            if !runtime.has_modules(Modules::QR) {
+                return Err(FfiError::new(
+                    CitizenSdkErrorCode::Unsupported,
+                    "实例没有 QR external signer transport",
+                ));
+            }
+            require_output(out_cancelled, "out_cancelled")?;
+            let session_id = utf8(session_id, "signing session_id", 128)?;
+            let cancelled = crate::qr_abi::cancel_unified_signing_session(handle, &session_id)?;
+            ptr::write(out_cancelled, u8::from(cancelled));
+            Ok(())
+        })
+    }
+}
+
+#[no_mangle]
+/// Starts the SDK-owned default-account mutation. The original default account authorizes the
+/// full order through the same hot/external signing core; callers cannot choose its signer/action.
+///
+/// # Safety
+/// The account array is borrowed only for this call and the request output must be writable.
+pub unsafe extern "C" fn citizensdk_begin_default_account_change(
+    handle: CitizenSdkHandle,
+    expected_revision: u64,
+    account_ids: *const CitizenSdkAccountId,
+    account_count: u32,
+    ttl_seconds: u64,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(all(feature = "wallet", feature = "signing")))]
+    {
+        let _ = (
+            handle,
+            expected_revision,
+            account_ids,
+            account_count,
+            ttl_seconds,
+            out_request_id,
+        );
+        ffi_status(|| Err(module_unsupported("wallet signing")))
+    }
+    #[cfg(all(feature = "wallet", feature = "signing"))]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            let account_ids = copy_wallet_catalog_account_ids(account_ids, account_count)?;
+            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let authorization =
+                    runtime.drive(runtime.engine().prepare_default_wallet_account_change(
+                        expected_revision,
+                        account_ids,
+                        ttl_seconds,
                     ))??;
-                    Ok(ResultPayload::WalletTransfer(transfer))
-                },
-            )
+                let current = authorization.current_default_account_id();
+                let payload_hash = authorization.signing_intent()?.payload_hash()?;
+                let mode = runtime
+                    .drive(runtime.engine().wallet_account_sign_mode(current))??
+                    .ok_or_else(|| {
+                        FfiError::new(
+                            CitizenSdkErrorCode::Conflict,
+                            "原默认账户在授权路由前已经消失",
+                        )
+                    })?;
+                match mode {
+                    WalletSignMode::Hot => {
+                        let state = runtime.drive(
+                            runtime
+                                .engine()
+                                .authorize_hot_default_wallet_account_change(authorization),
+                        )??;
+                        Ok(ResultPayload::DefaultAccountChange(
+                            DefaultAccountChangePayload::Completed {
+                                current_default_account_id: current,
+                                payload_hash,
+                                committed_revision: state.revision(),
+                            },
+                        ))
+                    }
+                    WalletSignMode::Cold => {
+                        #[cfg(not(feature = "qr"))]
+                        {
+                            let _ = authorization;
+                            Err(module_unsupported("qr external signer transport"))
+                        }
+                        #[cfg(feature = "qr")]
+                        {
+                            if !runtime.has_modules(Modules::QR) {
+                                return Err(FfiError::new(
+                                    CitizenSdkErrorCode::Unsupported,
+                                    "冷默认账户需要 QR external signer transport",
+                                ));
+                            }
+                            let pending = crate::qr_abi::create_default_account_qr_session(
+                                handle,
+                                authorization,
+                            )?;
+                            Ok(ResultPayload::DefaultAccountChange(
+                                DefaultAccountChangePayload::ExternalPending(pending),
+                            ))
+                        }
+                    }
+                }
+            })
         })
     }
 }
 
 #[no_mangle]
-/// Initializes tracked-account cursors at the current finalized head.
+/// Verifies a cold default-account response and performs the exact revision/account-set CAS.
 ///
 /// # Safety
-/// `account_ids[0..account_count]` is readable and output is writable.
-pub unsafe extern "C" fn citizensdk_initialize_finalized_history(
+/// Text views are borrowed only for this call; `out_request_id` must be writable.
+pub unsafe extern "C" fn citizensdk_consume_default_account_change(
     handle: CitizenSdkHandle,
-    account_ids: *const CitizenSdkAccountId,
-    account_count: u32,
+    session_id: CitizenSdkBytesView,
+    response: CitizenSdkBytesView,
     out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
-    #[cfg(not(feature = "history"))]
+    #[cfg(not(all(feature = "wallet", feature = "signing", feature = "qr")))]
     {
-        let _ = (handle, account_ids, account_count, out_request_id);
+        let _ = (handle, session_id, response, out_request_id);
+        ffi_status(|| Err(module_unsupported("wallet QR signing")))
+    }
+    #[cfg(all(feature = "wallet", feature = "signing", feature = "qr"))]
+    {
         ffi_status(|| {
-            Err(FfiError::new(
-                CitizenSdkErrorCode::Unsupported,
-                "当前构建不包含所需模块",
-            ))
+            let runtime = handles::get(handle)?;
+            if !runtime.has_modules(Modules::QR) {
+                return Err(FfiError::new(
+                    CitizenSdkErrorCode::Unsupported,
+                    "实例没有 QR external signer transport",
+                ));
+            }
+            let session_id = utf8(session_id, "default change session_id", 128)?;
+            let response = utf8(
+                response,
+                "default change response",
+                citizen_sdk_qr::MAX_QR_TEXT_BYTES,
+            )?;
+            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+                let (authorization, signature) = crate::qr_abi::consume_default_account_qr_session(
+                    handle,
+                    &session_id,
+                    &response,
+                )?;
+                let current = authorization.current_default_account_id();
+                let payload_hash = authorization.signing_intent()?.payload_hash()?;
+                let state = runtime.drive(
+                    runtime
+                        .engine()
+                        .commit_default_wallet_account_change(&authorization, signature),
+                )??;
+                Ok(ResultPayload::DefaultAccountChange(
+                    DefaultAccountChangePayload::Completed {
+                        current_default_account_id: current,
+                        payload_hash,
+                        committed_revision: state.revision(),
+                    },
+                ))
+            })
         })
-    }
-    #[cfg(feature = "history")]
-    {
-        history_request(
-            handle,
-            account_ids,
-            account_count,
-            out_request_id,
-            |engine, accounts| engine.initialize_finalized_history(accounts),
-        )
-    }
-}
-
-#[no_mangle]
-/// Scans at most the Core's fixed 120-block finalized batch.
-///
-/// # Safety
-/// `account_ids[0..account_count]` is readable and output is writable.
-pub unsafe extern "C" fn citizensdk_sync_finalized_history_batch(
-    handle: CitizenSdkHandle,
-    account_ids: *const CitizenSdkAccountId,
-    account_count: u32,
-    out_request_id: *mut CitizenSdkRequestId,
-) -> i32 {
-    #[cfg(not(feature = "history"))]
-    {
-        let _ = (handle, account_ids, account_count, out_request_id);
-        ffi_status(|| {
-            Err(FfiError::new(
-                CitizenSdkErrorCode::Unsupported,
-                "当前构建不包含所需模块",
-            ))
-        })
-    }
-    #[cfg(feature = "history")]
-    {
-        history_request(
-            handle,
-            account_ids,
-            account_count,
-            out_request_id,
-            |engine, accounts| engine.sync_finalized_history_batch(accounts),
-        )
     }
 }
 
@@ -1913,10 +2175,281 @@ pub unsafe extern "C" fn citizensdk_result_get_wallet_profile(
     ffi_status(|| {
         validate_output_versioned(out_info, "wallet profile info")?;
         let owned = ownership::get(result)?;
-        let ResultPayload::WalletProfile(profile) = owned.payload else {
-            return Err(wrong_result("wallet profile"));
+        let profile = match &owned.payload {
+            ResultPayload::WalletProfile(profile) => profile.as_ref(),
+            ResultPayload::WalletState(state) => state.profile(),
+            _ => return Err(wrong_result("wallet profile or wallet state")),
         };
-        ptr::write(out_info, wallet_profile_to_abi(profile.as_ref())?);
+        ptr::write(out_info, wallet_profile_to_abi(profile)?);
+        Ok(())
+    })
+}
+
+#[no_mangle]
+/// Copies the fixed portion of one unified wallet-state result.
+///
+/// # Safety
+/// `out_info` must contain a supported ABI prefix and be writable.
+pub unsafe extern "C" fn citizensdk_result_get_wallet_state(
+    result: CitizenSdkResultHandle,
+    out_info: *mut CitizenSdkWalletStateInfo,
+) -> i32 {
+    ffi_status(|| {
+        validate_output_versioned(out_info, "wallet state info")?;
+        let owned = ownership::get(result)?;
+        let ResultPayload::WalletState(state) = &owned.payload else {
+            return Err(wrong_result("wallet state"));
+        };
+        ptr::write(
+            out_info,
+            CitizenSdkWalletStateInfo {
+                revision: state.revision(),
+                account_count: checked_count(
+                    state.ordered_account_ids().len(),
+                    "wallet state account",
+                )?,
+                has_default_account: u32::from(state.default_account_id().is_some()),
+                default_account_id: state
+                    .default_account_id()
+                    .map(account_id_to_abi)
+                    .unwrap_or_default(),
+                ..CitizenSdkWalletStateInfo::default()
+            },
+        );
+        Ok(())
+    })
+}
+
+#[no_mangle]
+/// Copies one generic signing outcome with all variable outputs preflighted before any write.
+///
+/// # Safety
+/// `out_info` is versioned/writable and all buffer/required pairs follow the public copy contract.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn citizensdk_result_get_signing_outcome(
+    result: CitizenSdkResultHandle,
+    out_info: *mut CitizenSdkSigningOutcomeInfo,
+    signature_buffer: *mut u8,
+    signature_capacity: u64,
+    out_signature_required: *mut u64,
+    session_id_buffer: *mut u8,
+    session_id_capacity: u64,
+    out_session_id_required: *mut u64,
+    transport_request_buffer: *mut u8,
+    transport_request_capacity: u64,
+    out_transport_request_required: *mut u64,
+) -> i32 {
+    ffi_status(|| {
+        validate_output_versioned(out_info, "signing outcome info")?;
+        let owned = ownership::get(result)?;
+        let ResultPayload::SigningOutcome(outcome) = &owned.payload else {
+            return Err(wrong_result("signing outcome"));
+        };
+        let (info, signature, session_id, transport_request) = match outcome {
+            SigningOutcomePayload::Completed(completion) => (
+                CitizenSdkSigningOutcomeInfo {
+                    status: CitizenSdkSigningOutcomeStatus::Completed as u32,
+                    transport: CitizenSdkExternalSignerTransport::None as u32,
+                    account_id: account_id_to_abi(completion.account_id()),
+                    payload_hash: completion.payload_hash().into_bytes(),
+                    signature_len: 64,
+                    ..CitizenSdkSigningOutcomeInfo::default()
+                },
+                completion.signature_bytes().as_slice(),
+                &[][..],
+                &[][..],
+            ),
+            SigningOutcomePayload::ExternalPending(pending) => (
+                CitizenSdkSigningOutcomeInfo {
+                    status: CitizenSdkSigningOutcomeStatus::ExternalPending as u32,
+                    transport: CitizenSdkExternalSignerTransport::QrV1 as u32,
+                    account_id: account_id_to_abi(pending.account_id),
+                    payload_hash: pending.payload_hash.into_bytes(),
+                    expires_at: pending.expires_at,
+                    session_id_len: pending.session_id.len() as u64,
+                    transport_request_len: pending.transport_request.len() as u64,
+                    ..CitizenSdkSigningOutcomeInfo::default()
+                },
+                &[][..],
+                pending.session_id.as_bytes(),
+                pending.transport_request.as_bytes(),
+            ),
+        };
+        copy_three(
+            signature,
+            signature_buffer,
+            signature_capacity,
+            out_signature_required,
+            session_id,
+            session_id_buffer,
+            session_id_capacity,
+            out_session_id_required,
+            transport_request,
+            transport_request_buffer,
+            transport_request_capacity,
+            out_transport_request_required,
+        )?;
+        ptr::write(out_info, info);
+        Ok(())
+    })
+}
+
+#[no_mangle]
+/// Copies an SDK default-account mutation result. Completed results expose the committed revision;
+/// pending results expose only the bound external session and request.
+///
+/// # Safety
+/// `out_info` is versioned/writable and both variable buffer pairs follow the copy contract.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn citizensdk_result_get_default_account_change(
+    result: CitizenSdkResultHandle,
+    out_info: *mut CitizenSdkDefaultAccountChangeInfo,
+    session_id_buffer: *mut u8,
+    session_id_capacity: u64,
+    out_session_id_required: *mut u64,
+    transport_request_buffer: *mut u8,
+    transport_request_capacity: u64,
+    out_transport_request_required: *mut u64,
+) -> i32 {
+    ffi_status(|| {
+        validate_output_versioned(out_info, "default account change info")?;
+        let owned = ownership::get(result)?;
+        let ResultPayload::DefaultAccountChange(outcome) = &owned.payload else {
+            return Err(wrong_result("default account change"));
+        };
+        let (info, session_id, transport_request) = match outcome {
+            DefaultAccountChangePayload::Completed {
+                current_default_account_id,
+                payload_hash,
+                committed_revision,
+            } => (
+                CitizenSdkDefaultAccountChangeInfo {
+                    status: CitizenSdkSigningOutcomeStatus::Completed as u32,
+                    transport: CitizenSdkExternalSignerTransport::None as u32,
+                    current_default_account_id: account_id_to_abi(*current_default_account_id),
+                    payload_hash: payload_hash.into_bytes(),
+                    committed_revision: *committed_revision,
+                    ..CitizenSdkDefaultAccountChangeInfo::default()
+                },
+                &[][..],
+                &[][..],
+            ),
+            DefaultAccountChangePayload::ExternalPending(pending) => (
+                CitizenSdkDefaultAccountChangeInfo {
+                    status: CitizenSdkSigningOutcomeStatus::ExternalPending as u32,
+                    transport: CitizenSdkExternalSignerTransport::QrV1 as u32,
+                    current_default_account_id: account_id_to_abi(pending.account_id),
+                    payload_hash: pending.payload_hash.into_bytes(),
+                    expires_at: pending.expires_at,
+                    session_id_len: pending.session_id.len() as u64,
+                    transport_request_len: pending.transport_request.len() as u64,
+                    ..CitizenSdkDefaultAccountChangeInfo::default()
+                },
+                pending.session_id.as_bytes(),
+                pending.transport_request.as_bytes(),
+            ),
+        };
+        copy_pair(
+            session_id,
+            session_id_buffer,
+            session_id_capacity,
+            out_session_id_required,
+            transport_request,
+            transport_request_buffer,
+            transport_request_capacity,
+            out_transport_request_required,
+        )?;
+        ptr::write(out_info, info);
+        Ok(())
+    })
+}
+
+#[no_mangle]
+/// Copies one globally ordered hot/cold account and size-queries/copies its labels.
+///
+/// # Safety
+/// Every output pointer follows the documented CitizenSDK copy contract.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn citizensdk_result_get_wallet_state_account(
+    result: CitizenSdkResultHandle,
+    index: u32,
+    out_info: *mut CitizenSdkWalletStateAccountInfo,
+    ss58_buffer: *mut u8,
+    ss58_capacity: u64,
+    out_ss58_required: *mut u64,
+    name_buffer: *mut u8,
+    name_capacity: u64,
+    out_name_required: *mut u64,
+) -> i32 {
+    ffi_status(|| {
+        validate_output_versioned(out_info, "wallet state account info")?;
+        let owned = ownership::get(result)?;
+        let ResultPayload::WalletState(state) = &owned.payload else {
+            return Err(wrong_result("wallet state"));
+        };
+        let account_id = state
+            .ordered_account_ids()
+            .get(index as usize)
+            .copied()
+            .ok_or_else(|| FfiError::invalid("wallet state account index is out of range"))?;
+
+        let (sign_mode, wallet_index, account_index, created_at_millis, ss58, name) =
+            if let Some(account) = state
+                .profile()
+                .and_then(|profile| profile.account_by_id(account_id))
+            {
+                (
+                    WalletSignMode::Hot,
+                    citizen_sdk_contracts::CITIZEN_WALLET_INDEX,
+                    Some(account.index()),
+                    account.created_at_millis(),
+                    account.ss58_address(),
+                    account.name(),
+                )
+            } else if let Some(account) = state.cold_account_by_id(account_id) {
+                (
+                    WalletSignMode::Cold,
+                    account.wallet_index(),
+                    None,
+                    account.created_at_millis(),
+                    account.ss58_address(),
+                    account.name(),
+                )
+            } else {
+                return Err(FfiError::new(
+                    CitizenSdkErrorCode::Integrity,
+                    "wallet order references an unknown account",
+                ));
+            };
+
+        copy_pair(
+            ss58.as_bytes(),
+            ss58_buffer,
+            ss58_capacity,
+            out_ss58_required,
+            name.as_bytes(),
+            name_buffer,
+            name_capacity,
+            out_name_required,
+        )?;
+        ptr::write(
+            out_info,
+            CitizenSdkWalletStateAccountInfo {
+                sign_mode: match sign_mode {
+                    WalletSignMode::Hot => CitizenSdkWalletSignMode::Hot,
+                    WalletSignMode::Cold => CitizenSdkWalletSignMode::Cold,
+                } as u32,
+                wallet_index,
+                has_account_index: u32::from(account_index.is_some()),
+                account_index: account_index.unwrap_or_default(),
+                is_default: u32::from(index == 0),
+                account_id: account_id_to_abi(account_id),
+                created_at_millis,
+                ss58_address_len: ss58.len() as u64,
+                name_len: name.len() as u64,
+                ..CitizenSdkWalletStateAccountInfo::default()
+            },
+        );
         Ok(())
     })
 }
@@ -2037,219 +2570,6 @@ pub unsafe extern "C" fn citizensdk_result_get_prepared_wallet(
     })
 }
 
-#[no_mangle]
-/// Copies a terminal high-level wallet transfer and optional pool reason.
-///
-/// # Safety
-/// Every output pointer follows the documented CitizenSDK copy contract.
-pub unsafe extern "C" fn citizensdk_result_get_wallet_transfer(
-    result: CitizenSdkResultHandle,
-    out_info: *mut CitizenSdkWalletTransferInfo,
-    reason_buffer: *mut u8,
-    reason_capacity: u64,
-    out_reason_required: *mut u64,
-) -> i32 {
-    ffi_status(|| {
-        validate_output_versioned(out_info, "wallet transfer info")?;
-        let owned = ownership::get(result)?;
-        let ResultPayload::WalletTransfer(transfer) = owned.payload else {
-            return Err(wrong_result("wallet transfer"));
-        };
-        let (resolution, execution, reason) = transfer_resolution(transfer.resolution())?;
-        copy_to_host(
-            reason.as_bytes(),
-            reason_buffer,
-            reason_capacity,
-            out_reason_required,
-        )?;
-        ptr::write(
-            out_info,
-            CitizenSdkWalletTransferInfo {
-                transaction_hash: transfer.transaction_hash().into_bytes(),
-                resolution,
-                has_execution: u32::from(execution.is_some()),
-                execution: execution
-                    .as_ref()
-                    .map(execution_to_abi)
-                    .unwrap_or_else(|| CitizenSdkWalletTransferInfo::default().execution),
-                pool_rejection_reason_len: reason.len() as u64,
-                ..CitizenSdkWalletTransferInfo::default()
-            },
-        );
-        Ok(())
-    })
-}
-
-#[no_mangle]
-/// Copies summary counts for history or a wallet-transfer result's history.
-///
-/// # Safety
-/// `out_info` must contain a supported ABI prefix and be writable.
-pub unsafe extern "C" fn citizensdk_result_get_history_info(
-    result: CitizenSdkResultHandle,
-    out_info: *mut CitizenSdkHistoryInfo,
-) -> i32 {
-    ffi_status(|| {
-        validate_output_versioned(out_info, "history info")?;
-        let owned = ownership::get(result)?;
-        let history = history_state(&owned.payload)?;
-        ptr::write(
-            out_info,
-            CitizenSdkHistoryInfo {
-                revision: history.revision(),
-                cursor_count: checked_count(history.cursors().len(), "history cursor")?,
-                record_count: checked_count(history.records().len(), "history record")?,
-                transfer_count: checked_count(history.transfers().len(), "history transfer")?,
-                ..CitizenSdkHistoryInfo::default()
-            },
-        );
-        Ok(())
-    })
-}
-
-#[no_mangle]
-/// Copies one finalized-history cursor.
-///
-/// # Safety
-/// `out_info` must contain a supported ABI prefix and be writable.
-pub unsafe extern "C" fn citizensdk_result_get_history_cursor(
-    result: CitizenSdkResultHandle,
-    index: u32,
-    out_info: *mut CitizenSdkHistoryCursorInfo,
-) -> i32 {
-    ffi_status(|| {
-        validate_output_versioned(out_info, "history cursor info")?;
-        let owned = ownership::get(result)?;
-        let cursor = history_state(&owned.payload)?
-            .cursors()
-            .get(index as usize)
-            .copied()
-            .ok_or_else(|| FfiError::invalid("history cursor index is out of range"))?;
-        ptr::write(
-            out_info,
-            CitizenSdkHistoryCursorInfo {
-                account_id: account_id_to_abi(cursor.account_id()),
-                tracking_start_block: block_to_abi(cursor.tracking_start_block().into()),
-                last_synced_block: block_to_abi(cursor.last_synced_block().into()),
-                ..CitizenSdkHistoryCursorInfo::default()
-            },
-        );
-        Ok(())
-    })
-}
-
-#[no_mangle]
-/// Copies one pending/finalized submission record and its variable text.
-///
-/// # Safety
-/// Every output pointer follows the documented CitizenSDK copy contract.
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn citizensdk_result_get_history_record(
-    result: CitizenSdkResultHandle,
-    index: u32,
-    out_info: *mut CitizenSdkHistoryRecordInfo,
-    remark_buffer: *mut u8,
-    remark_capacity: u64,
-    out_remark_required: *mut u64,
-    reason_buffer: *mut u8,
-    reason_capacity: u64,
-    out_reason_required: *mut u64,
-) -> i32 {
-    ffi_status(|| {
-        validate_output_versioned(out_info, "history record info")?;
-        let owned = ownership::get(result)?;
-        let record = history_state(&owned.payload)?
-            .records()
-            .get(index as usize)
-            .ok_or_else(|| FfiError::invalid("history record index is out of range"))?;
-        let (status, block, execution, reason) = history_status(record)?;
-        copy_pair(
-            record.remark().as_bytes(),
-            remark_buffer,
-            remark_capacity,
-            out_remark_required,
-            reason.as_bytes(),
-            reason_buffer,
-            reason_capacity,
-            out_reason_required,
-        )?;
-        ptr::write(
-            out_info,
-            CitizenSdkHistoryRecordInfo {
-                account_id: account_id_to_abi(record.account_id()),
-                transaction_hash: record.transaction_hash().into_bytes(),
-                nonce: record.nonce(),
-                destination_account_id: account_id_to_abi(record.destination_account_id()),
-                amount_fen: u128_to_abi(record.amount_fen()),
-                status,
-                has_block: u32::from(block.is_some()),
-                block: block
-                    .map(block_to_abi)
-                    .unwrap_or_else(CitizenSdkBlockRef::default),
-                has_execution: u32::from(execution.is_some()),
-                execution: execution
-                    .as_ref()
-                    .map(execution_to_abi)
-                    .unwrap_or_else(|| CitizenSdkWalletTransferInfo::default().execution),
-                created_at_millis: record.created_at_millis(),
-                updated_at_millis: record.updated_at_millis(),
-                remark_len: record.remark().len() as u64,
-                pool_rejection_reason_len: reason.len() as u64,
-                ..CitizenSdkHistoryRecordInfo::default()
-            },
-        );
-        Ok(())
-    })
-}
-
-#[no_mangle]
-/// Copies one finalized transfer, preserving raw Runtime remark bytes.
-///
-/// # Safety
-/// Every output pointer follows the documented CitizenSDK copy contract.
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn citizensdk_result_get_finalized_transfer(
-    result: CitizenSdkResultHandle,
-    index: u32,
-    out_info: *mut CitizenSdkFinalizedTransferInfo,
-    source_pallet_buffer: *mut u8,
-    source_pallet_capacity: u64,
-    out_source_pallet_required: *mut u64,
-    remark_display_buffer: *mut u8,
-    remark_display_capacity: u64,
-    out_remark_display_required: *mut u64,
-    remark_bytes_buffer: *mut u8,
-    remark_bytes_capacity: u64,
-    out_remark_bytes_required: *mut u64,
-) -> i32 {
-    ffi_status(|| {
-        validate_output_versioned(out_info, "finalized transfer info")?;
-        let owned = ownership::get(result)?;
-        let transfer = history_state(&owned.payload)?
-            .transfers()
-            .get(index as usize)
-            .ok_or_else(|| FfiError::invalid("finalized transfer index is out of range"))?;
-        let display = transfer.remark().unwrap_or_default().as_bytes();
-        let raw = transfer.remark_bytes().unwrap_or_default();
-        copy_three(
-            transfer.source_pallet().as_bytes(),
-            source_pallet_buffer,
-            source_pallet_capacity,
-            out_source_pallet_required,
-            display,
-            remark_display_buffer,
-            remark_display_capacity,
-            out_remark_display_required,
-            raw,
-            remark_bytes_buffer,
-            remark_bytes_capacity,
-            out_remark_bytes_required,
-        )?;
-        ptr::write(out_info, finalized_transfer_to_abi(transfer));
-        Ok(())
-    })
-}
-
 unsafe fn wallet_profile_mutation<F>(
     handle: CitizenSdkHandle,
     account_id: *const CitizenSdkAccountId,
@@ -2271,33 +2591,6 @@ where
             runtime.refresh_provider_capabilities()?;
             let profile = runtime.drive(operation(runtime.engine().as_ref(), account_id))??;
             Ok(ResultPayload::WalletProfile(Some(profile)))
-        })
-    })
-}
-
-#[cfg(feature = "chain")]
-unsafe fn history_request<F>(
-    handle: CitizenSdkHandle,
-    account_ids: *const CitizenSdkAccountId,
-    account_count: u32,
-    out_request_id: *mut CitizenSdkRequestId,
-    operation: F,
-) -> i32
-where
-    F: for<'a> FnOnce(
-            &'a citizen_sdk_engine::CitizenEngine,
-            Vec<AccountId32>,
-        ) -> citizen_sdk_engine::EngineFuture<'a, TransactionHistoryState>
-        + Send
-        + 'static,
-{
-    ffi_status(|| {
-        let runtime = handles::get(handle)?;
-        let accounts = copy_account_ids(account_ids, account_count)?;
-        accept_and_write(runtime, out_request_id, move |runtime, _, _| {
-            runtime.refresh_provider_capabilities()?;
-            let history = runtime.drive(operation(runtime.engine().as_ref(), accounts))??;
-            Ok(ResultPayload::TransactionHistory(history))
         })
     })
 }
@@ -2401,6 +2694,23 @@ unsafe fn copy_account_ids(
         .collect())
 }
 
+unsafe fn copy_wallet_catalog_account_ids(
+    pointer: *const CitizenSdkAccountId,
+    count: u32,
+) -> FfiResult<Vec<AccountId32>> {
+    let count =
+        usize::try_from(count).map_err(|_| FfiError::invalid("account count is too large"))?;
+    if count == 0 || count > MAX_WALLET_CATALOG_ACCOUNTS || pointer.is_null() {
+        return Err(FfiError::invalid(
+            "wallet catalog must contain between 1 and 3980 accounts",
+        ));
+    }
+    Ok(std::slice::from_raw_parts(pointer, count)
+        .iter()
+        .map(|account| AccountId32::from_bytes(account.bytes))
+        .collect())
+}
+
 #[cfg(feature = "chain")]
 fn fee_snapshot_to_abi(snapshot: BestFeeSnapshot) -> CitizenSdkFeeSnapshotInfo {
     CitizenSdkFeeSnapshotInfo {
@@ -2441,119 +2751,6 @@ fn wallet_accounts(payload: &ResultPayload) -> FfiResult<(&[WalletAccount], Opti
         ResultPayload::WalletProfile(None) => Ok((&[], None)),
         ResultPayload::WalletAccounts(accounts) => Ok((accounts, None)),
         _ => Err(wrong_result("wallet profile or account list")),
-    }
-}
-
-fn transfer_resolution(
-    resolution: &WalletTransferResolution,
-) -> FfiResult<(u32, Option<ExecutionConclusion>, &str)> {
-    match resolution {
-        WalletTransferResolution::Finalized(conclusion @ ExecutionConclusion::Success { .. }) => {
-            Ok((
-                CitizenSdkTransferResolution::FinalizedSuccess as u32,
-                Some(conclusion.clone()),
-                "",
-            ))
-        }
-        WalletTransferResolution::Finalized(conclusion @ ExecutionConclusion::Failed { .. }) => {
-            Ok((
-                CitizenSdkTransferResolution::FinalizedFailed as u32,
-                Some(conclusion.clone()),
-                "",
-            ))
-        }
-        WalletTransferResolution::Finalized(ExecutionConclusion::Unverified { .. }) => {
-            Err(FfiError::new(
-                CitizenSdkErrorCode::Integrity,
-                "wallet transfer cannot expose an unverified finalized resolution",
-            ))
-        }
-        WalletTransferResolution::PoolRejected { reason } => Ok((
-            CitizenSdkTransferResolution::PoolRejected as u32,
-            None,
-            reason,
-        )),
-    }
-}
-
-fn history_state(payload: &ResultPayload) -> FfiResult<&TransactionHistoryState> {
-    match payload {
-        ResultPayload::TransactionHistory(history) => Ok(history),
-        ResultPayload::WalletTransfer(transfer) => Ok(transfer.history()),
-        _ => Err(wrong_result("transaction history")),
-    }
-}
-
-type HistoryStatusProjection<'a> = (
-    u32,
-    Option<citizen_sdk_contracts::VerifiedBlockRef>,
-    Option<ExecutionConclusion>,
-    &'a str,
-);
-
-fn history_status(record: &TransactionHistoryRecord) -> FfiResult<HistoryStatusProjection<'_>> {
-    match record.status() {
-        HistoryTransactionStatus::Pending => {
-            Ok((CitizenSdkHistoryStatus::Pending as u32, None, None, ""))
-        }
-        HistoryTransactionStatus::InBlock { block } => Ok((
-            CitizenSdkHistoryStatus::InBlock as u32,
-            Some(*block),
-            None,
-            "",
-        )),
-        HistoryTransactionStatus::PoolRejected { reason } => Ok((
-            CitizenSdkHistoryStatus::PoolRejected as u32,
-            None,
-            None,
-            reason,
-        )),
-        HistoryTransactionStatus::Execution(
-            conclusion @ ExecutionConclusion::Success { block, .. },
-        ) => Ok((
-            CitizenSdkHistoryStatus::FinalizedSuccess as u32,
-            Some(*block),
-            Some(conclusion.clone()),
-            "",
-        )),
-        HistoryTransactionStatus::Execution(
-            conclusion @ ExecutionConclusion::Failed { block, .. },
-        ) => Ok((
-            CitizenSdkHistoryStatus::FinalizedFailed as u32,
-            Some(*block),
-            Some(conclusion.clone()),
-            "",
-        )),
-        HistoryTransactionStatus::Execution(ExecutionConclusion::Unverified { .. }) => {
-            Err(FfiError::new(
-                CitizenSdkErrorCode::Integrity,
-                "persisted history contains an unverified execution",
-            ))
-        }
-    }
-}
-
-fn finalized_transfer_to_abi(
-    transfer: &FinalizedTransferRecord,
-) -> CitizenSdkFinalizedTransferInfo {
-    CitizenSdkFinalizedTransferInfo {
-        tracked_account_id: account_id_to_abi(transfer.tracked_account_id()),
-        from_account_id: account_id_to_abi(transfer.from_account_id()),
-        to_account_id: account_id_to_abi(transfer.to_account_id()),
-        amount_fen: u128_to_abi(transfer.amount_fen()),
-        block: block_to_abi(transfer.block().into()),
-        event_record_index: transfer.event_record_index(),
-        has_extrinsic_index: u32::from(transfer.extrinsic_index().is_some()),
-        extrinsic_index: transfer.extrinsic_index().unwrap_or_default(),
-        direction: if transfer.is_incoming() {
-            CitizenSdkTransferDirection::Incoming
-        } else {
-            CitizenSdkTransferDirection::Outgoing
-        } as u32,
-        source_pallet_len: transfer.source_pallet().len() as u64,
-        remark_display_len: transfer.remark().map_or(0, str::len) as u64,
-        remark_bytes_len: transfer.remark_bytes().map_or(0, <[u8]>::len) as u64,
-        ..CitizenSdkFinalizedTransferInfo::default()
     }
 }
 
@@ -2687,11 +2884,11 @@ mod no_chain_tests {
                 unsupported
             );
             assert_eq!(
-                citizensdk_initialize_finalized_history(0, ptr::null(), 0, ptr::null_mut()),
+                citizensdk_get_transaction_history(0, ptr::null(), 100, ptr::null_mut()),
                 unsupported
             );
             assert_eq!(
-                citizensdk_sync_finalized_history_batch(0, ptr::null(), 0, ptr::null_mut()),
+                citizensdk_sync_transaction_history(0, ptr::null_mut()),
                 unsupported
             );
             assert_eq!(

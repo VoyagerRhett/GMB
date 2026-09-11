@@ -34,13 +34,11 @@ internal class CitizenSdkNative private constructor(
         check(this.router == null) { "native callback is already bound" }
         this.router = router
         this.eventSink = eventSink
-        router.bindEventPublisher(eventSink)
         try {
             call { nativeBind(it) }
         } catch (error: Throwable) {
             this.router = null
             this.eventSink = null
-            router.bindEventPublisher {}
             throw error
         }
     }
@@ -54,6 +52,40 @@ internal class CitizenSdkNative private constructor(
     fun stop(): Long = call { nativeStop(it) }
     fun cancel(coreRequestId: Long): Boolean = call { nativeCancel(it, coreRequestId) }
     fun getFinalizedHead(): Long = call { nativeGetFinalizedHead(it) }
+    fun getSyncStatus(): Long = call { nativeGetSyncStatus(it) }
+    fun getBestHead(): Long = call { nativeGetBestHead(it) }
+    fun getFinalizedBlockAt(number: String): Long = call {
+        nativeGetFinalizedBlockAt(it, number.toULong().toLong())
+    }
+    fun resolveFinalizedBlock(hash: ByteArray, number: String): Long = call {
+        nativeResolveFinalizedBlock(it, hash.requireSize(32, "block hash"), number.toULong().toLong())
+    }
+    fun getBlockHeader(block: CitizenBlockRef): Long = call {
+        nativeGetBlockHeader(it, block.hash(), block.number.toULong().toLong(), block.finality.nativeValue())
+    }
+    fun getBlockBody(block: CitizenBlockRef): Long = call {
+        nativeGetBlockBody(it, block.hash(), block.number.toULong().toLong(), block.finality.nativeValue())
+    }
+    fun getRuntimeContext(block: CitizenBlockRef): Long = call {
+        nativeGetRuntimeContext(it, block.hash(), block.number.toULong().toLong(), block.finality.nativeValue())
+    }
+    fun getStorage(block: CitizenBlockRef, key: ByteArray): Long = call {
+        nativeGetStorage(it, block.hash(), block.number.toULong().toLong(), block.finality.nativeValue(), key)
+    }
+    fun getStorageBatch(block: CitizenBlockRef, keys: Array<ByteArray>): Long = call {
+        nativeGetStorageBatch(it, block.hash(), block.number.toULong().toLong(), block.finality.nativeValue(), keys)
+    }
+    fun getSystemEvents(block: CitizenBlockRef): Long = call {
+        nativeGetSystemEvents(it, block.hash(), block.number.toULong().toLong(), block.finality.nativeValue())
+    }
+    fun exportState(): Long = call { nativeExportState(it) }
+    fun importState(state: CitizenChainState): Long = call {
+        nativeImportState(
+            it, state.formatVersion.toInt(), state.finalized.hash(),
+            state.finalized.number.toULong().toLong(), state.finalized.finality.nativeValue(),
+            state.database(),
+        )
+    }
     fun getGenesisHash(): ByteArray = call { nativeGetGenesisHash(it) }
     fun getAccountBalance(accountId: ByteArray): Long = call { nativeGetAccountBalance(it, accountId) }
     fun getAccountBalances(accountIds: Array<ByteArray>): Long =
@@ -61,6 +93,17 @@ internal class CitizenSdkNative private constructor(
     fun getAccountNonce(accountId: ByteArray): Long = call { nativeGetAccountNonce(it, accountId) }
     fun getFeeSnapshot(): Long = call { nativeGetFeeSnapshot(it) }
     fun getWalletProfile(): Long = call { nativeGetWalletProfile(it) }
+    fun getWalletState(): Long = call { nativeGetWalletState(it) }
+    fun importColdAccountId(accountId: ByteArray, name: String): Long =
+        call { nativeImportColdAccountId(it, accountId, name.toByteArray(Charsets.UTF_8)) }
+    fun importColdAccountSs58(address: String, name: String): Long = call {
+        nativeImportColdAccountSs58(it, address.toByteArray(Charsets.UTF_8), name.toByteArray(Charsets.UTF_8))
+    }
+    fun reorderWalletAccounts(expectedRevision: Long, accountIds: Array<ByteArray>): Long =
+        call { nativeReorderWalletAccounts(it, expectedRevision, flattenAccounts(accountIds), accountIds.size) }
+    fun renameAnyAccount(accountId: ByteArray, name: String): Long =
+        call { nativeRenameAccount(it, accountId, name.toByteArray(Charsets.UTF_8)) }
+    fun deleteAnyAccount(accountId: ByteArray): Long = call { nativeDeleteAccount(it, accountId) }
     fun openPrivateKeyView(accountId: ByteArray, buffer: CitizenSdkPrivateKeyDisplayBuffer): LongArray =
         call { nativeOpenPrivateKeyView(it, accountId, buffer) }
     fun revealPrivateKeyView(viewId: Long) = call { nativeRevealPrivateKeyView(it, viewId) }
@@ -78,6 +121,51 @@ internal class CitizenSdkNative private constructor(
     fun reconcileWalletCleanup(): Long = call { nativeReconcileWalletCleanup(it) }
     fun signWalletPayload(accountId: ByteArray, message: ByteArray): Long =
         call { nativeSignWalletPayload(it, accountId, message) }
+    fun beginSigning(intent: CitizenSigningIntent): Long = call {
+        nativeBeginSigning(
+            it,
+            intent.accountId(),
+            intent.payload(),
+            when (intent.transform) {
+                CitizenSigningTransform.RAW -> 1
+                CitizenSigningTransform.SUBSTRATE_SIGNING_PAYLOAD -> 2
+                CitizenSigningTransform.BLAKE2_DOMAIN -> 3
+            },
+            intent.domain(),
+            when (intent.externalSignerTransport) {
+                null -> 0
+                CitizenExternalSignerTransport.QR_V1 -> 1
+            },
+            intent.opaqueAction,
+            intent.ttlSeconds,
+        )
+    }
+    fun consumeExternalSignature(sessionId: String, response: String): Long = call {
+        nativeConsumeExternalSignature(
+            it,
+            sessionId.toByteArray(Charsets.UTF_8),
+            response.toByteArray(Charsets.UTF_8),
+        )
+    }
+    fun cancelSigningSession(sessionId: String): Boolean = call {
+        nativeCancelSigningSession(it, sessionId.toByteArray(Charsets.UTF_8))
+    }
+    fun beginDefaultAccountChange(
+        expectedRevision: Long,
+        accountIds: Array<ByteArray>,
+        ttlSeconds: Long,
+    ): Long = call {
+        nativeBeginDefaultAccountChange(
+            it, expectedRevision, flattenAccounts(accountIds), accountIds.size, ttlSeconds,
+        )
+    }
+    fun consumeDefaultAccountChange(sessionId: String, response: String): Long = call {
+        nativeConsumeDefaultAccountChange(
+            it,
+            sessionId.toByteArray(Charsets.UTF_8),
+            response.toByteArray(Charsets.UTF_8),
+        )
+    }
     fun qrParse(text: String): CitizenQrDocument = call {
         CitizenQrDocument.parse(strictUtf8(nativeQrParse(it, text.toByteArray(Charsets.UTF_8))))
     }
@@ -115,16 +203,19 @@ internal class CitizenSdkNative private constructor(
         }
         CitizenQrImage(width, height, encoded.copyOfRange(8, encoded.size))
     }
-    fun transferWithRemark(
-        source: ByteArray,
-        destination: ByteArray,
-        amount: CitizenU128,
-        remark: ByteArray,
-    ): Long = call { nativeTransferWithRemark(it, source, destination, amount.low, amount.high, remark) }
-    fun initializeFinalizedHistory(accountIds: Array<ByteArray>): Long =
-        call { nativeInitializeFinalizedHistory(it, flattenAccounts(accountIds), accountIds.size) }
-    fun syncFinalizedHistory(accountIds: Array<ByteArray>): Long =
-        call { nativeSyncFinalizedHistory(it, flattenAccounts(accountIds), accountIds.size) }
+    fun prepareTransaction(source: ByteArray, callData: ByteArray): Long =
+        call { nativePrepareTransaction(it, source, callData) }
+    fun releasePreparedTransaction(token: Long) =
+        call { nativeReleasePreparedTransaction(it, token) }
+    fun executePreparedTransaction(token: Long): Long =
+        call { nativeExecutePreparedTransaction(it, token) }
+    fun consumePreparedTransactionQrResponse(executionId: ByteArray, response: ByteArray): Long =
+        call { nativeConsumePreparedTransactionQrResponse(it, executionId, response) }
+    fun cancelPreparedTransactionExecution(executionId: ByteArray) =
+        call { nativeCancelPreparedTransactionExecution(it, executionId) }
+    fun getTransactionHistory(beforeExecutionId: ByteArray?, limit: Int): Long =
+        call { nativeGetTransactionHistory(it, beforeExecutionId, limit) }
+    fun syncTransactionHistory(): Long = call { nativeSyncTransactionHistory(it) }
     fun prepareWalletCreation(wordCount: Int, password: ByteArray): Long =
         call { nativePrepareWalletCreation(it, wordCount, password) }
     fun importWallet(mnemonic: ByteArray, password: ByteArray): Long =
@@ -160,13 +251,7 @@ internal class CitizenSdkNative private constructor(
     }
 
     @Suppress("unused") // Called only by citizensdk_jni.
-    private fun onNativeWatch(coreRequestId: Long, sequence: Long, encoded: ByteArray) {
-        router?.onProgress(
-            coreRequestId,
-            java.lang.Long.toUnsignedString(sequence),
-            CitizenSdkNativeCodec.decodeWatch(encoded),
-        )
-    }
+    private fun onNativeWatch(coreRequestId: Long, sequence: Long, encoded: ByteArray) = Unit
 
     @Suppress("unused") // Called only by citizensdk_jni.
     private fun onNativeCapabilities(sequence: Long, encoded: ByteArray) {
@@ -242,12 +327,30 @@ internal class CitizenSdkNative private constructor(
     private external fun nativeStop(bridge: Long): Long
     private external fun nativeCancel(bridge: Long, coreRequestId: Long): Boolean
     private external fun nativeGetFinalizedHead(bridge: Long): Long
+    private external fun nativeGetSyncStatus(bridge: Long): Long
+    private external fun nativeGetBestHead(bridge: Long): Long
+    private external fun nativeGetFinalizedBlockAt(bridge: Long, number: Long): Long
+    private external fun nativeResolveFinalizedBlock(bridge: Long, hash: ByteArray, number: Long): Long
+    private external fun nativeGetBlockHeader(bridge: Long, hash: ByteArray, number: Long, finality: Int): Long
+    private external fun nativeGetBlockBody(bridge: Long, hash: ByteArray, number: Long, finality: Int): Long
+    private external fun nativeGetRuntimeContext(bridge: Long, hash: ByteArray, number: Long, finality: Int): Long
+    private external fun nativeGetStorage(bridge: Long, hash: ByteArray, number: Long, finality: Int, key: ByteArray): Long
+    private external fun nativeGetStorageBatch(bridge: Long, hash: ByteArray, number: Long, finality: Int, keys: Array<ByteArray>): Long
+    private external fun nativeGetSystemEvents(bridge: Long, hash: ByteArray, number: Long, finality: Int): Long
+    private external fun nativeExportState(bridge: Long): Long
+    private external fun nativeImportState(bridge: Long, formatVersion: Int, hash: ByteArray, number: Long, finality: Int, database: ByteArray): Long
     private external fun nativeGetGenesisHash(bridge: Long): ByteArray
     private external fun nativeGetAccountBalance(bridge: Long, accountId: ByteArray): Long
     private external fun nativeGetAccountBalances(bridge: Long, accountIds: ByteArray, count: Int): Long
     private external fun nativeGetAccountNonce(bridge: Long, accountId: ByteArray): Long
     private external fun nativeGetFeeSnapshot(bridge: Long): Long
     private external fun nativeGetWalletProfile(bridge: Long): Long
+    private external fun nativeGetWalletState(bridge: Long): Long
+    private external fun nativeImportColdAccountId(bridge: Long, accountId: ByteArray, name: ByteArray): Long
+    private external fun nativeImportColdAccountSs58(bridge: Long, address: ByteArray, name: ByteArray): Long
+    private external fun nativeReorderWalletAccounts(bridge: Long, expectedRevision: Long, accountIds: ByteArray, count: Int): Long
+    private external fun nativeRenameAccount(bridge: Long, accountId: ByteArray, name: ByteArray): Long
+    private external fun nativeDeleteAccount(bridge: Long, accountId: ByteArray): Long
     private external fun nativeOpenPrivateKeyView(bridge: Long, accountId: ByteArray, buffer: CitizenSdkPrivateKeyDisplayBuffer): LongArray
     private external fun nativeRevealPrivateKeyView(bridge: Long, viewId: Long)
     private external fun nativeCancelPrivateKeyView(bridge: Long, viewId: Long)
@@ -259,6 +362,34 @@ internal class CitizenSdkNative private constructor(
     private external fun nativeDeleteWallet(bridge: Long): Long
     private external fun nativeReconcileWalletCleanup(bridge: Long): Long
     private external fun nativeSignWalletPayload(bridge: Long, accountId: ByteArray, message: ByteArray): Long
+    private external fun nativeBeginSigning(
+        bridge: Long,
+        accountId: ByteArray,
+        payload: ByteArray,
+        transform: Int,
+        domain: ByteArray,
+        externalSignerTransport: Int,
+        opaqueAction: Int,
+        ttlSeconds: Long,
+    ): Long
+    private external fun nativeConsumeExternalSignature(
+        bridge: Long,
+        sessionId: ByteArray,
+        response: ByteArray,
+    ): Long
+    private external fun nativeCancelSigningSession(bridge: Long, sessionId: ByteArray): Boolean
+    private external fun nativeBeginDefaultAccountChange(
+        bridge: Long,
+        expectedRevision: Long,
+        accountIds: ByteArray,
+        count: Int,
+        ttlSeconds: Long,
+    ): Long
+    private external fun nativeConsumeDefaultAccountChange(
+        bridge: Long,
+        sessionId: ByteArray,
+        response: ByteArray,
+    ): Long
     private external fun nativeQrParse(bridge: Long, text: ByteArray): ByteArray
     private external fun nativeQrCreateSignRequest(bridge: Long, action: Int, accountId: ByteArray, payload: ByteArray, ttl: Long): ByteArray
     private external fun nativeReviewQrSignRequest(bridge: Long, text: ByteArray): Long
@@ -270,16 +401,19 @@ internal class CitizenSdkNative private constructor(
     private external fun nativeQrEncodeUserTransfer(bridge: Long, requestId: ByteArray, expiresAt: Long, accountId: ByteArray, amount: ByteArray, symbol: ByteArray, memo: ByteArray, bankCidNumber: ByteArray): ByteArray
     private external fun nativeQrDecodeLuminance(bridge: Long, data: ByteArray, width: Int, height: Int, rowStride: Int): ByteArray
     private external fun nativeQrEncode(bridge: Long, text: ByteArray, scale: Int): ByteArray
-    private external fun nativeTransferWithRemark(
+    private external fun nativePrepareTransaction(
         bridge: Long,
         source: ByteArray,
-        destination: ByteArray,
-        amountLow: Long,
-        amountHigh: Long,
-        remark: ByteArray,
+        callData: ByteArray,
     ): Long
-    private external fun nativeInitializeFinalizedHistory(bridge: Long, accountIds: ByteArray, count: Int): Long
-    private external fun nativeSyncFinalizedHistory(bridge: Long, accountIds: ByteArray, count: Int): Long
+    private external fun nativeReleasePreparedTransaction(bridge: Long, token: Long)
+    private external fun nativeExecutePreparedTransaction(bridge: Long, token: Long): Long
+    private external fun nativeConsumePreparedTransactionQrResponse(
+        bridge: Long, executionId: ByteArray, response: ByteArray,
+    ): Long
+    private external fun nativeCancelPreparedTransactionExecution(bridge: Long, executionId: ByteArray)
+    private external fun nativeGetTransactionHistory(bridge: Long, beforeExecutionId: ByteArray?, limit: Int): Long
+    private external fun nativeSyncTransactionHistory(bridge: Long): Long
     private external fun nativePrepareWalletCreation(bridge: Long, wordCount: Int, password: ByteArray): Long
     private external fun nativeValidateWalletPassword(password: ByteArray)
     private external fun nativeValidateWalletMnemonic(mnemonic: ByteArray, wordCount: Int)
@@ -314,6 +448,11 @@ internal class CitizenSdkNative private constructor(
         @JvmStatic
         internal external fun completeVaultUnwrap(nativeBridge: Long, hostOperationId: Long, errorCode: Int)
     }
+}
+
+private fun CitizenFinality.nativeValue(): Int = when (this) {
+    CitizenFinality.BEST -> 1
+    CitizenFinality.FINALIZED -> 2
 }
 
 /** 唯一 native 调用/销毁准入状态。失败后保持 closing，只允许精确重试销毁。 */

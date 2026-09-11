@@ -203,7 +203,41 @@ void main() {
       platform.argumentsByMethod['signWalletPayload']![4],
       isA<Uint8List>().having((value) => value.length, 'length', 0),
     );
-    expect(platform.argumentsByMethod['renameWalletAccount']![4], '旅行钱包');
+    expect(platform.argumentsByMethod['renameAccount']![4], '旅行钱包');
+    await sdk.close();
+  });
+
+  test('统一钱包状态包含冷热账户且默认账户只从首项读取', () async {
+    final sdk = await CitizenSdk.open();
+    final initial = await sdk.wallet.getState();
+    final imported = await sdk.wallet.importColdAccount(
+      accountId: _account(2),
+      name: '  冷钱包  ',
+    );
+    final reordered = await sdk.wallet.reorderAccountsWithoutDefaultChange(
+      expectedRevision: imported.revision,
+      accountIds: <String>[_account(1), _account(2)],
+    );
+    final renamed = await sdk.wallet.renameAccount(
+      accountId: _account(2),
+      name: '离线签名',
+    );
+    final deleted = await sdk.wallet.deleteAccount(_account(2));
+
+    expect(initial.defaultAccount?.accountId, _account(1));
+    expect(imported.accounts.last.signMode, CitizenWalletSignMode.cold);
+    expect(reordered.defaultAccount?.accountId, _account(1));
+    expect(renamed.accounts.last.name, '离线签名');
+    expect(deleted.accounts, hasLength(1));
+    expect(platform.argumentsByMethod['importColdAccountId']![4], '冷钱包');
+    expect(
+      platform.argumentsByMethod['reorderWalletAccountsWithoutDefaultChange']!
+          .sublist(3),
+      <Object?>[
+        '2',
+        <String>[_account(1), _account(2)],
+      ],
+    );
     await sdk.close();
   });
 
@@ -308,7 +342,17 @@ final class _WalletPlatform implements CitizenSdkPlatform {
       'importWallet' => <Object?>[_profile('imported', 1)],
       'addWalletAccounts' => <Object?>[_profile('imported', 3)],
       'signWalletPayload' => <Object?>[Uint8List(64)],
-      'renameWalletAccount' => <Object?>[_profile('created', 1)],
+      'getWalletState' => <Object?>[_state(includeCold: false, revision: 1)],
+      'importColdAccountId' => <Object?>[
+        _state(includeCold: true, revision: 2),
+      ],
+      'reorderWalletAccountsWithoutDefaultChange' => <Object?>[
+        _state(includeCold: true, revision: 3),
+      ],
+      'renameAccount' => <Object?>[
+        _state(includeCold: true, revision: 4, coldName: '离线签名'),
+      ],
+      'deleteAccount' => <Object?>[_state(includeCold: false, revision: 5)],
       'deleteWallet' => const <Object?>[null],
       'close' => <Object?>['disposed'],
       _ => throw StateError('未预期 method：$method'),
@@ -335,6 +379,41 @@ List<Object?> _profile(String origin, int accountCount) {
     ];
   });
   return <Object?>[0, origin, '1', _account(1), _account(1), accounts];
+}
+
+List<Object?> _state({
+  required bool includeCold,
+  required int revision,
+  String coldName = '冷钱包',
+}) {
+  final hot = _profile('created', 1);
+  return <Object?>[
+    '$revision',
+    hot,
+    <Object?>[
+      <Object?>[
+        'hot',
+        0,
+        0,
+        _account(1),
+        citizenSs58FromAccountId(_account(1)),
+        '账户0',
+        '1',
+        true,
+      ],
+      if (includeCold)
+        <Object?>[
+          'cold',
+          1,
+          null,
+          _account(2),
+          citizenSs58FromAccountId(_account(2)),
+          coldName,
+          '2',
+          false,
+        ],
+    ],
+  ];
 }
 
 String _account(int byte) =>

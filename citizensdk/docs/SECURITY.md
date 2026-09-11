@@ -33,6 +33,24 @@ checkpoint、manifest 或链资产摘要覆盖。本版本没有在线链资产�
 - mini-secret、展开后的 SecretKey 和签名临时字节在作用域结束时清零。
 - signer FFI 用 `catch_unwind` 把 panic 转为错误码；FFI Release profile 不允许破坏该契约。
 
+## 通用签名意图与外部签名会话
+
+`SigningIntent` 只绑定 AccountId、不透明 payload 和显式通用 transform。raw 逐字节签名；
+Substrate SigningPayload 只在长度大于 256 字节时取 blake2_256；domain 模式签
+`blake2_256(domain || payload)`，domain 必须为 1..32 字节。SDK 不根据 action、App、页面、
+CID 或业务实体选择 transform，调用方必须在自己的业务协议中决定编码和域。
+
+热账户必须通过 `LocalSigning + HardwareVault + UserAuthentication`，签名后再以原账户和冻结
+transform 自验。冷账户在 WalletState 路由完成后立即转 external transport，不调用 Vault。
+`QR_V1` 会话绑定 SDK 实例、随机 session、账户、原 payload、transform、opaque action、transport
+和 expiry；任意 `uint16` action 均可传输，Core 不再持有业务 allowlist，也不从 payload 前两字节
+猜 action。无效响应保持会话可重试；首个有效响应原子消费；取消、过期或 close 后不能复活。
+
+默认账户授权额外冻结 CitizenChain genesis、wallet revision、原默认账户、变更前完整排列、
+目标完整排列、expiry 与 16 字节随机 nonce。签名者固定为原默认账户，验签成功后仍必须在同一
+钱包锁内复核 revision、原默认账户和账户闭集再 CAS。action 12 只存在于与独立 CitizenWallet
+互操作的默认账户 transport adapter，不是通用签名业务规则。公开层没有绕过授权的 setter。
+
 ## Rust Core 的秘密与 provider 合同
 
 `native/contracts` 已经把 `ChainSigner` 与 `SecretVault` 分开：前者负责 sr25519 派生、签名与
@@ -47,11 +65,16 @@ Enclave 及 Windows/Linux 金库都是 `SecretVault` provider，不冒充能够�
 类型不能接收明文秘密，系统金库仍是独立的第六边界。
 
 `WalletAccount` 会从 `AccountId32` 重算 SS58 prefix `2027` 的规范地址；`WalletProfile` 固定
-wallet index `0` 和账户0锚。`WalletState` 必须同时携带 provisioning 的 target profile：
+热 wallet index `0` 和账户0锚。`ColdWalletAccount` 只包含非零本机 index、AccountId、规范
+SS58、名称和创建时间，不存在 `SecretRef`、generation 或密钥字段。`WalletState` 原子保存
+冷热账户的精确全局排列，第一项为默认账户；热冷 AccountId 重复、顺序缺项/重复/越集和冷
+index 回退均失败关闭。`WalletState` 同时携带 provisioning 的 target profile：
 create/import 精确拥有全部 target refs 并在回滚时删除本代 wallet key；append 的 previous
 profile 是 target 账户列表的严格前缀，既有字段逐项不变，计划只拥有新增 refs。provisioning
 与 active cleanup 互斥；cleanup refs 非空、唯一且属于同一 generation，queue 最多 64 项，
 各计划的 operation ID 与物理目标不得重叠，也不得命中当前 secrets 或当前 generation KEK。
+冷账户操作在任何热 provisioning/cleanup 未完成时拒绝写入，不会以“顺便恢复”为由调用
+`SecretVault`。wallet typed payload 直接使用 v2 并拒绝 v1；没有旧钱包解析、迁移或兼容分支。
 
 第 4.1 步的 Rust 钱包服务已经实现 BIP-39 派生、创建/导入/追加、可用性核验、切换、改名、
 签名、删除和清理重放。助记词、master 与 child 只以可清零 Rust 缓冲区参与派生或金库调用；
@@ -65,8 +88,44 @@ Rust Core 没有公开私钥返回接口；内部原生显示只提供本次查�
 宿主只能补齐所选模块需要的具名 store 与 KEK/DEK 金库，不能注入 signer、任意 RPC 或 nonce。
 Rust 在平台资源创建前统一校验 modules；wallet/signing 各有独立门禁，不因共享 secure
 store/Vault 而开放钱包 UI。chain 未选择时不构造 provider、读取链资产或创建链数据库；
-history 未选择时不初始化历史服务。完整本地转账保持先持久化 pending 再广播。
-既有非 QR ABI 结构与数值保持；模块校验、模块构造、无实例验签、四个公开链查询/结果入口及九个 QR 入口使当前闭集为 89 个。
+history 未选择时不初始化历史服务。SDK 执行的 prepared transaction 保持先持久化 pending 再广播。
+既有 ABI 结构与数值保持；统一钱包、通用冷热签名、安全链读取、通用交易准备与执行加入后，当前闭集为 117 个。
+
+### 安全链读取边界
+
+公开同步状态的 best、verified finalized、peer count、`isSyncing`、`isUsable` 来自同一个 smoldot
+typed snapshot；只有 `isUsable` 是链读取 readiness 事实。调用方不能用节点数、等待时间或高度变化
+替代 Core 的能力判定。按高度/哈希解析 finalized 块必须经过 verified ancestry；调用方提供的
+`finality` 位、缓存或普通 RPC header 都不能提升为 finalized 证明。
+
+准确块读取先验证 hash/height/canonical 关系。Header 重新构造完整 SCALE Header 并核对
+Blake2-256；Body 保留完整 extrinsic 顺序且不业务解码；Runtime、storage 和 batch 都绑定同一个
+准确块。batch 保留输入顺序与重复 key，任一项错误时不返回部分结果。`System.Events` 便利入口
+固定协议 key 且只接受 finalized 块，但返回值仍为 opaque SCALE bytes；Square、投票、立法、提案、
+治理、旅行、订单等解释由接入 App 完成。
+
+公开输入/输出受固定资源上限约束：storage key 1..4 KiB、batch 1..1024 项且 key 总量不超过
+1 MiB、Header digest 1 MiB、Body 16384 项/64 MiB、metadata 与 storage batch 响应聚合 64 MiB、
+状态 database 256 KiB。跨 ABI 大值使用先询长后完整复制或逐项复制，短缓冲不产生部分输出。
+公开层没有任意 RPC method/URL、未验证 JSON、业务 storage schema 或“调用方声明已验证”旁路。
+
+### 通用交易执行边界
+
+prepared 对象只可原子消费一次；执行前重新构造并逐字节核对 chain identity、runtime、nonce、
+signed extensions、完整 SigningPayload 和 extrinsic 模板，漂移时要求重新 prepare。热路径只经
+现有 SecretVault/强认证/唯一 sr25519 signer；冷路径只经既有 `QR_V1`，错误账户、session、payload、
+expiry、重放或签名会销毁该 execution，绝不回退热签或接受裸签名字节。
+
+签名只填充冻结模板的 64 字节槽。完整 generic authorization 必须先由 typed store CAS 持久化并
+写后回读，之后才能创建 provider watch。Ready/Broadcast/InBlock/Finalized 通知都不是执行成功；
+只有 canonical finalized body 与同 index `System.ExtrinsicSuccess/Failed` 能写终态，Invalid/Usurped
+才是 pool rejection。取消会唤醒 provider wait 并排空已进入的 CAS，不删除真实 Pending/InBlock。
+重启扫描先查 finalized 证据；仍未终态时只在当前 chain/runtime 与完整签名字节全部一致后，每个
+monitor generation 重发一次原 signed extrinsic，不重新解锁、签名、迁移或兼容旧数据。
+
+`exportState`/`importState` 只运输 CitizenSDK 当前 smoldot 数据库与 finalized 锚。导入只允许在
+启动前，Core 回执必须与输入锚完全一致；它不是 CitizenApp/CitizenWallet 数据迁移格式，不解析、
+转换、回退或兼容旧数据库。
 
 Apple 绑定为 Core 借用的 HostBridge、callback、store 和 vault context 保留显式 ABI +1。
 关闭只能沿 `live -> monitorStopped -> destroyOnly -> closed` 单调前进；callback clear
@@ -176,8 +235,11 @@ host callback、存储原子性和平台绑定都必须审计。
 `WalletRepository`/`SecureSeedStore` 是 legacy Dart 名称。Android 与 Apple 正式装配均已切换到
 Rust typed stores；这些 Dart 类型仅用于受控差分测试，正式绑定不可达。
 
-- `WalletRepository` 只保存公开 profile、revision、provisioning plan、active cleanup 和
-  不相交的 exact cleanup queue。
+- `WalletRepository` 只保存热 profile、仅公钥冷账户、全局账户顺序、revision、provisioning
+  plan、active cleanup 和不相交的 exact cleanup queue。
+- 冷账户只接受 AccountId32 或严格 prefix `2027` SS58 公钥身份；它不进入 `SecureSeedStore`
+  或 `SecretVault`。导入、改名、排序、设默认和删除的 Engine 路径均为公开事实 CAS，测试以
+  Vault 不可用状态证明零 `open`、零 wallet-key delete、零密文写入。
 - `SecureSeedStore` 每个账户只保存 `//index` child mini-secret。
 - 创建首先生成只存在于 Rust 内存的一次性会话；准备阶段对 profile、密文和 KEK 零写入，
   用户确认已经备份助记词后才消费会话进入持久提交。由此消除“钱包已提交、唯一助记词尚未
@@ -203,8 +265,8 @@ Rust typed stores；这些 Dart 类型仅用于受控差分测试，正式绑定
   均由秘密缓冲区完成清零。
 - `usableProfile` / `isUsable` 不只读取公开 profile，而是验证账户0、KEK 及全部 child 的
   sr25519 公钥；后端异常上抛，不能把认证、金库或仓储故障伪装成“无钱包”。
-- `renameAccount` 只经 revision CAS 修改公开名称；cleanup 未完成或并发删除时失败关闭，绝不
-  代为创建、恢复或删除秘密。
+- 热 `renameAccount` 与冷账户改名都只经 revision CAS 修改公开名称；cleanup 未完成或并发
+  删除时失败关闭，绝不代为创建、恢复或删除秘密。
 - `getAccountPrivateKey` 只属于归档 legacy Dart API：它返回不可擦除的 Dart `String`，
   宿主必须负责风险确认、防截屏、禁日志/持久化/上传和尽快丢弃引用。Rust Core 与新的产品
   C ABI 明确不提供对应私钥导出路径。
@@ -234,15 +296,21 @@ runtime context，不能信任宿主可写缓存中的 metadata。
 
 Rust 交易构造只接受准确 CitizenChain 身份、同一 best 块的 runtime context 和同次
 `AccountNonceApi_account_nonce` typed snapshot。该 Runtime 值不包含交易池；同账户一旦有
-Pending/InBlock，持久历史 single-flight 会禁止构造另一笔交易；同参数只恢复原始授权，
-不同参数返回 Conflict，防止本地复用 nonce。
-`transfer_with_remark` 固定 pallet `4` / call `0`、正分金额、最多 99 UTF-8 字节
-remark、immortal era 与 tip `0`；metadata 动态编码必须与固定 call bytes 相等。签名前复核
-source AccountId 与金库秘密公钥，签后立即验签。Rust 钱包不公开可拆分的 signed build；唯一
-`transfer_with_remark` 入口在内部把 source/destination/amount/remark/nonce 与完整 extrinsic
-hash、完整 signed extrinsic、构造块、RuntimeVersion 和 genesis_hash 原子持久化为 pending，
-确认 CAS 成功后才广播。恢复先补扫 finalized 历史；仍未决才从当前已验证 best 读取同版本
-Runtime，核对账户、nonce、call、完整编码与 sr25519 签名，再决定是否重发相同字节。
+Pending/InBlock，持久历史 single-flight 会禁止构造另一笔交易，防止本地复用 nonce。
+
+通用准备入口只接收 source AccountId 和有界 opaque RuntimeCall。Engine 必须用准确 best block 的
+outer-call metadata 类型完整消费到 EOF 并 canonical 回编码；未知 call、截断、trailing、超限或
+不支持的 signed extension 全部失败关闭。当前策略固定为 SDK 自动 nonce、immortal era、tip=0，
+调用方没有 nonce/era/tip/选项或版本入口。准备对象按实例 generation 和 source single-flight 隔离，
+不持久化且只能取消或由后续交易闭环原子消费一次；stop/close 清除注册表和可清零内部 signer
+message/extrinsic 模板。公开摘要不包含这些敏感交易材料或原生 handle。
+
+通用准备入口只接收调用方生成的 opaque RuntimeCall，并用准确 metadata 完整消费到 EOF 后
+canonical 回编码；SDK 不解释目的账户、金额、备注或 pallet 业务含义。签名前复核 source AccountId
+与金库秘密公钥，签后立即验签。执行入口把 source、callData hash、nonce、完整 signed extrinsic、
+构造块、RuntimeVersion 和 genesis_hash 原子持久化为 pending，确认 CAS 成功后才广播。恢复先
+核验 finalized 证据；仍未决才从当前已验证 best 读取同版本 Runtime，核对账户、nonce、call、
+完整编码与 sr25519 签名，再决定是否重发相同字节。
 immortal 的额外签名域绑定 genesis 而非原 best 哈希，因此原构造块不可读不阻断同版本恢复。
 当前 Runtime 版本已变且尚无执行证据时安全报错，保留原授权，不擅自重签或清除记录。写后异常、
 取消或进程退出不丢失这份授权；缺少授权的状态失败关闭，不自动清库或重签。
@@ -251,7 +319,7 @@ immortal 的额外签名域绑定 genesis 而非原 best 哈希，因此原构�
 `watch_extrinsic` 合同实际会 submit-and-watch，而不是被动观察既有哈希；因此只要组合任一
 钱包交易组件，Engine 也会在触达 provider 前禁止 raw submit-and-watch。
 
-高层 `citizensdk_transfer_with_remark` 的完整 terminal future 在独立四线程长观察池运行，
+通用 `citizensdk_execute_prepared_transaction` 的完整 terminal future 在独立四线程长观察池运行，
 不会占用 lifecycle/read/state 所用的短操作池。宿主取消会得到 `CANCELLED`；provider 断线、
 dropped、retracted、timeout 或取消只结束本次观察，不删除 durable Pending/InBlock 门。
 finalized 返回仍必须经过 canonical body、准确块 metadata 与同 index `System.Events` 核验。
@@ -262,26 +330,19 @@ Rust Engine 现在把上述规则固化为准确 `VerifiedBlockRef` 的 runtime 
 `resolve_finalized_block(hash, height)`，smoldot 从准确 verified finalized 锚沿 exact parent
 hash 验证到目标高度；best/recent cache 或 peer 高度映射都不能替代这条证明。每批最多 120 块，
 独立有界 proof-derived cache 只用于减少重复回溯。这样安全支持重启补扫并关闭重组 TOCTOU。
-历史终态
-只接收核验器产生的私有令牌，令牌不可分离地绑定 txHash 与 Success/Failed，且必须精确匹配
-唯一 pending，不能把 A 交易结论写给 B。finalized 流水拒绝自转，对同一 extrinsic/account/
-amount identity 的业务事件与 `Balances` 事件严格一对一配对；已核验本地 pending 认领发送方
-outgoing、保留接收方 incoming，并在同一原始块重放时保持终态和 pending 消费幂等。它还对
-导入的轻节点状态执行启动前、链/协议/genesis/格式/finality、
-最大 256 KiB 和不倒退门禁。finalized 事件还绑定生产 metadata 的绝对 AccountId32/u128/
-BoundedVec<u8> 类型指纹；call/event 同步漂移也必须在读取值前失败。Runtime 备注按最多 99 个
-原始 bytes 保存，并以标准 UTF-8 lossy/U+FFFD 显示，不能把非法 bytes 与真实 `?` 混同。
-Balances.Transfer 的 Initialization/Finalization 阶段保留空 extrinsic_index 和准确事件序号；
-不得把两条无调用索引的流水合并。System 执行结果和 TransferWithRemark 仍严格要求
-ApplyExtrinsic，不能用 hook 流水证明某笔 extrinsic 执行成功。
+历史终态只接收核验器产生的私有令牌，令牌不可分离地绑定 txHash 与 Success/Failed，且必须
+精确匹配唯一 pending，不能把 A 交易结论写给 B。SDK 历史不扫描 transfer、投票或治理事件，
+不推断方向，也不保存目的账户、金额、备注或业务 pallet。导入的轻节点状态执行启动前、
+链/协议/genesis/格式/finality、最大 256 KiB 和不倒退门禁。System 执行结果必须属于
+`ApplyExtrinsic`，不能用 hook 流水证明某笔 extrinsic 执行成功。
 engine 使用官方 `subxt-core = 0.43.0` 做 metadata/events 解码，
 不增加第二轻节点。真实 `smoldot/provider` 已实现 `VerifiedChainClient`；它内部仅允许源码
 固定的准确块读取、runtime、提交/观察和状态方法，产品 ABI 不接受任意 RPC 方法名。Provider
 提交后立即独立核对完整 extrinsic Blake2-256；节点哈希不一致直接失败关闭。
 
 `citizensdk_sign_wallet_payload` 是提供给受信任宿主的产品无关本地账户签名能力，可用于 TUYU
-等明确业务协议；它返回签名，因此同进程宿主技术上也能把签名用于 SDK 高层交易路径之外。
-pending-before-broadcast 保证只覆盖 SDK 自己的高层钱包交易入口，不能被描述为对所有宿主签名
+等明确业务协议；它返回签名，因此同进程宿主技术上也能把签名用于 SDK 交易闭环之外。
+pending-before-broadcast 保证只覆盖 SDK 自己执行的 prepared transaction，不能被描述为对所有宿主签名
 用途的强制约束。语言绑定必须明确这条信任边界，不能把通用载荷签名伪装成只能签业务
 challenge 的受限密码学原语。
 
@@ -329,7 +390,7 @@ host completion 被 claim 后仍计为 outstanding，直到 SDK
 
 根产品 C ABI/头文件不导出低层 signer、private-key 或 child-secret 原语；高层
 `citizensdk_sign_wallet_payload` 只返回签名结果。Android AAR/Flutter 双投影禁止
-`libsmoldot`，只带产品 Core 与薄 JNI bridge；Apple XCFramework 只导出根产品头的 89 个
+`libsmoldot`，只带产品 Core 与薄 JNI bridge；Apple XCFramework 只导出根产品头的 97 个
 `citizensdk_*` 符号，并拒绝 `smoldot_*`、`citizen_sr25519_*` 与 `account_crypto_*`。legacy
 smoldot/signer 符号只允许存在于源码树外的 macOS `arm64` 差分测试宿主库，绝不进入候选。
 

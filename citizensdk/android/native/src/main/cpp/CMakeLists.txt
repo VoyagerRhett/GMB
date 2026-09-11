@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.22.1)
+cmake_minimum_required(VERSION 3.31.6)
 project(citizensdk_jni LANGUAGES CXX)
 
 if(NOT ANDROID_ABI STREQUAL "arm64-v8a")

@@ -1,6 +1,7 @@
 # CitizenSDK 钱包模型
 
-第 2 步钱包模块只管理热钱包和账户，签名单列 `SigningService`，两者不互相隐式启用。
+钱包模块管理一只热钱包、多个仅公钥冷账户和二者共享的本机账户顺序；签名单列
+`SigningService`，两者不互相隐式启用。
 签名-only 仅使用同一宿主中已由 SDK 安全建立的账户归属资料与设备金库；首次 provision
 仍经钱包安全流程，不生成另一套身份或秘密存储，不提供秘密导出。纯验签无需钱包或实例。
 模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
@@ -12,15 +13,46 @@ Apple 创建、导入及追加账户界面均允许空的可选 BIP-39 password�
 
 CitizenSDK 在一台设备上管理一只无根热钱包，wallet index 固定为 `0`，钱包内支持账户
 `//0` 至 `//1989`。账户 index `0` 是锚点，其 AccountId 同时是 `masterAccountId`；存在兄弟
-账户时不能单独删除账户0。Citizen 地址使用 SS58 prefix `2027`，公开 profile 中的 SS58
-必须由 AccountId32 重新计算并核对，不能信任调用方传入的地址文本。
-CitizenWallet 冷钱包是独立产品，不属于 SDK。
+账户时不能单独删除账户0。SDK 还保存多个仅公钥冷账户：冷账户从 wallet index `1` 开始
+单调分配，删除后不复用；它们没有派生账户、`SecretRef`、generation、KEK、DEK 或 cleanup。
+热、冷账户共用 `orderedAccountIds`，第一项是全局默认账户，新账户稳定追加到末尾。
+
+Citizen 地址使用 SS58 prefix `2027`。AccountId 导入时由 SDK 生成规范 SS58；SS58 导入时
+必须通过 prefix、长度、Blake2b 校验和及规范 Base58 回编码检查。CitizenWallet 是独立的
+离线钱包产品，不属于 SDK、也不由 SDK 修改；公民 App 可把其公钥重新导入 SDK 成为冷账户，
+后续签名通过既有 `QR_V1` 与它协作。
+
+## 统一账户目录
+
+`WalletState` 原子保存热 `WalletProfile`、`ColdWalletAccount[]`、全局
+`orderedAccountIds` 和 `nextColdWalletIndex`。状态构造必须证明：
+
+- 热、冷 AccountId 全局唯一，不能以两种签名模式重复存在。
+- `orderedAccountIds` 是全部现存热、冷账户的无重复精确排列；不存在影子默认账户字段。
+- 热钱包 `activeAccountId` 只保留原热钱包内部选择语义，不替代全局默认账户。
+- 冷账户 index 唯一、非零、严格小于单调计数器；删除只移除当前事实，不回退计数器。
+- 冷账户公开变更遇到热钱包 provisioning/cleanup 时失败关闭，绝不为完成冷操作而调用金库。
+
+冷账户持久数量当前以 `1990` 为资源上限；热账户最多 `1990` 个，因此全局顺序最多 `3980`
+项。该上限是宿主解码和内存分配边界，不把冷账户解释为热钱包派生账户。
+
+公开 `WalletState` 快照携带单调 revision、可选热 profile 和上述精确全局账户排列。公开操作
+包括 AccountId/SS58 冷账户导入、热冷统一改名/删除，以及带 `expectedRevision` 的完整重排。
+普通重排强制第一项不变，旧 revision、非精确排列和默认项变化都失败且不写状态。产品
+不导出原始 default setter；默认账户变化必须冻结 revision、原默认账户、完整排列、genesis、
+expiry 与 nonce，并由原默认账户签名。验签后仍复核原目录并 CAS；热原默认账户走 Vault，
+冷原默认账户通过可选 QR_V1 外部签名 transport。热 profile
+内原有 `activeAccountId` 继续只服务热钱包内部选择，不能被包装层解释成全局默认账户。
+
+冷账户导入、改名、删除与重排不需要硬件认证，也不调用 Vault；这不是降低热钱包安全门禁，
+而是因为它们不持有秘密。公开包装只调用 Core，不在 Dart/Kotlin/Swift/C++ 重写第二套状态机。
 
 ## Rust Core 模型边界
 
-`native/contracts` 固定了与当前钱包语义一致的公开模型：wallet index 为 `0`，
-账户范围仍是 `//0..//1989`，账户0必须等于 `masterAccountId`，profile、provisioning、
-cleanup 与 exact secret reference 分离。create/import provisioning 的 previous profile 必须
+`native/contracts` 固定了与当前钱包语义一致的公开模型：热 wallet index 为 `0`，
+热账户范围仍是 `//0..//1989`，账户0必须等于 `masterAccountId`；冷账户是独立公开类型，
+没有可构造秘密引用的字段。profile、冷账户目录、全局顺序、provisioning、cleanup 与 exact
+secret reference 分离。create/import provisioning 的 previous profile 必须
 为空，计划必须精确拥有 target profile 的全部账户 refs，并在回滚时删除本代 wallet key；
 append 的 previous profile 必须是 target 账户列表的严格前缀，wallet identity、origin、时间、
 active account 与已有账户逐项不变，计划只拥有新增账户 refs 且不得删除 wallet key。
@@ -29,6 +61,10 @@ cleanup 与最多 64 项 queue 的 operation ID 和物理目标不得重叠，�
 exact secrets 或当前 generation 的 wallet key。`WalletProfileStore` 只保存公开事实，
 `EncryptedSecretBlobStore` 只能保存加密信封，`SecretVault` 单独承担设备金库与认证。
 `ChainSigner` 是独立的 sr25519 合同，不能与系统金库合并成同一业务接口。
+
+宿主 wallet typed payload 已直接升级到 v2，新增冷账户目录、全局顺序和单调计数器。v1 钱包
+payload 明确返回 unsupported version；没有旧钱包读取、迁移、转换或 fallback decoder。用户
+需要自行重新输入助记词建立热钱包，或重新导入公钥建立冷账户。
 
 第 4.1 步已经在 Rust Engine 实现钱包派生和完整生命周期：English BIP-39 12／18／24 词、可选
 NFKD password、`//0..//1989`，以及 create/import/add/usable/rename/activate/delete/
@@ -40,7 +76,8 @@ reconcile；通用签名当前由独立 SigningService 承担。create 不是“
 正常写入和写后抛错都由回读事实收敛。失败方只有先取得自己的 cleanup 所有权才可删除，未完
 清理进入最多 64 项的可重放队列，不能命中当前钱包或另一代秘密。
 
-产品 C ABI v1 当前共 89 个函数，既有结构、数值与默认构造保持。新增模块校验、显式模块构造
+第 1.2 步已把上述统一状态投影到产品 C ABI、Dart、Android、Darwin、Linux 与 Windows。
+产品 C ABI v1 当前共 117 个函数，既有结构、数值与默认构造保持。新增模块校验、显式模块构造
 和无实例纯验签入口，以及四个链查询/结果入口；所有构造都进入同一私有装配。官方绑定按 modules 创建同一 Rust 服务，
 chain/history 才需要 public store，wallet/signing 才需要配套 secure store 与 KEK/DEK Vault。
 未选 wallet 的调用必须在访问钱包管理服务或展示 UI 前拒绝。
@@ -144,9 +181,9 @@ AccountId，最后回读并核对 profile、provisioning 与 active cleanup 的�
 窗口返回过期事实。不存在或秘密缺失/错配返回不可用，安全存储和仓储后端异常继续上抛；
 所有读取的 child 都在 `finally` 清零。
 
-账户名称是本机公开事实。`renameAccount` 只提交修剪后 1..30 个 Unicode scalar 的名称，使用
-相同 revision CAS 与精确回读；未知账户、遗留 cleanup plan 或并发删除均失败关闭，不读取、
-改写或恢复任何密文。
+账户名称是本机公开事实。热、冷账户名称都只接受修剪后 1..30 个 Unicode scalar。热账户
+`renameAccount` 保留既有安全状态门；冷账户改名使用同一钱包 revision CAS，且不读取、改写或
+恢复任何密文。未知账户、遗留 provisioning/cleanup 或并发删除均失败关闭。
 
 ## API 与宿主边界
 
@@ -185,12 +222,12 @@ Dart、Swift、Kotlin 或产品 C ABI；创建结果中的助记词只保留在�
 擦除。它们不返回 public Swift API、不记录、不持久化且不进入 Flutter。
 
 Rust Engine 的 `sign_wallet_payload` 是受信任宿主的通用账户签名能力，可供 TUYU 等明确协议
-签署业务载荷。它返回通用 sr25519 签名，因此宿主技术上能够在 SDK 高层钱包交易路径之外使用
-该结果；SDK 的 pending-before-broadcast 保证只覆盖内建 `transfer_with_remark` 路径。产品
+签署业务载荷。它返回通用 sr25519 签名，因此宿主技术上能够在 SDK 交易闭环之外使用该结果；
+SDK 的 pending-before-broadcast 保证只覆盖自身执行的 prepared transaction。产品
 C ABI 已以 `citizensdk_sign_wallet_payload` 投影该方法，后续绑定不得把它描述成只能签
 challenge 的受限密码学原语。
 
-高层 `citizensdk_transfer_with_remark` 在独立四线程长观察池等待完整 terminal future；取消或
+通用 `citizensdk_execute_prepared_transaction` 在独立四线程长观察池等待完整 terminal future；取消或
 provider 中断不会清除 durable Pending/InBlock single-flight。只有 canonical finalized body、
 准确块 metadata 与同 index `System.Events` 核验才能形成成功/失败终态。
 

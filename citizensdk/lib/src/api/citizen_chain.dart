@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import '../models/citizen_capability.dart';
 import '../models/citizen_chain_state.dart';
 
@@ -11,6 +13,33 @@ abstract interface class CitizenChain {
   Future<String> getGenesisHash();
 
   Future<CitizenBlockRef> getFinalizedHead();
+
+  Future<CitizenChainSyncStatus> getSyncStatus();
+
+  Future<CitizenBlockRef> getBestHead();
+
+  Future<CitizenBlockRef> getFinalizedBlockAt(BigInt number);
+
+  Future<CitizenBlockRef> resolveFinalizedBlock(String hash, BigInt number);
+
+  Future<CitizenBlockHeader> getBlockHeader(CitizenBlockRef block);
+
+  Future<CitizenBlockBody> getBlockBody(CitizenBlockRef block);
+
+  Future<CitizenRuntimeContext> getRuntimeContext(CitizenBlockRef block);
+
+  Future<Uint8List?> getStorage(CitizenBlockRef block, Uint8List key);
+
+  Future<List<Uint8List?>> getStorageBatch(
+    CitizenBlockRef block,
+    List<Uint8List> keys,
+  );
+
+  Future<Uint8List?> getSystemEvents(CitizenBlockRef finalizedBlock);
+
+  Future<CitizenChainState> exportState();
+
+  Future<void> importState(CitizenChainState state);
 
   Future<CitizenAccountBalance> getAccountBalance(String accountId);
 

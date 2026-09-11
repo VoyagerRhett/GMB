@@ -20,64 +20,6 @@ pub struct TransactionEvidence<'a> {
     pub system_events: Option<&'a [u8]>,
 }
 
-/// 只能由本模块把完整 extrinsic hash/body/event 核验结果提升成的 finalized 终态令牌。
-///
-/// 交易历史只接收此类型，因而不能把 A 交易的 `Success` 误配给 B 交易的 pending 记录。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct VerifiedFinalizedExecution {
-    transaction_hash: Hash32,
-    conclusion: ExecutionConclusion,
-}
-
-impl VerifiedFinalizedExecution {
-    pub(crate) const fn transaction_hash(&self) -> Hash32 {
-        self.transaction_hash
-    }
-
-    pub(crate) const fn conclusion(&self) -> &ExecutionConclusion {
-        &self.conclusion
-    }
-}
-
-/// provider-owned 历史协调器调用的唯一生产构造入口。
-pub(crate) fn verify_finalized_execution(
-    evidence: TransactionEvidence<'_>,
-) -> Result<VerifiedFinalizedExecution, EngineError> {
-    let transaction_hash = evidence.submitted_hash;
-    let conclusion = verify_transaction_outcome(evidence);
-    verified_finalized_execution(transaction_hash, conclusion)
-}
-
-fn verified_finalized_execution(
-    transaction_hash: Hash32,
-    conclusion: ExecutionConclusion,
-) -> Result<VerifiedFinalizedExecution, EngineError> {
-    let is_finalized_terminal = matches!(
-        &conclusion,
-        ExecutionConclusion::Success { block, .. }
-            | ExecutionConclusion::Failed { block, .. }
-            if block.is_finalized()
-    );
-    if !is_finalized_terminal {
-        return Err(EngineError::contract(
-            citizen_sdk_contracts::ContractErrorCode::InvalidState,
-            "只有 finalized 同块同 index 的已核验执行结论才能进入历史",
-        ));
-    }
-    Ok(VerifiedFinalizedExecution {
-        transaction_hash,
-        conclusion,
-    })
-}
-
-#[cfg(test)]
-pub(crate) fn verified_finalized_execution_for_test(
-    transaction_hash: Hash32,
-    conclusion: ExecutionConclusion,
-) -> Result<VerifiedFinalizedExecution, EngineError> {
-    verified_finalized_execution(transaction_hash, conclusion)
-}
-
 /// Verify full extrinsic identity, exact block index, and the same-index
 /// `System` outcome. Every incomplete or contradictory path is explicit
 /// `Unverified`; block inclusion alone can never produce `Success`.

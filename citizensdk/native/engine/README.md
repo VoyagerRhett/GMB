@@ -41,36 +41,24 @@ macOS `arm64` differential-test host artifact and never a product runtime.
   zero profile/blob/KEK writes, and commit is allowed only after the user has
   confirmed backup. Deleted secret refs become permanent tombstones and whole
   wallet generations are retired by the Vault. No private-key export exists.
-- `TransactionBuilder` validates `OnchainTransaction.transfer_with_remark`
-  against exact metadata and fixed pallet/call bytes, then uses official
-  `subxt-core 0.43.0` to build an immortal, tip-zero signed extrinsic V4 with
-  the exact best runtime version, CitizenChain genesis and exact Runtime nonce.
+- `TransactionPreparationService` validates application-encoded opaque
+  RuntimeCall bytes against exact metadata, requires canonical full decoding,
+  and uses official `subxt-core 0.43.0` to build an immortal, tip-zero signed
+  extrinsic V4 with the exact best runtime, CitizenChain genesis and nonce.
+- `TransactionExecutionService` consumes a preparation once, routes hot
+  accounts through the Rust signer and cold accounts through the existing
+  `QR_V1` external-signing session, then persists before provider access.
   The unlocked secret stays in `SecretBuffer`; source/public-key equality and
-  the resulting sr25519 signature are both verified.
-- The public wallet transaction API is one indivisible `transfer_with_remark`.
-  It is now a complete terminal future, not a submit-only receipt. Its internal
-  builder cannot be extracted: `TransactionHistoryService` persists source,
-  destination, amount, remark, nonce and the complete-extrinsic hash before
-  provider submit-and-watch starts. `InBlock` remains non-terminal. A
-  `Finalized` watch fact only sets the target: the finalized-history runtime
-  then walks canonical ancestry and accepts only a private verifier-produced
-  token binding the same hash and block-body index to finalized
-  `System.ExtrinsicSuccess` or `System.ExtrinsicFailed`.
-- `transfer_with_remark_and_watch` adds an optional synchronous
-  `WalletTransferObserver`. Every update contains only a transaction hash,
-  typed stage and already-persisted history snapshot; signed bytes and secrets
-  never enter the callback. Observer panic is isolated from the transaction
-  state machine. `Invalid/Usurped` return a typed pool-rejected result.
-  Provider errors, stream end, `Dropped`, `Retracted` and finality timeout
-  return retryable errors and deliberately retain the durable Pending/InBlock
-  same-account gate for later finalized-history recovery.
-- Finalized history rejects self-transfer views, pairs
-  `OnchainTransaction`/`Balances` events one-for-one only when their exact
-  extrinsic/account/amount identity matches, retains the business event and
-  remark, and lets a verified local pending submission claim its sender-side
-  outgoing view while preserving the receiver-side incoming view. Replaying
-  the same raw finalized block cannot resurrect a pending record that the
-  first commit already consumed.
+  the resulting sr25519 signature are verified.
+- `TransactionHistoryService` stores only SDK-submitted generic executions.
+  Public pages whitelist source/call/transaction hashes, protocol status,
+  verified block/System outcome and timestamps; recovery callData, nonce,
+  signature and signed extrinsic stay private. `InBlock` remains non-terminal.
+- Explicit history sync and automatic recovery share the same canonical
+  ancestry/body/events proof, CAS and generation fences. `Invalid/Usurped` are
+  pool rejections; provider errors, stream end, `Dropped`, `Retracted` and
+  timeout retain durable Pending/InBlock state. No transfer/event business
+  projection or account-wide chain scan is implemented here.
 
 `native/ffi::ProductComposition` 按已验证 modules 装配同一实现，不为平台或组合复制算法。
 仅 chain 构造 smoldot provider、链数据库与 runtime cache，history 仅在被选择时初始化；

@@ -4,12 +4,30 @@
 默认 full。先调用统一模块校验，再仅创建所选服务的资源；chain 未选不加载链资产或创建链数据库，
 history 未选不初始化历史，wallet/signing 才使用配套 secure store/Vault。SigningService
 仅使用同宿主已有 SDK 安全账户归属资料，首次 provision 仍须钱包安全流程，秘密不导出。
-纯验签无需实例、钱包、金库或链；Flutter 五端共用 36 方法，open 仅 `[1, modules]`，
+纯验签无需实例、钱包、金库或链；Flutter 五端共用 63 方法，open 仅 `[1, modules]`，
 `verifySignature` 请求仅 `[1, accountId, signature, payload]`、响应仅 `[1, bool]`，
 不建立 session 或事件订阅。运行期模块选择不裁剪现有正式 full 包及链资产。
 Android 相机层只向 JNI 交付 8 位亮度帧；识别与生成唯一进入 SDK 内 ZXing-C++ 3.1.1，
 协议解析和扫码签名会话唯一进入 Rust QR 模块。QR-only 不初始化钱包、Vault 或轻节点。
 本次第 2 步仅更新源码、注释、合同和测试，尚未执行新的真实构建、平台测试或硬件验收；下文旧分步运行记录保留为历史证据，不代表本次变更已验证。
+
+第 1.2 步新增 `getWalletState`、两种冷公钥导入、保持默认项不变的 revision 重排，以及统一
+改名/删除。Kotlin/JNI 和 Flutter 只严格投影 Core 的热/冷账户事实；冷账户路径不启动
+Activity、认证或 Vault，产品没有无授权 default setter，也没有旧 App 钱包迁移/兼容分支。
+
+第 1.3 步新增通用 opaque 签名、external QR_V1 会话和默认账户签名授权。JNI/Kotlin 不重算
+transform、不维护业务 action 表；冷账户不访问 Android Keystore/Vault，热账户仍使用现有
+认证路径。默认账户仅在 Core 验原默认账户签名并完成 revision CAS 后改变。
+
+第 1.4 步新增 12 个通用安全链读取方法。Kotlin/JNI/Flutter 只复制准确块、同步状态、
+Header/Body/Runtime、opaque storage/System.Events 和显式 smoldot 状态，不自行联网、重算
+finality 或解释 App 业务 SCALE。所有 byte array 在跨异步边界前复制，返回模型防御性复制；
+输入数量、累计字节、输出类型和 import finalized 回执均失败关闭。
+
+第 1.5/1.6 步把 opaque callData 准备及冷热执行投影为五个固定方法。Kotlin/JNI 不构造
+RuntimeCall、payload 或 extrinsic；同步 admission 失败会恢复唯一 prepared token。冷签 response
+固定 1..2331 UTF-8 bytes 且只进入 Core 的 `QR_V1` 会话，长观察使用 Core executionId 取消，
+平台不保存签名或链上授权字节。
 
 第 3 步补充会话内 `getGenesisHash` 与 `getAccountBalances`，分别投影无需启动的固定链身份
 及同一 finalized 块的批量余额；后者保留顺序、重复项与空列表，不在 Android 重写查询逻辑。

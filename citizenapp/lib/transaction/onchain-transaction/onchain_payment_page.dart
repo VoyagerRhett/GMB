@@ -13,10 +13,10 @@ import 'package:citizenapp/my/util/amount_format.dart';
 import 'package:citizenapp/transaction/onchain-transaction/onchain_payment_models.dart';
 import 'package:citizenapp/transaction/onchain-transaction/onchain_payment_service.dart';
 import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/rpc/chain_tx_monitor.dart';
+import 'package:citizenapp/transaction/history/chain/wallet_transaction_history_sync.dart';
 import 'package:citizenapp/rpc/transfer_rpc.dart';
-import 'package:citizenapp/transaction/shared/local_tx_store.dart';
-import 'package:citizenapp/transaction/shared/tx_auto_refresh_mixin.dart';
+import 'package:citizenapp/transaction/history/data/local_tx_store.dart';
+import 'package:citizenapp/transaction/history/presentation/tx_auto_refresh_mixin.dart';
 import 'package:citizenapp/isar/wallet_isar.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
 import 'package:citizenapp/qr/qr_protocols.dart';
@@ -27,7 +27,7 @@ import 'package:citizenapp/my/user/contact_service.dart' show UserContact;
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:citizenapp/wallet/pages/wallet_page.dart';
-import 'package:citizenapp/wallet/pages/transaction_history_page.dart';
+import 'package:citizenapp/transaction/history/presentation/transaction_history_page.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
 typedef OnchainPaymentExtraEntriesBuilder = List<Widget> Function(

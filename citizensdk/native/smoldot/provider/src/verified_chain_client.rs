@@ -1,11 +1,12 @@
 use std::num::NonZero;
 
 use citizen_sdk_contracts::{
-    validated_finalized_block_range_len, BlockFinality, ChainIdentity, ContractError,
-    ContractErrorCode, ContractFuture, ContractResult, ContractStream, ExportedChainState,
-    ExtrinsicWatchEvent, FinalizedBlockRef, Hash32, RuntimeContext, RuntimeVersion,
-    SignedExtrinsic, StateImportReceipt, SubmittedExtrinsic, VerifiedBlockRef, VerifiedChainClient,
-    MAX_FINALIZED_BLOCKS_PER_BATCH,
+    validated_finalized_block_range_len, BlockFinality, ChainIdentity, ChainSyncStatus,
+    ContractError, ContractErrorCode, ContractFuture, ContractResult, ContractStream,
+    ExportedChainState, ExtrinsicWatchEvent, FinalizedBlockRef, Hash32, RuntimeContext,
+    RuntimeVersion, SignedExtrinsic, StateImportReceipt, SubmittedExtrinsic, VerifiedBlockHeader,
+    VerifiedBlockRef, VerifiedChainClient, MAX_FINALIZED_BLOCKS_PER_BATCH, MAX_HEADER_DIGEST_BYTES,
+    MAX_STORAGE_BATCH_KEYS, MAX_STORAGE_BATCH_KEY_BYTES, MAX_STORAGE_KEY_BYTES,
 };
 use futures_channel::mpsc;
 use serde_json::{json, Value};
@@ -41,6 +42,33 @@ impl VerifiedChainClient for SmoldotVerifiedChainClient {
         Box::pin(async move {
             let running = running?;
             finalized_head(&running).await
+        })
+    }
+
+    fn get_sync_status(&self) -> ContractFuture<'_, ChainSyncStatus> {
+        let running = self.running();
+        Box::pin(async move {
+            let running = running?;
+            let snapshot_future = {
+                let client = running.client.lock();
+                client
+                    .chain_status_snapshot(running.chain_id)
+                    .map_err(provider_error)?
+            };
+            let snapshot = snapshot_future.await.map_err(provider_error)?;
+            ChainSyncStatus::try_new(
+                snapshot.peer_count,
+                snapshot.is_syncing,
+                snapshot.is_usable,
+                VerifiedBlockRef::best(
+                    Hash32::from_bytes(snapshot.best_block_hash),
+                    snapshot.best_block_number,
+                ),
+                FinalizedBlockRef::from_parts(
+                    Hash32::from_bytes(snapshot.current_verified_finalized_block_hash),
+                    snapshot.current_verified_finalized_block_number,
+                ),
+            )
         })
     }
 
@@ -215,6 +243,18 @@ impl VerifiedChainClient for SmoldotVerifiedChainClient {
         })
     }
 
+    fn get_block_header_at(
+        &self,
+        block: VerifiedBlockRef,
+    ) -> ContractFuture<'_, VerifiedBlockHeader> {
+        let running = self.running();
+        Box::pin(async move {
+            let running = running?;
+            validate_exact_block(&running, block).await?;
+            verified_header_at(&running, block).await
+        })
+    }
+
     fn get_block_extrinsics_at(&self, block: VerifiedBlockRef) -> ContractFuture<'_, Vec<Vec<u8>>> {
         let running = self.running();
         Box::pin(async move {
@@ -277,6 +317,10 @@ impl VerifiedChainClient for SmoldotVerifiedChainClient {
                     return;
                 }
             };
+            // The new upstream API reports retraction as `block: null`; retain
+            // only the previously verified inclusion block needed to project
+            // the existing generic watch contract.
+            let mut last_included = None;
 
             while !lease.stopping() && !sender.is_closed() {
                 let notification = match tokio::time::timeout(
@@ -307,7 +351,7 @@ impl VerifiedChainClient for SmoldotVerifiedChainClient {
                 let Some(status) = subscription_result(&value, &subscription) else {
                     continue;
                 };
-                match parse_watch_event(&running, status).await {
+                match parse_watch_event(&running, status, &mut last_included).await {
                     Ok((event, terminal)) => {
                         if sender.unbounded_send(Ok(event)).is_err() || terminal {
                             break;
@@ -648,10 +692,37 @@ async fn storage_batch_exact_at(
 }
 
 fn validate_storage_keys(keys: &[Vec<u8>]) -> ContractResult<()> {
+    if keys.len() > MAX_STORAGE_BATCH_KEYS {
+        return Err(contract_error(
+            ContractErrorCode::InvalidArgument,
+            "storage batch key 数量超过 1024",
+        ));
+    }
+    let mut total = 0_usize;
     if let Some(index) = keys.iter().position(Vec::is_empty) {
         return Err(contract_error(
             ContractErrorCode::InvalidArgument,
             format!("storage key {index} 不能为空"),
+        ));
+    }
+    for (index, key) in keys.iter().enumerate() {
+        if key.len() > MAX_STORAGE_KEY_BYTES {
+            return Err(contract_error(
+                ContractErrorCode::InvalidArgument,
+                format!("storage key {index} 超过 4 KiB"),
+            ));
+        }
+        total = total.checked_add(key.len()).ok_or_else(|| {
+            contract_error(
+                ContractErrorCode::InvalidArgument,
+                "storage batch key 总长度溢出",
+            )
+        })?;
+    }
+    if total > MAX_STORAGE_BATCH_KEY_BYTES {
+        return Err(contract_error(
+            ContractErrorCode::InvalidArgument,
+            "storage batch key 总长度超过 1 MiB",
         ));
     }
     Ok(())
@@ -676,6 +747,12 @@ async fn storage_at(
         return Err(contract_error(
             ContractErrorCode::InvalidArgument,
             "storage key 不能为空",
+        ));
+    }
+    if key.len() > MAX_STORAGE_KEY_BYTES {
+        return Err(contract_error(
+            ContractErrorCode::InvalidArgument,
+            "storage key 超过 4 KiB",
         ));
     }
     let result = running
@@ -711,111 +788,280 @@ async fn block_number_by_hash(running: &RunningProvider, hash: Hash32) -> Contra
     )
 }
 
-async fn block_ref_from_status_hash(
+async fn verified_header_at(
+    running: &RunningProvider,
+    block: VerifiedBlockRef,
+) -> ContractResult<VerifiedBlockHeader> {
+    let value = running
+        .rpc
+        .request("chain_getHeader", json!([hash_hex(block.hash())]))
+        .await?;
+    if value.is_null() {
+        return Err(contract_error(
+            ContractErrorCode::NotFound,
+            "轻节点不知道目标 block header",
+        ));
+    }
+    decode_verified_header(block, &value)
+}
+
+fn decode_verified_header(
+    block: VerifiedBlockRef,
+    value: &Value,
+) -> ContractResult<VerifiedBlockHeader> {
+    let number = parse_u64_value(
+        value
+            .get("number")
+            .ok_or_else(|| contract_error(ContractErrorCode::Decode, "block header 缺少 number"))?,
+        "block header number",
+    )?;
+    if number != block.number() {
+        return Err(contract_error(
+            ContractErrorCode::Integrity,
+            "block header 高度与请求块不一致",
+        ));
+    }
+    let parent_hash = parse_hash_value(
+        value.get("parentHash").ok_or_else(|| {
+            contract_error(ContractErrorCode::Decode, "block header 缺少 parentHash")
+        })?,
+        "block header parentHash",
+    )?;
+    let state_root = parse_hash_value(
+        value.get("stateRoot").ok_or_else(|| {
+            contract_error(ContractErrorCode::Decode, "block header 缺少 stateRoot")
+        })?,
+        "block header stateRoot",
+    )?;
+    let extrinsics_root = parse_hash_value(
+        value.get("extrinsicsRoot").ok_or_else(|| {
+            contract_error(
+                ContractErrorCode::Decode,
+                "block header 缺少 extrinsicsRoot",
+            )
+        })?,
+        "block header extrinsicsRoot",
+    )?;
+    let logs = value
+        .get("digest")
+        .and_then(|digest| digest.get("logs"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            contract_error(
+                ContractErrorCode::Decode,
+                "block header digest.logs 不是数组",
+            )
+        })?;
+    let log_count = u64::try_from(logs.len()).map_err(|_| {
+        contract_error(
+            ContractErrorCode::Decode,
+            "block header digest log 数量超过 u64",
+        )
+    })?;
+    let mut digest = scale_compact_u64(log_count);
+    for (index, log) in logs.iter().enumerate() {
+        let encoded = parse_hex_value(log, &format!("block header digest log {index}"))?;
+        let new_len = digest.len().checked_add(encoded.len()).ok_or_else(|| {
+            contract_error(ContractErrorCode::Integrity, "block header digest 长度溢出")
+        })?;
+        if new_len > MAX_HEADER_DIGEST_BYTES {
+            return Err(contract_error(
+                ContractErrorCode::Integrity,
+                "block header digest 超过 1 MiB",
+            ));
+        }
+        digest.extend_from_slice(&encoded);
+    }
+
+    // Rebuild the canonical SCALE Header and independently bind every returned field to the
+    // caller's exact hash. `validate_exact_block` proves canonicality/finality; this check proves
+    // the JSON projection was neither mixed across blocks nor silently truncated.
+    let mut encoded = Vec::with_capacity(128_usize.saturating_add(digest.len()));
+    encoded.extend_from_slice(parent_hash.as_bytes());
+    encoded.extend_from_slice(&scale_compact_u64(number));
+    encoded.extend_from_slice(state_root.as_bytes());
+    encoded.extend_from_slice(extrinsics_root.as_bytes());
+    encoded.extend_from_slice(&digest);
+    if substrate_blake2_256(&encoded) != block.hash() {
+        return Err(contract_error(
+            ContractErrorCode::Integrity,
+            "block header 字段重建出的 Blake2-256 与请求 hash 不一致",
+        ));
+    }
+    VerifiedBlockHeader::try_new(block, parent_hash, state_root, extrinsics_root, digest)
+}
+
+fn scale_compact_u64(value: u64) -> Vec<u8> {
+    if value < 1 << 6 {
+        return vec![(value as u8) << 2];
+    }
+    if value < 1 << 14 {
+        return (((value as u16) << 2) | 1).to_le_bytes().to_vec();
+    }
+    if value < 1 << 30 {
+        return (((value as u32) << 2) | 2).to_le_bytes().to_vec();
+    }
+    let bytes = value.to_le_bytes();
+    let length = 8_usize
+        .saturating_sub((value.leading_zeros() as usize) / 8)
+        .max(4);
+    let mut encoded = Vec::with_capacity(length + 1);
+    encoded.push((((length - 4) as u8) << 2) | 3);
+    encoded.extend_from_slice(&bytes[..length]);
+    encoded
+}
+
+async fn block_ref_from_transaction_watch(
     running: &RunningProvider,
     value: &Value,
     finality: BlockFinality,
-    require_canonical: bool,
 ) -> ContractResult<VerifiedBlockRef> {
-    let hash = parse_hash_value(value, "transaction status block hash")?;
+    let object = value.as_object().ok_or_else(|| {
+        contract_error(
+            ContractErrorCode::Decode,
+            "transactionWatch_v1 block 不是 object",
+        )
+    })?;
+    let hash = parse_hash_value(
+        object.get("hash").ok_or_else(|| {
+            contract_error(
+                ContractErrorCode::Decode,
+                "transactionWatch_v1 block 缺少 hash",
+            )
+        })?,
+        "transactionWatch_v1 block hash",
+    )?;
+    let index = object.get("index").and_then(Value::as_u64).ok_or_else(|| {
+        contract_error(
+            ContractErrorCode::Decode,
+            "transactionWatch_v1 block 缺少 index",
+        )
+    })?;
+    u32::try_from(index).map_err(|_| {
+        contract_error(
+            ContractErrorCode::Decode,
+            "transactionWatch_v1 block index 越界",
+        )
+    })?;
     let number = block_number_by_hash(running, hash).await?;
     let block = match finality {
         BlockFinality::Best => VerifiedBlockRef::best(hash, number),
         BlockFinality::Finalized => VerifiedBlockRef::finalized(hash, number),
     };
-    if require_canonical {
-        validate_exact_block(running, block).await?;
-    }
+    validate_exact_block(running, block).await?;
     Ok(block)
 }
 
 async fn parse_watch_event(
     running: &RunningProvider,
     status: &Value,
+    last_included: &mut Option<VerifiedBlockRef>,
 ) -> ContractResult<(ExtrinsicWatchEvent, bool)> {
-    if let Some(name) = status.as_str() {
-        let event = match name {
-            "ready" => ExtrinsicWatchEvent::Ready,
-            "broadcast" => ExtrinsicWatchEvent::Broadcast { peer_count: 0 },
-            "future" => ExtrinsicWatchEvent::Future,
-            "dropped" => ExtrinsicWatchEvent::Dropped,
-            "invalid" => ExtrinsicWatchEvent::Invalid,
-            "finalityTimeout" => ExtrinsicWatchEvent::FinalityTimeout { block: None },
-            _ => {
-                return Err(contract_error(
-                    ContractErrorCode::Decode,
-                    format!("未知 extrinsic watch 状态: {name}"),
-                ))
-            }
-        };
-        let terminal = is_definitive_pool_failure(&event);
-        return Ok((event, terminal));
-    }
     let map = status.as_object().ok_or_else(|| {
         contract_error(
             ContractErrorCode::Decode,
-            "extrinsic watch 状态既不是字符串也不是 object",
+            "transactionWatch_v1 状态不是 object",
         )
     })?;
-    if let Some(value) = map.get("broadcast") {
-        let peer_count = value
-            .as_array()
-            .map(|peers| u32::try_from(peers.len()).unwrap_or(u32::MAX))
-            .or_else(|| value.as_u64().and_then(|count| u32::try_from(count).ok()))
-            .unwrap_or(0);
-        return Ok((ExtrinsicWatchEvent::Broadcast { peer_count }, false));
-    }
-    if let Some(value) = map.get("inBlock") {
-        let block = block_ref_from_status_hash(running, value, BlockFinality::Best, true).await?;
-        return Ok((ExtrinsicWatchEvent::InBlock { block }, false));
-    }
-    if let Some(value) = map.get("finalized") {
-        let block = block_ref_from_status_hash(running, value, BlockFinality::Finalized, true)
-            .await?
-            .require_finalized()?;
-        return Ok((ExtrinsicWatchEvent::Finalized { block }, true));
-    }
-    if let Some(value) = map.get("retracted") {
-        let block = block_ref_from_status_hash(running, value, BlockFinality::Best, false).await?;
-        return Ok((ExtrinsicWatchEvent::Retracted { block }, false));
-    }
-    if let Some(value) = map.get("usurped") {
-        let event = ExtrinsicWatchEvent::Usurped {
-            replacement_hash: parse_hash_value(value, "replacement extrinsic hash")?,
-        };
-        return Ok((event, true));
-    }
-    if let Some(value) = map.get("finalityTimeout") {
-        let block = if value.is_null() {
-            None
-        } else {
-            Some(block_ref_from_status_hash(running, value, BlockFinality::Best, false).await?)
-        };
-        return Ok((ExtrinsicWatchEvent::FinalityTimeout { block }, false));
-    }
-    for (name, event, terminal) in [
-        ("ready", ExtrinsicWatchEvent::Ready, false),
-        ("future", ExtrinsicWatchEvent::Future, false),
-        ("dropped", ExtrinsicWatchEvent::Dropped, false),
-        ("invalid", ExtrinsicWatchEvent::Invalid, true),
-    ] {
-        if map.contains_key(name) {
-            return Ok((event, terminal));
+    let name = map.get("event").and_then(Value::as_str).ok_or_else(|| {
+        contract_error(
+            ContractErrorCode::Decode,
+            "transactionWatch_v1 状态缺少 event",
+        )
+    })?;
+    match name {
+        "validated" => Ok((ExtrinsicWatchEvent::Ready, false)),
+        "broadcasted" => {
+            let peers = map.get("numPeers").and_then(Value::as_u64).ok_or_else(|| {
+                contract_error(
+                    ContractErrorCode::Decode,
+                    "transactionWatch_v1 broadcasted 缺少 numPeers",
+                )
+            })?;
+            let peer_count = u32::try_from(peers).map_err(|_| {
+                contract_error(
+                    ContractErrorCode::Decode,
+                    "transactionWatch_v1 numPeers 越界",
+                )
+            })?;
+            Ok((ExtrinsicWatchEvent::Broadcast { peer_count }, false))
         }
+        "bestChainBlockIncluded" => match map.get("block") {
+            Some(Value::Null) => Ok((
+                last_included
+                    .take()
+                    .map(|block| ExtrinsicWatchEvent::Retracted { block })
+                    .unwrap_or(ExtrinsicWatchEvent::Future),
+                false,
+            )),
+            Some(value) => {
+                let block =
+                    block_ref_from_transaction_watch(running, value, BlockFinality::Best).await?;
+                *last_included = Some(block);
+                Ok((ExtrinsicWatchEvent::InBlock { block }, false))
+            }
+            None => Err(contract_error(
+                ContractErrorCode::Decode,
+                "transactionWatch_v1 bestChainBlockIncluded 缺少 block",
+            )),
+        },
+        "finalized" => {
+            let value = map.get("block").ok_or_else(|| {
+                contract_error(
+                    ContractErrorCode::Decode,
+                    "transactionWatch_v1 finalized 缺少 block",
+                )
+            })?;
+            let block = block_ref_from_transaction_watch(running, value, BlockFinality::Finalized)
+                .await?
+                .require_finalized()?;
+            Ok((ExtrinsicWatchEvent::Finalized { block }, true))
+        }
+        "invalid" => {
+            validate_transaction_watch_error(map.get("error"), "invalid")?;
+            Ok((ExtrinsicWatchEvent::Invalid, true))
+        }
+        "dropped" => {
+            validate_transaction_watch_error(map.get("error"), "dropped")?;
+            match map.get("broadcasted").and_then(Value::as_bool) {
+                Some(_) => Ok((ExtrinsicWatchEvent::Dropped, true)),
+                None => Err(contract_error(
+                    ContractErrorCode::Decode,
+                    "transactionWatch_v1 dropped 缺少 broadcasted",
+                )),
+            }
+        }
+        "error" => {
+            let error = validate_transaction_watch_error(map.get("error"), "error")?;
+            Err(contract_error(
+                ContractErrorCode::Network,
+                format!("transactionWatch_v1 观察失败: {error}"),
+            ))
+        }
+        _ => Err(contract_error(
+            ContractErrorCode::Decode,
+            format!("未知 transactionWatch_v1 状态: {name}"),
+        )),
     }
-    Err(contract_error(
-        ContractErrorCode::Decode,
-        "未知 extrinsic watch object 状态",
-    ))
 }
 
-/// 与既有 Dart 合同一致：只有 invalid/usurped 是交易池确定失败。
-/// dropped、future、retracted 与 finalityTimeout 都不能据此断言链上失败。
-fn is_definitive_pool_failure(event: &ExtrinsicWatchEvent) -> bool {
-    matches!(
-        event,
-        ExtrinsicWatchEvent::Invalid | ExtrinsicWatchEvent::Usurped { .. }
-    )
+fn validate_transaction_watch_error<'a>(
+    value: Option<&'a Value>,
+    event: &str,
+) -> ContractResult<&'a str> {
+    let text = value.and_then(Value::as_str).ok_or_else(|| {
+        contract_error(
+            ContractErrorCode::Decode,
+            format!("transactionWatch_v1 {event} 缺少 error"),
+        )
+    })?;
+    if text.is_empty() || text.len() > 4_096 {
+        return Err(contract_error(
+            ContractErrorCode::Decode,
+            format!("transactionWatch_v1 {event} error 长度非法"),
+        ));
+    }
+    Ok(text)
 }
 
 pub(crate) fn parse_hash_value(value: &Value, field: &str) -> ContractResult<Hash32> {
@@ -933,6 +1179,53 @@ mod tests {
     }
 
     #[test]
+    fn scale_compact_u64_covers_all_substrate_modes() {
+        assert_eq!(scale_compact_u64(0), [0]);
+        assert_eq!(scale_compact_u64(63), [0xfc]);
+        assert_eq!(scale_compact_u64(64), [0x01, 0x01]);
+        assert_eq!(scale_compact_u64((1 << 14) - 1), [0xfd, 0xff]);
+        assert_eq!(scale_compact_u64(1 << 14), [0x02, 0x00, 0x01, 0x00]);
+        assert_eq!(scale_compact_u64(1 << 30), [0x03, 0x00, 0x00, 0x00, 0x40]);
+        assert_eq!(
+            scale_compact_u64(u64::MAX),
+            [0x13, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+        );
+    }
+
+    #[test]
+    fn header_decoder_rebuilds_and_verifies_the_exact_scale_header_hash() {
+        let parent = Hash32::from_bytes([1; 32]);
+        let state = Hash32::from_bytes([2; 32]);
+        let extrinsics = Hash32::from_bytes([3; 32]);
+        let digest_log = vec![0x06, 0x42, 0x41, 0x42, 0x45];
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(parent.as_bytes());
+        encoded.extend_from_slice(&scale_compact_u64(42));
+        encoded.extend_from_slice(state.as_bytes());
+        encoded.extend_from_slice(extrinsics.as_bytes());
+        encoded.extend_from_slice(&scale_compact_u64(1));
+        encoded.extend_from_slice(&digest_log);
+        let block = VerifiedBlockRef::finalized(substrate_blake2_256(&encoded), 42);
+        let value = json!({
+            "number": "0x2a",
+            "parentHash": hash_hex(parent),
+            "stateRoot": hash_hex(state),
+            "extrinsicsRoot": hash_hex(extrinsics),
+            "digest": {"logs": [format!("0x{}", hex::encode(&digest_log))]},
+        });
+        let header = decode_verified_header(block, &value)
+            .unwrap_or_else(|error| panic!("verified header failed: {error:?}"));
+        assert_eq!(header.block(), block);
+        assert_eq!(header.digest(), [scale_compact_u64(1), digest_log].concat());
+
+        let wrong = VerifiedBlockRef::finalized(Hash32::from_bytes([9; 32]), 42);
+        let error = decode_verified_header(wrong, &value)
+            .err()
+            .unwrap_or_else(|| panic!("wrong header hash must fail"));
+        assert_eq!(error.code(), ContractErrorCode::Integrity);
+    }
+
+    #[test]
     fn current_storage_batch_routes_only_exact_matching_heads() {
         let best = VerifiedBlockRef::best(Hash32::from_bytes([0x11; 32]), 11);
         let finalized = FinalizedBlockRef::from_parts(Hash32::from_bytes([0x09; 32]), 9);
@@ -981,6 +1274,16 @@ mod tests {
             panic!("typed batch length mismatch must fail closed");
         };
         assert_eq!(error.code(), ContractErrorCode::Integrity);
+
+        let oversized_key = vec![0; MAX_STORAGE_KEY_BYTES + 1];
+        assert!(validate_storage_keys(&[oversized_key]).is_err());
+        let too_many = vec![vec![1]; MAX_STORAGE_BATCH_KEYS + 1];
+        assert!(validate_storage_keys(&too_many).is_err());
+        let too_large = vec![
+            vec![1; MAX_STORAGE_KEY_BYTES];
+            MAX_STORAGE_BATCH_KEY_BYTES / MAX_STORAGE_KEY_BYTES + 1
+        ];
+        assert!(validate_storage_keys(&too_large).is_err());
     }
 
     #[test]
@@ -1028,18 +1331,6 @@ mod tests {
             panic!("hash calculated without the Compact length prefix must fail");
         };
         assert_eq!(error.code(), ContractErrorCode::Integrity);
-    }
-
-    #[test]
-    fn non_definitive_pool_statuses_do_not_end_the_watch() {
-        assert!(!is_definitive_pool_failure(&ExtrinsicWatchEvent::Dropped));
-        assert!(!is_definitive_pool_failure(
-            &ExtrinsicWatchEvent::FinalityTimeout { block: None }
-        ));
-        assert!(is_definitive_pool_failure(&ExtrinsicWatchEvent::Invalid));
-        assert!(is_definitive_pool_failure(&ExtrinsicWatchEvent::Usurped {
-            replacement_hash: Hash32::from_bytes([7; 32]),
-        }));
     }
 
     #[test]

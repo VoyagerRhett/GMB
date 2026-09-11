@@ -5,12 +5,11 @@
 
 #![forbid(unsafe_code)]
 
-mod chain_actions;
 mod codec;
 mod session;
 
 pub use codec::{
-    parse, AccountIdCode, QrCode, QrError, QrErrorCode, SignRequest, SignResponse,
-    UserTransfer, MAX_QR_JSON_BYTES, MAX_QR_TEXT_BYTES, QR_V1,
+    parse, AccountIdCode, QrCode, QrError, QrErrorCode, SignRequest, SignResponse, UserTransfer,
+    MAX_QR_JSON_BYTES, MAX_QR_TEXT_BYTES, QR_V1,
 };
 pub use session::{QrClock, QrSession, QrSessionStore, SystemQrClock};

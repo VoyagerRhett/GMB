@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizen_sdk/src/platform/citizen_sdk_platform.dart';
@@ -140,6 +141,68 @@ void main() {
     );
     await sdk.close();
   });
+
+  test('通用链门面投影同步、准确块、opaque存储与显式轻节点状态', () async {
+    final sdk = await CitizenSdk.open(modules: CitizenSdkModules.chain);
+    final finalized = CitizenBlockRef(
+      hash: _account(9),
+      number: BigInt.from(9),
+      finality: CitizenBlockFinality.finalized,
+    );
+    final status = await sdk.chain.getSyncStatus();
+    expect(status.peerCount, BigInt.from(2));
+    expect(status.isUsable, isTrue);
+    expect((await sdk.chain.getBestHead()).finality, CitizenBlockFinality.best);
+    expect(
+      (await sdk.chain.getFinalizedBlockAt(BigInt.from(9))).number,
+      BigInt.from(9),
+    );
+    expect(
+      (await sdk.chain.resolveFinalizedBlock(_account(9), BigInt.from(9))).hash,
+      _account(9),
+    );
+    expect((await sdk.chain.getBlockHeader(finalized)).digest, <int>[0]);
+    expect((await sdk.chain.getBlockBody(finalized)).extrinsics.single, <int>[
+      1,
+    ]);
+    expect((await sdk.chain.getRuntimeContext(finalized)).specVersion, 7);
+    expect(
+      await sdk.chain.getStorage(finalized, Uint8List.fromList(<int>[1])),
+      <int>[2],
+    );
+    expect(
+      (await sdk.chain.getStorageBatch(finalized, <Uint8List>[
+        Uint8List.fromList(<int>[1]),
+        Uint8List.fromList(<int>[2]),
+      ])).map((value) => value?.toList()),
+      <List<int>?>[
+        <int>[2],
+        null,
+      ],
+    );
+    expect(await sdk.chain.getSystemEvents(finalized), <int>[3]);
+    final state = await sdk.chain.exportState();
+    await sdk.chain.importState(state);
+    expect(state.finalized.hash, finalized.hash);
+    expect(
+      platform.methods,
+      containsAll(<String>[
+        'getSyncStatus',
+        'getBestHead',
+        'getFinalizedBlockAt',
+        'resolveFinalizedBlock',
+        'getBlockHeader',
+        'getBlockBody',
+        'getRuntimeContext',
+        'getStorage',
+        'getStorageBatch',
+        'getSystemEvents',
+        'exportState',
+        'importState',
+      ]),
+    );
+    await sdk.close();
+  });
 }
 
 final class _SdkPlatform implements CitizenSdkPlatform {
@@ -192,6 +255,57 @@ final class _SdkPlatform implements CitizenSdkPlatform {
       'close' => <Object?>['disposed'],
       'getCapabilities' => <Object?>[_capabilitySnapshot()],
       'getGenesisHash' => <Object?>[_account(9)],
+      'getSyncStatus' => <Object?>[
+        <Object?>['2', true, true, _block(10, 'best'), _block(9, 'finalized')],
+      ],
+      'getBestHead' => <Object?>[_block(10, 'best')],
+      'getFinalizedBlockAt' => <Object?>[_block(9, 'finalized')],
+      'resolveFinalizedBlock' => <Object?>[_block(9, 'finalized')],
+      'getBlockHeader' => <Object?>[
+        <Object?>[
+          _block(9, 'finalized'),
+          _account(8),
+          _account(7),
+          _account(6),
+          Uint8List.fromList(<int>[0]),
+        ],
+      ],
+      'getBlockBody' => <Object?>[
+        <Object?>[
+          _block(9, 'finalized'),
+          <Uint8List>[
+            Uint8List.fromList(<int>[1]),
+          ],
+        ],
+      ],
+      'getRuntimeContext' => <Object?>[
+        <Object?>[
+          _block(9, 'finalized'),
+          7,
+          8,
+          Uint8List.fromList(<int>[1]),
+        ],
+      ],
+      'getStorage' => <Object?>[
+        Uint8List.fromList(<int>[2]),
+      ],
+      'getStorageBatch' => <Object?>[
+        <Object?>[
+          Uint8List.fromList(<int>[2]),
+          null,
+        ],
+      ],
+      'getSystemEvents' => <Object?>[
+        Uint8List.fromList(<int>[3]),
+      ],
+      'exportState' => <Object?>[
+        <Object?>[
+          1,
+          _block(9, 'finalized'),
+          Uint8List.fromList(<int>[4]),
+        ],
+      ],
+      'importState' => <Object?>[],
       'getAccountBalance' => <Object?>[
         <Object?>[
           _account(wrongAccountResponses ? 2 : 1),

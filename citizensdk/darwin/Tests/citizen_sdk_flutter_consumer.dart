@@ -78,9 +78,6 @@ Future<void> _verify() async {
             capabilityEvents.add(event.snapshot);
           case CitizenSdkHistoryChanged():
             // 历史变化是只读通知；本消费者不读取或修改历史数据。
-          case CitizenSdkTransferProgress():
-            // 本消费者不提交交易；交易事件意味着路由或会话隔离出现错误。
-            eventFailed = true;
         }
       },
       onError: (Object _, StackTrace __) {

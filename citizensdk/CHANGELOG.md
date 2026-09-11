@@ -2,10 +2,42 @@
 
 ## 1.0.0 - Unreleased
 
+- CitizenApp 接入任务第 1.6 步完成：通用交易准备现在可由统一 WalletState 原子路由到热钱包
+  强认证签名或既有 `QR_V1` 冷签名，签名经同一 sr25519 实现自验后先以 typed store CAS
+  持久化完整授权字节，再 submit/watch，并以 canonical finalized body 与同 index
+  `System.Events` 形成唯一终态。重启只核验并重发原 signed extrinsic，不重新签名。新增 4 项
+  Core ABI、3 项 Flutter 方法和 result kind 28，当前闭集为 121/64；没有 App 业务编码、迁移、
+  兼容或其它协议版本，CitizenApp 与 CitizenWallet 均未修改。
+
+- CitizenApp 接入任务第 1.5 步完成：新增产品无关的 opaque SCALE `callData` 交易准备。
+  Core 在同一准确 best block 上验证 metadata outer call、读取 nonce/runtime/genesis，固定使用
+  immortal era 与 tip=0，并把 signer message 和 extrinsic 模板留在一次性原生准备对象中；公开层
+  只返回安全摘要和取消标识。公开面现为 117 项 Core ABI、五端 61 项 Flutter 方法。没有签名、
+  广播、历史、业务 DTO、迁移、兼容或新的协议版本；CitizenApp 与 CitizenWallet 均未修改。
+
+- CitizenApp 接入任务第 1.4 步完成：在唯一 smoldot/`VerifiedChainClient` 路径公开同步状态、
+  best/finalized 链头、finalized canonical 块解析、准确块 Header/Body/Runtime、通用 storage
+  单项/批量读取、finalized `System.Events` 原始字节及显式状态导入导出。所有读取绑定准确块并
+  执行大小、顺序、finality 和返回类型校验；SDK 不包含任何 App 业务 key、DTO、SCALE 业务解码、
+  任意 RPC、迁移或兼容逻辑。公开面现为 114 项 Core ABI、五端 59 项 Flutter 方法；本轮未修改
+  CitizenApp 或 CitizenWallet。
+
+- CitizenApp 接入任务第 1.3 步完成：新增产品无关 `SigningIntent`、raw/Substrate/domain
+  三类签名变换、热钱包强认证签名与自验、冷账户外部签名会话，以及由原默认账户授权的
+  默认账户 CAS 切换。`QR_V1` 只保留为可选 transport，允许任意 `uint16` opaque action，
+  删除 SDK 业务 action 白名单和 payload/action 猜测。公开面现为 104 项 Core ABI、五端
+  47 项 Flutter 方法；没有迁移、兼容、业务 payload 解码或 CitizenWallet 源码修改。
+
+- CitizenApp 接入任务第 1.2 步完成：Core 新增统一 `WalletState` 与热/冷账户公开投影、
+  仅公钥冷账户 AccountId/SS58 导入、带 revision 且不改变默认账户的全局重排，以及热冷统一
+  改名/删除；公开面更新为 97 项 Core ABI 与五端一致的 42 项 Flutter 方法。默认账户仍只由
+  全局顺序第一项表达，未导出未授权 default setter；旧钱包 v1 状态继续明确拒绝，不迁移、
+  不兼容读取 CitizenApp 数据。本轮只修改 CitizenSDK，CitizenApp 与 CitizenWallet 零修改。
+
 - 二维码作为独立可组合模块纳入 CitizenSDK：`qr=32`，完整模块集合为
   `63`。QR_V1 协议解析、签名请求会话、一次性响应消费和链调用审阅统一由
   Rust Core 实现；二维码图像识别与生成在 iOS、Android、macOS、Windows、Linux
-  唯一使用 ZXing-C++ 3.1.1。公开面统一为 89 项 Core ABI 和 36 项 Flutter 方法，
+  唯一使用 ZXing-C++ 3.1.1。公开面统一为 97 项 Core ABI 和 42 项 Flutter 方法，
   QR-only 不初始化钱包、设备金库或轻节点。二维码与签名仍是独立模块，调用方可
   单独集成或完整集成 SDK。SDK 自有扫描和扫码签名窗口接入五端；链调用签名
   复用已验证 chain metadata 与已有 signing，删除调用方时钟及外部签名拼装入口。

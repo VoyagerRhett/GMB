@@ -360,10 +360,8 @@ final class CitizenSdkFlutterSession {
 }
 
 typedef _CitizenSdkRawEventHandler = void Function(Object? raw);
-typedef _CitizenSdkRawErrorHandler = void Function(
-  Object error,
-  StackTrace stackTrace,
-);
+typedef _CitizenSdkRawErrorHandler =
+    void Function(Object error, StackTrace stackTrace);
 
 final class _CitizenSdkEventHandler {
   const _CitizenSdkEventHandler(this.onData, this.onError);

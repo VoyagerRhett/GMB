@@ -1,4 +1,5 @@
 import '../models/citizen_wallet.dart';
+import '../models/citizen_signing.dart';
 
 /// CitizenSDK 无根热钱包的公开控制面。
 ///
@@ -6,6 +7,34 @@ import '../models/citizen_wallet.dart';
 /// password 参数，也不会收到 prepared/native/result handle。
 abstract interface class CitizenWallet {
   Future<CitizenWalletProfile?> getProfile();
+
+  /// 返回热／冷账户的统一公开目录；第一项是只读默认账户。
+  Future<CitizenWalletState> getState();
+
+  /// 导入独立冷钱包的公开账户。`accountId` 与 `ss58Address` 必须且只能提供一个。
+  Future<CitizenWalletState> importColdAccount({
+    String? accountId,
+    String? ss58Address,
+    required String name,
+  });
+
+  /// 基于同一 revision 重排完整目录；第一项必须仍是当前默认账户。
+  Future<CitizenWalletState> reorderAccountsWithoutDefaultChange({
+    required BigInt expectedRevision,
+    required List<String> accountIds,
+  });
+
+  /// Changes the default account only after the original default authorizes the complete order.
+  Future<CitizenDefaultAccountChangeOutcome> beginDefaultAccountChange({
+    required BigInt expectedRevision,
+    required List<String> accountIds,
+    int ttlSeconds = 90,
+  });
+
+  Future<CitizenDefaultAccountChangeCompleted> consumeDefaultAccountChange({
+    required String sessionId,
+    required String response,
+  });
 
   /// 在 SDK 原生安全窗口查看指定账户私钥；确认、设备认证和清屏均由 SDK 管理。
   /// 只等待真实流程结束，绝不向 Dart 返回私钥、显示回调或内部句柄。
@@ -28,12 +57,12 @@ abstract interface class CitizenWallet {
 
   Future<CitizenWalletProfile> setActiveAccount(String accountId);
 
-  Future<CitizenWalletProfile> renameAccount({
+  Future<CitizenWalletState> renameAccount({
     required String accountId,
     required String name,
   });
 
-  Future<CitizenWalletProfile?> deleteAccount(String accountId);
+  Future<CitizenWalletState> deleteAccount(String accountId);
 
   Future<void> delete();
 

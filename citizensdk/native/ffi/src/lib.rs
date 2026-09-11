@@ -18,6 +18,7 @@ use std::{
 use citizen_sdk_contracts::{
     BlockFinality, ChainIdentity, ExecutionConclusion, ExportedChainState, ExtrinsicWatchEvent,
     Hash32, Modules, SignedExtrinsic, UnverifiedReason, VerifiedBlockRef,
+    MAX_STORAGE_BATCH_KEY_BYTES, MAX_STORAGE_KEY_BYTES,
 };
 use futures_util::{FutureExt, StreamExt};
 
@@ -42,6 +43,7 @@ mod ownership;
 mod qr_abi;
 mod requests;
 mod runtime;
+mod transaction_abi;
 mod wallet_abi;
 
 pub use abi::*;
@@ -305,6 +307,7 @@ pub unsafe extern "C" fn citizensdk_destroy(handle: CitizenSdkHandle) -> i32 {
         // joined callbacks. Only after that commit point may teardown discard
         // uncommitted recovery-phrase sessions owned by this instance.
         wallet_abi::drop_prepared_for_owner(handle);
+        transaction_abi::drop_prepared_for_owner(handle);
         #[cfg(feature = "qr")]
         qr_abi::drop_sessions_for_owner(handle);
         handles::remove(handle, &runtime)
@@ -651,6 +654,186 @@ pub unsafe extern "C" fn citizensdk_get_finalized_head(
 }
 
 #[no_mangle]
+/// Accepts one coherent typed light-node synchronization snapshot.
+///
+/// # Safety
+/// `out_request_id` must be writable for one request identifier.
+pub unsafe extern "C" fn citizensdk_get_sync_status(
+    handle: CitizenSdkHandle,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "chain"))]
+    return ffi_status(|| {
+        Err(FfiError::new(
+            CitizenSdkErrorCode::Unsupported,
+            "chain is not compiled into this build",
+        ))
+    });
+    #[cfg(feature = "chain")]
+    ffi_status(|| {
+        let runtime = handles::get(handle)?;
+        runtime.provider()?;
+        accept_and_write(runtime, out_request_id, |runtime, _, _| {
+            runtime.refresh_provider_capabilities()?;
+            let status = runtime.drive(runtime.engine().chain_sync_status())??;
+            Ok(ResultPayload::ChainSyncStatus(status))
+        })
+    })
+}
+
+#[no_mangle]
+/// Resolves one height through the verified finalized canonical ancestry.
+///
+/// # Safety
+/// `out_request_id` must be writable for one request identifier.
+pub unsafe extern "C" fn citizensdk_get_finalized_block_at(
+    handle: CitizenSdkHandle,
+    number: u64,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "chain"))]
+    return ffi_status(|| {
+        Err(FfiError::new(
+            CitizenSdkErrorCode::Unsupported,
+            "chain is not compiled into this build",
+        ))
+    });
+    #[cfg(feature = "chain")]
+    ffi_status(|| {
+        let runtime = handles::get(handle)?;
+        runtime.provider()?;
+        accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            runtime.refresh_provider_capabilities()?;
+            let block = runtime.drive(runtime.engine().finalized_block_at(number))??;
+            Ok(ResultPayload::Block(block.into()))
+        })
+    })
+}
+
+#[no_mangle]
+/// Verifies one caller-supplied hash/height as a finalized canonical block.
+///
+/// # Safety
+/// `hash_32` must be readable for 32 bytes and `out_request_id` must be writable.
+pub unsafe extern "C" fn citizensdk_resolve_finalized_block(
+    handle: CitizenSdkHandle,
+    hash_32: *const u8,
+    number: u64,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "chain"))]
+    return ffi_status(|| {
+        Err(FfiError::new(
+            CitizenSdkErrorCode::Unsupported,
+            "chain is not compiled into this build",
+        ))
+    });
+    #[cfg(feature = "chain")]
+    ffi_status(|| {
+        let runtime = handles::get(handle)?;
+        runtime.provider()?;
+        let hash = Hash32::from_bytes(copy_fixed_32(hash_32, "block hash")?);
+        accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            runtime.refresh_provider_capabilities()?;
+            let block = runtime.drive(runtime.engine().resolve_finalized_block(hash, number))??;
+            Ok(ResultPayload::Block(block.into()))
+        })
+    })
+}
+
+#[no_mangle]
+/// Reads a hash-bound header for one exact verified block.
+///
+/// # Safety
+/// `block` must be readable and versioned; `out_request_id` must be writable.
+pub unsafe extern "C" fn citizensdk_get_block_header_at(
+    handle: CitizenSdkHandle,
+    block: *const CitizenSdkBlockRef,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "chain"))]
+    return ffi_status(|| {
+        Err(FfiError::new(
+            CitizenSdkErrorCode::Unsupported,
+            "chain is not compiled into this build",
+        ))
+    });
+    #[cfg(feature = "chain")]
+    ffi_status(|| {
+        let runtime = handles::get(handle)?;
+        runtime.provider()?;
+        let block = block_from_abi(read_versioned(block, "block")?)?;
+        accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            runtime.refresh_provider_capabilities()?;
+            let header = runtime.drive(runtime.engine().block_header_at(block))??;
+            Ok(ResultPayload::BlockHeader(header))
+        })
+    })
+}
+
+#[no_mangle]
+/// Reads ordered opaque extrinsics for one exact verified block.
+///
+/// # Safety
+/// `block` must be readable and versioned; `out_request_id` must be writable.
+pub unsafe extern "C" fn citizensdk_get_block_body_at(
+    handle: CitizenSdkHandle,
+    block: *const CitizenSdkBlockRef,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "chain"))]
+    return ffi_status(|| {
+        Err(FfiError::new(
+            CitizenSdkErrorCode::Unsupported,
+            "chain is not compiled into this build",
+        ))
+    });
+    #[cfg(feature = "chain")]
+    ffi_status(|| {
+        let runtime = handles::get(handle)?;
+        runtime.provider()?;
+        let block = block_from_abi(read_versioned(block, "block")?)?;
+        accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            runtime.refresh_provider_capabilities()?;
+            let body = runtime.drive(runtime.engine().block_body_at(block))??;
+            Ok(ResultPayload::BlockBody(body))
+        })
+    })
+}
+
+#[no_mangle]
+/// Reads raw `System.Events` bytes at one exact finalized block.
+///
+/// # Safety
+/// `block` must be readable and versioned; `out_request_id` must be writable.
+pub unsafe extern "C" fn citizensdk_get_system_events_at(
+    handle: CitizenSdkHandle,
+    block: *const CitizenSdkBlockRef,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "chain"))]
+    return ffi_status(|| {
+        Err(FfiError::new(
+            CitizenSdkErrorCode::Unsupported,
+            "chain is not compiled into this build",
+        ))
+    });
+    #[cfg(feature = "chain")]
+    ffi_status(|| {
+        let runtime = handles::get(handle)?;
+        runtime.provider()?;
+        let block = block_from_abi(read_versioned(block, "block")?)?
+            .require_finalized()
+            .map_err(FfiError::from)?;
+        accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            runtime.refresh_provider_capabilities()?;
+            let events = runtime.drive(runtime.engine().finalized_system_events_at(block))??;
+            Ok(ResultPayload::Storage(events))
+        })
+    })
+}
+
+#[no_mangle]
 /// Accepts an exact-block verified storage query.
 ///
 /// # Safety
@@ -677,7 +860,10 @@ pub unsafe extern "C" fn citizensdk_get_storage_at(
             let runtime = handles::get(handle)?;
             runtime.provider()?;
             let block = block_from_abi(read_versioned(block, "block")?)?;
-            let key = copy_view(key, "storage key", MAX_ABI_INPUT_BYTES)?;
+            let key = copy_view(key, "storage key", MAX_STORAGE_KEY_BYTES)?;
+            if key.is_empty() {
+                return Err(FfiError::invalid("storage key must not be empty"));
+            }
             accept_and_write(runtime, out_request_id, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 let value = runtime.drive(runtime.engine().storage_at(block, key))??;
@@ -724,11 +910,14 @@ pub unsafe extern "C" fn citizensdk_get_storage_batch_at(
             let mut copied = Vec::with_capacity(views.len());
             let mut total = 0_usize;
             for (index, view) in views.iter().copied().enumerate() {
-                let key = copy_view(view, &format!("storage key {index}"), MAX_ABI_INPUT_BYTES)?;
+                let key = copy_view(view, &format!("storage key {index}"), MAX_STORAGE_KEY_BYTES)?;
+                if key.is_empty() {
+                    return Err(FfiError::invalid("storage keys must not be empty"));
+                }
                 total = total
                     .checked_add(key.len())
                     .ok_or_else(|| FfiError::invalid("storage batch is too large"))?;
-                if total > MAX_ABI_INPUT_BYTES {
+                if total > MAX_STORAGE_BATCH_KEY_BYTES {
                     return Err(FfiError::invalid("storage batch is too large"));
                 }
                 copied.push(key);
@@ -1064,6 +1253,146 @@ pub unsafe extern "C" fn citizensdk_result_get_block_ref(
         };
         ptr::write(out_block, block_to_abi(block));
         Ok(())
+    })
+}
+
+#[no_mangle]
+/// Copies one coherent light-node synchronization snapshot.
+///
+/// # Safety
+/// `out_info` must be writable and initialized with the supported ABI prefix.
+pub unsafe extern "C" fn citizensdk_result_get_sync_status(
+    result: CitizenSdkResultHandle,
+    out_info: *mut CitizenSdkChainSyncStatusInfo,
+) -> i32 {
+    ffi_status(|| {
+        validate_output_versioned(out_info, "chain sync status info")?;
+        let owned = ownership::get(result)?;
+        let ResultPayload::ChainSyncStatus(status) = owned.payload else {
+            return Err(wrong_result("chain sync status"));
+        };
+        ptr::write(
+            out_info,
+            CitizenSdkChainSyncStatusInfo {
+                struct_size: std::mem::size_of::<CitizenSdkChainSyncStatusInfo>() as u32,
+                abi_version: CITIZENSDK_ABI_VERSION,
+                peer_count: status.peer_count(),
+                is_syncing: u8::from(status.is_syncing()),
+                is_usable: u8::from(status.is_usable()),
+                reserved: [0; 6],
+                best: block_to_abi(status.best()),
+                finalized: block_to_abi(status.finalized().into()),
+            },
+        );
+        Ok(())
+    })
+}
+
+#[no_mangle]
+/// Copies a verified header descriptor and its complete SCALE Digest bytes.
+///
+/// # Safety
+/// `out_info` and `out_required` must be writable. For a copy, `digest_buffer` must be writable
+/// for at least `digest_capacity` bytes.
+pub unsafe extern "C" fn citizensdk_result_get_block_header(
+    result: CitizenSdkResultHandle,
+    out_info: *mut CitizenSdkBlockHeaderInfo,
+    digest_buffer: *mut u8,
+    digest_capacity: u64,
+    out_required: *mut u64,
+) -> i32 {
+    ffi_status(|| {
+        validate_output_versioned(out_info, "block header info")?;
+        let owned = ownership::get(result)?;
+        let ResultPayload::BlockHeader(header) = owned.payload else {
+            return Err(wrong_result("block header"));
+        };
+        copy_to_host(
+            header.digest(),
+            digest_buffer,
+            digest_capacity,
+            out_required,
+        )?;
+        ptr::write(
+            out_info,
+            CitizenSdkBlockHeaderInfo {
+                struct_size: std::mem::size_of::<CitizenSdkBlockHeaderInfo>() as u32,
+                abi_version: CITIZENSDK_ABI_VERSION,
+                block: block_to_abi(header.block()),
+                parent_hash: header.parent_hash().into_bytes(),
+                state_root: header.state_root().into_bytes(),
+                extrinsics_root: header.extrinsics_root().into_bytes(),
+                digest_len: header.digest().len() as u64,
+            },
+        );
+        Ok(())
+    })
+}
+
+#[no_mangle]
+/// Copies fixed-width information for an ordered opaque block body.
+///
+/// # Safety
+/// `out_info` must be writable and initialized with the supported ABI prefix.
+pub unsafe extern "C" fn citizensdk_result_get_block_body_info(
+    result: CitizenSdkResultHandle,
+    out_info: *mut CitizenSdkBlockBodyInfo,
+) -> i32 {
+    ffi_status(|| {
+        validate_output_versioned(out_info, "block body info")?;
+        let owned = ownership::get(result)?;
+        let ResultPayload::BlockBody(body) = owned.payload else {
+            return Err(wrong_result("block body"));
+        };
+        let extrinsic_count = u32::try_from(body.extrinsics().len())
+            .map_err(|_| FfiError::internal("block body extrinsic count exceeds u32"))?;
+        let total_bytes = body
+            .extrinsics()
+            .iter()
+            .try_fold(0_u64, |total, extrinsic| {
+                let length = u64::try_from(extrinsic.len())
+                    .map_err(|_| FfiError::internal("block body extrinsic length exceeds u64"))?;
+                total
+                    .checked_add(length)
+                    .ok_or_else(|| FfiError::internal("block body length exceeds u64"))
+            })?;
+        ptr::write(
+            out_info,
+            CitizenSdkBlockBodyInfo {
+                struct_size: std::mem::size_of::<CitizenSdkBlockBodyInfo>() as u32,
+                abi_version: CITIZENSDK_ABI_VERSION,
+                block: block_to_abi(body.block()),
+                extrinsic_count,
+                reserved: 0,
+                total_bytes,
+            },
+        );
+        Ok(())
+    })
+}
+
+#[no_mangle]
+/// Copies or size-queries one ordered opaque extrinsic from a block body.
+///
+/// # Safety
+/// `out_required` must be writable. For a copy, `buffer` must be writable for `capacity` bytes.
+pub unsafe extern "C" fn citizensdk_result_copy_block_body_extrinsic(
+    result: CitizenSdkResultHandle,
+    index: u32,
+    buffer: *mut u8,
+    capacity: u64,
+    out_required: *mut u64,
+) -> i32 {
+    ffi_status(|| {
+        let owned = ownership::get(result)?;
+        let ResultPayload::BlockBody(body) = owned.payload else {
+            return Err(wrong_result("block body"));
+        };
+        let extrinsic = body
+            .extrinsics()
+            .get(index as usize)
+            .ok_or_else(|| FfiError::invalid("block body extrinsic index is out of range"))?;
+        copy_to_host(extrinsic, buffer, capacity, out_required)
     })
 }
 
@@ -1954,6 +2283,120 @@ mod tests {
             block_from_abi(abi).unwrap_or_else(|error| panic!("round trip failed: {error:?}")),
             block
         );
+    }
+
+    #[test]
+    fn chain_sync_header_and_body_results_copy_exact_bounded_values() {
+        use citizen_sdk_contracts::{
+            ChainSyncStatus, FinalizedBlockRef, VerifiedBlockBody, VerifiedBlockHeader,
+        };
+        use ownership::OwnedResult;
+
+        let finalized = FinalizedBlockRef::from_parts(Hash32::from_bytes([0x22; 32]), 22);
+        let best = VerifiedBlockRef::best(Hash32::from_bytes([0x23; 32]), 23);
+        let sync_result = ownership::insert(OwnedResult::success(
+            1,
+            ResultPayload::ChainSyncStatus(
+                ChainSyncStatus::try_new(7, true, true, best, finalized)
+                    .unwrap_or_else(|error| panic!("sync status failed: {error:?}")),
+            ),
+        ))
+        .unwrap_or_else(|error| panic!("result insert failed: {error:?}"));
+        let mut sync = CitizenSdkChainSyncStatusInfo::default();
+        assert_eq!(
+            unsafe { citizensdk_result_get_sync_status(sync_result, &mut sync) },
+            0
+        );
+        assert_eq!(sync.peer_count, 7);
+        assert_eq!(sync.best.number, 23);
+        assert_eq!(sync.finalized.number, 22);
+        ownership::release(sync_result)
+            .unwrap_or_else(|error| panic!("result release failed: {error:?}"));
+
+        let block: VerifiedBlockRef = finalized.into();
+        let header = VerifiedBlockHeader::try_new(
+            block,
+            Hash32::from_bytes([1; 32]),
+            Hash32::from_bytes([2; 32]),
+            Hash32::from_bytes([3; 32]),
+            vec![4, 5, 6],
+        )
+        .unwrap_or_else(|error| panic!("header failed: {error:?}"));
+        let header_result =
+            ownership::insert(OwnedResult::success(1, ResultPayload::BlockHeader(header)))
+                .unwrap_or_else(|error| panic!("result insert failed: {error:?}"));
+        let mut header_info = CitizenSdkBlockHeaderInfo::default();
+        let mut required = 0;
+        assert_eq!(
+            unsafe {
+                citizensdk_result_get_block_header(
+                    header_result,
+                    &mut header_info,
+                    ptr::null_mut(),
+                    0,
+                    &mut required,
+                )
+            },
+            0
+        );
+        assert_eq!(required, 3);
+        let mut digest = vec![0; required as usize];
+        assert_eq!(
+            unsafe {
+                citizensdk_result_get_block_header(
+                    header_result,
+                    &mut header_info,
+                    digest.as_mut_ptr(),
+                    digest.len() as u64,
+                    &mut required,
+                )
+            },
+            0
+        );
+        assert_eq!(digest, [4, 5, 6]);
+        ownership::release(header_result)
+            .unwrap_or_else(|error| panic!("result release failed: {error:?}"));
+
+        let body = VerifiedBlockBody::try_new(block, vec![vec![7], vec![8, 9]])
+            .unwrap_or_else(|error| panic!("body failed: {error:?}"));
+        let body_result =
+            ownership::insert(OwnedResult::success(1, ResultPayload::BlockBody(body)))
+                .unwrap_or_else(|error| panic!("result insert failed: {error:?}"));
+        let mut body_info = CitizenSdkBlockBodyInfo::default();
+        assert_eq!(
+            unsafe { citizensdk_result_get_block_body_info(body_result, &mut body_info) },
+            0
+        );
+        assert_eq!((body_info.extrinsic_count, body_info.total_bytes), (2, 3));
+        let mut second_required = 0;
+        assert_eq!(
+            unsafe {
+                citizensdk_result_copy_block_body_extrinsic(
+                    body_result,
+                    1,
+                    ptr::null_mut(),
+                    0,
+                    &mut second_required,
+                )
+            },
+            0
+        );
+        let mut second = vec![0; second_required as usize];
+        assert_eq!(
+            unsafe {
+                citizensdk_result_copy_block_body_extrinsic(
+                    body_result,
+                    1,
+                    second.as_mut_ptr(),
+                    second.len() as u64,
+                    &mut second_required,
+                )
+            },
+            0
+        );
+        assert_eq!(second, [8, 9]);
+        ownership::release(body_result)
+            .unwrap_or_else(|error| panic!("result release failed: {error:?}"));
     }
 
     #[test]

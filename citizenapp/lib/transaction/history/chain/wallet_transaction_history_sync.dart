@@ -1,33 +1,18 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/isar/wallet_isar.dart';
 import 'package:citizenapp/log/app_log.dart';
-import 'package:citizenapp/rpc/pallet_registry.dart';
-import 'package:citizenapp/transaction/shared/local_tx_store.dart';
+import 'package:citizenapp/transaction/history/chain/citizenchain_transaction_event_decoder.dart';
+import 'package:citizenapp/transaction/history/data/local_tx_store.dart';
 import 'package:flutter/foundation.dart';
-import 'package:polkadart/polkadart.dart' show Events, Hasher;
+import 'package:polkadart/polkadart.dart' show Hasher;
 import 'package:polkadart_keyring/polkadart_keyring.dart' show Keyring;
 
-import 'chain_event_subscription.dart';
-import 'chain_read_cache.dart';
-import 'chain_rpc.dart';
-import 'smoldot_client.dart';
-
-class _DecodedTransferEvent {
-  const _DecodedTransferEvent({
-    required this.fromAccountId,
-    required this.toAccountId,
-    required this.amountFen,
-    this.remark,
-  });
-
-  final String fromAccountId;
-  final String toAccountId;
-  final String amountFen;
-  final String? remark;
-}
+import 'package:citizenapp/rpc/chain_event_subscription.dart';
+import 'package:citizenapp/rpc/chain_read_cache.dart';
+import 'package:citizenapp/rpc/chain_rpc.dart';
+import 'package:citizenapp/rpc/smoldot_client.dart';
 
 /// owner 被 stop 同步废止后，用于结束仍在等待外部 RPC/smoldot 的监控任务。
 class _ChainTxMonitorStopped implements Exception {
@@ -121,15 +106,6 @@ class ChainTxMonitor {
 
   /// 每次补同步最多连续处理的区块数，避免手机长时间离线后一次性压节点。
   static const int _maxBlocksPerRun = 120;
-
-  // ──── 已知事件的 pallet_index + event_index ────
-
-  /// Balances::Transfer (pallet=2, event=2)，仅作为底层余额事件兜底。
-  static const int _balancesPallet = PalletRegistry.balancesPallet;
-  static const int _transferEvent = 2;
-  static const int _onchainTransactionPallet =
-      PalletRegistry.onchainTransactionPallet;
-  static const int _transferWithRemarkEvent = 2;
 
   /// System.Events storage key（twox128("System") + twox128("Events")）。
   static final Uint8List _eventsStorageKey = _buildEventsKey();
@@ -715,19 +691,22 @@ class ChainTxMonitor {
       );
       if (eventsBytes.isEmpty) return true;
 
+      final decoded = await _decodeTransactionEvents(owner, eventsBytes);
+      if (!_isCurrent(owner)) return false;
+
       // 先按 txHash 精确认本机提交的待确认交易（就地翻已确认/失败），并记下
       // 已认领的 accountId#extrinsicIndex；下面转出侧据此跳过、绝不另建第二条。
       final claimedThisBlock = await _confirmSubmittedByTxHash(
         owner,
         blockNumber,
         blockHashHex,
-        eventsBytes,
+        decoded.outcomes,
       );
       if (!_isCurrent(owner)) return false;
 
       await _decodeTransferEvents(
         owner,
-        eventsBytes,
+        decoded.transfers,
         blockNumber,
         blockHashHex,
         claimedThisBlock,
@@ -753,7 +732,7 @@ class ChainTxMonitor {
     _ChainTxMonitorOwner owner,
     int blockNumber,
     String blockHashHex,
-    Uint8List eventsBytes,
+    Map<int, CitizenChainExtrinsicOutcome> outcomes,
   ) async {
     final claimed = <String>{};
     final openRecords = <LocalTxEntity>[];
@@ -795,15 +774,18 @@ class ChainTxMonitor {
       );
       if (!_isCurrent(owner)) return claimed;
       if (idx == null) continue; // 这笔不在本块，继续等后面的最终块
-      final failure = _chainRpc.findExtrinsicFailureInEvents(
-        eventsBytes,
-        extrinsicIndex: idx,
-      );
-      if (failure != null) {
+      final outcome = outcomes[idx];
+      if (outcome == null) {
+        throw StateError(
+          'txHash 命中 extrinsic $idx，但 metadata 解码未得到唯一 System 终态',
+        );
+      }
+      if (!outcome.succeeded) {
         await LocalTxStore.markLocalSubmitFailed(
           accountId: record.accountId,
           txHash: txHash,
-          failureReason: failure.description,
+          failureReason:
+              outcome.failureDescription ?? 'Runtime execution failed',
         );
       } else {
         await LocalTxStore.markLocalSubmitFinalized(
@@ -820,25 +802,11 @@ class ChainTxMonitor {
     return claimed;
   }
 
-  /// 确认所有"未终态"本机提交记录的唯一兜底 —— 与前向游标完全解耦,零扫块。
+  /// 只用准确入块锚确认尚未终态的本机提交记录。
   ///
-  /// 每轮同步末尾执行;无待确认记录时一次本地查询即返回。对每条记录按两级判据:
-  ///
-  /// - **判据一(锚比对)**:blockHash 是交易池 inBlock 事件写入的"本笔所在块"锚
-  ///   (`dropped` 不再清它)。读该块头取块号 N;若 N ≤ finalized 高度且最终链在
-  ///   N 高度的块哈希与锚相等 ⇒ 锚块已最终、本笔已上链 → 对这一个块跑一次
-  ///   [_processBlock](按 txHash 认领 + ExtrinsicFailed 精查 + 事件补写;单块
-  ///   一次性,与前向扫描处理一个新块同量级)。锚不等/块头取不到 → 降级判据二。
-  ///
-  /// - **判据二(nonce 兜底)**:账户 nonce 单调递增、只有交易上链才被消费。
-  ///   finalized 状态下账户 nonce > 记录 usedNonce ⇒ 该 nonce 已被最终链消费 ⇒
-  ///   本笔已上链 → 翻 finalized(不带块号,保留原字段)。私钥仅在本机、app 串行
-  ///   提交,同 nonce 顶替(usurped)已在交易池 watch 单独判失败,判据严格成立。
-  ///   局限:不区分"上链但执行失败"(该情形 nonce 同样被消费;概率极低 ——
-  ///   提交前有余额/ED 校验,带锚记录会走判据一精查)。
-  ///
-  /// 资源账:每条记录至多 2 次读头 + 每账户至多 1 次 System.Account 快照读;
-  /// **永不窗口扫块、永不批量下载块体**,绝不挤占链状态轮询(ChainProgressBanner)。
+  /// 没有准确锚或锚被重组时保持 pending，等待 finalized 前向扫描按 txHash 找到
+  /// 完整块体和同 index `System.ExtrinsicSuccess/Failed`。账户 nonce 被消费不能
+  /// 证明本次调用成功，因此这里没有 nonce fallback。
   Future<void> _confirmOpenSubmits(_ChainTxMonitorOwner owner) async {
     if (!_isCurrent(owner) || _ss58AddressByAccountId.isEmpty) return;
     final head = (await _awaitExternal(owner, _chainRpc.fetchFinalizedBlock()))
@@ -846,11 +814,10 @@ class ChainTxMonitor {
     if (!_isCurrent(owner)) return;
     for (final accountId in _ss58AddressByAccountId.keys.toList()) {
       if (!_isCurrent(owner)) return;
-      var records = await LocalTxStore.queryOpenLocalSubmit(accountId);
+      final records = await LocalTxStore.queryOpenLocalSubmit(accountId);
       if (!_isCurrent(owner)) return;
       if (records.isEmpty) continue;
 
-      // 判据一:锚比对(同锚块只处理一次)。
       final processedAnchors = <String>{};
       for (final record in records) {
         if (!_isCurrent(owner)) return;
@@ -868,46 +835,11 @@ class ChainTxMonitor {
         if (finalizedHash == null ||
             LocalTxStore.normalizeBlockHash(finalizedHash) !=
                 LocalTxStore.normalizeBlockHash(anchor)) {
-          // 锚块被最终链顶掉(交易可能被重排进别的块):交给判据二兜底。
+          // 锚块被最终链顶掉；保持 pending，等待后续 finalized 前向扫描。
           continue;
         }
         await _processBlock(owner, blockNumber);
         if (!_isCurrent(owner)) return;
-      }
-
-      // 判据二:nonce 兜底(锚路径后仍未终态的记录)。
-      records = await LocalTxStore.queryOpenLocalSubmit(accountId);
-      if (!_isCurrent(owner)) return;
-      if (records.isEmpty) continue;
-      final int? finalizedNonce;
-      try {
-        finalizedNonce = (await _awaitExternal(
-          owner,
-          SmoldotClientManager.instance
-              .getFinalizedSystemAccountSnapshot(accountId),
-        ))
-            ?.nonce;
-      } catch (e) {
-        if (!_isCurrent(owner)) return;
-        AppLog.d('[TxMonitor] 读取账户 nonce 失败,下轮再确认: $e');
-        continue;
-      }
-      if (!_isCurrent(owner)) return;
-      if (finalizedNonce == null) continue;
-      for (final record in records) {
-        if (!_isCurrent(owner)) return;
-        final txHash = record.txHash;
-        final usedNonce = record.usedNonce;
-        if (txHash == null || txHash.isEmpty || usedNonce == null) continue;
-        if (finalizedNonce > usedNonce) {
-          await LocalTxStore.markLocalSubmitFinalized(
-            accountId: record.accountId,
-            txHash: txHash,
-          );
-          if (!_isCurrent(owner)) return;
-          AppLog.d('[TxMonitor] nonce 兜底确认: tx=$txHash '
-              'usedNonce=$usedNonce < 账户nonce=$finalizedNonce');
-        }
       }
     }
   }
@@ -941,187 +873,42 @@ class ChainTxMonitor {
     return null;
   }
 
-  /// 解码 System.Events，优先提取 OnchainTransaction 转账事件。
-  ///
-  /// Balances::Transfer 只作为底层余额事件兜底；外部普通转账入口仍然唯一收口到
-  /// OnchainTransaction::transfer_with_remark。
-  Future<void> _decodeTransferEvents(
+  Future<CitizenChainTransactionBlockEvents> _decodeTransactionEvents(
     _ChainTxMonitorOwner owner,
-    Uint8List data,
-    int blockNumber,
-    String blockHash,
-    Set<String> claimedThisBlock,
+    Uint8List eventsBytes,
   ) async {
-    try {
-      final keyHex = '0x${_hexEncode(_eventsStorageKey)}';
-      final metadata = await _awaitExternal(owner, _chainRpc.fetchMetadata());
-      if (!_isCurrent(owner)) return;
-      final events = Events.fromJson({
-        'changes': [
-          [keyHex, '0x${_hexEncode(data)}']
-        ],
-      }, metadata.chainInfo);
-
-      for (var index = 0; index < events.eventRecord.length; index++) {
-        if (!_isCurrent(owner)) return;
-        final record = events.eventRecord[index];
-        final transferWithRemark = _readTransferWithRemark(record.event);
-        if (transferWithRemark != null) {
-          final extrinsicIndex = _readExtrinsicIndex(record.phase);
-          await _writeTransferForBothSides(
-            owner: owner,
-            claimedThisBlock: claimedThisBlock,
-            fromAccountId: transferWithRemark.fromAccountId,
-            toAccountId: transferWithRemark.toAccountId,
-            transferAmountFen: transferWithRemark.amountFen,
-            blockNumber: blockNumber,
-            blockHash: blockHash,
-            eventRecordIndex: index,
-            extrinsicIndex: extrinsicIndex,
-            remark: transferWithRemark.remark,
-          );
-          continue;
-        }
-        final transfer = _readBalancesTransfer(record.event);
-        if (transfer == null) continue;
-        final extrinsicIndex = _readExtrinsicIndex(record.phase);
-        await _writeTransferForBothSides(
-          owner: owner,
-          claimedThisBlock: claimedThisBlock,
-          fromAccountId: transfer.fromAccountId,
-          toAccountId: transfer.toAccountId,
-          transferAmountFen: transfer.amountFen,
-          blockNumber: blockNumber,
-          blockHash: blockHash,
-          eventRecordIndex: index,
-          extrinsicIndex: extrinsicIndex,
-        );
-      }
-      return;
-    } catch (e) {
-      if (!_isCurrent(owner)) return;
-      AppLog.d('[TxMonitor] metadata 事件解码失败，使用兜底解析: $e');
-    }
-
-    await _decodeTransferEventsFallback(
-      owner,
-      data,
-      blockNumber,
-      blockHash,
-      claimedThisBlock,
+    final keyHex = '0x${_hexEncode(_eventsStorageKey)}';
+    final metadata = await _awaitExternal(owner, _chainRpc.fetchMetadata());
+    if (!_isCurrent(owner)) throw const _ChainTxMonitorStopped();
+    return const CitizenChainTransactionEventDecoder().decode(
+      eventsBytes: eventsBytes,
+      metadata: metadata,
+      eventsStorageKeyHex: keyHex,
     );
   }
 
-  Future<void> _decodeTransferEventsFallback(
+  /// 将严格 metadata 解码出的 CitizenApp 业务事件写入本地历史。
+  Future<void> _decodeTransferEvents(
     _ChainTxMonitorOwner owner,
-    Uint8List data,
+    List<CitizenChainTransferEvent> transfers,
     int blockNumber,
     String blockHash,
     Set<String> claimedThisBlock,
   ) async {
-    var offset = 0;
-    var eventRecordIndex = 0;
-    if (data.isEmpty) return;
-    final (_, countSize) = _decodeCompactU32(data, 0);
-    offset += countSize;
-
-    while (offset + 4 < data.length) {
+    for (final transfer in transfers) {
       if (!_isCurrent(owner)) return;
-      int? extrinsicIndex;
-      final phase = data[offset];
-      offset += 1;
-      if (phase == 0x00) {
-        if (offset + 4 > data.length) break;
-        extrinsicIndex = _readU32LE(data, offset);
-        offset += 4;
-      }
-
-      if (offset + 2 > data.length) break;
-      final palletIndex = data[offset];
-      final eventIndex = data[offset + 1];
-      offset += 2;
-
-      if (palletIndex == _balancesPallet && eventIndex == _transferEvent) {
-        // Balances::Transfer { from: AccountId, to: AccountId, amount: u128 }
-        if (offset + 80 <= data.length) {
-          final from = data.sublist(offset, offset + 32);
-          final to = data.sublist(offset + 32, offset + 64);
-          final amountBytes = data.sublist(offset + 64, offset + 80);
-          offset += 80;
-
-          final fromAccountId = '0x${_hexEncode(from)}';
-          final toAccountId = '0x${_hexEncode(to)}';
-          final transferAmountFen = _readU128LE(amountBytes, 0).toString();
-
-          await _writeTransferForBothSides(
-            owner: owner,
-            claimedThisBlock: claimedThisBlock,
-            fromAccountId: fromAccountId,
-            toAccountId: toAccountId,
-            transferAmountFen: transferAmountFen,
-            blockNumber: blockNumber,
-            blockHash: blockHash,
-            eventRecordIndex: eventRecordIndex,
-            extrinsicIndex: extrinsicIndex,
-          );
-
-          offset = _skipTopics(data, offset);
-          eventRecordIndex++;
-          continue;
-        }
-      }
-      if (palletIndex == _onchainTransactionPallet &&
-          eventIndex == _transferWithRemarkEvent) {
-        // OnchainTransaction::TransferWithRemark { from, beneficiary, amount, remark }
-        if (offset + 81 <= data.length) {
-          final from = data.sublist(offset, offset + 32);
-          final to = data.sublist(offset + 32, offset + 64);
-          final amountBytes = data.sublist(offset + 64, offset + 80);
-          offset += 80;
-          final (remarkLen, remarkLenSize) = _decodeCompactU32(data, offset);
-          if (remarkLenSize == 0 ||
-              offset + remarkLenSize + remarkLen > data.length) {
-            break;
-          }
-          offset += remarkLenSize;
-          final remark = remarkLen == 0
-              ? null
-              : utf8.decode(
-                  data.sublist(offset, offset + remarkLen),
-                  allowMalformed: true,
-                );
-          offset += remarkLen;
-
-          await _writeTransferForBothSides(
-            owner: owner,
-            claimedThisBlock: claimedThisBlock,
-            fromAccountId: '0x${_hexEncode(from)}',
-            toAccountId: '0x${_hexEncode(to)}',
-            transferAmountFen: _readU128LE(amountBytes, 0).toString(),
-            blockNumber: blockNumber,
-            blockHash: blockHash,
-            eventRecordIndex: eventRecordIndex,
-            extrinsicIndex: extrinsicIndex,
-            remark: remark,
-          );
-
-          offset = _skipTopics(data, offset);
-          eventRecordIndex++;
-          continue;
-        }
-      }
-
-      final skipped = _skipKnownEventPayload(data, offset, palletIndex,
-          eventIndex: eventIndex);
-      if (skipped != null) {
-        offset = _skipTopics(data, skipped);
-        eventRecordIndex++;
-        continue;
-      }
-
-      // 未识别事件：尝试跳到下一个 EventRecord。
-      offset = _skipToNextEvent(data, offset);
-      eventRecordIndex++;
+      await _writeTransferForBothSides(
+        owner: owner,
+        claimedThisBlock: claimedThisBlock,
+        fromAccountId: transfer.fromAccountId,
+        toAccountId: transfer.toAccountId,
+        transferAmountFen: transfer.amountFen,
+        blockNumber: blockNumber,
+        blockHash: blockHash,
+        eventRecordIndex: transfer.eventRecordIndex,
+        extrinsicIndex: transfer.extrinsicIndex,
+        remark: transfer.remark,
+      );
     }
   }
 
@@ -1177,187 +964,6 @@ class ChainTxMonitor {
         remark: remark,
       );
     }
-  }
-
-  _DecodedTransferEvent? _readTransferWithRemark(Map<String, dynamic> event) {
-    final onchain = event['OnchainTransaction'] ?? event['onchainTransaction'];
-    if (onchain is! Map) return null;
-    final transfer = onchain['TransferWithRemark'] ??
-        onchain['transferWithRemark'] ??
-        onchain['transfer_with_remark'];
-    if (transfer == null) return null;
-
-    dynamic from;
-    dynamic to;
-    dynamic amount;
-    dynamic remark;
-    if (transfer is Map) {
-      from = transfer['from'] ?? transfer['0'];
-      to = transfer['beneficiary'] ?? transfer['to'] ?? transfer['1'];
-      amount = transfer['amount'] ?? transfer['2'];
-      remark = transfer['remark'] ?? transfer['3'];
-      if ((from == null || to == null || amount == null || remark == null) &&
-          transfer.values.length >= 4) {
-        final values = transfer.values.toList(growable: false);
-        from ??= values[0];
-        to ??= values[1];
-        amount ??= values[2];
-        remark ??= values[3];
-      }
-    } else if (transfer is List && transfer.length >= 4) {
-      from = transfer[0];
-      to = transfer[1];
-      amount = transfer[2];
-      remark = transfer[3];
-    }
-
-    final fromAccountId = _decodeAccountId(from);
-    final toAccountId = _decodeAccountId(to);
-    final amountFen = _eventAmountToFen(amount);
-    if (fromAccountId == null || toAccountId == null || amountFen == null) {
-      return null;
-    }
-    return _DecodedTransferEvent(
-      fromAccountId: fromAccountId,
-      toAccountId: toAccountId,
-      amountFen: amountFen,
-      remark: _eventRemarkToString(remark),
-    );
-  }
-
-  _DecodedTransferEvent? _readBalancesTransfer(Map<String, dynamic> event) {
-    final balances = event['Balances'] ?? event['balances'];
-    if (balances is! Map) return null;
-    final transfer = balances['Transfer'] ?? balances['transfer'];
-    if (transfer == null) return null;
-
-    dynamic from;
-    dynamic to;
-    dynamic amount;
-    if (transfer is Map) {
-      from = transfer['from'] ?? transfer['0'];
-      to = transfer['to'] ?? transfer['1'];
-      amount = transfer['amount'] ?? transfer['value'] ?? transfer['2'];
-      if ((from == null || to == null || amount == null) &&
-          transfer.values.length >= 3) {
-        final values = transfer.values.toList(growable: false);
-        from ??= values[0];
-        to ??= values[1];
-        amount ??= values[2];
-      }
-    } else if (transfer is List && transfer.length >= 3) {
-      from = transfer[0];
-      to = transfer[1];
-      amount = transfer[2];
-    }
-
-    final fromAccountId = _decodeAccountId(from);
-    final toAccountId = _decodeAccountId(to);
-    final amountFen = _eventAmountToFen(amount);
-    if (fromAccountId == null || toAccountId == null || amountFen == null) {
-      return null;
-    }
-    return _DecodedTransferEvent(
-      fromAccountId: fromAccountId,
-      toAccountId: toAccountId,
-      amountFen: amountFen,
-    );
-  }
-
-  int? _readExtrinsicIndex(Map<String, dynamic> phase) {
-    final value = phase['ApplyExtrinsic'] ?? phase['applyExtrinsic'];
-    if (value is int) return value;
-    if (value is BigInt) return value.toInt();
-    if (value is String) return int.tryParse(value);
-    return null;
-  }
-
-  String? _decodeAccountId(dynamic raw) {
-    if (raw is Uint8List && raw.length == 32) {
-      return '0x${_hexEncode(raw)}';
-    }
-    if (raw is List) {
-      final bytes = raw.whereType<int>().toList(growable: false);
-      if (bytes.length == 32) {
-        return '0x${_hexEncode(Uint8List.fromList(bytes))}';
-      }
-    }
-    if (raw is String) {
-      final text = raw.trim();
-      final hex = text.startsWith('0x') ? text.substring(2) : text;
-      final isHex = RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(hex);
-      if (isHex) return '0x${hex.toLowerCase()}';
-      try {
-        return '0x${_hexEncode(
-          Uint8List.fromList(Keyring().decodeAddress(text)),
-        )}';
-      } catch (_) {
-        return null;
-      }
-    }
-    return null;
-  }
-
-  String? _eventAmountToFen(dynamic raw) {
-    if (raw is BigInt) return raw.toString();
-    if (raw is int) return raw.toString();
-    if (raw is String) return BigInt.tryParse(raw)?.toString();
-    return null;
-  }
-
-  String? _eventRemarkToString(dynamic raw) {
-    if (raw == null) return null;
-    if (raw is Uint8List) {
-      return raw.isEmpty ? null : utf8.decode(raw, allowMalformed: true);
-    }
-    if (raw is List) {
-      final bytes = raw.whereType<int>().toList(growable: false);
-      return bytes.isEmpty ? null : utf8.decode(bytes, allowMalformed: true);
-    }
-    if (raw is Map) {
-      final bytes = raw.values.whereType<int>().toList(growable: false);
-      if (bytes.isNotEmpty) {
-        return utf8.decode(bytes, allowMalformed: true);
-      }
-    }
-    if (raw is String) {
-      final text = raw.trim();
-      if (text.isEmpty) return null;
-      if (RegExp(r'^0x[0-9a-fA-F]*$').hasMatch(text)) {
-        final bytes = _hexDecode(text.substring(2));
-        return bytes.isEmpty ? null : utf8.decode(bytes, allowMalformed: true);
-      }
-      return raw;
-    }
-    return raw.toString();
-  }
-
-  int? _skipKnownEventPayload(
-    Uint8List data,
-    int offset,
-    int palletIndex, {
-    required int eventIndex,
-  }) {
-    // metadata 解码正常时不会走到这里；兜底分支只显式跳过
-    // 普通转账前后最常见的定长事件，避免旧版“向前扫描”误命中 payload 字节。
-    final oneAccountAndAmount = offset + 48 <= data.length ? offset + 48 : null;
-    if (palletIndex == _balancesPallet) {
-      if (eventIndex == 7 ||
-          eventIndex == 8 ||
-          eventIndex == 10 ||
-          eventIndex == 11) {
-        return oneAccountAndAmount;
-      }
-    }
-    // OnchainTransaction::FeePaid { who: AccountId, fee: u128 }
-    if (palletIndex == 4 && eventIndex == 0) {
-      return oneAccountAndAmount;
-    }
-    // OnchainTransaction::FeeShareBurnt { reason: BurnReason, amount: u128 }
-    if (palletIndex == 4 && eventIndex == 1) {
-      return offset + 17 <= data.length ? offset + 17 : null;
-    }
-    return null;
   }
 
   Future<void> _writeWalletTransferIfMatched({
@@ -1453,68 +1059,5 @@ class ChainTxMonitor {
       );
     }
     return result;
-  }
-
-  static int _readU32LE(Uint8List bytes, int offset) {
-    return bytes[offset] |
-        (bytes[offset + 1] << 8) |
-        (bytes[offset + 2] << 16) |
-        (bytes[offset + 3] << 24);
-  }
-
-  static BigInt _readU128LE(Uint8List bytes, int offset) {
-    var value = BigInt.zero;
-    for (var i = 15; i >= 0; i--) {
-      value = (value << 8) | BigInt.from(bytes[offset + i]);
-    }
-    return value;
-  }
-
-  static (int, int) _decodeCompactU32(Uint8List bytes, int offset) {
-    if (offset >= bytes.length) return (0, 0);
-    final mode = bytes[offset] & 0x03;
-    switch (mode) {
-      case 0:
-        return (bytes[offset] >> 2, 1);
-      case 1:
-        if (offset + 2 > bytes.length) return (0, 0);
-        return (((bytes[offset + 1] << 8) | bytes[offset]) >> 2, 2);
-      case 2:
-        if (offset + 4 > bytes.length) return (0, 0);
-        return (
-          ((bytes[offset + 3] << 24) |
-                  (bytes[offset + 2] << 16) |
-                  (bytes[offset + 1] << 8) |
-                  bytes[offset]) >>
-              2,
-          4
-        );
-      default:
-        return (0, 1);
-    }
-  }
-
-  /// 跳过 topics（Vec<Hash>）。
-  static int _skipTopics(Uint8List data, int offset) {
-    if (offset >= data.length) return offset;
-    final (count, size) = _decodeCompactU32(data, offset);
-    offset += size;
-    offset += count * 32;
-    return offset;
-  }
-
-  /// 未识别事件时，向前扫描寻找下一个合法 EventRecord 的 phase 起点。
-  static int _skipToNextEvent(Uint8List data, int offset) {
-    for (var i = offset; i < data.length - 3; i++) {
-      final byte = data[i];
-      if (byte == 0x01 || byte == 0x02) {
-        final nextPallet = data[i + 1];
-        if (nextPallet < 64) return i;
-      } else if (byte == 0x00 && i + 5 < data.length) {
-        final possiblePallet = data[i + 5];
-        if (possiblePallet < 64) return i;
-      }
-    }
-    return data.length;
   }
 }

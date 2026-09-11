@@ -33,6 +33,14 @@ pub type CitizenSdkResultHandle = u64;
 /// drops [`citizen_sdk_engine::PreparedWalletCreation`] and zeroizes its
 /// mnemonic/password buffers; it is deliberately not an instance/result ID.
 pub type CitizenSdkPreparedWalletHandle = u64;
+/// Instance-owned opaque transaction preparation; it is never a serialized recovery token.
+pub type CitizenSdkPreparedTransactionHandle = u64;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CitizenSdkTransactionExecutionId {
+    pub bytes: [u8; 16],
+}
 
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -148,11 +156,54 @@ pub enum CitizenSdkResultKind {
     WalletAccounts = 13,
     Signature = 14,
     PreparedWallet = 15,
-    WalletTransfer = 16,
-    TransactionHistory = 17,
+    /// Numeric 16 is permanently unused after removal of the product-specific
+    /// wallet-transfer result.
+    TransactionHistoryPage = 17,
     AccountBalances = 18,
     QrReview = 19,
     QrSigned = 20,
+    WalletState = 21,
+    SigningOutcome = 22,
+    DefaultAccountChange = 23,
+    ChainSyncStatus = 24,
+    BlockHeader = 25,
+    BlockBody = 26,
+    PreparedTransaction = 27,
+    TransactionExecution = 28,
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CitizenSdkTransactionExecutionStatus {
+    ExternalPending = 1,
+    FinalizedSuccess = 2,
+    FinalizedFailed = 3,
+    PoolRejected = 4,
+}
+
+/// Product-independent byte transform selected by one signing intent.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CitizenSdkSigningTransform {
+    Raw = 1,
+    SubstrateSigningPayload = 2,
+    Blake2Domain = 3,
+}
+
+/// Optional external signer transport. Additional transports can be added without defining app
+/// action semantics; QR_V1's `action` remains an opaque caller-owned u16 value.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CitizenSdkExternalSignerTransport {
+    None = 0,
+    QrV1 = 1,
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CitizenSdkSigningOutcomeStatus {
+    Completed = 1,
+    ExternalPending = 2,
 }
 
 #[repr(u32)]
@@ -170,29 +221,22 @@ pub enum CitizenSdkWalletOrigin {
     Imported = 2,
 }
 
+/// 账户签名由本机热钱包完成，或交给独立冷钱包二维码流程完成。
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CitizenSdkHistoryStatus {
+pub enum CitizenSdkWalletSignMode {
+    Hot = 1,
+    Cold = 2,
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CitizenSdkTransactionHistoryStatus {
     Pending = 1,
     InBlock = 2,
     PoolRejected = 3,
     FinalizedSuccess = 4,
     FinalizedFailed = 5,
-}
-
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CitizenSdkTransferResolution {
-    FinalizedSuccess = 1,
-    FinalizedFailed = 2,
-    PoolRejected = 3,
-}
-
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CitizenSdkTransferDirection {
-    Outgoing = 1,
-    Incoming = 2,
 }
 
 #[repr(u32)]
@@ -361,6 +405,86 @@ pub struct CitizenSdkRuntimeContextInfo {
     pub spec_version: u32,
     pub transaction_version: u32,
     pub metadata_len: u64,
+}
+
+/// One coherent light-node status snapshot. `is_usable` is provider-owned and must not be
+/// recomputed by a platform binding or product application.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CitizenSdkChainSyncStatusInfo {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub peer_count: u64,
+    pub is_syncing: u8,
+    pub is_usable: u8,
+    pub reserved: [u8; 6],
+    pub best: CitizenSdkBlockRef,
+    pub finalized: CitizenSdkBlockRef,
+}
+
+impl Default for CitizenSdkChainSyncStatusInfo {
+    fn default() -> Self {
+        Self {
+            struct_size: std::mem::size_of::<Self>() as u32,
+            abi_version: CITIZENSDK_ABI_VERSION,
+            peer_count: 0,
+            is_syncing: 0,
+            is_usable: 0,
+            reserved: [0; 6],
+            best: CitizenSdkBlockRef::default(),
+            finalized: CitizenSdkBlockRef::default(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CitizenSdkBlockHeaderInfo {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub block: CitizenSdkBlockRef,
+    pub parent_hash: [u8; 32],
+    pub state_root: [u8; 32],
+    pub extrinsics_root: [u8; 32],
+    pub digest_len: u64,
+}
+
+impl Default for CitizenSdkBlockHeaderInfo {
+    fn default() -> Self {
+        Self {
+            struct_size: std::mem::size_of::<Self>() as u32,
+            abi_version: CITIZENSDK_ABI_VERSION,
+            block: CitizenSdkBlockRef::default(),
+            parent_hash: [0; 32],
+            state_root: [0; 32],
+            extrinsics_root: [0; 32],
+            digest_len: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CitizenSdkBlockBodyInfo {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub block: CitizenSdkBlockRef,
+    pub extrinsic_count: u32,
+    pub reserved: u32,
+    pub total_bytes: u64,
+}
+
+impl Default for CitizenSdkBlockBodyInfo {
+    fn default() -> Self {
+        Self {
+            struct_size: std::mem::size_of::<Self>() as u32,
+            abi_version: CITIZENSDK_ABI_VERSION,
+            block: CitizenSdkBlockRef::default(),
+            extrinsic_count: 0,
+            reserved: 0,
+            total_bytes: 0,
+        }
+    }
 }
 
 #[repr(C)]
@@ -538,6 +662,137 @@ impl Default for CitizenSdkWalletAccountInfo {
     }
 }
 
+/// 统一热／冷钱包目录的固定部分；第一项（若存在）是只读默认账户。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CitizenSdkWalletStateInfo {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub revision: u64,
+    pub account_count: u32,
+    pub has_default_account: u32,
+    pub default_account_id: CitizenSdkAccountId,
+}
+
+impl Default for CitizenSdkWalletStateInfo {
+    fn default() -> Self {
+        Self {
+            struct_size: std::mem::size_of::<Self>() as u32,
+            abi_version: CITIZENSDK_ABI_VERSION,
+            revision: 0,
+            account_count: 0,
+            has_default_account: 0,
+            default_account_id: CitizenSdkAccountId::default(),
+        }
+    }
+}
+
+/// 统一目录中的一个公开账户。冷账户没有派生 index，使用 `has_account_index=0`。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CitizenSdkWalletStateAccountInfo {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub sign_mode: u32,
+    pub wallet_index: u32,
+    pub has_account_index: u32,
+    pub account_index: u32,
+    pub is_default: u32,
+    pub reserved: u32,
+    pub account_id: CitizenSdkAccountId,
+    pub created_at_millis: u64,
+    pub ss58_address_len: u64,
+    pub name_len: u64,
+}
+
+/// Fixed part of a generic signing result. Variable bytes are copied atomically by the dedicated
+/// result getter; a completed result has 64 signature bytes and no session/request text.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CitizenSdkSigningOutcomeInfo {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub status: u32,
+    pub transport: u32,
+    pub account_id: CitizenSdkAccountId,
+    pub payload_hash: [u8; 32],
+    pub expires_at: u64,
+    pub signature_len: u64,
+    pub session_id_len: u64,
+    pub transport_request_len: u64,
+}
+
+impl Default for CitizenSdkSigningOutcomeInfo {
+    fn default() -> Self {
+        Self {
+            struct_size: std::mem::size_of::<Self>() as u32,
+            abi_version: CITIZENSDK_ABI_VERSION,
+            status: 0,
+            transport: 0,
+            account_id: CitizenSdkAccountId::default(),
+            payload_hash: [0; 32],
+            expires_at: 0,
+            signature_len: 0,
+            session_id_len: 0,
+            transport_request_len: 0,
+        }
+    }
+}
+
+/// Default-account mutation result. A completed result exposes only the committed revision;
+/// callers refresh the normal WalletState projection. A pending result carries one external
+/// request and never exposes a raw setter or an unverified authorization token.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CitizenSdkDefaultAccountChangeInfo {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub status: u32,
+    pub transport: u32,
+    pub current_default_account_id: CitizenSdkAccountId,
+    pub payload_hash: [u8; 32],
+    pub expires_at: u64,
+    pub committed_revision: u64,
+    pub session_id_len: u64,
+    pub transport_request_len: u64,
+}
+
+impl Default for CitizenSdkDefaultAccountChangeInfo {
+    fn default() -> Self {
+        Self {
+            struct_size: std::mem::size_of::<Self>() as u32,
+            abi_version: CITIZENSDK_ABI_VERSION,
+            status: 0,
+            transport: 0,
+            current_default_account_id: CitizenSdkAccountId::default(),
+            payload_hash: [0; 32],
+            expires_at: 0,
+            committed_revision: 0,
+            session_id_len: 0,
+            transport_request_len: 0,
+        }
+    }
+}
+
+impl Default for CitizenSdkWalletStateAccountInfo {
+    fn default() -> Self {
+        Self {
+            struct_size: std::mem::size_of::<Self>() as u32,
+            abi_version: CITIZENSDK_ABI_VERSION,
+            sign_mode: 0,
+            wallet_index: 0,
+            has_account_index: 0,
+            account_index: 0,
+            is_default: 0,
+            reserved: 0,
+            account_id: CitizenSdkAccountId::default(),
+            created_at_millis: 0,
+            ss58_address_len: 0,
+            name_len: 0,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CitizenSdkPreparedWalletInfo {
@@ -558,24 +813,158 @@ impl Default for CitizenSdkPreparedWalletInfo {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CitizenSdkWalletTransferInfo {
+pub struct CitizenSdkPreparedTransactionInfo {
     pub struct_size: u32,
     pub abi_version: u32,
+    pub prepared_transaction: CitizenSdkPreparedTransactionHandle,
+    pub preparation_id: [u8; 16],
+    pub source_account_id: CitizenSdkAccountId,
+    pub call_data_hash: [u8; 32],
+    pub best_block: CitizenSdkBlockRef,
+    pub runtime_spec_number: u32,
+    pub transaction_format_number: u32,
+    pub nonce: u64,
+}
+
+/// Safe projection of either an external QR_V1 request or one accurately verified terminal.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CitizenSdkTransactionExecutionInfo {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub status: u32,
+    pub transport: u32,
+    pub execution_id: [u8; 16],
+    pub source_account_id: CitizenSdkAccountId,
+    pub call_data_hash: [u8; 32],
     pub transaction_hash: [u8; 32],
-    pub resolution: u32,
-    pub has_execution: u32,
-    pub execution: CitizenSdkExecutionInfo,
+    pub expires_at: u64,
+    pub has_block: u32,
+    pub has_extrinsic_index: u32,
+    pub has_dispatch_failure: u32,
+    pub has_module_failure: u32,
+    pub has_replacement_hash: u32,
+    pub dispatch_variant: u32,
+    pub pallet_index: u32,
+    pub error_index: u32,
+    pub block: CitizenSdkBlockRef,
+    pub extrinsic_index: u32,
+    pub replacement_hash: [u8; 32],
+    pub session_id_len: u64,
+    pub transport_request_len: u64,
     pub pool_rejection_reason_len: u64,
 }
 
-impl Default for CitizenSdkWalletTransferInfo {
+impl Default for CitizenSdkTransactionExecutionInfo {
     fn default() -> Self {
         Self {
             struct_size: std::mem::size_of::<Self>() as u32,
             abi_version: CITIZENSDK_ABI_VERSION,
+            status: 0,
+            transport: 0,
+            execution_id: [0; 16],
+            source_account_id: CitizenSdkAccountId::default(),
+            call_data_hash: [0; 32],
             transaction_hash: [0; 32],
-            resolution: 0,
+            expires_at: 0,
+            has_block: 0,
+            has_extrinsic_index: 0,
+            has_dispatch_failure: 0,
+            has_module_failure: 0,
+            has_replacement_hash: 0,
+            dispatch_variant: 0,
+            pallet_index: 0,
+            error_index: 0,
+            block: CitizenSdkBlockRef::default(),
+            extrinsic_index: 0,
+            replacement_hash: [0; 32],
+            session_id_len: 0,
+            transport_request_len: 0,
+            pool_rejection_reason_len: 0,
+        }
+    }
+}
+
+impl Default for CitizenSdkPreparedTransactionInfo {
+    fn default() -> Self {
+        Self {
+            struct_size: std::mem::size_of::<Self>() as u32,
+            abi_version: CITIZENSDK_ABI_VERSION,
+            prepared_transaction: 0,
+            preparation_id: [0; 16],
+            source_account_id: CitizenSdkAccountId::default(),
+            call_data_hash: [0; 32],
+            best_block: CitizenSdkBlockRef::default(),
+            runtime_spec_number: 0,
+            transaction_format_number: 0,
+            nonce: 0,
+        }
+    }
+}
+
+/// Header for one deterministic page of SDK-submitted generic transactions.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CitizenSdkTransactionHistoryPageInfo {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub revision: u64,
+    pub record_count: u32,
+    pub has_next_before_execution_id: u32,
+    pub next_before_execution_id: CitizenSdkTransactionExecutionId,
+}
+
+impl Default for CitizenSdkTransactionHistoryPageInfo {
+    fn default() -> Self {
+        Self {
+            struct_size: std::mem::size_of::<Self>() as u32,
+            abi_version: CITIZENSDK_ABI_VERSION,
+            revision: 0,
+            record_count: 0,
+            has_next_before_execution_id: 0,
+            next_before_execution_id: CitizenSdkTransactionExecutionId { bytes: [0; 16] },
+        }
+    }
+}
+
+/// Safe whitelist projection of one durable generic transaction execution.
+/// Opaque call bytes, signed extrinsic bytes, nonce and signer material never
+/// cross the public ABI.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CitizenSdkTransactionHistoryRecordInfo {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub execution_id: CitizenSdkTransactionExecutionId,
+    pub source_account_id: CitizenSdkAccountId,
+    pub call_data_hash: [u8; 32],
+    pub transaction_hash: [u8; 32],
+    pub status: u32,
+    pub has_block: u32,
+    pub block: CitizenSdkBlockRef,
+    pub has_execution: u32,
+    pub has_replacement_hash: u32,
+    pub execution: CitizenSdkExecutionInfo,
+    pub replacement_hash: [u8; 32],
+    pub created_at_millis: u64,
+    pub updated_at_millis: u64,
+    pub pool_rejection_reason_len: u64,
+}
+
+impl Default for CitizenSdkTransactionHistoryRecordInfo {
+    fn default() -> Self {
+        Self {
+            struct_size: std::mem::size_of::<Self>() as u32,
+            abi_version: CITIZENSDK_ABI_VERSION,
+            execution_id: CitizenSdkTransactionExecutionId { bytes: [0; 16] },
+            source_account_id: CitizenSdkAccountId::default(),
+            call_data_hash: [0; 32],
+            transaction_hash: [0; 32],
+            status: 0,
+            has_block: 0,
+            block: CitizenSdkBlockRef::default(),
             has_execution: 0,
+            has_replacement_hash: 0,
             execution: CitizenSdkExecutionInfo {
                 struct_size: std::mem::size_of::<CitizenSdkExecutionInfo>() as u32,
                 abi_version: CITIZENSDK_ABI_VERSION,
@@ -591,141 +980,10 @@ impl Default for CitizenSdkWalletTransferInfo {
                 error_index: 0,
                 reserved_tail: [0; 2],
             },
-            pool_rejection_reason_len: 0,
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CitizenSdkHistoryInfo {
-    pub struct_size: u32,
-    pub abi_version: u32,
-    pub revision: u64,
-    pub cursor_count: u32,
-    pub record_count: u32,
-    pub transfer_count: u32,
-    pub reserved: u32,
-}
-
-impl Default for CitizenSdkHistoryInfo {
-    fn default() -> Self {
-        Self {
-            struct_size: std::mem::size_of::<Self>() as u32,
-            abi_version: CITIZENSDK_ABI_VERSION,
-            revision: 0,
-            cursor_count: 0,
-            record_count: 0,
-            transfer_count: 0,
-            reserved: 0,
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CitizenSdkHistoryCursorInfo {
-    pub struct_size: u32,
-    pub abi_version: u32,
-    pub account_id: CitizenSdkAccountId,
-    pub tracking_start_block: CitizenSdkBlockRef,
-    pub last_synced_block: CitizenSdkBlockRef,
-}
-
-impl Default for CitizenSdkHistoryCursorInfo {
-    fn default() -> Self {
-        Self {
-            struct_size: std::mem::size_of::<Self>() as u32,
-            abi_version: CITIZENSDK_ABI_VERSION,
-            account_id: CitizenSdkAccountId::default(),
-            tracking_start_block: CitizenSdkBlockRef::default(),
-            last_synced_block: CitizenSdkBlockRef::default(),
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CitizenSdkHistoryRecordInfo {
-    pub struct_size: u32,
-    pub abi_version: u32,
-    pub account_id: CitizenSdkAccountId,
-    pub transaction_hash: [u8; 32],
-    pub nonce: u64,
-    pub destination_account_id: CitizenSdkAccountId,
-    pub amount_fen: CitizenSdkU128,
-    pub status: u32,
-    pub has_block: u32,
-    pub block: CitizenSdkBlockRef,
-    pub has_execution: u32,
-    pub reserved: u32,
-    pub execution: CitizenSdkExecutionInfo,
-    pub created_at_millis: u64,
-    pub updated_at_millis: u64,
-    pub remark_len: u64,
-    pub pool_rejection_reason_len: u64,
-}
-
-impl Default for CitizenSdkHistoryRecordInfo {
-    fn default() -> Self {
-        Self {
-            struct_size: std::mem::size_of::<Self>() as u32,
-            abi_version: CITIZENSDK_ABI_VERSION,
-            account_id: CitizenSdkAccountId::default(),
-            transaction_hash: [0; 32],
-            nonce: 0,
-            destination_account_id: CitizenSdkAccountId::default(),
-            amount_fen: CitizenSdkU128::default(),
-            status: 0,
-            has_block: 0,
-            block: CitizenSdkBlockRef::default(),
-            has_execution: 0,
-            reserved: 0,
-            execution: CitizenSdkWalletTransferInfo::default().execution,
+            replacement_hash: [0; 32],
             created_at_millis: 0,
             updated_at_millis: 0,
-            remark_len: 0,
             pool_rejection_reason_len: 0,
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CitizenSdkFinalizedTransferInfo {
-    pub struct_size: u32,
-    pub abi_version: u32,
-    pub tracked_account_id: CitizenSdkAccountId,
-    pub from_account_id: CitizenSdkAccountId,
-    pub to_account_id: CitizenSdkAccountId,
-    pub amount_fen: CitizenSdkU128,
-    pub block: CitizenSdkBlockRef,
-    pub event_record_index: u32,
-    pub has_extrinsic_index: u32,
-    pub extrinsic_index: u32,
-    pub direction: u32,
-    pub source_pallet_len: u64,
-    pub remark_display_len: u64,
-    pub remark_bytes_len: u64,
-}
-
-impl Default for CitizenSdkFinalizedTransferInfo {
-    fn default() -> Self {
-        Self {
-            struct_size: std::mem::size_of::<Self>() as u32,
-            abi_version: CITIZENSDK_ABI_VERSION,
-            tracked_account_id: CitizenSdkAccountId::default(),
-            from_account_id: CitizenSdkAccountId::default(),
-            to_account_id: CitizenSdkAccountId::default(),
-            amount_fen: CitizenSdkU128::default(),
-            block: CitizenSdkBlockRef::default(),
-            event_record_index: 0,
-            has_extrinsic_index: 0,
-            extrinsic_index: 0,
-            direction: 0,
-            source_pallet_len: 0,
-            remark_display_len: 0,
-            remark_bytes_len: 0,
         }
     }
 }

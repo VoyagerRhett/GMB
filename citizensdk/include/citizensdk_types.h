@@ -3,192 +3,221 @@
 
 #include <stdint.h>
 
-#define CITIZENSDK_ABI_VERSION UINT32_C(1)
-#define CITIZENSDK_CAPABILITY_COUNT UINT32_C(10)
+/* Public numeric constants use direct typed literals so C, C++ and Swift all
+ * consume the same exported ABI names without platform-specific projections. */
+
+#define CITIZENSDK_ABI_VERSION 1U
+#define CITIZENSDK_CAPABILITY_COUNT 10U
 
 /* Immutable instance module selection. Transactions and history require chain.
  * Wallet may reuse crypto internally without enabling the public signing API. */
-#define CITIZENSDK_MODULE_WALLET UINT32_C(1)
-#define CITIZENSDK_MODULE_SIGNING UINT32_C(2)
-#define CITIZENSDK_MODULE_CHAIN UINT32_C(4)
-#define CITIZENSDK_MODULE_TRANSACTIONS UINT32_C(8)
-#define CITIZENSDK_MODULE_HISTORY UINT32_C(16)
-#define CITIZENSDK_MODULE_QR UINT32_C(32)
-#define CITIZENSDK_MODULE_FULL UINT32_C(63)
+#define CITIZENSDK_MODULE_WALLET 1U
+#define CITIZENSDK_MODULE_SIGNING 2U
+#define CITIZENSDK_MODULE_CHAIN 4U
+#define CITIZENSDK_MODULE_TRANSACTIONS 8U
+#define CITIZENSDK_MODULE_HISTORY 16U
+#define CITIZENSDK_MODULE_QR 32U
+#define CITIZENSDK_MODULE_FULL 63U
 
 typedef uint64_t citizensdk_handle_t;
 typedef uint64_t citizensdk_request_id_t;
 typedef uint64_t citizensdk_result_handle_t;
 typedef uint64_t citizensdk_prepared_wallet_handle_t;
+typedef uint64_t citizensdk_prepared_transaction_handle_t;
+typedef struct citizensdk_transaction_execution_id {
+  uint8_t bytes[16];
+} citizensdk_transaction_execution_id_t;
 
 typedef int32_t citizensdk_error_code_t;
-#define CITIZENSDK_OK INT32_C(0)
-#define CITIZENSDK_ERROR_INVALID_ARGUMENT INT32_C(1)
-#define CITIZENSDK_ERROR_INVALID_HANDLE INT32_C(2)
-#define CITIZENSDK_ERROR_INVALID_STATE INT32_C(3)
-#define CITIZENSDK_ERROR_UNSUPPORTED INT32_C(4)
-#define CITIZENSDK_ERROR_UNAVAILABLE INT32_C(5)
-#define CITIZENSDK_ERROR_NOT_READY INT32_C(6)
-#define CITIZENSDK_ERROR_NOT_FOUND INT32_C(7)
-#define CITIZENSDK_ERROR_CONFLICT INT32_C(8)
-#define CITIZENSDK_ERROR_INTEGRITY INT32_C(9)
-#define CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED INT32_C(10)
-#define CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED INT32_C(11)
-#define CITIZENSDK_ERROR_KEY_INVALIDATED INT32_C(12)
-#define CITIZENSDK_ERROR_PERMISSION_DENIED INT32_C(13)
-#define CITIZENSDK_ERROR_STORAGE INT32_C(14)
-#define CITIZENSDK_ERROR_NETWORK INT32_C(15)
-#define CITIZENSDK_ERROR_DECODE INT32_C(16)
-#define CITIZENSDK_ERROR_TIMEOUT INT32_C(17)
-#define CITIZENSDK_ERROR_BUSY INT32_C(18)
-#define CITIZENSDK_ERROR_QUEUE_FULL INT32_C(19)
-#define CITIZENSDK_ERROR_INTERNAL INT32_C(20)
-#define CITIZENSDK_ERROR_PANIC INT32_C(21)
-#define CITIZENSDK_ERROR_CANCELLED INT32_C(22)
+#define CITIZENSDK_OK 0
+#define CITIZENSDK_ERROR_INVALID_ARGUMENT 1
+#define CITIZENSDK_ERROR_INVALID_HANDLE 2
+#define CITIZENSDK_ERROR_INVALID_STATE 3
+#define CITIZENSDK_ERROR_UNSUPPORTED 4
+#define CITIZENSDK_ERROR_UNAVAILABLE 5
+#define CITIZENSDK_ERROR_NOT_READY 6
+#define CITIZENSDK_ERROR_NOT_FOUND 7
+#define CITIZENSDK_ERROR_CONFLICT 8
+#define CITIZENSDK_ERROR_INTEGRITY 9
+#define CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED 10
+#define CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED 11
+#define CITIZENSDK_ERROR_KEY_INVALIDATED 12
+#define CITIZENSDK_ERROR_PERMISSION_DENIED 13
+#define CITIZENSDK_ERROR_STORAGE 14
+#define CITIZENSDK_ERROR_NETWORK 15
+#define CITIZENSDK_ERROR_DECODE 16
+#define CITIZENSDK_ERROR_TIMEOUT 17
+#define CITIZENSDK_ERROR_BUSY 18
+#define CITIZENSDK_ERROR_QUEUE_FULL 19
+#define CITIZENSDK_ERROR_INTERNAL 20
+#define CITIZENSDK_ERROR_PANIC 21
+#define CITIZENSDK_ERROR_CANCELLED 22
 
 typedef uint32_t citizensdk_lifecycle_t;
-#define CITIZENSDK_LIFECYCLE_CREATED UINT32_C(1)
-#define CITIZENSDK_LIFECYCLE_IMPORTING_STATE UINT32_C(2)
-#define CITIZENSDK_LIFECYCLE_STARTING UINT32_C(3)
-#define CITIZENSDK_LIFECYCLE_RUNNING UINT32_C(4)
-#define CITIZENSDK_LIFECYCLE_START_FAILED UINT32_C(5)
-#define CITIZENSDK_LIFECYCLE_STOPPED UINT32_C(6)
-#define CITIZENSDK_LIFECYCLE_DISPOSED UINT32_C(7)
+#define CITIZENSDK_LIFECYCLE_CREATED 1U
+#define CITIZENSDK_LIFECYCLE_IMPORTING_STATE 2U
+#define CITIZENSDK_LIFECYCLE_STARTING 3U
+#define CITIZENSDK_LIFECYCLE_RUNNING 4U
+#define CITIZENSDK_LIFECYCLE_START_FAILED 5U
+#define CITIZENSDK_LIFECYCLE_STOPPED 6U
+#define CITIZENSDK_LIFECYCLE_DISPOSED 7U
 
 typedef uint32_t citizensdk_finality_t;
-#define CITIZENSDK_FINALITY_BEST UINT32_C(1)
-#define CITIZENSDK_FINALITY_FINALIZED UINT32_C(2)
+#define CITIZENSDK_FINALITY_BEST 1U
+#define CITIZENSDK_FINALITY_FINALIZED 2U
 
 typedef uint32_t citizensdk_capability_name_t;
-#define CITIZENSDK_CAPABILITY_CHAIN_READ UINT32_C(1)
-#define CITIZENSDK_CAPABILITY_TRANSACTION_BUILD UINT32_C(2)
-#define CITIZENSDK_CAPABILITY_TRANSACTION_SUBMIT UINT32_C(3)
-#define CITIZENSDK_CAPABILITY_TRANSACTION_VERIFY UINT32_C(4)
-#define CITIZENSDK_CAPABILITY_WALLET_PROFILE UINT32_C(5)
-#define CITIZENSDK_CAPABILITY_LOCAL_SIGNING UINT32_C(6)
-#define CITIZENSDK_CAPABILITY_HARDWARE_VAULT UINT32_C(7)
-#define CITIZENSDK_CAPABILITY_USER_AUTHENTICATION UINT32_C(8)
-#define CITIZENSDK_CAPABILITY_HISTORY UINT32_C(9)
-#define CITIZENSDK_CAPABILITY_BACKGROUND_SYNC UINT32_C(10)
+#define CITIZENSDK_CAPABILITY_CHAIN_READ 1U
+#define CITIZENSDK_CAPABILITY_TRANSACTION_BUILD 2U
+#define CITIZENSDK_CAPABILITY_TRANSACTION_SUBMIT 3U
+#define CITIZENSDK_CAPABILITY_TRANSACTION_VERIFY 4U
+#define CITIZENSDK_CAPABILITY_WALLET_PROFILE 5U
+#define CITIZENSDK_CAPABILITY_LOCAL_SIGNING 6U
+#define CITIZENSDK_CAPABILITY_HARDWARE_VAULT 7U
+#define CITIZENSDK_CAPABILITY_USER_AUTHENTICATION 8U
+#define CITIZENSDK_CAPABILITY_HISTORY 9U
+#define CITIZENSDK_CAPABILITY_BACKGROUND_SYNC 10U
 
 typedef uint32_t citizensdk_capability_reason_t;
-#define CITIZENSDK_CAPABILITY_REASON_NONE UINT32_C(0)
-#define CITIZENSDK_CAPABILITY_REASON_BUILD_UNSUPPORTED UINT32_C(1)
-#define CITIZENSDK_CAPABILITY_REASON_DEVICE_UNAVAILABLE UINT32_C(2)
-#define CITIZENSDK_CAPABILITY_REASON_HOST_DISABLED UINT32_C(3)
-#define CITIZENSDK_CAPABILITY_REASON_ENGINE_NOT_RUNNING UINT32_C(4)
-#define CITIZENSDK_CAPABILITY_REASON_DEPENDENCY_NOT_READY UINT32_C(5)
-#define CITIZENSDK_CAPABILITY_REASON_USER_AUTHENTICATION_REQUIRED UINT32_C(6)
-#define CITIZENSDK_CAPABILITY_REASON_VAULT_LOCKED UINT32_C(7)
-#define CITIZENSDK_CAPABILITY_REASON_CHAIN_STARTING UINT32_C(8)
-#define CITIZENSDK_CAPABILITY_REASON_CHAIN_UNSYNCED UINT32_C(9)
-#define CITIZENSDK_CAPABILITY_REASON_STORAGE_UNAVAILABLE UINT32_C(10)
+#define CITIZENSDK_CAPABILITY_REASON_NONE 0U
+#define CITIZENSDK_CAPABILITY_REASON_BUILD_UNSUPPORTED 1U
+#define CITIZENSDK_CAPABILITY_REASON_DEVICE_UNAVAILABLE 2U
+#define CITIZENSDK_CAPABILITY_REASON_HOST_DISABLED 3U
+#define CITIZENSDK_CAPABILITY_REASON_ENGINE_NOT_RUNNING 4U
+#define CITIZENSDK_CAPABILITY_REASON_DEPENDENCY_NOT_READY 5U
+#define CITIZENSDK_CAPABILITY_REASON_USER_AUTHENTICATION_REQUIRED 6U
+#define CITIZENSDK_CAPABILITY_REASON_VAULT_LOCKED 7U
+#define CITIZENSDK_CAPABILITY_REASON_CHAIN_STARTING 8U
+#define CITIZENSDK_CAPABILITY_REASON_CHAIN_UNSYNCED 9U
+#define CITIZENSDK_CAPABILITY_REASON_STORAGE_UNAVAILABLE 10U
 
 typedef uint32_t citizensdk_event_type_t;
-#define CITIZENSDK_EVENT_REQUEST_COMPLETED UINT32_C(1)
-#define CITIZENSDK_EVENT_WATCH_UPDATE UINT32_C(2)
-#define CITIZENSDK_EVENT_CAPABILITIES_CHANGED UINT32_C(3)
-#define CITIZENSDK_EVENT_LIFECYCLE_CHANGED UINT32_C(4)
+#define CITIZENSDK_EVENT_REQUEST_COMPLETED 1U
+#define CITIZENSDK_EVENT_WATCH_UPDATE 2U
+#define CITIZENSDK_EVENT_CAPABILITIES_CHANGED 3U
+#define CITIZENSDK_EVENT_LIFECYCLE_CHANGED 4U
 /* Payloadless invalidation; request_id/result/capability_revision/reserved are zero. */
-#define CITIZENSDK_EVENT_HISTORY_CHANGED UINT32_C(5)
+#define CITIZENSDK_EVENT_HISTORY_CHANGED 5U
 
 typedef uint32_t citizensdk_result_kind_t;
-#define CITIZENSDK_RESULT_EMPTY UINT32_C(0)
-#define CITIZENSDK_RESULT_BLOCK_REF UINT32_C(1)
-#define CITIZENSDK_RESULT_STORAGE_VALUE UINT32_C(2)
-#define CITIZENSDK_RESULT_STORAGE_BATCH UINT32_C(3)
-#define CITIZENSDK_RESULT_RUNTIME_CONTEXT UINT32_C(4)
-#define CITIZENSDK_RESULT_EXTRINSIC_HASH UINT32_C(5)
-#define CITIZENSDK_RESULT_EXECUTION_CONCLUSION UINT32_C(6)
-#define CITIZENSDK_RESULT_WATCH_EVENT UINT32_C(7)
-#define CITIZENSDK_RESULT_EXPORTED_STATE UINT32_C(8)
-#define CITIZENSDK_RESULT_ACCOUNT_BALANCE UINT32_C(9)
-#define CITIZENSDK_RESULT_ACCOUNT_NONCE UINT32_C(10)
-#define CITIZENSDK_RESULT_FEE_SNAPSHOT UINT32_C(11)
-#define CITIZENSDK_RESULT_WALLET_PROFILE UINT32_C(12)
-#define CITIZENSDK_RESULT_WALLET_ACCOUNTS UINT32_C(13)
-#define CITIZENSDK_RESULT_SIGNATURE UINT32_C(14)
-#define CITIZENSDK_RESULT_PREPARED_WALLET UINT32_C(15)
-#define CITIZENSDK_RESULT_WALLET_TRANSFER UINT32_C(16)
-#define CITIZENSDK_RESULT_TRANSACTION_HISTORY UINT32_C(17)
-#define CITIZENSDK_RESULT_ACCOUNT_BALANCES UINT32_C(18)
-#define CITIZENSDK_RESULT_QR_REVIEW UINT32_C(19)
-#define CITIZENSDK_RESULT_QR_SIGNED UINT32_C(20)
+#define CITIZENSDK_RESULT_EMPTY 0U
+#define CITIZENSDK_RESULT_BLOCK_REF 1U
+#define CITIZENSDK_RESULT_STORAGE_VALUE 2U
+#define CITIZENSDK_RESULT_STORAGE_BATCH 3U
+#define CITIZENSDK_RESULT_RUNTIME_CONTEXT 4U
+#define CITIZENSDK_RESULT_EXTRINSIC_HASH 5U
+#define CITIZENSDK_RESULT_EXECUTION_CONCLUSION 6U
+#define CITIZENSDK_RESULT_WATCH_EVENT 7U
+#define CITIZENSDK_RESULT_EXPORTED_STATE 8U
+#define CITIZENSDK_RESULT_ACCOUNT_BALANCE 9U
+#define CITIZENSDK_RESULT_ACCOUNT_NONCE 10U
+#define CITIZENSDK_RESULT_FEE_SNAPSHOT 11U
+#define CITIZENSDK_RESULT_WALLET_PROFILE 12U
+#define CITIZENSDK_RESULT_WALLET_ACCOUNTS 13U
+#define CITIZENSDK_RESULT_SIGNATURE 14U
+#define CITIZENSDK_RESULT_PREPARED_WALLET 15U
+/* Result kind 16 is permanently unused. */
+#define CITIZENSDK_RESULT_TRANSACTION_HISTORY_PAGE 17U
+#define CITIZENSDK_RESULT_ACCOUNT_BALANCES 18U
+#define CITIZENSDK_RESULT_QR_REVIEW 19U
+#define CITIZENSDK_RESULT_QR_SIGNED 20U
+#define CITIZENSDK_RESULT_WALLET_STATE 21U
+#define CITIZENSDK_RESULT_SIGNING_OUTCOME 22U
+#define CITIZENSDK_RESULT_DEFAULT_ACCOUNT_CHANGE 23U
+#define CITIZENSDK_RESULT_CHAIN_SYNC_STATUS 24U
+#define CITIZENSDK_RESULT_BLOCK_HEADER 25U
+#define CITIZENSDK_RESULT_BLOCK_BODY 26U
+#define CITIZENSDK_RESULT_PREPARED_TRANSACTION 27U
+#define CITIZENSDK_RESULT_TRANSACTION_EXECUTION 28U
+
+typedef uint32_t citizensdk_transaction_execution_status_t;
+#define CITIZENSDK_TRANSACTION_EXECUTION_EXTERNAL_PENDING 1U
+#define CITIZENSDK_TRANSACTION_EXECUTION_FINALIZED_SUCCESS 2U
+#define CITIZENSDK_TRANSACTION_EXECUTION_FINALIZED_FAILED 3U
+#define CITIZENSDK_TRANSACTION_EXECUTION_POOL_REJECTED 4U
+
+typedef uint32_t citizensdk_signing_transform_t;
+#define CITIZENSDK_SIGNING_TRANSFORM_RAW 1U
+#define CITIZENSDK_SIGNING_TRANSFORM_SUBSTRATE_PAYLOAD 2U
+#define CITIZENSDK_SIGNING_TRANSFORM_BLAKE2_DOMAIN 3U
+
+typedef uint32_t citizensdk_external_signer_transport_t;
+#define CITIZENSDK_EXTERNAL_SIGNER_NONE 0U
+#define CITIZENSDK_EXTERNAL_SIGNER_QR_V1 1U
+
+typedef uint32_t citizensdk_signing_outcome_status_t;
+#define CITIZENSDK_SIGNING_COMPLETED 1U
+#define CITIZENSDK_SIGNING_EXTERNAL_PENDING 2U
 
 typedef uint32_t citizensdk_wallet_word_count_t;
-#define CITIZENSDK_WALLET_WORDS_12 UINT32_C(12)
-#define CITIZENSDK_WALLET_WORDS_18 UINT32_C(18)
-#define CITIZENSDK_WALLET_WORDS_24 UINT32_C(24)
+#define CITIZENSDK_WALLET_WORDS_12 12U
+#define CITIZENSDK_WALLET_WORDS_18 18U
+#define CITIZENSDK_WALLET_WORDS_24 24U
 
 typedef uint32_t citizensdk_wallet_origin_t;
-#define CITIZENSDK_WALLET_ORIGIN_CREATED UINT32_C(1)
-#define CITIZENSDK_WALLET_ORIGIN_IMPORTED UINT32_C(2)
+#define CITIZENSDK_WALLET_ORIGIN_CREATED 1U
+#define CITIZENSDK_WALLET_ORIGIN_IMPORTED 2U
 
-typedef uint32_t citizensdk_history_status_t;
-#define CITIZENSDK_HISTORY_PENDING UINT32_C(1)
-#define CITIZENSDK_HISTORY_IN_BLOCK UINT32_C(2)
-#define CITIZENSDK_HISTORY_POOL_REJECTED UINT32_C(3)
-#define CITIZENSDK_HISTORY_FINALIZED_SUCCESS UINT32_C(4)
-#define CITIZENSDK_HISTORY_FINALIZED_FAILED UINT32_C(5)
+typedef uint32_t citizensdk_wallet_sign_mode_t;
+#define CITIZENSDK_WALLET_SIGN_HOT 1U
+#define CITIZENSDK_WALLET_SIGN_COLD 2U
 
-typedef uint32_t citizensdk_transfer_resolution_t;
-#define CITIZENSDK_TRANSFER_FINALIZED_SUCCESS UINT32_C(1)
-#define CITIZENSDK_TRANSFER_FINALIZED_FAILED UINT32_C(2)
-#define CITIZENSDK_TRANSFER_POOL_REJECTED UINT32_C(3)
-
-typedef uint32_t citizensdk_transfer_direction_t;
-#define CITIZENSDK_TRANSFER_OUTGOING UINT32_C(1)
-#define CITIZENSDK_TRANSFER_INCOMING UINT32_C(2)
+typedef uint32_t citizensdk_transaction_history_status_t;
+#define CITIZENSDK_TRANSACTION_HISTORY_PENDING 1U
+#define CITIZENSDK_TRANSACTION_HISTORY_IN_BLOCK 2U
+#define CITIZENSDK_TRANSACTION_HISTORY_POOL_REJECTED 3U
+#define CITIZENSDK_TRANSACTION_HISTORY_FINALIZED_SUCCESS 4U
+#define CITIZENSDK_TRANSACTION_HISTORY_FINALIZED_FAILED 5U
 
 typedef uint32_t citizensdk_watch_status_t;
-#define CITIZENSDK_WATCH_READY UINT32_C(1)
-#define CITIZENSDK_WATCH_BROADCAST UINT32_C(2)
-#define CITIZENSDK_WATCH_FUTURE UINT32_C(3)
-#define CITIZENSDK_WATCH_IN_BLOCK UINT32_C(4)
-#define CITIZENSDK_WATCH_FINALIZED UINT32_C(5)
-#define CITIZENSDK_WATCH_RETRACTED UINT32_C(6)
-#define CITIZENSDK_WATCH_FINALITY_TIMEOUT UINT32_C(7)
-#define CITIZENSDK_WATCH_DROPPED UINT32_C(8)
-#define CITIZENSDK_WATCH_INVALID UINT32_C(9)
-#define CITIZENSDK_WATCH_USURPED UINT32_C(10)
+#define CITIZENSDK_WATCH_READY 1U
+#define CITIZENSDK_WATCH_BROADCAST 2U
+#define CITIZENSDK_WATCH_FUTURE 3U
+#define CITIZENSDK_WATCH_IN_BLOCK 4U
+#define CITIZENSDK_WATCH_FINALIZED 5U
+#define CITIZENSDK_WATCH_RETRACTED 6U
+#define CITIZENSDK_WATCH_FINALITY_TIMEOUT 7U
+#define CITIZENSDK_WATCH_DROPPED 8U
+#define CITIZENSDK_WATCH_INVALID 9U
+#define CITIZENSDK_WATCH_USURPED 10U
 
 typedef uint32_t citizensdk_execution_status_t;
-#define CITIZENSDK_EXECUTION_SUCCESS UINT32_C(1)
-#define CITIZENSDK_EXECUTION_FAILED UINT32_C(2)
-#define CITIZENSDK_EXECUTION_UNVERIFIED UINT32_C(3)
+#define CITIZENSDK_EXECUTION_SUCCESS 1U
+#define CITIZENSDK_EXECUTION_FAILED 2U
+#define CITIZENSDK_EXECUTION_UNVERIFIED 3U
 
 /* Values in execution_info.reason_or_dispatch_variant for UNVERIFIED. */
 typedef uint32_t citizensdk_unverified_reason_t;
-#define CITIZENSDK_UNVERIFIED_TARGET_BLOCK_UNAVAILABLE UINT32_C(1)
-#define CITIZENSDK_UNVERIFIED_RUNTIME_CONTEXT_UNAVAILABLE UINT32_C(2)
-#define CITIZENSDK_UNVERIFIED_METADATA_DECODE_FAILED UINT32_C(3)
-#define CITIZENSDK_UNVERIFIED_BLOCK_BODY_UNAVAILABLE UINT32_C(4)
-#define CITIZENSDK_UNVERIFIED_EXTRINSIC_HASH_MISMATCH UINT32_C(5)
-#define CITIZENSDK_UNVERIFIED_EXTRINSIC_NOT_FOUND UINT32_C(6)
-#define CITIZENSDK_UNVERIFIED_MULTIPLE_EXTRINSIC_MATCHES UINT32_C(7)
-#define CITIZENSDK_UNVERIFIED_SYSTEM_EVENTS_UNAVAILABLE UINT32_C(8)
-#define CITIZENSDK_UNVERIFIED_SYSTEM_EVENTS_MALFORMED UINT32_C(9)
-#define CITIZENSDK_UNVERIFIED_OUTCOME_EVENT_MISSING UINT32_C(10)
-#define CITIZENSDK_UNVERIFIED_OUTCOME_EVENT_AMBIGUOUS UINT32_C(11)
-#define CITIZENSDK_UNVERIFIED_PROVIDER_FAILURE UINT32_C(12)
+#define CITIZENSDK_UNVERIFIED_TARGET_BLOCK_UNAVAILABLE 1U
+#define CITIZENSDK_UNVERIFIED_RUNTIME_CONTEXT_UNAVAILABLE 2U
+#define CITIZENSDK_UNVERIFIED_METADATA_DECODE_FAILED 3U
+#define CITIZENSDK_UNVERIFIED_BLOCK_BODY_UNAVAILABLE 4U
+#define CITIZENSDK_UNVERIFIED_EXTRINSIC_HASH_MISMATCH 5U
+#define CITIZENSDK_UNVERIFIED_EXTRINSIC_NOT_FOUND 6U
+#define CITIZENSDK_UNVERIFIED_MULTIPLE_EXTRINSIC_MATCHES 7U
+#define CITIZENSDK_UNVERIFIED_SYSTEM_EVENTS_UNAVAILABLE 8U
+#define CITIZENSDK_UNVERIFIED_SYSTEM_EVENTS_MALFORMED 9U
+#define CITIZENSDK_UNVERIFIED_OUTCOME_EVENT_MISSING 10U
+#define CITIZENSDK_UNVERIFIED_OUTCOME_EVENT_AMBIGUOUS 11U
+#define CITIZENSDK_UNVERIFIED_PROVIDER_FAILURE 12U
 
 /* CitizenChain's current Substrate DispatchError discriminants, returned in
  * reason_or_dispatch_variant for FAILED. */
 typedef uint32_t citizensdk_dispatch_error_variant_t;
-#define CITIZENSDK_DISPATCH_ERROR_OTHER UINT32_C(0)
-#define CITIZENSDK_DISPATCH_ERROR_CANNOT_LOOKUP UINT32_C(1)
-#define CITIZENSDK_DISPATCH_ERROR_BAD_ORIGIN UINT32_C(2)
-#define CITIZENSDK_DISPATCH_ERROR_MODULE UINT32_C(3)
-#define CITIZENSDK_DISPATCH_ERROR_CONSUMER_REMAINING UINT32_C(4)
-#define CITIZENSDK_DISPATCH_ERROR_NO_PROVIDERS UINT32_C(5)
-#define CITIZENSDK_DISPATCH_ERROR_TOO_MANY_CONSUMERS UINT32_C(6)
-#define CITIZENSDK_DISPATCH_ERROR_TOKEN UINT32_C(7)
-#define CITIZENSDK_DISPATCH_ERROR_ARITHMETIC UINT32_C(8)
-#define CITIZENSDK_DISPATCH_ERROR_TRANSACTIONAL UINT32_C(9)
-#define CITIZENSDK_DISPATCH_ERROR_EXHAUSTED UINT32_C(10)
-#define CITIZENSDK_DISPATCH_ERROR_CORRUPTION UINT32_C(11)
-#define CITIZENSDK_DISPATCH_ERROR_UNAVAILABLE UINT32_C(12)
-#define CITIZENSDK_DISPATCH_ERROR_ROOT_NOT_ALLOWED UINT32_C(13)
+#define CITIZENSDK_DISPATCH_ERROR_OTHER 0U
+#define CITIZENSDK_DISPATCH_ERROR_CANNOT_LOOKUP 1U
+#define CITIZENSDK_DISPATCH_ERROR_BAD_ORIGIN 2U
+#define CITIZENSDK_DISPATCH_ERROR_MODULE 3U
+#define CITIZENSDK_DISPATCH_ERROR_CONSUMER_REMAINING 4U
+#define CITIZENSDK_DISPATCH_ERROR_NO_PROVIDERS 5U
+#define CITIZENSDK_DISPATCH_ERROR_TOO_MANY_CONSUMERS 6U
+#define CITIZENSDK_DISPATCH_ERROR_TOKEN 7U
+#define CITIZENSDK_DISPATCH_ERROR_ARITHMETIC 8U
+#define CITIZENSDK_DISPATCH_ERROR_TRANSACTIONAL 9U
+#define CITIZENSDK_DISPATCH_ERROR_EXHAUSTED 10U
+#define CITIZENSDK_DISPATCH_ERROR_CORRUPTION 11U
+#define CITIZENSDK_DISPATCH_ERROR_UNAVAILABLE 12U
+#define CITIZENSDK_DISPATCH_ERROR_ROOT_NOT_ALLOWED 13U
 
 typedef struct citizensdk_bytes_view {
   const uint8_t *data;
@@ -205,7 +234,7 @@ typedef struct citizensdk_account_id {
   uint8_t bytes[32];
 } citizensdk_account_id_t;
 
-#define CITIZENSDK_HOST_DEK_BYTES UINT64_C(32)
+#define CITIZENSDK_HOST_DEK_BYTES 32ULL
 
 /* Rust-owned mutable memory used only by vault unwrap_dek. */
 typedef struct citizensdk_mutable_bytes_view {
@@ -214,23 +243,23 @@ typedef struct citizensdk_mutable_bytes_view {
 } citizensdk_mutable_bytes_view_t;
 
 typedef uint32_t citizensdk_host_record_domain_t;
-#define CITIZENSDK_HOST_RECORD_CHAIN_DATABASE UINT32_C(1)
-#define CITIZENSDK_HOST_RECORD_RUNTIME_CACHE UINT32_C(2)
-#define CITIZENSDK_HOST_RECORD_WALLET_PROFILE UINT32_C(3)
-#define CITIZENSDK_HOST_RECORD_TRANSACTION_HISTORY UINT32_C(4)
-#define CITIZENSDK_HOST_RECORD_ENCRYPTED_SECRET_BLOB UINT32_C(5)
+#define CITIZENSDK_HOST_RECORD_CHAIN_DATABASE 1U
+#define CITIZENSDK_HOST_RECORD_RUNTIME_CACHE 2U
+#define CITIZENSDK_HOST_RECORD_WALLET_PROFILE 3U
+#define CITIZENSDK_HOST_RECORD_TRANSACTION_HISTORY 4U
+#define CITIZENSDK_HOST_RECORD_ENCRYPTED_SECRET_BLOB 5U
 
 typedef uint32_t citizensdk_host_secret_kind_t;
-#define CITIZENSDK_HOST_SECRET_ACCOUNT_MINI_SECRET UINT32_C(1)
+#define CITIZENSDK_HOST_SECRET_ACCOUNT_MINI_SECRET 1U
 
 typedef uint32_t citizensdk_host_vault_availability_t;
-#define CITIZENSDK_HOST_VAULT_AVAILABLE UINT32_C(1)
-#define CITIZENSDK_HOST_VAULT_NO_STRONG_USER_AUTHENTICATION UINT32_C(2)
-#define CITIZENSDK_HOST_VAULT_UNSUPPORTED UINT32_C(3)
-#define CITIZENSDK_HOST_VAULT_UNAVAILABLE UINT32_C(4)
+#define CITIZENSDK_HOST_VAULT_AVAILABLE 1U
+#define CITIZENSDK_HOST_VAULT_NO_STRONG_USER_AUTHENTICATION 2U
+#define CITIZENSDK_HOST_VAULT_UNSUPPORTED 3U
+#define CITIZENSDK_HOST_VAULT_UNAVAILABLE 4U
 
 typedef uint32_t citizensdk_host_bytes_kind_t;
-#define CITIZENSDK_HOST_BYTES_WRAPPED_DEK UINT32_C(1)
+#define CITIZENSDK_HOST_BYTES_WRAPPED_DEK 1U
 
 typedef struct citizensdk_host_hash32 {
   uint8_t bytes[32];
@@ -518,6 +547,40 @@ typedef struct citizensdk_runtime_context_info {
   uint64_t metadata_len;
 } citizensdk_runtime_context_info_t;
 
+/* One same-instant snapshot from the typed light client. Consumers must use
+ * is_usable directly instead of reconstructing readiness from other fields. */
+typedef struct citizensdk_chain_sync_status_info {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint64_t peer_count;
+  uint8_t is_syncing;
+  uint8_t is_usable;
+  uint8_t reserved[6];
+  citizensdk_block_ref_t best;
+  citizensdk_block_ref_t finalized;
+} citizensdk_chain_sync_status_info_t;
+
+/* digest is copied separately as complete SCALE Digest bytes. */
+typedef struct citizensdk_block_header_info {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  citizensdk_block_ref_t block;
+  uint8_t parent_hash[32];
+  uint8_t state_root[32];
+  uint8_t extrinsics_root[32];
+  uint64_t digest_len;
+} citizensdk_block_header_info_t;
+
+/* Extrinsics remain ordered opaque SCALE bytes and are copied one item at a time. */
+typedef struct citizensdk_block_body_info {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  citizensdk_block_ref_t block;
+  uint32_t extrinsic_count;
+  uint32_t reserved;
+  uint64_t total_bytes;
+} citizensdk_block_body_info_t;
+
 typedef struct citizensdk_watch_event_info {
   uint32_t struct_size;
   uint32_t abi_version;
@@ -606,75 +669,134 @@ typedef struct citizensdk_wallet_account_info {
   uint64_t name_len;
 } citizensdk_wallet_account_info_t;
 
+/* Unified secret-free account catalog. Its first account is the default; this
+ * ABI intentionally has no unauthorised default-account setter. */
+typedef struct citizensdk_wallet_state_info {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint64_t revision;
+  uint32_t account_count;
+  uint32_t has_default_account;
+  citizensdk_account_id_t default_account_id;
+} citizensdk_wallet_state_info_t;
+
+typedef struct citizensdk_wallet_state_account_info {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  citizensdk_wallet_sign_mode_t sign_mode;
+  uint32_t wallet_index;
+  uint32_t has_account_index;
+  uint32_t account_index;
+  uint32_t is_default;
+  uint32_t reserved;
+  citizensdk_account_id_t account_id;
+  uint64_t created_at_millis;
+  uint64_t ss58_address_len;
+  uint64_t name_len;
+} citizensdk_wallet_state_account_info_t;
+
+typedef struct citizensdk_signing_outcome_info {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  citizensdk_signing_outcome_status_t status;
+  citizensdk_external_signer_transport_t transport;
+  citizensdk_account_id_t account_id;
+  uint8_t payload_hash[32];
+  uint64_t expires_at;
+  uint64_t signature_len;
+  uint64_t session_id_len;
+  uint64_t transport_request_len;
+} citizensdk_signing_outcome_info_t;
+
+typedef struct citizensdk_default_account_change_info {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  citizensdk_signing_outcome_status_t status;
+  citizensdk_external_signer_transport_t transport;
+  citizensdk_account_id_t current_default_account_id;
+  uint8_t payload_hash[32];
+  uint64_t expires_at;
+  uint64_t committed_revision;
+  uint64_t session_id_len;
+  uint64_t transport_request_len;
+} citizensdk_default_account_change_info_t;
+
 typedef struct citizensdk_prepared_wallet_info {
   uint32_t struct_size;
   uint32_t abi_version;
   citizensdk_prepared_wallet_handle_t prepared_wallet;
 } citizensdk_prepared_wallet_info_t;
 
-typedef struct citizensdk_wallet_transfer_info {
+/* Safe summary only. The signer message and extrinsic template remain inside Core. */
+typedef struct citizensdk_prepared_transaction_info {
   uint32_t struct_size;
   uint32_t abi_version;
-  uint8_t transaction_hash[32];
-  citizensdk_transfer_resolution_t resolution;
-  uint32_t has_execution;
-  citizensdk_execution_info_t execution;
-  uint64_t pool_rejection_reason_len;
-} citizensdk_wallet_transfer_info_t;
+  citizensdk_prepared_transaction_handle_t prepared_transaction;
+  uint8_t preparation_id[16];
+  citizensdk_account_id_t source_account_id;
+  uint8_t call_data_hash[32];
+  citizensdk_block_ref_t best_block;
+  uint32_t runtime_spec_number;
+  uint32_t transaction_format_number;
+  uint64_t nonce;
+} citizensdk_prepared_transaction_info_t;
 
-typedef struct citizensdk_history_info {
+/* Either a bounded existing QR_V1 request or an accurately verified terminal. */
+typedef struct citizensdk_transaction_execution_info {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  citizensdk_transaction_execution_status_t status;
+  citizensdk_external_signer_transport_t transport;
+  uint8_t execution_id[16];
+  citizensdk_account_id_t source_account_id;
+  uint8_t call_data_hash[32];
+  uint8_t transaction_hash[32];
+  uint64_t expires_at;
+  uint32_t has_block;
+  uint32_t has_extrinsic_index;
+  uint32_t has_dispatch_failure;
+  uint32_t has_module_failure;
+  uint32_t has_replacement_hash;
+  uint32_t dispatch_variant;
+  uint32_t pallet_index;
+  uint32_t error_index;
+  citizensdk_block_ref_t block;
+  uint32_t extrinsic_index;
+  uint8_t replacement_hash[32];
+  uint64_t session_id_len;
+  uint64_t transport_request_len;
+  uint64_t pool_rejection_reason_len;
+} citizensdk_transaction_execution_info_t;
+
+/* Deterministic page over transactions submitted by CitizenSDK itself. */
+typedef struct citizensdk_transaction_history_page_info {
   uint32_t struct_size;
   uint32_t abi_version;
   uint64_t revision;
-  uint32_t cursor_count;
   uint32_t record_count;
-  uint32_t transfer_count;
-  uint32_t reserved;
-} citizensdk_history_info_t;
+  uint32_t has_next_before_execution_id;
+  citizensdk_transaction_execution_id_t next_before_execution_id;
+} citizensdk_transaction_history_page_info_t;
 
-typedef struct citizensdk_history_cursor_info {
+/* Product-independent public projection. callData, signed extrinsic, nonce and
+ * application meanings such as destination/amount/remark are never exposed. */
+typedef struct citizensdk_transaction_history_record_info {
   uint32_t struct_size;
   uint32_t abi_version;
-  citizensdk_account_id_t account_id;
-  citizensdk_block_ref_t tracking_start_block;
-  citizensdk_block_ref_t last_synced_block;
-} citizensdk_history_cursor_info_t;
-
-typedef struct citizensdk_history_record_info {
-  uint32_t struct_size;
-  uint32_t abi_version;
-  citizensdk_account_id_t account_id;
+  citizensdk_transaction_execution_id_t execution_id;
+  citizensdk_account_id_t source_account_id;
+  uint8_t call_data_hash[32];
   uint8_t transaction_hash[32];
-  uint64_t nonce;
-  citizensdk_account_id_t destination_account_id;
-  citizensdk_u128_t amount_fen;
-  citizensdk_history_status_t status;
+  citizensdk_transaction_history_status_t status;
   uint32_t has_block;
   citizensdk_block_ref_t block;
   uint32_t has_execution;
-  uint32_t reserved;
+  uint32_t has_replacement_hash;
   citizensdk_execution_info_t execution;
+  uint8_t replacement_hash[32];
   uint64_t created_at_millis;
   uint64_t updated_at_millis;
-  uint64_t remark_len;
   uint64_t pool_rejection_reason_len;
-} citizensdk_history_record_info_t;
-
-typedef struct citizensdk_finalized_transfer_info {
-  uint32_t struct_size;
-  uint32_t abi_version;
-  citizensdk_account_id_t tracked_account_id;
-  citizensdk_account_id_t from_account_id;
-  citizensdk_account_id_t to_account_id;
-  citizensdk_u128_t amount_fen;
-  citizensdk_block_ref_t block;
-  uint32_t event_record_index;
-  uint32_t has_extrinsic_index;
-  uint32_t extrinsic_index;
-  citizensdk_transfer_direction_t direction;
-  uint64_t source_pallet_len;
-  uint64_t remark_display_len;
-  uint64_t remark_bytes_len;
-} citizensdk_finalized_transfer_info_t;
+} citizensdk_transaction_history_record_info_t;
 
 #endif /* CITIZENSDK_TYPES_H */

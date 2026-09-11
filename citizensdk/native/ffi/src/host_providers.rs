@@ -383,9 +383,9 @@ pub type CitizenSdkHostRuntimeCacheDeleteV1 = Option<
     ) -> i32,
 >;
 pub type CitizenSdkHostTransactionHistoryLoadV1 = CitizenSdkHostChainDatabaseLoadV1;
-/// History cursor, pending records, conclusions, and finalized transfers are
-/// one atomic revisioned value; a host must not split this CAS into tables that
-/// can become visible at different revisions.
+/// Generic SDK-submitted executions form one atomic revisioned value; a host
+/// must not split this CAS into tables that can become visible at different
+/// revisions. Business history belongs to the integrating application.
 pub type CitizenSdkHostTransactionHistoryCompareAndSwapV1 = Option<
     unsafe extern "C" fn(
         host_context: *mut c_void,
@@ -2711,7 +2711,7 @@ async fn load_history_state(
                 "absent history record has a nonzero revision",
             ));
         }
-        return TransactionHistoryState::try_new(0, Vec::new(), Vec::new(), Vec::new());
+        return TransactionHistoryState::try_new(0, Vec::new());
     }
     let state = decode_transaction_history_state(&completion.record.ok_or_else(|| {
         ContractError::new(
@@ -3677,7 +3677,7 @@ mod production_tests {
                     .load()
                     .await
                     .unwrap_or_else(|error| panic!("history load failed: {error}")),
-                TransactionHistoryState::try_new(0, Vec::new(), Vec::new(), Vec::new())
+                TransactionHistoryState::try_new(0, Vec::new())
                     .unwrap_or_else(|error| panic!("empty history failed: {error}"))
             );
             assert_eq!(

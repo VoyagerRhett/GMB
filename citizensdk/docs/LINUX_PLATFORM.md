@@ -10,7 +10,7 @@
 运行时模块选择不裁剪现有 full 包或链资产。模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
 
 本文固定 CitizenSDK 第 7 步的 LinuxARM、LinuxAMD 平台投影。Linux 平台不会复制或改写
-CitizenChain 轻节点、钱包、sr25519、Runtime 或交易实现；它只把根目录当前声明的 89 个
+CitizenChain 轻节点、钱包、sr25519、Runtime 或交易实现；它只把根目录当前声明的 117 个
 `citizensdk_*` 产品 C ABI 与宿主操作系统能力组合起来。
 
 ## 当前状态
@@ -67,7 +67,7 @@ Flutter App           │       │
                      CitizenSDK Rust Core
 ```
 
-- `libcitizensdk.so` 是唯一 Rust Core，必须精确导出根产品头声明的89个符号及SDK内部查看的4个链接符号，私有声明不安装。
+- `libcitizensdk.so` 是唯一 Rust Core，必须精确导出根产品头声明的114个符号及SDK内部查看的4个链接符号，私有声明不安装。
 - `libcitizensdk_host.so` 只实现 HostBridge、typed stores、TPM/认证、SDK-owned 钱包 UI 和
   生命周期装配；不得包含第二份 smoldot、signer、Engine 或 Core 导出。
 - CMake 公开导入目标固定为 `CitizenSDK::Core` 和 `CitizenSDK::Host`。
@@ -171,7 +171,7 @@ observer 正常返回或抛出后都通过 RAII 对每个非零 result 执行一
 ## Flutter adapter 源码合同
 
 Linux Flutter adapter 固定 `citizen/sdk/core/v1` 与 `citizen/sdk/events/v1`，精确复用 Dart、
-Android、Darwin 的 36 方法和 fixed tuple。open 为 `[1, modules]`；无会话验签为
+Android、Darwin 的 63 方法和 fixed tuple。open 为 `[1, modules]`；无会话验签为
 `[1, accountId, signature, payload]`，返回 `[1, bool]`，在 session 查找及环境工厂前调用纯 Core，
 不创建 Host、数据库或金库。其余方法的一个 session 持有一个 Host/Core；Dart 只看见
 随机 session ID。请求在 Core 接受前预置 route；callback 动态范围内复制公开 result，只有

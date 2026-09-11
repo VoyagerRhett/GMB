@@ -336,7 +336,7 @@ class FakeTransport final : public csf::NativeTransport {
     if (native_method == csf::Method::start) lifecycle = CITIZENSDK_LIFECYCLE_RUNNING;
     if (native_method == csf::Method::stop) lifecycle = CITIZENSDK_LIFECYCLE_STOPPED;
     const auto id = next_id++;
-    if ((defer_transfer && native_method == csf::Method::transfer_with_remark) ||
+    if ((defer_history && native_method == csf::Method::get_transaction_history) ||
         (defer_profile && native_method == csf::Method::get_wallet_profile)) {
       deferred_id = id; *out = id; return CITIZENSDK_OK;
     }
@@ -369,15 +369,16 @@ class FakeTransport final : public csf::NativeTransport {
       return csf::Value::list({csf::Value::list(std::move(balances))});
     }
     if (fail_copy) throw ContractFailure(CITIZENSDK_ERROR_INTEGRITY, "injected public result failure");
+    if (method == csf::Method::get_transaction_history ||
+        method == csf::Method::sync_transaction_history)
+      return csf::Value::list({csf::Value::list({csf::Value::string("0"),
+          csf::Value::list({}), csf::Value::null()})});
     if (method == csf::Method::start || method == csf::Method::stop ||
         method == csf::Method::delete_wallet_account ||
         method == csf::Method::delete_wallet ||
         method == csf::Method::reconcile_wallet_cleanup)
       return csf::Value::list({}); // canonical Core EMPTY, not a fake profile
     return csf::Value::list({csf::Value::string(csf::method_name(method))});
-  }
-  csf::Value copy_progress(citizensdk_result_handle_t, int64_t sequence) override {
-    return csf::Value::list({csf::Value::integer(sequence), csf::Value::string("broadcast")});
   }
   citizensdk_lifecycle_t lifecycle_state() override {
     if (!core_present && csf::allow_close_without_core(close_attempted, checkpoint_state,
@@ -448,7 +449,7 @@ class FakeTransport final : public csf::NativeTransport {
   int wallet_cancelled{};
   int closed{};
   int retired{};
-  bool defer_transfer{};
+  bool defer_history{};
   bool fail_close{};
   bool fail_accept{};
   bool defer_profile{};

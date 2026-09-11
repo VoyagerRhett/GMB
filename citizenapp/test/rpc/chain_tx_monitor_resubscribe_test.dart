@@ -7,7 +7,7 @@ import 'package:isar_community/isar.dart';
 import 'package:citizenapp/isar/wallet_isar.dart';
 import 'package:citizenapp/rpc/chain_event_subscription.dart';
 import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/rpc/chain_tx_monitor.dart';
+import 'package:citizenapp/transaction/history/chain/wallet_transaction_history_sync.dart';
 
 import '../support/isar_test_env.dart';
 

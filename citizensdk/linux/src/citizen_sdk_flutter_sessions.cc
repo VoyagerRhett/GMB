@@ -45,6 +45,16 @@ std::string qr_text(std::vector<uint8_t> bytes) {
   return std::string(reinterpret_cast<const char *>(bytes.data()), bytes.size());
 }
 
+std::string preparation_id(const uint8_t *bytes) {
+  static constexpr char digits[] = "0123456789abcdef";
+  std::string result(34, '0'); result[1] = 'x';
+  for (std::size_t index = 0; index < 16; ++index) {
+    result[2 + index * 2] = digits[bytes[index] >> 4];
+    result[3 + index * 2] = digits[bytes[index] & 15];
+  }
+  return result;
+}
+
 citizensdk_error_code_t qr_image_error(citizensdk_qr_image_status_t status) noexcept {
   switch (status) {
     case CITIZENSDK_QR_IMAGE_INVALID_ARGUMENT:
@@ -78,6 +88,33 @@ class HostTransport final : public NativeTransport {
       case Method::start: return citizensdk_start(sdk, out);
       case Method::stop: return citizensdk_stop(sdk, out);
       case Method::get_finalized_head: return citizensdk_get_finalized_head(sdk, out);
+      case Method::get_sync_status: return citizensdk_get_sync_status(sdk, out);
+      case Method::get_best_head: return citizensdk_get_best_head(sdk, out);
+      case Method::get_finalized_block_at:
+        return citizensdk_get_finalized_block_at(sdk, r.block_number, out);
+      case Method::resolve_finalized_block:
+        return citizensdk_resolve_finalized_block(sdk, r.block.hash, r.block_number, out);
+      case Method::get_block_header:
+        return citizensdk_get_block_header_at(sdk, &r.block, out);
+      case Method::get_block_body:
+        return citizensdk_get_block_body_at(sdk, &r.block, out);
+      case Method::get_runtime_context:
+        return citizensdk_get_runtime_context_at(sdk, &r.block, out);
+      case Method::get_storage:
+        return citizensdk_get_storage_at(sdk, &r.block, view(r.payload), out);
+      case Method::get_storage_batch: {
+        std::vector<citizensdk_bytes_view_t> keys;
+        keys.reserve(r.storage_keys.size());
+        for (const auto &key : r.storage_keys) keys.push_back(view(key));
+        return citizensdk_get_storage_batch_at(sdk, &r.block, keys.data(),
+                                                static_cast<uint32_t>(keys.size()), out);
+      }
+      case Method::get_system_events:
+        return citizensdk_get_system_events_at(sdk, &r.block, out);
+      case Method::export_state: return citizensdk_export_state(sdk, out);
+      case Method::import_state:
+        return citizensdk_import_state(sdk, &r.block, r.state_format_version,
+                                       view(r.state_database), out);
       case Method::get_account_balance:
         return citizensdk_get_finalized_account_balance(sdk, &r.account_id, out);
       case Method::get_account_balances:
@@ -87,6 +124,19 @@ class HostTransport final : public NativeTransport {
       case Method::get_account_nonce: return citizensdk_get_account_nonce(sdk, &r.account_id, out);
       case Method::get_fee_snapshot: return citizensdk_get_best_fee_snapshot(sdk, out);
       case Method::get_wallet_profile: return citizensdk_get_wallet_profile(sdk, out);
+      case Method::get_wallet_state: return citizensdk_get_wallet_state(sdk, out);
+      case Method::import_cold_account_id:
+        return citizensdk_import_cold_account_id(sdk, &r.account_id, bytes_view(r.name), out);
+      case Method::import_cold_account_ss58:
+        return citizensdk_import_cold_account_ss58(sdk, bytes_view(r.qr_text), bytes_view(r.name), out);
+      case Method::reorder_wallet_accounts_without_default_change:
+        return citizensdk_reorder_wallet_accounts_without_default_change(
+            sdk, r.wallet_revision, r.account_ids.data(),
+            static_cast<uint32_t>(r.account_ids.size()), out);
+      case Method::rename_account:
+        return citizensdk_rename_account(sdk, &r.account_id, bytes_view(r.name), out);
+      case Method::delete_account:
+        return citizensdk_delete_account(sdk, &r.account_id, out);
       case Method::set_active_wallet_account:
         return citizensdk_set_active_wallet_account(sdk, &r.account_id, out);
       case Method::rename_wallet_account:
@@ -97,18 +147,54 @@ class HostTransport final : public NativeTransport {
       case Method::reconcile_wallet_cleanup: return citizensdk_reconcile_wallet_cleanup(sdk, out);
       case Method::sign_wallet_payload:
         return citizensdk_sign_wallet_payload(sdk, &r.account_id, view(r.payload), out);
-      case Method::transfer_with_remark:
-        return citizensdk_transfer_with_remark(sdk, &r.account_id, &r.destination,
-                                             r.amount, view(r.remark), out);
-      case Method::initialize_finalized_history:
-        return citizensdk_initialize_finalized_history(sdk, r.account_ids.data(),
-                     static_cast<uint32_t>(r.account_ids.size()), out);
-      case Method::sync_finalized_history:
-        return citizensdk_sync_finalized_history_batch(sdk, r.account_ids.data(),
-                     static_cast<uint32_t>(r.account_ids.size()), out);
+      case Method::begin_signing:
+        return citizensdk_begin_signing(
+            sdk, &r.account_id, view(r.payload), r.signing_transform,
+            view(r.signing_domain), r.external_signer_transport,
+            r.signing_action, r.signing_ttl, out);
+      case Method::consume_external_signature:
+        return citizensdk_consume_external_signature(
+            sdk, view(r.signing_session_id), view(r.signing_response), out);
+      case Method::begin_default_account_change:
+        return citizensdk_begin_default_account_change(
+            sdk, r.wallet_revision, r.account_ids.data(),
+            static_cast<uint32_t>(r.account_ids.size()), r.signing_ttl, out);
+      case Method::consume_default_account_change:
+        return citizensdk_consume_default_account_change(
+            sdk, view(r.signing_session_id), view(r.signing_response), out);
+      case Method::prepare_transaction:
+        return citizensdk_prepare_transaction(sdk, &r.account_id, view(r.payload), out);
+      case Method::execute_prepared_transaction: {
+        citizensdk_prepared_transaction_handle_t prepared = 0;
+        {
+          std::lock_guard<std::mutex> guard(prepared_lock_);
+          const auto found = prepared_transactions_.find(r.preparation_id);
+          if (found == prepared_transactions_.end()) return CITIZENSDK_ERROR_NOT_FOUND;
+          prepared = found->second;
+          prepared_transactions_.erase(found);
+        }
+        const auto code = citizensdk_execute_prepared_transaction(sdk, prepared, out);
+        if (code != CITIZENSDK_OK) {
+          std::lock_guard<std::mutex> guard(prepared_lock_);
+          prepared_transactions_.emplace(r.preparation_id, prepared);
+        }
+        return code;
+      }
+      case Method::consume_prepared_transaction_qr_response:
+        return citizensdk_transaction_execution_consume_qr_response(
+            sdk, &r.execution_id, view(r.signing_response), out);
+      case Method::get_transaction_history:
+        return citizensdk_get_transaction_history(
+            sdk, r.before_execution_id ? &*r.before_execution_id : nullptr,
+            r.history_limit, out);
+      case Method::sync_transaction_history:
+        return citizensdk_sync_transaction_history(sdk, out);
       // open/close/capabilities are synchronous Host operations; the three
       // secret-bearing wallet mutations are admitted only by existing GTK UI.
       case Method::view_account_private_key:
+      case Method::cancel_signing:
+      case Method::cancel_prepared_transaction:
+      case Method::cancel_prepared_transaction_execution:
       case Method::verify_signature:
       case Method::open: case Method::close: case Method::get_capabilities: case Method::get_genesis_hash:
       case Method::create_wallet: case Method::import_wallet: case Method::add_wallet_accounts:
@@ -122,10 +208,23 @@ class HostTransport final : public NativeTransport {
     return CITIZENSDK_ERROR_UNSUPPORTED;
   }
   Value copy_result(Method method, citizensdk_result_handle_t result) override {
-    return copy_public_result(method, result);
-  }
-  Value copy_progress(citizensdk_result_handle_t result, int64_t sequence) override {
-    return watch_payload(result, sequence);
+    Value value = copy_public_result(method, result);
+    if (method == Method::prepare_transaction) {
+      citizensdk_prepared_transaction_info_t info{};
+      info.struct_size = sizeof(info);
+      info.abi_version = CITIZENSDK_ABI_VERSION;
+      const auto code = citizensdk_result_get_prepared_transaction(result, &info);
+      if (code != CITIZENSDK_OK) throw Error(code, "Prepared transaction ownership copy failed");
+      const auto id = preparation_id(info.preparation_id);
+      std::lock_guard<std::mutex> guard(prepared_lock_);
+      if (!prepared_transactions_.emplace(id, info.prepared_transaction).second) {
+        (void)citizensdk_prepared_transaction_release(
+            host_->native_handle(), info.prepared_transaction);
+        throw ContractFailure(CITIZENSDK_ERROR_INTEGRITY,
+                              "Core returned a duplicate preparation identity");
+      }
+    }
+    return value;
   }
   citizensdk_lifecycle_t lifecycle_state() override {
     citizensdk_lifecycle_t state{};
@@ -134,6 +233,36 @@ class HostTransport final : public NativeTransport {
     return state;
   }
   Value genesis_hash() override { return copy_genesis_hash(host_->native_handle()); }
+  Value cancel_signing(const DecodedRequest &r) override {
+    uint8_t cancelled = 0;
+    const auto code = citizensdk_cancel_signing_session(
+        host_->native_handle(), view(r.signing_session_id), &cancelled);
+    if (code != CITIZENSDK_OK) throw Error(code, "CitizenSDK signing cancellation failed");
+    if (cancelled > 1)
+      throw ContractFailure(CITIZENSDK_ERROR_INTEGRITY,
+                            "CitizenSDK signing cancellation result is invalid");
+    return Value::list({Value::boolean(cancelled != 0)});
+  }
+  Value cancel_prepared_transaction(const DecodedRequest &r) override {
+    std::lock_guard<std::mutex> guard(prepared_lock_);
+    const auto found = prepared_transactions_.find(r.preparation_id);
+    if (found == prepared_transactions_.end())
+      throw ContractFailure(CITIZENSDK_ERROR_NOT_FOUND,
+                            "Transaction preparation was not found");
+    const auto code = citizensdk_prepared_transaction_release(
+        host_->native_handle(), found->second);
+    if (code != CITIZENSDK_OK)
+      throw Error(code, "CitizenSDK prepared transaction cancellation failed");
+    prepared_transactions_.erase(found);
+    return Value::list({Value::null()});
+  }
+  Value cancel_transaction_execution(const DecodedRequest &r) override {
+    const auto code = citizensdk_transaction_execution_cancel(
+        host_->native_handle(), &r.execution_id);
+    if (code != CITIZENSDK_OK)
+      throw Error(code, "CitizenSDK transaction execution cancellation failed");
+    return Value::list({Value::null()});
+  }
   Value capability_snapshot() override {
     citizensdk_capability_snapshot_t snapshot{};
     snapshot.struct_size = sizeof(snapshot);
@@ -256,6 +385,8 @@ class HostTransport final : public NativeTransport {
  private:
   std::unique_ptr<Host> host_;
   const uint32_t modules_;
+  std::mutex prepared_lock_;
+  std::map<std::string, citizensdk_prepared_transaction_handle_t> prepared_transactions_;
 };
 
 std::string random_session_id() {
@@ -289,6 +420,9 @@ Reply success(const DecodedRequest &request, Value payload) {
   if (request.method == Method::get_account_balances)
     validate_account_balances(request, payload);
   if (request.method == Method::get_genesis_hash ||
+      request.method == Method::cancel_signing ||
+      request.method == Method::cancel_prepared_transaction ||
+      request.method == Method::cancel_prepared_transaction_execution ||
       (request.method >= Method::qr_parse && request.method <= Method::sign_qr_request))
     validate_public_value(request.method, payload);
   return {true, response(request.session, request.sequence, std::move(payload)),
@@ -489,23 +623,8 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
         route->native_id = event_value.request_id;
       }
       if (!route || route->terminal_seen) return;
-      if (event_value.event_type == CITIZENSDK_EVENT_REQUEST_COMPLETED)
-        route->terminal_seen = true;
-      else if (event_value.event_type != CITIZENSDK_EVENT_WATCH_UPDATE ||
-               route->native_method != Method::transfer_with_remark) return;
-    }
-    if (event_value.event_type == CITIZENSDK_EVENT_WATCH_UPDATE) {
-      try {
-        Value payload = session->transport->copy_progress(event_value.result, route->request.sequence);
-        std::weak_ptr<State> weak = shared_from_this();
-        std::weak_ptr<Session> target = session;
-        schedule([weak, target, expected, payload = std::move(payload)]() mutable {
-          if (const auto state = weak.lock()) if (const auto value = target.lock()) {
-            try { state->emit(value, "transferProgress", std::move(payload), expected); } catch (...) {}
-          }
-        });
-      } catch (...) {}
-      return;
+      if (event_value.event_type != CITIZENSDK_EVENT_REQUEST_COMPLETED) return;
+      route->terminal_seen = true;
     }
     std::optional<Reply> copied;
     try { copied = success(route->request,
@@ -627,6 +746,11 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
       case Method::create_wallet: case Method::import_wallet:
       case Method::add_wallet_accounts: case Method::set_active_wallet_account:
       case Method::rename_wallet_account: case Method::delete_wallet_account:
+      case Method::import_cold_account_id: case Method::import_cold_account_ss58:
+      case Method::reorder_wallet_accounts_without_default_change:
+      case Method::begin_default_account_change:
+      case Method::consume_default_account_change:
+      case Method::rename_account: case Method::delete_account:
       case Method::delete_wallet: case Method::reconcile_wallet_cleanup:
         return true;
       default: return false;
@@ -937,18 +1061,6 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     std::exception_ptr first;
     try { wallets.cancel_session(session->id); } catch (...) { first = std::current_exception(); }
     try { cancel_qr_routes(session); } catch (...) { if (!first) first = std::current_exception(); }
-    std::vector<citizensdk_request_id_t> cancel;
-    {
-      std::lock_guard<std::mutex> guard(session->lock);
-      for (const auto &pair : session->routes) {
-        if (pair.second->request.method == Method::transfer_with_remark &&
-            !pair.second->completed && pair.second->native_id != 0)
-          cancel.push_back(pair.second->native_id);
-      }
-    }
-    for (const auto id : cancel) {
-      try { session->transport->cancel(id); } catch (...) { if (!first) first = std::current_exception(); }
-    }
     if (first) {
       try { std::rethrow_exception(first); }
       catch (const Error &error) { close_failed(session, error.code(), error.what()); }
@@ -1008,6 +1120,36 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
       catch (const ContractFailure &error) { result = failure(error.code, error.what(), request); }
       catch (const Error &error) { result = failure(error.code(), error.what(), request); }
       catch (...) { result = failure(CITIZENSDK_ERROR_INTERNAL, "CitizenSDK genesis query failed", request); }
+      reply(std::move(*result));
+      return;
+    }
+    if (request.method == Method::cancel_signing) {
+      std::optional<Reply> result;
+      try { result = success(request, session->transport->cancel_signing(request)); }
+      catch (const ContractFailure &error) { result = failure(error.code, error.what(), request); }
+      catch (const Error &error) { result = failure(error.code(), error.what(), request); }
+      catch (...) { result = failure(CITIZENSDK_ERROR_INTERNAL, "CitizenSDK signing cancellation failed", request); }
+      reply(std::move(*result));
+      return;
+    }
+    if (request.method == Method::cancel_prepared_transaction) {
+      std::optional<Reply> result;
+      try { result = success(request, session->transport->cancel_prepared_transaction(request)); }
+      catch (const ContractFailure &error) { result = failure(error.code, error.what(), request); }
+      catch (const Error &error) { result = failure(error.code(), error.what(), request); }
+      catch (...) { result = failure(CITIZENSDK_ERROR_INTERNAL,
+                                     "CitizenSDK transaction cancellation failed", request); }
+      reply(std::move(*result));
+      return;
+    }
+    if (request.method == Method::cancel_prepared_transaction_execution) {
+      std::optional<Reply> result;
+      try { result = success(request, session->transport->cancel_transaction_execution(request)); }
+      catch (const ContractFailure &error) { result = failure(error.code, error.what(), request); }
+      catch (const Error &error) { result = failure(error.code(), error.what(), request); }
+      catch (...) { result = failure(CITIZENSDK_ERROR_INTERNAL,
+                                     "CitizenSDK transaction execution cancellation failed",
+                                     request); }
       reply(std::move(*result));
       return;
     }
@@ -1087,26 +1229,6 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
       {
         std::lock_guard<std::mutex> guard(session->lock);
         for (auto &route_pair : session->routes) route_pair.second->reply = {};
-      }
-      int64_t last_sequence = 0;
-      for (;;) {
-        citizensdk_request_id_t cancellation_id = 0;
-        {
-          std::lock_guard<std::mutex> guard(session->lock);
-          for (auto next = session->routes.upper_bound(last_sequence);
-               next != session->routes.end(); ++next) {
-            last_sequence = next->first;
-            if (next->second->request.method == Method::transfer_with_remark &&
-                !next->second->completed && next->second->native_id != 0) {
-              cancellation_id = next->second->native_id;
-              break;
-            }
-          }
-        }
-        if (cancellation_id == 0) break;
-        // Never enter Core under the session lock: a finite test transport may
-        // complete inline, and the production dispatch thread may race here.
-        try { session->transport->cancel(cancellation_id); } catch (...) {}
       }
       retire_detached_session_if_idle(session);
     }

@@ -3,7 +3,6 @@
 package org.citizen.sdk.internal
 
 import org.citizen.sdk.CitizenSdkErrorCode
-import org.citizen.sdk.CitizenSdkEvents
 import org.citizen.sdk.CitizenSdkException
 import org.citizen.sdk.CitizenSdkOperation
 import java.util.concurrent.CompletableFuture
@@ -19,7 +18,6 @@ internal class CitizenSdkRequestRouter(
         val operationId: String,
         val future: CompletableFuture<T>,
         val decode: (CitizenSdkNativeResult) -> T,
-        val progress: CitizenSdkEvents.TransferProgressListener?,
     ) {
         val deliveryGate = Any()
         val deliveries = ArrayDeque<Delivery>()
@@ -28,7 +26,6 @@ internal class CitizenSdkRequestRouter(
 
     private sealed class Delivery {
         class Completion(val decoded: CitizenSdkNativeCodec.Decoded) : Delivery()
-        class Progress(val sequence: String, val update: CitizenSdkNativeCodec.Watch) : Delivery()
     }
 
     private val gate = Any()
@@ -37,29 +34,20 @@ internal class CitizenSdkRequestRouter(
     private val pending = HashMap<Long, Pending<*>>()
     private val requestByOperation = HashMap<String, Long>()
     private val earlyCompletions = HashMap<Long, CitizenSdkNativeCodec.Decoded>()
-    private val earlyProgress = HashMap<Long, MutableList<Pair<String, CitizenSdkNativeCodec.Watch>>>()
     private var admissionInProgress = false
     private var queuedDeliveries = 0
 
-    @Volatile
-    private var eventPublisher: ((CitizenSdkEvents.Event) -> Unit)? = null
-
-    fun bindEventPublisher(value: (CitizenSdkEvents.Event) -> Unit) {
-        eventPublisher = value
-    }
-
     fun <T> submit(begin: () -> Long, decode: (CitizenSdkNativeResult) -> T): CompletableFuture<T> =
-        submitOperation(begin, decode, null).future
+        submitOperation(begin, decode).future
 
     fun <T> submitOperation(
         begin: () -> Long,
         decode: (CitizenSdkNativeResult) -> T,
-        progressListener: CitizenSdkEvents.TransferProgressListener?,
     ): CitizenSdkOperation<T> {
         check(!closed.get()) { "CitizenSdk request router is closed" }
         val operationId = allocateOperationId()
         val future = CompletableFuture<T>()
-        val entry = Pending(operationId, future, decode, progressListener)
+        val entry = Pending(operationId, future, decode)
         var drainEntry: Pending<*>? = null
         synchronized(gate) {
             check(!closed.get()) { "CitizenSdk request router is closed" }
@@ -75,7 +63,6 @@ internal class CitizenSdkRequestRouter(
                 // exposed because no operation was returned to the caller.
                 earlyCompletions.values.forEach { it.result?.let(releaseResult) }
                 earlyCompletions.clear()
-                earlyProgress.clear()
                 throw error
             } finally {
                 admissionInProgress = false
@@ -83,9 +70,6 @@ internal class CitizenSdkRequestRouter(
             check(coreRequestId != 0L) { "Core returned reserved request ID 0" }
             check(pending.put(coreRequestId, entry) == null) { "Core request ID was reused" }
             check(requestByOperation.put(operationId, coreRequestId) == null) { "facade operation ID was reused" }
-            earlyProgress.remove(coreRequestId)?.forEach { (sequence, update) ->
-                if (enqueue(entry, Delivery.Progress(sequence, update))) drainEntry = entry
-            }
             earlyCompletions.remove(coreRequestId)?.let { decoded ->
                 pending.remove(coreRequestId)
                 requestByOperation.remove(operationId)
@@ -108,31 +92,14 @@ internal class CitizenSdkRequestRouter(
             } else {
                 val entry = checkNotNull(pending.remove(coreRequestId))
                 requestByOperation.remove(entry.operationId)
-                earlyProgress.remove(coreRequestId)
                 if (enqueue(entry, Delivery.Completion(decoded))) entry else null
             }
         }
         drainEntry?.let(::drain)
     }
 
-    fun onProgress(coreRequestId: Long, sequence: String, update: CitizenSdkNativeCodec.Watch) {
-        val drainEntry = synchronized(gate) {
-            if (!pending.containsKey(coreRequestId)) {
-                if (admissionInProgress && !earlyCompletions.containsKey(coreRequestId)) {
-                    earlyProgress.getOrPut(coreRequestId, ::ArrayList).add(sequence to update)
-                }
-                null
-            } else {
-                val entry = checkNotNull(pending[coreRequestId])
-                if (enqueue(entry, Delivery.Progress(sequence, update))) entry else null
-            }
-        }
-        drainEntry?.let(::drain)
-    }
-
     fun requireIdle() = synchronized(gate) {
-        if (pending.isNotEmpty() || earlyCompletions.isNotEmpty() || earlyProgress.isNotEmpty() ||
-            queuedDeliveries != 0
+        if (pending.isNotEmpty() || earlyCompletions.isNotEmpty() || queuedDeliveries != 0
         ) {
             throw CitizenSdkException(CitizenSdkErrorCode.BUSY, "CitizenSDK still owns asynchronous requests")
         }
@@ -151,7 +118,6 @@ internal class CitizenSdkRequestRouter(
         synchronized(gate) {
             requireIdle()
             closed.set(true)
-            eventPublisher = null
         }
     }
 
@@ -176,26 +142,6 @@ internal class CitizenSdkRequestRouter(
         }
     }
 
-    private fun deliverProgress(
-        entry: Pending<*>,
-        sequence: String,
-        update: CitizenSdkNativeCodec.Watch,
-    ) {
-        val event = CitizenSdkEvents.Event.TransferProgress(
-            sequence = sequence,
-            operationId = entry.operationId,
-            status = update.status,
-            block = update.block,
-            replacementHash = update.replacementHash,
-            peerCount = update.peerCount,
-        )
-        // Host listeners are observational. A throwing listener must never
-        // corrupt request ownership or prevent another listener from seeing
-        // the same Core progress update.
-        runCatching { entry.progress?.onProgress(event) }
-        runCatching { eventPublisher?.invoke(event) }
-    }
-
     /** Queues under admission order and elects at most one lock-free drainer. */
     private fun enqueue(entry: Pending<*>, delivery: Delivery): Boolean =
         synchronized(entry.deliveryGate) {
@@ -218,13 +164,6 @@ internal class CitizenSdkRequestRouter(
                 entry.deliveries.removeFirst()
             }
             when (delivery) {
-                is Delivery.Progress -> {
-                    try {
-                        deliverProgress(entry, delivery.sequence, delivery.update)
-                    } finally {
-                        synchronized(gate) { queuedDeliveries -= 1 }
-                    }
-                }
                 is Delivery.Completion -> {
                     // Core is terminal before CompletableFuture callbacks run;
                     // a continuation may therefore close the now-idle SDK.

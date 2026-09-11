@@ -41,20 +41,15 @@ Engine -> Contracts <- smoldot / sr25519 / OS vault / typed stores
   SS58 prefix `2027`；SS58 必须从 AccountId32 重算核对。账户重命名修剪后只接受 1..30 个
   Unicode scalar，active 切换和子账户删除通过 `WalletProfile` 的安全重建方法重新执行全部
   profile 不变量。
-- `TransferWithRemarkCall` 固定 pallet `4` / call `0`、正 u128 分金额与最多 99 个 UTF-8
-  备注字节；`ImmortalSigningPayload` 要求 runtime context、准确 best Runtime nonce、账户、公钥、正式
-  genesis 均属于同一构造身份。`SignedTransactionBuild` 只携带公开轨迹、签名和 extrinsic。
-- 交易历史状态的 `persisted_name` 直接对齐现有 Dart 持久值：`Pending` = `pending`、
-  `InBlock` = `inBlock`、`PoolRejected` = `poolRejected`，`Execution(Success/Failed)` 分别映射
-  `finalized/failed`；只有 finalized 同块同 index 的明确 runtime 结论才能进入 Execution，
-  入块或 finalized 块锚本身仍不等于执行成功。PoolRejected 保留非空拒绝原因；pending 同时
-  完整保存 nonce、收款账户、金额和 remark，同一 txHash 重试必须逐项一致。finalized 流水按
-  tracked account + block + event 建键，收发双方同时被跟踪时不会丢掉一端；自转账在值对象
-  边界被拒绝。Engine 对同 extrinsic/账户/金额的 `OnchainTransaction` 与 `Balances`
-  事件一对一去重，保留业务事件及 remark；本机 pending 终态认领同 index 发送方
-  outgoing，但仍保留接收方 incoming。逐账户游标保存准确
-  finalized hash/height；同一原始块重放不得恢复已经被终态消费的 pending，只允许相同块幂等
-  或严格推进到 `last + 1`，禁止跳块、回退或同高度换 hash。
+- `OpaqueTransactionCall` 只保存有界 opaque RuntimeCall；
+  `ImmortalSigningPayload` 要求 runtime context、准确 best Runtime nonce、账户、公钥、正式 genesis
+  属于同一构造身份。`PreparedTransaction` 的 signer message 和 extrinsic template 不跨公开边界。
+- `TransactionExecutionRecord` 完整保存 SDK 恢复所需的 callData、nonce 与 signed extrinsic，
+  但 `TransactionHistoryRecord` 仅按白名单投影 hash、状态、验证块/System 结论和时间。
+  `persisted_name` 固定为 `pending`、`inBlock`、`poolRejected`、`finalizedSuccess`、
+  `finalizedFailed`；只有 finalized 同块同 index 的明确 Runtime 结论才能进入 Execution。
+  store 最多 4096 条，只按确定顺序驱逐最老明确终态，绝不驱逐 Pending/InBlock。合同不含
+  destination、amount、remark、direction、业务 pallet/event 或逐账户扫描游标。
 - `WalletState::try_from_parts` 要求 create/import 的 previous 为空、计划精确拥有 target 全部
   secrets 并回滚删除 wallet key；append previous 必须是 target 账户列表的严格前缀且计划只
   拥有新增 refs。它还拒绝 provisioning/active cleanup 同时取得所有权、cleanup 命中当前

@@ -22,8 +22,9 @@ use citizen_sdk_contracts::{
     store::{EncryptedSecretBlobStore, WalletProfileStore},
     AccountId32, ChainSigner, ContractError, ContractErrorCode, ContractFuture, ContractResult,
     EncryptedSecretBlobSnapshot, EncryptedSecretBlobState, EncryptedSecretEnvelope, Hash32Bytes,
-    SecretBuffer, SecretOwner, SecretRef, SecretVault, VaultAvailability, VaultGeneration,
-    WalletCleanupPlan, WalletOrigin, WalletProvisioningPlan, WalletState,
+    SecretBuffer, SecretOwner, SecretRef, SecretVault, SigningIntent, SigningTransform,
+    Sr25519PublicKey, Sr25519Signature, VaultAvailability, VaultGeneration, WalletCleanupPlan,
+    WalletOrigin, WalletProvisioningPlan, WalletSignMode, WalletState,
 };
 use citizen_signer::Sr25519SoftwareSigner;
 use futures::{executor::block_on, join};
@@ -454,6 +455,420 @@ impl Harness {
 }
 
 #[test]
+fn cold_accounts_share_one_order_and_never_call_the_secret_vault() {
+    block_on(async {
+        let harness = Harness::new();
+        *harness.vault.availability.lock().unwrap() = VaultAvailability::Unavailable;
+        let first_id = AccountId32::from_bytes([0xa1; 32]);
+        let second_id = AccountId32::from_bytes([0xa2; 32]);
+
+        let first = harness
+            .service
+            .import_cold_account(first_id, " 冷钱包1 ")
+            .await
+            .expect("AccountId 导入冷账户");
+        let second_address = citizen_sdk_contracts::citizen_ss58_address(second_id);
+        let second = harness
+            .service
+            .import_cold_ss58_account(&second_address, "冷钱包2")
+            .await
+            .expect("SS58 导入冷账户");
+        assert_eq!((first.wallet_index(), second.wallet_index()), (1, 2));
+        assert_eq!(first.name(), "冷钱包1");
+        assert_eq!(
+            harness.service.account_sign_mode(first_id).await.unwrap(),
+            Some(WalletSignMode::Cold)
+        );
+
+        let revision = harness.service.state().await.unwrap().revision();
+        let state = harness
+            .service
+            .reorder_accounts_without_default_change(revision, vec![first_id, second_id])
+            .await
+            .unwrap();
+        assert_eq!(state.default_account_id(), Some(first_id));
+        let renamed = harness
+            .service
+            .rename_cold_account(second_id, " 离线治理 ")
+            .await
+            .unwrap();
+        assert_eq!(renamed.name(), "离线治理");
+
+        assert_contract_code(
+            harness
+                .service
+                .import_cold_account(first_id, "重复")
+                .await
+                .expect_err("重复冷账户必须拒绝"),
+            ContractErrorCode::Conflict,
+        );
+        assert!(harness
+            .service
+            .reorder_accounts_without_default_change(
+                harness.service.state().await.unwrap().revision(),
+                vec![first_id, first_id],
+            )
+            .await
+            .is_err());
+
+        harness.service.delete_cold_account(first_id).await.unwrap();
+        let reimported = harness
+            .service
+            .import_cold_account(first_id, "重新导入")
+            .await
+            .unwrap();
+        assert_eq!(reimported.wallet_index(), 3, "删除后的 index 不得复用");
+        let state = harness.profiles.snapshot();
+        assert_eq!(state.ordered_account_ids(), &[second_id, first_id]);
+        assert_eq!(state.next_cold_wallet_index(), 4);
+        assert_eq!(harness.vault.open_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(harness.vault.delete_wallet_calls.load(Ordering::SeqCst), 0);
+        assert!(harness.vault.wallet_keys.lock().unwrap().is_empty());
+        assert_eq!(harness.secrets.envelope_count(), 0);
+    });
+}
+
+#[test]
+fn engine_internal_cold_wallet_surface_uses_the_same_catalog_state() {
+    use citizen_sdk_contracts::Modules;
+
+    block_on(async {
+        let harness = Harness::new();
+        let engine = harness.engine(Modules::try_new(Modules::WALLET).unwrap());
+        let account_id = AccountId32::from_bytes([0xac; 32]);
+        let imported = engine
+            .import_cold_wallet_account(account_id, "冷签账户".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(imported.account_id(), account_id);
+        assert_eq!(
+            engine.wallet_account_sign_mode(account_id).await.unwrap(),
+            Some(WalletSignMode::Cold)
+        );
+        assert_eq!(
+            engine.wallet_state().await.unwrap().default_account_id(),
+            Some(account_id)
+        );
+        engine
+            .rename_cold_wallet_account(account_id, "治理冷签".to_owned())
+            .await
+            .unwrap();
+        engine.delete_cold_wallet_account(account_id).await.unwrap();
+        assert!(engine
+            .wallet_state()
+            .await
+            .unwrap()
+            .cold_accounts()
+            .is_empty());
+        engine.dispose().unwrap();
+    });
+}
+
+#[test]
+fn public_catalog_reorder_uses_revision_and_cannot_change_the_default_account() {
+    use citizen_sdk_contracts::Modules;
+
+    block_on(async {
+        let harness = Harness::new();
+        let engine = harness.engine(Modules::try_new(Modules::WALLET).unwrap());
+        let first = AccountId32::from_bytes([0xad; 32]);
+        let second = AccountId32::from_bytes([0xae; 32]);
+        engine
+            .import_cold_wallet_account(first, "默认冷账户".to_owned())
+            .await
+            .unwrap();
+        engine
+            .import_cold_wallet_account(second, "备用冷账户".to_owned())
+            .await
+            .unwrap();
+        let state = engine.wallet_state().await.unwrap();
+
+        let changed_default = engine
+            .reorder_wallet_accounts_without_default_change(state.revision(), vec![second, first])
+            .await
+            .expect_err("未授权默认账户变更必须失败");
+        assert_contract_code(changed_default, ContractErrorCode::InvalidArgument);
+        assert_eq!(
+            engine.wallet_state().await.unwrap().default_account_id(),
+            Some(first)
+        );
+
+        let stale = engine
+            .reorder_wallet_accounts_without_default_change(
+                state.revision().saturating_sub(1),
+                vec![first, second],
+            )
+            .await
+            .expect_err("过期 revision 必须失败");
+        assert_contract_code(stale, ContractErrorCode::Conflict);
+
+        let reordered = engine
+            .reorder_wallet_accounts_without_default_change(state.revision(), vec![first, second])
+            .await
+            .unwrap();
+        assert_eq!(reordered.default_account_id(), Some(first));
+        assert_eq!(reordered.revision(), state.revision() + 1);
+
+        let renamed = engine
+            .rename_wallet_account_any(second, " 离线治理 ".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(
+            renamed.cold_account_by_id(second).unwrap().name(),
+            "离线治理"
+        );
+        let deleted = engine.delete_wallet_account_any(second).await.unwrap();
+        assert!(deleted.cold_account_by_id(second).is_none());
+        assert_eq!(harness.vault.open_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(harness.vault.delete_wallet_calls.load(Ordering::SeqCst), 0);
+        engine.dispose().unwrap();
+    });
+}
+
+#[test]
+fn generic_signing_intent_routes_hot_and_cold_accounts_without_business_payload_knowledge() {
+    use citizen_sdk_contracts::Modules;
+
+    block_on(async {
+        let harness = Harness::new();
+        let profile = harness.service.import(&known_mnemonic(), "").await.unwrap();
+        let hot = profile.master_account_id();
+        let cold = AccountId32::from_bytes([0xaf; 32]);
+        harness
+            .service
+            .import_cold_account(cold, "外部签名账户")
+            .await
+            .unwrap();
+        let engine = harness.engine(Modules::try_new(Modules::WALLET | Modules::SIGNING).unwrap());
+
+        let intent = SigningIntent::try_new(
+            hot,
+            b"opaque consumer bytes".to_vec(),
+            SigningTransform::Blake2Domain(b"third-party.example".to_vec()),
+        )
+        .unwrap();
+        let signing_message = intent.signing_message().unwrap();
+        let payload_hash = intent.payload_hash().unwrap();
+        let completion = engine.sign_wallet_intent(intent).await.unwrap();
+        assert_eq!(completion.account_id(), hot);
+        assert_eq!(completion.payload_hash(), payload_hash);
+        assert!(harness
+            .signer
+            .verify(
+                Sr25519PublicKey::from_bytes(hot.into_bytes()),
+                signing_message,
+                completion.signature(),
+            )
+            .await
+            .unwrap());
+
+        let vault_calls = harness.vault.open_calls.load(Ordering::SeqCst);
+        let failure = engine
+            .sign_wallet_intent(
+                SigningIntent::try_new(cold, vec![0x01], SigningTransform::Raw).unwrap(),
+            )
+            .await
+            .expect_err("冷账户必须交给外部签名 transport");
+        assert_contract_code(failure, ContractErrorCode::Unsupported);
+        assert_eq!(
+            harness.vault.open_calls.load(Ordering::SeqCst),
+            vault_calls,
+            "冷账户路由不得尝试读取 SDK 热钱包金库",
+        );
+        engine.dispose().unwrap();
+    });
+}
+
+#[test]
+fn hot_default_account_change_signs_the_frozen_order_and_commits_once() {
+    use citizen_sdk_contracts::Modules;
+
+    block_on(async {
+        let harness = Harness::new();
+        let profile = harness.service.import(&known_mnemonic(), "").await.unwrap();
+        let hot = profile.master_account_id();
+        let cold = AccountId32::from_bytes([0xb0; 32]);
+        harness
+            .service
+            .import_cold_account(cold, "冷账户")
+            .await
+            .unwrap();
+        let engine = harness.engine(Modules::try_new(Modules::WALLET | Modules::SIGNING).unwrap());
+        let before = engine.wallet_state().await.unwrap();
+        let authorization = engine
+            .prepare_default_wallet_account_change(before.revision(), vec![cold, hot], 120)
+            .await
+            .unwrap();
+
+        assert_eq!(authorization.before_account_ids(), &[hot, cold]);
+        assert_eq!(authorization.ordered_account_ids(), &[cold, hot]);
+        let committed = engine
+            .authorize_hot_default_wallet_account_change(authorization)
+            .await
+            .unwrap();
+        assert_eq!(committed.ordered_account_ids(), &[cold, hot]);
+        assert_eq!(committed.default_account_id(), Some(cold));
+        assert_eq!(committed.revision(), before.revision() + 1);
+        engine.dispose().unwrap();
+    });
+}
+
+#[test]
+fn external_signature_can_authorize_cold_default_change_without_opening_the_sdk_vault() {
+    use citizen_sdk_contracts::Modules;
+
+    block_on(async {
+        let harness = Harness::new();
+        let external_secret = SecretBuffer::try_new(vec![0x41; 32]).unwrap();
+        let external_public = harness.signer.public_key(&external_secret).await.unwrap();
+        let current = AccountId32::from_bytes(*external_public.as_bytes());
+        let next = AccountId32::from_bytes([0xb1; 32]);
+        harness
+            .service
+            .import_cold_account(current, "当前外部账户")
+            .await
+            .unwrap();
+        harness
+            .service
+            .import_cold_account(next, "下一个外部账户")
+            .await
+            .unwrap();
+        let engine = harness.engine(Modules::try_new(Modules::WALLET | Modules::SIGNING).unwrap());
+        let before = engine.wallet_state().await.unwrap();
+        let authorization = engine
+            .prepare_default_wallet_account_change(before.revision(), vec![next, current], 120)
+            .await
+            .unwrap();
+        let signature = harness
+            .signer
+            .sign(
+                &external_secret,
+                authorization
+                    .signing_intent()
+                    .unwrap()
+                    .signing_message()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let committed = engine
+            .commit_default_wallet_account_change(&authorization, signature)
+            .await
+            .unwrap();
+
+        assert_eq!(committed.default_account_id(), Some(next));
+        assert_eq!(harness.vault.open_calls.load(Ordering::SeqCst), 0);
+        engine.dispose().unwrap();
+    });
+}
+
+#[test]
+fn default_account_authorization_rejects_stale_or_expired_snapshots() {
+    use citizen_sdk_contracts::Modules;
+
+    block_on(async {
+        let harness = Harness::new();
+        let profile = harness.service.import(&known_mnemonic(), "").await.unwrap();
+        let hot = profile.master_account_id();
+        let cold = AccountId32::from_bytes([0xb2; 32]);
+        harness
+            .service
+            .import_cold_account(cold, "冷账户")
+            .await
+            .unwrap();
+        let engine = harness.engine(Modules::try_new(Modules::WALLET | Modules::SIGNING).unwrap());
+        let before = engine.wallet_state().await.unwrap();
+        let stale_authorization = engine
+            .prepare_default_wallet_account_change(before.revision(), vec![cold, hot], 120)
+            .await
+            .unwrap();
+        engine
+            .rename_wallet_account_any(cold, "已修改目录".to_owned())
+            .await
+            .unwrap();
+        let stale = engine
+            .authorize_hot_default_wallet_account_change(stale_authorization)
+            .await
+            .expect_err("签名期间目录变化必须使授权失效");
+        assert_contract_code(stale, ContractErrorCode::Conflict);
+        assert_eq!(
+            engine.wallet_state().await.unwrap().default_account_id(),
+            Some(hot)
+        );
+
+        let current = engine.wallet_state().await.unwrap();
+        let expired_authorization = harness
+            .service
+            .prepare_default_account_change(current.revision(), vec![cold, hot], 1)
+            .await
+            .unwrap();
+        harness
+            .clock
+            .0
+            .store(expired_authorization.expires_at() * 1_000, Ordering::SeqCst);
+        let expired = harness
+            .service
+            .commit_default_account_change(
+                &expired_authorization,
+                Sr25519Signature::from_bytes([0; 64]),
+            )
+            .await
+            .expect_err("过期授权必须在验签或写入前拒绝");
+        assert_contract_code(expired, ContractErrorCode::Timeout);
+        assert_eq!(
+            engine.wallet_state().await.unwrap().default_account_id(),
+            Some(hot)
+        );
+        engine.dispose().unwrap();
+    });
+}
+
+#[test]
+fn hot_wallet_changes_preserve_cold_accounts_and_cross_mode_duplicates_fail() {
+    block_on(async {
+        let harness = Harness::new();
+        let cold_id = AccountId32::from_bytes([0xb1; 32]);
+        harness
+            .service
+            .import_cold_account(cold_id, "冷账户")
+            .await
+            .unwrap();
+
+        let mnemonic = known_mnemonic();
+        let hot = harness.service.import(&mnemonic, "").await.unwrap();
+        let hot_id = hot.master_account_id();
+        let state = harness.profiles.snapshot();
+        assert_eq!(state.ordered_account_ids(), &[cold_id, hot_id]);
+        assert_eq!(state.cold_accounts().len(), 1);
+        assert_contract_code(
+            harness
+                .service
+                .import_cold_account(hot_id, "重复热账户")
+                .await
+                .expect_err("热冷 AccountId 不得重复"),
+            ContractErrorCode::Conflict,
+        );
+
+        let child = harness
+            .service
+            .add_accounts(&mnemonic, "", &[1])
+            .await
+            .unwrap()[0]
+            .account_id();
+        assert_eq!(
+            harness.profiles.snapshot().ordered_account_ids(),
+            &[cold_id, hot_id, child]
+        );
+        harness.service.delete_wallet().await.unwrap();
+        let state = harness.profiles.snapshot();
+        assert!(state.profile().is_none());
+        assert_eq!(state.cold_accounts().len(), 1);
+        assert_eq!(state.ordered_account_ids(), &[cold_id]);
+        assert_eq!(state.default_account_id(), Some(cold_id));
+    });
+}
+
+#[test]
 fn signing_guard_rejects_before_auth_without_wallet_management() {
     block_on(async {
         let harness = Harness::new();
@@ -461,10 +876,18 @@ fn signing_guard_rejects_before_auth_without_wallet_management() {
         let profile = harness.service.import(&mnemonic, "").await.unwrap();
         let auth_before = harness.vault.open_calls.load(Ordering::SeqCst);
         let writes_before = harness.profiles.cas_calls.load(Ordering::SeqCst);
-        let result = harness.signing_service().sign_guarded(profile.master_account_id(), vec![4, 0], &|| Err(EngineError::Cancelled)).await;
+        let result = harness
+            .signing_service()
+            .sign_guarded(profile.master_account_id(), vec![4, 0], &|| {
+                Err(EngineError::Cancelled)
+            })
+            .await;
         assert_eq!(result, Err(EngineError::Cancelled));
         assert_eq!(harness.vault.open_calls.load(Ordering::SeqCst), auth_before);
-        assert_eq!(harness.profiles.cas_calls.load(Ordering::SeqCst), writes_before);
+        assert_eq!(
+            harness.profiles.cas_calls.load(Ordering::SeqCst),
+            writes_before
+        );
     });
 }
 
@@ -482,7 +905,13 @@ fn signing_guard_cancellation_drains_late_auth_and_never_returns_signature() {
         *harness.vault.open_entered.lock().unwrap() = Some(entered);
         let cancelled = AtomicBool::new(false);
         let completed = harness.vault.open_completed.load(Ordering::SeqCst);
-        let guard = || if cancelled.load(Ordering::SeqCst) { Err(EngineError::Cancelled) } else { Ok(()) };
+        let guard = || {
+            if cancelled.load(Ordering::SeqCst) {
+                Err(EngineError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
         let service = harness.signing_service();
         let work = Box::pin(service.sign_guarded(profile.master_account_id(), vec![4, 0], &guard));
         let work = match futures::future::select(work, entered_rx).await {
@@ -490,10 +919,16 @@ fn signing_guard_cancellation_drains_late_auth_and_never_returns_signature() {
             _ => panic!("必须进入真实授权等待"),
         };
         cancelled.store(true, Ordering::SeqCst);
-        assert_eq!(harness.vault.open_completed.load(Ordering::SeqCst), completed);
+        assert_eq!(
+            harness.vault.open_completed.load(Ordering::SeqCst),
+            completed
+        );
         release.send(()).unwrap();
         assert_eq!(work.await, Err(EngineError::Cancelled));
-        assert_eq!(harness.vault.open_completed.load(Ordering::SeqCst), completed + 1);
+        assert_eq!(
+            harness.vault.open_completed.load(Ordering::SeqCst),
+            completed + 1
+        );
     });
 }
 
@@ -907,6 +1342,10 @@ fn incomplete_create_never_exposes_the_uncommitted_target_profile() {
         .unwrap();
 
         assert_eq!(harness.service.profile().await.unwrap(), None);
+        let visible = harness.service.state().await.unwrap();
+        assert!(visible.profile().is_none());
+        assert!(visible.ordered_account_ids().is_empty());
+        assert!(visible.provisioning().is_none());
         assert_eq!(harness.service.usable_profile().await.unwrap(), None);
         assert_contract_code(
             harness
@@ -1257,7 +1696,7 @@ async fn create_confirmed(
 
 fn assert_contract_code(error: EngineError, expected: ContractErrorCode) {
     match error {
-        EngineError::Contract(contract) => assert_eq!(contract.code(), expected),
+        EngineError::Contract(contract) => assert_eq!(contract.code(), expected, "{contract:?}"),
         other => panic!("期望 typed contract error，实际为 {other:?}"),
     }
 }

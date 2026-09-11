@@ -2,7 +2,15 @@
 # CitizenSDK 原生核心唯一构建入口。源码目录只读，Cargo 与平台产物必须写入显式的外部目录。
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "$0")" && pwd -P)"
+# CocoaPods和Flutter缓存工程会以符号链接呈现产品脚本。源码身份必须从脚本
+# 最终指向的真实文件推导，不能从缓存视图中的$0目录推导。
+script_path="${BASH_SOURCE[0]}"
+while [[ -L "$script_path" ]]; do
+  link_target="$(readlink "$script_path")"
+  [[ "$link_target" == /* ]] || link_target="$(cd "$(dirname "$script_path")" && pwd -P)/$link_target"
+  script_path="$link_target"
+done
+script_dir="$(cd "$(dirname "$script_path")" && pwd -P)"
 sdk_dir="$(dirname "$script_dir")"
 ffi_manifest="$sdk_dir/native/smoldot/ffi/Cargo.toml"
 product_ffi_manifest="$sdk_dir/native/ffi/Cargo.toml"
@@ -200,6 +208,21 @@ prepare_safe_directory() {
   [[ "$real_path" == "$path" ]] || fail "$label 的真实路径发生漂移：$path -> $real_path"
 }
 
+# GRADLE_USER_HOME 是调用产品提供的包管理器缓存，不是 CitizenSDK 编译物。
+# 它可以位于 SDK 工作根之外，但必须是源码树之外的安全真实目录；SDK 自有
+# Gradle 工程、项目缓存、Kotlin 状态和原生产物仍只能写入 work_dir。
+prepare_external_cache_directory() {
+  local path="$1" label="$2" real_path
+  assert_safe_directory_path "$path" "$label"
+  mkdir -p "$path"
+  assert_safe_directory_path "$path" "$label"
+  [[ -d "$path" && ! -L "$path" ]] || fail "$label 不是普通目录：$path"
+  real_path="$(cd "$path" && pwd -P)"
+  [[ "$real_path" == "$path" ]] || fail "$label 的真实路径发生漂移：$path -> $real_path"
+  local_build_path_is_allowed "$real_path" \
+    || fail "$label 必须位于 CitizenSDK 源码树之外：$real_path"
+}
+
 prepare_safe_output_file() {
   local root="$1" path="$2" label="$3" parent
   assert_descendant_path "$root" "$path" "$label"
@@ -286,7 +309,7 @@ product_header_symbols() {
     "$product_header" | sort -u
 }
 
-# 公开89符号与内部4符号各自精确封闭；私有头只在本轮工作目录生成。
+# 公开117符号与内部4符号各自精确封闭；私有头只在本轮工作目录生成。
 product_internal_symbols() {
   node --input-type=module - "$script_dir/release.mjs" <<'NODE'
 import {pathToFileURL} from 'node:url';
@@ -356,7 +379,7 @@ verify_product_abi_symbols() {
     local missing extra
     missing="$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))"
     extra="$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))"
-    fail "$label 与89公开+4内部符号闭集不一致；缺失=${missing:-无}；额外=${extra:-无}"
+    fail "$label 与117公开+4内部符号闭集不一致；缺失=${missing:-无}；额外=${extra:-无}"
   }
 }
 
@@ -526,9 +549,9 @@ verify_linux_install() {
   fi
   core_symbols="$(product_header_symbols)"
   host_symbols="$(linux_host_header_symbols)"
-  [[ "$(printf '%s\n' "$core_symbols" | wc -l | tr -d ' ')" == 89 \
+  [[ "$(printf '%s\n' "$core_symbols" | wc -l | tr -d ' ')" == 117 \
     && "$(printf '%s\n' "$host_symbols" | wc -l | tr -d ' ')" == 17 ]] \
-    || fail "$platform 公开 ABI 必须精确为 89 Core / 17 Host"
+    || fail "$platform 公开 ABI 必须精确为 117 Core / 17 Host"
   verify_linux_elf_identity "$platform" "$prefix/lib/$platform/libcitizensdk.so" \
     "$prefix/lib/$platform/libcitizensdk_host.so" "$readelf_bin" "$nm_bin"
 }
@@ -821,17 +844,23 @@ build_android() {
   gradle_bin="$(resolve_gradle)"
   android_build_dir="$work_dir/gradle-native"
   gradle_project_cache="$work_dir/gradle-project-cache"
-  gradle_user_home="$work_dir/gradle-home"
+  # 调用产品可以提供位于自身任务缓存中的统一 GRADLE_USER_HOME，使已下载依赖
+  # 自动归入塔塔依赖库；它不是 SDK 编译物，因此不要求位于 SDK 子工作根。
+  gradle_user_home="${GRADLE_USER_HOME:-$work_dir/gradle-home}"
   kotlin_persistent_dir="$work_dir/kotlin-project-persistent"
   core_stage="$work_dir/android-core/arm64-v8a"
   core_destination="$output_dir/android/arm64-v8a/libcitizensdk.so"
   jni_destination="$output_dir/android/arm64-v8a/libcitizensdk_jni.so"
   aar_destination="$output_dir/android/citizensdk.aar"
   for directory in \
-    "$android_build_dir" "$gradle_project_cache" "$gradle_user_home" \
-    "$kotlin_persistent_dir" "$core_stage"; do
+    "$android_build_dir" "$gradle_project_cache" "$kotlin_persistent_dir" "$core_stage"; do
     prepare_safe_directory "$work_dir" "$directory" "Android 外部构建目录"
   done
+  if [[ -n "${GRADLE_USER_HOME:-}" ]]; then
+    prepare_external_cache_directory "$gradle_user_home" "Android Gradle 依赖缓存"
+  else
+    prepare_safe_directory "$work_dir" "$gradle_user_home" "Android Gradle 依赖缓存"
+  fi
   prepare_android_gradle_project
   export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$toolchain/bin/aarch64-linux-android24-clang"
   export CC_aarch64_linux_android="$toolchain/bin/aarch64-linux-android24-clang"
@@ -910,8 +939,8 @@ verify_apple_product_abi_symbols() {
   actual="$(printf '%s\n' "$all_symbols" | grep '^citizensdk_' || true)"
   expected="$(apple_public_symbols)"
   expected_count="$(printf '%s\n' "$expected" | grep -c '^citizensdk_' || true)"
-  [[ "$expected_count" == 92 ]] \
-    || fail "Apple 产品头必须精确声明 89 个 Core 与 3 个图像函数"
+  [[ "$expected_count" == 120 ]] \
+    || fail "Apple 产品头必须精确声明 117 个 Core 与 3 个图像函数"
   forbidden="$(printf '%s\n' "$all_symbols" \
     | grep -E '^(smoldot_|citizen_sr25519_|account_crypto_)' || true)"
   [[ -z "$forbidden" ]] \
@@ -920,11 +949,11 @@ verify_apple_product_abi_symbols() {
     local missing extra
     missing="$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))"
     extra="$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))"
-    fail "$label 的 citizensdk_* 与 92 函数产品头不一致；缺失=${missing:-无}；额外=${extra:-无}"
+    fail "$label 的 citizensdk_* 与 117 Core + 3 图像函数产品头不一致；缺失=${missing:-无}；额外=${extra:-无}"
   }
   # 动态 framework 同时提供 Swift API 和 C ABI。Swift public/ABI-support 符号
   # 只能属于本模块 mangling；除这组 Swift 符号外，全部外部已定义符号必须正好
-  # 是产品头中的 92 个 C ABI，Rust staticlib 及其依赖不得穿透边界。
+  # 是产品头中的 117 个 Core + 3 个图像 C ABI，Rust staticlib 及其依赖不得穿透边界。
   swift_symbols="$(printf '%s\n' "$all_symbols" | grep '^\$s10CitizenSDK' || true)"
   [[ -n "$swift_symbols" ]] || fail "$label 未导出 CitizenSDK Swift 模块符号"
   foreign="$(printf '%s\n' "$all_symbols" \
@@ -941,7 +970,7 @@ write_apple_exported_symbols() {
   actual="$(printf '%s\n' "$all_symbols" | grep '^citizensdk_' || true)"
   expected="$(apple_linked_symbols)"
   [[ "$actual" == "$expected" ]] \
-    || fail "$label 未过滤链接不等于92公开+4内部符号闭集"
+    || fail "$label 未过滤链接不等于117公开+4内部+3图像符号闭集（共124项）"
   swift_symbols="$(printf '%s\n' "$all_symbols" | grep '^\$s10CitizenSDK' || true)"
   [[ -n "$swift_symbols" ]] || fail "$label 未过滤链接没有 CitizenSDK Swift 导出"
   prepare_safe_output_file "$work_dir" "$destination" "$label 导出允许集"
@@ -949,8 +978,8 @@ write_apple_exported_symbols() {
     apple_public_symbols
     printf '%s\n' "$swift_symbols"
   } | sed 's/^/_/' | LC_ALL=C sort -u >"$destination"
-  [[ "$(grep -c '^_citizensdk_' "$destination" || true)" == 92 ]] \
-    || fail "$label 导出允许集没有精确 92 个 C ABI"
+  [[ "$(grep -c '^_citizensdk_' "$destination" || true)" == 120 ]] \
+    || fail "$label 导出允许集没有精确 117 个 Core + 3 个图像 C ABI"
 }
 
 write_framework_plist() {
@@ -3784,7 +3813,7 @@ build_windows() {
 
 verify_windows_exports() {
   local library="$1" header="$2" label="$3" exports internal_symbols=""
-  # 只有Core采用89公开+4内部闭集；Host另导出自己的17项和3项统一图像接口。
+  # 只有 Core 采用 117 公开 + 4 内部闭集；Host 另导出自己的 17 项和 3 项统一图像接口。
   if [[ "$header" == "$product_header" ]]; then
     internal_symbols="$(product_internal_symbols)"
   else

@@ -12,34 +12,15 @@ SCHEME="RunnerUITests"
 TARGET_BUNDLE_ID="ios.citizenapp"
 TEST_HOST_BUNDLE_ID="ios.citizenapp.UITestHost"
 TEST_RUNNER_BUNDLE_ID="ios.citizenapp.UITests.xctrunner"
-: "${TATA_CONSOLE_TARGET_ROOT:?UI检查必须由控制台提供中央产物根}"
-: "${TATA_CONSOLE_CACHE_DIR:?UI检查必须由控制台提供当前iOS任务目录}"
-: "${TATA_CONSOLE_FLUTTER_ROOT:?UI检查必须使用本端独立工程配置}"
-BUILD_ROOT="$TATA_CONSOLE_CACHE_DIR"
-PROJECT="$TATA_CONSOLE_FLUTTER_ROOT/ios/Runner.xcodeproj"
+BUILD_ROOT="${TATA_CONSOLE_BUILD_CACHE_DIR:-${TATA_CONSOLE_CACHE_DIR:-${TMPDIR:-/tmp}/citizenapp-ios-ui-test}}"
+PROJECT="$APP_ROOT/ios/Runner.xcodeproj"
 DERIVED_DATA="$BUILD_ROOT/DerivedData"
 RESULT_BUNDLE="$BUILD_ROOT/RunnerUITests.xcresult"
 
-[[ "$BUILD_ROOT" == "${TATA_CONSOLE_TARGET_ROOT%/target}/cache/gmb/citizenapp/ios" \
-  && "$TATA_CONSOLE_FLUTTER_ROOT" == "$BUILD_ROOT" \
-  && -f "$PROJECT/project.pbxproj" && ! -L "$PROJECT/project.pbxproj" ]] || {
-  echo "UI 测试缺少准确iOS任务配置：$BUILD_ROOT" >&2
-  exit 1
+[[ -f "$PROJECT/project.pbxproj" && ! -L "$PROJECT/project.pbxproj" ]] || {
+  echo "CitizenApp iOS 工程不存在：$PROJECT" >&2; exit 1
 }
-# 不清空平台目录；只有当前控制台持有的 iOS 任务可以复用其配置执行检查。
-python3 - "$BUILD_ROOT" <<'PY'
-import json, os, pathlib, sys
-root = pathlib.Path(sys.argv[1])
-lock = root / '.owner'
-if str(root.resolve()) != str(root) or lock.is_symlink() or not lock.is_file():
-    raise SystemExit('CitizenApp UI检查缺少本端任务所有权')
-owner = json.loads(lock.read_text())
-if owner.get('canonicalId') != 'gmb.citizenapp.ios.build' or not owner.get('runId') or not isinstance(owner.get('pid'), int) or owner['pid'] <= 0:
-    raise SystemExit('CitizenApp UI检查任务身份不匹配')
-if os.environ.get('TATA_CONSOLE_RUN_ID') != owner['runId']:
-    raise SystemExit('CitizenApp UI检查运行任务不匹配')
-os.kill(owner['pid'], 0)
-PY
+mkdir -p "$BUILD_ROOT"
 export TMPDIR="$BUILD_ROOT/"
 
 device_json="$(xcrun devicectl list devices --quiet --json-output -)"

@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:citizenapp/isar/wallet_isar.dart';
-import 'package:citizenapp/transaction/shared/local_tx_store.dart';
-import 'package:citizenapp/wallet/pages/transaction_history_page.dart';
+import 'package:citizenapp/transaction/history/data/local_tx_store.dart';
+import 'package:citizenapp/transaction/history/presentation/transaction_history_page.dart';
 
 LocalTxEntity _record({
   String status = LocalTxStore.statusFinalized,

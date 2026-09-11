@@ -14,14 +14,20 @@
 #   ./scripts/build-smoldot-native.sh host       # 当前宿主（flutter test 用）
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+  LINK_TARGET="$(readlink "$SCRIPT_PATH")"
+  [[ "$LINK_TARGET" == /* ]] || LINK_TARGET="$(cd "$(dirname "$SCRIPT_PATH")" && pwd -P)/$LINK_TARGET"
+  SCRIPT_PATH="$LINK_TARGET"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd -P)"
 CITIZENAPP_DIR="$(dirname "$SCRIPT_DIR")"
 RUST_DIR="$CITIZENAPP_DIR/smoldot/ffi"
 TARGET="${1:-all}"
 
 if [[ "$TARGET" == ios || "$TARGET" == android ]]; then
   if [[ -n "${TATA_CONSOLE_BUILD_CACHE_DIR:-}" ]]; then
-    export CARGO_TARGET_DIR="$TATA_CONSOLE_BUILD_CACHE_DIR/cargo-target"
+    export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$TATA_CONSOLE_BUILD_CACHE_DIR/cargo}"
   elif [[ -n "${TATA_CONSOLE_CACHE_DIR:-}" ]]; then
     export CARGO_TARGET_DIR="$TATA_CONSOLE_CACHE_DIR/native/cargo"
   elif [[ "${CI:-}" == true ]]; then

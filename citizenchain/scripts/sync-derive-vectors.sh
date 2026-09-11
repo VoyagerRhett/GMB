@@ -15,30 +15,8 @@ set -euo pipefail
 # 仓库根(本脚本位于 <repo>/citizenchain/scripts/)。
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-# 独立本机调用先由中央执行器认领共享任务；带运行身份的子进程直接进入下方守卫，避免递归。
-if [[ "${CI:-}" != true && -z "${TATA_CONSOLE_RUN_ID:-}" ]]; then
-  exec "${GMB_NODE_BIN:-node}" "$REPO_ROOT/../TATA/tataconsole/flows/local/workspace.mjs" \
-    shared-check "$REPO_ROOT" "${1:-check}"
-fi
-: "${TATA_CONSOLE_TARGET_ROOT:?共享检查必须提供中央产物根}"
-: "${TATA_CONSOLE_CACHE_DIR:?共享检查必须提供当前任务目录}"
-SHARED_WORK_DIR="$TATA_CONSOLE_CACHE_DIR"
-[[ "$SHARED_WORK_DIR" == "${TATA_CONSOLE_TARGET_ROOT%/target}/cache/gmb/shared/macos" ]] \
-  || { echo "[sync] 共享仓库中央工作目录不合法：${SHARED_WORK_DIR}" >&2; exit 1; }
-# 共享检查使用自己的任务所有权，不能冒用产品编译身份或删除整个共享平台容器。
-python3 - "$SHARED_WORK_DIR" <<'PY'
-import json, os, pathlib, sys
-root = pathlib.Path(sys.argv[1])
-lock = root / '.owner'
-if str(root.resolve()) != str(root) or lock.is_symlink() or not lock.is_file():
-    raise SystemExit('共享检查缺少当前任务所有权')
-owner = json.loads(lock.read_text())
-if owner.get('canonicalId') != 'gmb.shared.macos.check' or not owner.get('runId') or not isinstance(owner.get('pid'), int) or owner['pid'] <= 0:
-    raise SystemExit('共享检查任务身份不匹配')
-if os.environ.get('TATA_CONSOLE_RUN_ID') != owner['runId']:
-    raise SystemExit('共享检查运行任务不匹配')
-os.kill(owner['pid'], 0)
-PY
+SHARED_WORK_DIR="${TATA_CONSOLE_BUILD_CACHE_DIR:-${TMPDIR:-/tmp}/gmb-sync-derive-vectors}"
+mkdir -p "$SHARED_WORK_DIR"
 export CARGO_TARGET_DIR="$SHARED_WORK_DIR/cargo"
 export TMPDIR="$SHARED_WORK_DIR/"
 

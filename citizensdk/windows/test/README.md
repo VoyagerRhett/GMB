@@ -44,7 +44,7 @@ Flutter 构建分支单独枚举六个程序：codec、environment、sessions、
 secret_boundary。只编译五个正式 adapter 源文件，连接同版已安装 Host/Core；不会落入
 原生 14 项测试的 Host 源码编译分支，不下载测试框架，也不删除已有原生测试。
 
-- codec：36 方法、固定 tuple、UTF-8/NUL、u64/u128、账户/载荷、二维码协议/图像、公开返回语义及非法值；
+- codec：63 方法、固定 tuple、UTF-8/NUL、u64/u128、账户/载荷、统一钱包状态、通用签名、安全链读取、通用交易准备/执行、二维码协议/图像、公开返回语义及非法值；
   原始 wire 的截断、尾随、巨长声明和超深输入必须在官方 decoder 分配之前拒绝。
 - environment：明确声明的 application_id、系统路径/标准资产、有效父窗口与销毁边界。
 - sessions/wallet_flow：早完成、错配/重复/迟到回调、重入、全进程变更门禁、取消非终态、

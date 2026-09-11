@@ -9,50 +9,56 @@ use crate::{
     },
 };
 use citizen_sdk_contracts::{
-    AccountId32, ChainDatabaseSnapshot, EncryptedSecretBlobSnapshot, EncryptedSecretBlobState,
-    EncryptedSecretEnvelope, Hash32, Hash32Bytes, RuntimeContext, RuntimeVersion, SecretOwner,
-    SecretRef, TransactionHistoryState, VaultGeneration, VerifiedBlockRef, WalletState,
+    citizen_ss58_address, AccountId32, ChainDatabaseSnapshot, ColdWalletAccount,
+    EncryptedSecretBlobSnapshot, EncryptedSecretBlobState, EncryptedSecretEnvelope, Hash32,
+    Hash32Bytes, RuntimeContext, RuntimeVersion, SecretOwner, SecretRef, TransactionHistoryState,
+    VaultGeneration, VerifiedBlockRef, WalletState,
 };
 
 const HEADER_LEN: usize = 56;
 
 #[test]
-fn pending_outbox_round_trips_complete_authorization_and_rejects_missing_bytes() {
-    let record = citizen_sdk_contracts::TransactionHistoryRecord::try_new(
+fn generic_execution_round_trips_complete_recovery_material_and_rejects_wrong_schema() {
+    let call_data = vec![4, 0, 7];
+    let call_data_hash = Hash32::from_bytes(
+        citizen_sdk_contracts::blake2_256(&call_data)
+            .unwrap_or_else(|error| panic!("callData hash fixture failed: {error}")),
+    );
+    let record = citizen_sdk_contracts::TransactionExecutionRecord::try_new(
+        citizen_sdk_contracts::TransactionExecutionId::try_new([9; 16])
+            .unwrap_or_else(|error| panic!("execution id fixture failed: {error}")),
         AccountId32::from_bytes([1; 32]),
+        call_data_hash,
+        call_data,
         Hash32::from_bytes([2; 32]),
-        3,
-        AccountId32::from_bytes([4; 32]),
-        5,
-        "resume",
-        citizen_sdk_contracts::HistoryTransactionStatus::Pending,
-        6,
-        6,
         citizen_sdk_contracts::SignedExtrinsic::try_new(vec![0x04, 0x84])
-            .unwrap_or_else(|error| panic!("测试夹具失败: {error}")),
+            .unwrap_or_else(|error| panic!("extrinsic fixture failed: {error}")),
         VerifiedBlockRef::best(Hash32::from_bytes([7; 32]), 8),
         RuntimeVersion::new(100, 12),
         citizen_sdk_contracts::ChainIdentity::citizenchain().genesis_hash(),
+        3,
+        citizen_sdk_contracts::HistoryTransactionStatus::Pending,
+        6,
+        6,
     )
-    .unwrap_or_else(|error| panic!("测试夹具失败: {error}"));
-    let state = TransactionHistoryState::try_new(1, Vec::new(), vec![record], Vec::new())
-        .unwrap_or_else(|error| panic!("测试夹具失败: {error}"));
+    .unwrap_or_else(|error| panic!("execution fixture failed: {error}"));
+    let state = TransactionHistoryState::try_new(1, vec![record])
+        .unwrap_or_else(|error| panic!("history fixture failed: {error}"));
     let encoded = encode_transaction_history_state(&state)
-        .unwrap_or_else(|error| panic!("测试夹具失败: {error}"));
+        .unwrap_or_else(|error| panic!("history encode failed: {error}"));
     assert_eq!(
         decode_transaction_history_state(&encoded)
-            .unwrap_or_else(|error| panic!("测试夹具失败: {error}")),
+            .unwrap_or_else(|error| panic!("history decode failed: {error}")),
         state
     );
+
     let payload = decode_host_record(HostRecordDomain::TransactionHistory, &encoded)
-        .unwrap_or_else(|error| panic!("测试夹具失败: {error}"))
+        .unwrap_or_else(|error| panic!("host record decode failed: {error}"))
         .payload();
-    // 删除完整授权字段并重新计算外层摘要也不能解成合法记录；不允许只剩哈希的格式。
-    let mut truncated = payload.to_vec();
-    truncated.truncate(truncated.len() - (4 + 2 + 41 + 8 + 32 + 4));
-    truncated.extend_from_slice(&0_u32.to_le_bytes());
-    let invalid = encode_host_record(HostRecordDomain::TransactionHistory, &truncated)
-        .unwrap_or_else(|error| panic!("测试夹具失败: {error}"));
+    let mut wrong_schema = payload.to_vec();
+    wrong_schema[0] ^= 0xff;
+    let invalid = encode_host_record(HostRecordDomain::TransactionHistory, &wrong_schema)
+        .unwrap_or_else(|error| panic!("invalid fixture encode failed: {error}"));
     assert!(decode_transaction_history_state(&invalid).is_err());
 }
 
@@ -253,7 +259,7 @@ fn all_five_typed_models_round_trip_through_strict_binary_codecs() {
         wallet
     );
 
-    let history = TransactionHistoryState::try_new(0, Vec::new(), Vec::new(), Vec::new())
+    let history = TransactionHistoryState::try_new(0, Vec::new())
         .unwrap_or_else(|error| panic!("history fixture failed: {error}"));
     let encoded = encode_transaction_history_state(&history)
         .unwrap_or_else(|error| panic!("history encode failed: {error}"));
@@ -272,6 +278,48 @@ fn all_five_typed_models_round_trip_through_strict_binary_codecs() {
             .unwrap_or_else(|error| panic!("secret decode failed: {error}")),
         secret
     );
+}
+
+#[test]
+fn wallet_v2_round_trips_cold_catalog_and_rejects_v1_without_fallback() {
+    let account_id = AccountId32::from_bytes([0x91; 32]);
+    let cold = ColdWalletAccount::try_new(
+        1,
+        account_id,
+        citizen_ss58_address(account_id),
+        "离线账户",
+        123,
+    )
+    .unwrap_or_else(|error| panic!("cold fixture failed: {error}"));
+    let state = WalletState::try_from_catalog_parts(
+        9,
+        None,
+        vec![cold],
+        vec![account_id],
+        2,
+        None,
+        None,
+        Vec::new(),
+    )
+    .unwrap_or_else(|error| panic!("wallet fixture failed: {error}"));
+    let encoded = encode_wallet_state(&state)
+        .unwrap_or_else(|error| panic!("wallet v2 encode failed: {error}"));
+    assert_eq!(
+        decode_wallet_state(&encoded)
+            .unwrap_or_else(|error| panic!("wallet v2 decode failed: {error}")),
+        state
+    );
+    let payload = decode_host_record(HostRecordDomain::WalletProfile, &encoded)
+        .unwrap_or_else(|error| panic!("wallet envelope failed: {error}"))
+        .payload();
+    assert_eq!(&payload[..2], &2_u16.to_le_bytes());
+
+    let legacy = encode_host_record(HostRecordDomain::WalletProfile, &1_u16.to_le_bytes())
+        .unwrap_or_else(|error| panic!("legacy fixture failed: {error}"));
+    let error = decode_wallet_state(&legacy)
+        .err()
+        .unwrap_or_else(|| panic!("wallet v1 must be rejected"));
+    assert_eq!(error.kind(), HostCodecErrorKind::UnsupportedVersion);
 }
 
 fn secret_ref(wallet_index: u32, generation: u8, owner: u8, account: u8) -> SecretRef {

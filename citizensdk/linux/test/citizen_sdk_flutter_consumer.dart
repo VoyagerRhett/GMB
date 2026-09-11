@@ -83,13 +83,13 @@ Future<void> _verify() async {
         if (event.sequence <= eventSequence) eventFailed = true;
         eventSequence = event.sequence;
         switch (event) {
+          case CitizenSdkHistoryChanged():
+            // 本夹具不触发历史写入；出现该事件说明原生路由隔离错误。
+            eventFailed = true;
           case CitizenSdkLifecycleChanged():
             lifecycleEvents.add(event.lifecycle);
           case CitizenSdkCapabilitiesChanged():
             capabilityEvents.add(event.snapshot);
-          case CitizenSdkTransferProgress():
-            // 本夹具绝不提交交易；出现交易事件即说明路由/会话隔离错误。
-            eventFailed = true;
         }
       },
       onError: (Object _, StackTrace __) {

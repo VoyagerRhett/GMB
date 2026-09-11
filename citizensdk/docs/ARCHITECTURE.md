@@ -98,14 +98,28 @@ metadata、`System.Events` 与 extrinsic 哈希语义。
   `HARDWARE_VAULT`、`USER_AUTHENTICATION`、`HISTORY`、`BACKGROUND_SYNC`。每项分别表达
   `supported`、`available`、`enabled`、`ready` 和稳定 reason；能力发现不能替代敏感操作的
   即时复核。
-- `WalletState`：固定唯一 wallet index `0`、Citizen SS58 prefix `2027`；账户 index `0`
-  必须等于 `masterAccountId`，账户 index 范围为 `0..1989`。create/import provisioning 使用
+- `WalletState`：固定唯一热 wallet index `0`、Citizen SS58 prefix `2027`；热账户 index `0`
+  必须等于 `masterAccountId`，热账户 index 范围为 `0..1989`。仅公钥冷账户从本机 wallet
+  index `1` 单调分配且不复用，没有 `SecretRef` 或 generation。热、冷 AccountId 全局唯一，
+  `orderedAccountIds` 必须是二者的无重复精确排列，第一项是全局默认账户。create/import provisioning 使用
   空前态并精确拥有目标全部 secrets；append 的前态必须是目标账户列表的严格前缀，既有
   profile 字段与账户逐项不变，计划只拥有新增账户的 exact refs。cleanup/queue 不得命中
   当前 profile 引用的 exact account secret 或当前 generation 的 wallet key；active cleanup
   与 queue 的 operation ID 和物理目标不得重复。`EncryptedSecretBlobStore` 的
   `Vacant -> Sealed -> Tombstone` 单向状态机和 `SecretVault` 的 generation retirement 是
   跨进程迟到写入 fence，进程内 mutex 不能替代。
+
+第 1.1 步的统一钱包实现目录职责固定如下：
+
+- `native/contracts/src/wallet.rs`：热/冷值对象、SS58 严格解析、目录不变量和热生命周期计划。
+- `native/contracts/src/store/wallet_profile.rs`：把完整钱包状态冻结为一个无秘密 CAS 单元。
+- `native/engine/src/wallet_service.rs`：冷热重复检查、冷账户增删改、全局顺序，以及热钱包变化
+  对冷目录的保留规则；冷路径不得调用 Vault。
+- `native/engine/src/engine.rs`：仅 Rust 内部调用面；本步骤不形成产品 C ABI。
+- `native/ffi/src/host_codec.rs`：wallet typed payload v2 的唯一严格编码/解码；明确拒绝 v1，
+  不提供迁移或 fallback。
+- `native/contracts/tests`、`native/engine/src/wallet_service_tests.rs`、
+  `native/ffi/src/host_codec_tests.rs`：分别验证模型不变量、Engine 行为/零金库调用和持久化格式。
 
 `native/engine` 实现能力依赖收敛、准确区块 runtime context 缓存、仅启动前且不倒退的
 状态导入门禁，以及交易执行结论。导入会把本 Engine provisional anchor 与 revisioned
@@ -137,32 +151,45 @@ graceful stop 在任何退订、服务或 provider 停止副作用前完成同�
   `AccountNonceApi_account_nonce` Runtime call 携带的账户、hash、高度与值，并复核准确 best
   身份。该值不包含交易池，持久同账户 Pending/InBlock single-flight 防止本地重复使用。
 - 钱包管理：English BIP-39 12／18／24 词、可选 NFKD password、`//0..//1989` 派生，以及
-  create/import/add/usable/rename/activate/delete/reconcile。create 固定为 prepare（零持久
+  create/import/add/usable/rename/activate/delete/reconcile；并管理仅公钥冷账户的
+  AccountId/SS58 导入、改名、删除、统一排序和默认账户。create 固定为 prepare（零持久
   写入、一次性恢复词会话）→用户确认备份→commit，消除持久钱包先于恢复词展示的崩溃窗口；
   `bip39`、password 和 NFKD 临时值均进入 zeroize 生命周期。公开事实先以 revision CAS 保存
   provisioning，generation/owner/operation 精确拥有秘密与 cleanup；写后异常由 exact readback
-  收敛。金库解锁秘密始终留在 Rust `SecretBuffer`，Rust Core 不提供私钥导出。
+  收敛。冷账户没有秘密生命周期且不会调用 Vault；金库解锁秘密始终留在 Rust
+  `SecretBuffer`，Rust Core 不提供私钥导出。
   产品 ABI 的 prepared-wallet handle 绑定 owner instance，只允许显式创建/备份 UI 复制助记词；
   import/add 的恢复词只能来自用户明确输入，private key 与 child secret 永不导出。
-- 独立签名：`SigningService` 只使用同宿主已由 SDK 安全建立账户的归属资料与设备金库，
-  首次 provision 仍经 wallet 安全流程，不开放钱包管理或任何秘密输出。
+- 独立签名：`SigningIntent` 保存 AccountId、不透明 payload 和 raw/Substrate/domain 三类通用
+  transform；Engine 从 WalletState 判定冷热模式。热账户通过 `SigningService`、设备金库和
+  强认证签名并自验；冷账户进入可选 external transport，绝不回退读取 Vault。QR_V1 只编码
+  任意有界 opaque action，不解析或登记 App 业务。默认账户变更冻结完整目录、revision、genesis、
+  expiry 和 nonce，由原默认账户签名后 CAS，Rust 内部也没有绕过授权的 raw setter。
   纯验签是无实例公开工具，既不需要启用签名模块，也不建立 session、订阅或金库。
-- 交易构造：固定 `OnchainTransaction.transfer_with_remark` pallet `4` / call `0`、正分金额和
-  最多 99 UTF-8 字节 remark，以准确 best runtime/transaction version、CitizenChain genesis、
-  准确 Runtime nonce、immortal era、tip `0` 和官方 `subxt-core 0.43.0` 构造 signed extrinsic
-  V4。metadata 动态 call bytes 必须与固定合同完全一致，source/public key 与签名均复核。
-- 历史：构造对象保持 Engine 私有，钱包只公开不可拆分的 `transfer_with_remark`；它先以完整
-  extrinsic hash 持久化 source/destination/amount/remark/nonce pending，再广播。raw pre-signed
-  submit 只供无钱包的高级链客户端，一旦组合钱包组件就必须命中内部 pending；底层所谓 watch
-  实际是 submit-and-watch，因此组合钱包组件后同样在 provider 前关闭。inBlock/
-  finalized 块锚不等于成功；终态只接受完整证据核验器产生的私有令牌，该令牌绑定 txHash 与
-  同一 extrinsic index 的 `System.ExtrinsicSuccess/Failed`，并精确匹配唯一 pending。finalized
-  流水拒绝自转，对同 identity 的 `OnchainTransaction`/`Balances` 事件严格一对一配对，保留
-  业务事件和 remark；已核验 pending 认领发送方 outgoing、保留接收方 incoming，同一原始块
-  重放也不能令已消费 pending 重新出现。逐账户 finalized 游标只允许相同块幂等或严格
-  `last + 1`，不能跳块。每批最多 120 个连续高度；历史操作代际租约覆盖全部 provider/store
-  await 与最后一次 CAS，stop/dispose 不能切入不完整提交。
-  高层 C ABI 转账在独立四线程长观察池中选择完整 terminal future 与 cancellation；取消或
+- 通用安全链读取：同一 `VerifiedChainClient` 公开单快照同步状态、best/finalized 链头、
+  finalized canonical 块解析、准确块 Header/Body/Runtime、opaque storage 单项/批量读取、
+  finalized `System.Events` 原始字节和显式状态导入导出。Provider 重新核对 block hash/height、
+  Header SCALE/Blake2-256、返回顺序和资源上限；Engine 只投影协议级事实。业务 App 根据
+  runtime metadata 自己生成 storage key、解释 call/event，SDK 不包含业务 pallet/call DTO。
+- 通用交易准备：`prepareTransaction(sourceAccountId, callData)` 把 App 已编码的 opaque SCALE
+  RuntimeCall 交给同一 Rust Core。Engine 在一个准确 best block 上读取 metadata、runtime、genesis
+  与 source nonce，用 metadata outer-call 类型完整消费并 canonical 回编码，固定采用 immortal era
+  与 tip `0`。generation-scoped registry 每个 source 只保留一个一次性准备对象；内部 signer message
+  和 extrinsic 模板不跨 ABI，公开层只有不可伪造标识与安全摘要。各 App 的转账、投票、治理等
+  业务 call 编码只能把最终 opaque callData 交给这一通用 builder。
+- 通用交易执行：一次性 preparation 原子 claim 后重新核对 chain identity、runtime、nonce、signed
+  extensions 与完整模板，再按 WalletState 走热钱包强认证或既有 `QR_V1` 冷签。签名只填入冻结槽并
+  自验；完整授权记录必须先 CAS、写后回读再创建 provider watch。准确 canonical body 和同 index
+  `System.Events` 是唯一 finalized 终态来源；重启只核验并重发同一原始 extrinsic，不重新签名。
+- 通用执行历史：构造与恢复材料保持 Engine 私有。Core 先以完整 extrinsic hash 持久化 source、
+  callData hash、nonce、opaque callData 和 signed extrinsic，再访问 provider；公开 page 仅白名单
+  投影 hash、协议状态、验证块/System 结论与时间。raw pre-signed submit 只供无交易模块的高级
+  链客户端；底层 watch 实际是 submit-and-watch，因此组合交易模块后必须先命中内部 pending。
+  inBlock/finalized 块锚不等于成功；终态只接受绑定 txHash 与同一 extrinsic index
+  `System.ExtrinsicSuccess/Failed` 的私有证据。显式同步一次最多处理 32 条未终态 execution，
+  不扫描账户业务流水，也不解释 destination、amount、remark、direction 或业务 pallet/event。
+  历史操作代际租约覆盖全部 provider/store await 与最后一次 CAS。
+  通用交易 C ABI 在独立四线程长观察池中选择完整 terminal future 与 cancellation；取消或
   interrupted/dropped/retracted/timeout 不清 durable Pending/InBlock 门，只有 canonical body、
   准确块 metadata 与同 index `System.Events` 核验才形成 finalized 终态。
 
@@ -172,8 +199,10 @@ hash 逐头回溯，核对响应 hash、完整 SCALE header hash、高度与父�
 返回值都不是 finalized 证明；独立有界 proof-derived cache 只降低重复回溯成本。这样既关闭
 异步重组 TOCTOU，也允许重启后补扫旧块。
 
-当前产品 C ABI v1 共 89 个函数，既有结构、数值与默认构造行为保持；
-新增模块校验、显式模块构造和无实例验签三个入口，另补四个链查询/结果入口及九个 QR 协议/会话入口。官方绑定使用
+当前产品 C ABI 共 117 个公开函数，既有结构、数值与默认构造行为保持；
+新增模块校验、显式模块构造和无实例验签三个入口，另补早期四个链查询/结果入口、九个 QR
+协议/会话入口、统一钱包与通用签名入口，并在第 1.4 步增加十个安全链读取入口、第 1.5 步增加
+三个通用交易准备入口，并在第 1.6 步增加四个通用交易执行入口。官方绑定使用
 `citizensdk_create_with_modules`，旧入口也进入同一私有装配函数，不另设状态机。
 chain/history 按选择提供 public store，wallet/signing 才需要配套 secure store/Vault。
 依赖实现仍固定，宿主不能注入 signer、nonce、任意 RPC 或任意键值服务。
@@ -213,7 +242,7 @@ batch storage 一次读取，再按原始输入顺序和重复项重建不可变
 
 | 数据 | 命名空间 | 内容 |
 |---|---|---|
-| 钱包公开事实 | `citizensdk.wallet.state.v1` | profile、revision、provisioning、active cleanup、exact cleanup queue，不含秘密 |
+| 钱包公开事实 | 宿主 wallet typed payload v2 | 热 profile、仅公钥冷账户、全局顺序、revision、provisioning、active cleanup、exact cleanup queue，不含秘密；拒绝 v1 |
 | 轻节点数据库 | `citizensdk.smoldot.database.v1` | 公开 finalized database |
 | 交易公开事实 | `citizensdk.transactions.state.v1` | finalized 流水、pending、逐账户游标，不含秘密 |
 | 账户密文 | `citizensdk.wallet.secret.*` | 硬件金库信封 |
@@ -337,7 +366,7 @@ TataConsole Flow 已同步 Apple 三个技术 slice、单一 XCFramework 与本�
 流程接线不等于远程 CI、正式 Release 或 Hosted 上传已经实际运行，运行结果仍以对应记录为准。
 
 测试执行合同要求根 Flutter 包一次发现并执行全部根测试及已经迁入的 smoldot 测试，不再把
-历史的 230 项与 51 项当成两套独立门禁；统一使用 `flutter test --timeout=2m`，以覆盖其中
+历史的 230 项与 51 项当成两套独立门禁；统一使用 `scripts/test.sh flutter --timeout=2m`，以覆盖其中
 最长 30 秒的活链订阅窗口。第 2 步隔离副本实际执行结果为 288/288。交易执行确认使用带
 `System.Event`、`Phase` 与 `DispatchInfo` 类型的真实 Substrate v14 metadata 夹具，不得退回
 只能解常量的最小 metadata。Android 必须真实运行插件 JUnit；正式 CI 还必须在

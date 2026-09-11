@@ -12,12 +12,15 @@ use std::{
 };
 
 use citizen_sdk_contracts::{
-    citizen_ss58_address,
+    citizen_ss58_address, parse_citizen_ss58_address,
     store::{EncryptedSecretBlobState, EncryptedSecretBlobStore, WalletProfileStore},
-    AccountId32, AccountNonceSource, ChainSigner, ContractErrorCode, ContractResult, SecretBuffer,
-    SecretOwner, SecretRef, SecretVault, Sr25519Signature, VaultAvailability, VaultGeneration,
-    VerifiedChainClient, WalletAccount, WalletCleanupPlan, WalletOrigin, WalletProfile,
-    WalletProvisioningPlan, WalletState, CITIZEN_WALLET_INDEX, MAX_WALLET_ACCOUNT_INDEX,
+    AccountId32, ChainSigner, ColdWalletAccount, ContractErrorCode, ContractResult,
+    DefaultAccountChangeAuthorization, SecretBuffer, SecretOwner, SecretRef, SecretVault,
+    Sr25519PublicKey, Sr25519Signature, VaultAvailability, VaultGeneration, WalletAccount,
+    WalletCleanupPlan, WalletOrigin, WalletProfile, WalletProvisioningPlan, WalletSignMode,
+    WalletState, CITIZENCHAIN_GENESIS_HASH, CITIZEN_WALLET_INDEX,
+    DEFAULT_ACCOUNT_CHANGE_NONCE_BYTES, MAX_COLD_WALLET_ACCOUNTS, MAX_EXTERNAL_SIGNING_TTL_SECONDS,
+    MAX_WALLET_ACCOUNT_INDEX,
 };
 use futures::lock::Mutex as AsyncMutex;
 use zeroize::Zeroizing;
@@ -28,9 +31,6 @@ use crate::{
         derive_wallet_accounts, generate_mnemonic, mint_owner, WalletEntropySource, WalletWordCount,
     },
 };
-
-#[cfg(feature = "chain")]
-use crate::transaction_builder::{BuiltTransferWithRemark, TransactionBuilder};
 
 const MAX_CAS_ATTEMPTS: usize = 32;
 const MAX_CLEANUP_QUEUE: usize = 64;
@@ -395,6 +395,242 @@ impl WalletService {
         Ok(stable_profile(&state))
     }
 
+    /// 返回稳定可见的钱包目录；在途热账户目标和内部 lifecycle 计划均不会进入公开投影。
+    pub async fn state(&self) -> Result<WalletState, EngineError> {
+        let _guard = wallet_operation_gate().lock().await;
+        let state = self.profiles.load().await?;
+        visible_wallet_state(&state)
+    }
+
+    /// 导入一个仅公钥冷账户。该路径只读写公开状态，不查询或调用设备金库。
+    pub async fn import_cold_account(
+        &self,
+        account_id: AccountId32,
+        name: &str,
+    ) -> Result<ColdWalletAccount, EngineError> {
+        let _guard = wallet_operation_gate().lock().await;
+        self.import_cold_account_locked(account_id, name).await
+    }
+
+    /// SS58 导入先在合同层严格还原 AccountId，再进入与 AccountId 导入相同的唯一写路径。
+    pub async fn import_cold_ss58_account(
+        &self,
+        ss58_address: &str,
+        name: &str,
+    ) -> Result<ColdWalletAccount, EngineError> {
+        let account_id = parse_citizen_ss58_address(ss58_address)?;
+        let _guard = wallet_operation_gate().lock().await;
+        self.import_cold_account_locked(account_id, name).await
+    }
+
+    /// 公开重排入口：调用方必须基于同一 revision，且不得改变首项默认账户。
+    ///
+    /// 默认账户变更必须走原默认账户签名授权；这里在同一把钱包操作锁内完成
+    /// revision 与首项检查，避免把普通排序伪装成默认账户切换。
+    pub async fn reorder_accounts_without_default_change(
+        &self,
+        expected_revision: u64,
+        ordered_account_ids: Vec<AccountId32>,
+    ) -> Result<WalletState, EngineError> {
+        let _guard = wallet_operation_gate().lock().await;
+        let state = self.catalog_mutation_state().await?;
+        if state.revision() != expected_revision {
+            return Err(conflict("钱包目录 revision 已变化，请重新读取后重排"));
+        }
+        if ordered_account_ids.first().copied() != state.default_account_id() {
+            return Err(error(
+                ContractErrorCode::InvalidArgument,
+                "普通重排不得改变第一项默认账户",
+            ));
+        }
+        self.commit_catalog_state(
+            &state,
+            state.cold_accounts().to_vec(),
+            ordered_account_ids,
+            state.next_cold_wallet_index(),
+        )
+        .await
+    }
+
+    /// Freeze an SDK-owned default-account mutation before either hot or external signing.
+    ///
+    /// The snapshot binds the exact revision and complete account set. No app identity, CID,
+    /// business action, or caller-provided signing message participates in this wallet primitive.
+    pub async fn prepare_default_account_change(
+        &self,
+        expected_revision: u64,
+        ordered_account_ids: Vec<AccountId32>,
+        ttl_seconds: u64,
+    ) -> Result<DefaultAccountChangeAuthorization, EngineError> {
+        if ttl_seconds == 0 || ttl_seconds > MAX_EXTERNAL_SIGNING_TTL_SECONDS {
+            return Err(error(
+                ContractErrorCode::InvalidArgument,
+                "默认账户授权期限必须位于 1..300 秒",
+            ));
+        }
+        let _guard = wallet_operation_gate().lock().await;
+        let state = self.catalog_mutation_state().await?;
+        if state.revision() != expected_revision {
+            return Err(conflict("钱包目录 revision 已变化，请重新发起默认账户变更"));
+        }
+        let current_default = state
+            .default_account_id()
+            .ok_or_else(|| error(ContractErrorCode::InvalidState, "空钱包不能变更默认账户"))?;
+        let now = self.clock.now_millis()? / 1_000;
+        if now == 0 {
+            return Err(error(ContractErrorCode::Unavailable, "系统时钟不可用"));
+        }
+        let expires_at = now
+            .checked_add(ttl_seconds)
+            .filter(|value| *value <= i64::MAX as u64)
+            .ok_or_else(|| error(ContractErrorCode::InvalidArgument, "默认账户授权期限溢出"))?;
+        let mut nonce = [0_u8; DEFAULT_ACCOUNT_CHANGE_NONCE_BYTES];
+        self.entropy.fill(&mut nonce)?;
+        Ok(DefaultAccountChangeAuthorization::try_new(
+            CITIZENCHAIN_GENESIS_HASH,
+            expected_revision,
+            current_default,
+            state.ordered_account_ids().to_vec(),
+            ordered_account_ids,
+            expires_at,
+            nonce,
+        )?)
+    }
+
+    /// Verify the original default account's signature and atomically commit the frozen order.
+    /// Invalid signatures never write; a valid but stale authorization fails its exact CAS checks.
+    pub async fn commit_default_account_change(
+        &self,
+        authorization: &DefaultAccountChangeAuthorization,
+        signature: Sr25519Signature,
+    ) -> Result<WalletState, EngineError> {
+        self.require_default_change_current(authorization)?;
+        let intent = authorization.signing_intent()?;
+        let message = intent.signing_message()?;
+        let verified = self
+            .signer
+            .verify(
+                Sr25519PublicKey::from_bytes(
+                    authorization.current_default_account_id().into_bytes(),
+                ),
+                message,
+                signature,
+            )
+            .await?;
+        if !verified {
+            return Err(error(
+                ContractErrorCode::Integrity,
+                "默认账户变更签名未通过原默认账户复核",
+            ));
+        }
+
+        let _guard = wallet_operation_gate().lock().await;
+        self.require_default_change_current(authorization)?;
+        let state = self.catalog_mutation_state().await?;
+        if state.revision() != authorization.expected_revision()
+            || state.default_account_id() != Some(authorization.current_default_account_id())
+            || state.ordered_account_ids() != authorization.before_account_ids()
+        {
+            return Err(conflict(
+                "签名期间钱包 revision、原默认账户或账户闭集已经变化",
+            ));
+        }
+        self.commit_catalog_state(
+            &state,
+            state.cold_accounts().to_vec(),
+            authorization.ordered_account_ids().to_vec(),
+            state.next_cold_wallet_index(),
+        )
+        .await
+    }
+
+    fn require_default_change_current(
+        &self,
+        authorization: &DefaultAccountChangeAuthorization,
+    ) -> Result<(), EngineError> {
+        let now = self.clock.now_millis()? / 1_000;
+        if now == 0 || now >= authorization.expires_at() {
+            return Err(error(ContractErrorCode::Timeout, "默认账户变更授权已过期"));
+        }
+        Ok(())
+    }
+
+    /// 冷账户改名只变更公开展示事实，不生成或访问任何秘密。
+    pub async fn rename_cold_account(
+        &self,
+        account_id: AccountId32,
+        name: &str,
+    ) -> Result<ColdWalletAccount, EngineError> {
+        let _guard = wallet_operation_gate().lock().await;
+        let state = self.catalog_mutation_state().await?;
+        let Some(position) = state
+            .cold_accounts()
+            .iter()
+            .position(|account| account.account_id() == account_id)
+        else {
+            return Err(error(ContractErrorCode::NotFound, "冷账户不存在"));
+        };
+        let mut cold_accounts = state.cold_accounts().to_vec();
+        let renamed = cold_accounts[position].try_with_name(name)?;
+        cold_accounts[position] = renamed.clone();
+        self.commit_catalog_state(
+            &state,
+            cold_accounts,
+            state.ordered_account_ids().to_vec(),
+            state.next_cold_wallet_index(),
+        )
+        .await?;
+        Ok(renamed)
+    }
+
+    /// 删除冷账户只移除公开事实和全局顺序项；已分配 wallet index 永不复用。
+    pub async fn delete_cold_account(&self, account_id: AccountId32) -> Result<(), EngineError> {
+        let _guard = wallet_operation_gate().lock().await;
+        let state = self.catalog_mutation_state().await?;
+        let Some(position) = state
+            .cold_accounts()
+            .iter()
+            .position(|account| account.account_id() == account_id)
+        else {
+            return Err(error(ContractErrorCode::NotFound, "冷账户不存在"));
+        };
+        let mut cold_accounts = state.cold_accounts().to_vec();
+        cold_accounts.remove(position);
+        let ordered = state
+            .ordered_account_ids()
+            .iter()
+            .copied()
+            .filter(|candidate| *candidate != account_id)
+            .collect();
+        self.commit_catalog_state(
+            &state,
+            cold_accounts,
+            ordered,
+            state.next_cold_wallet_index(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// 查询稳定账户的签名分流；未完成 provisioning 的热账户不会提前可见。
+    pub async fn account_sign_mode(
+        &self,
+        account_id: AccountId32,
+    ) -> Result<Option<WalletSignMode>, EngineError> {
+        let _guard = wallet_operation_gate().lock().await;
+        let state = self.profiles.load().await?;
+        if stable_profile(&state)
+            .as_ref()
+            .is_some_and(|profile| profile.account_by_id(account_id).is_some())
+        {
+            Ok(Some(WalletSignMode::Hot))
+        } else if state.cold_account_by_id(account_id).is_some() {
+            Ok(Some(WalletSignMode::Cold))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// 完整验证硬件密钥、每个密文和 child 公钥后才返回可用 profile。
     pub async fn usable_profile(&self) -> Result<Option<WalletProfile>, EngineError> {
         let _guard = wallet_operation_gate().lock().await;
@@ -685,48 +921,6 @@ impl WalletService {
             .profile()
             .cloned()
             .ok_or_else(|| error(ContractErrorCode::Integrity, "重命名写入后 profile 缺失"))
-    }
-
-    /// 在同一钱包操作门内解锁账户、复核 exact generation/owner，并交给准确 best Runtime
-    /// 交易构造器。秘密不会成为返回值；返回对象只含公开 call、签名与 extrinsic，且保持
-    /// crate-private，只能由 Engine 的 pending-before-submit-and-watch 闭环消费。
-    #[allow(clippy::too_many_arguments)]
-    #[cfg(feature = "chain")]
-    pub async fn build_transfer_with_remark(
-        &self,
-        chain_client: &dyn VerifiedChainClient,
-        nonce_source: &dyn AccountNonceSource,
-        account_id: AccountId32,
-        destination: AccountId32,
-        amount_fen: u128,
-        remark: impl Into<String>,
-    ) -> Result<BuiltTransferWithRemark, EngineError> {
-        let _guard = wallet_operation_gate().lock().await;
-        let (profile, account) = current_account(self.profiles.as_ref(), account_id, None).await?;
-        let snapshot = self.encrypted_secrets.load(account.secret_ref()).await?;
-        let envelope = snapshot.envelope().cloned().ok_or_else(|| {
-            error(
-                ContractErrorCode::AuthenticationRequired,
-                "指定账户的设备密文不存在",
-            )
-        })?;
-        let secret = self.vault.open(account.secret_ref(), envelope).await?;
-        current_account(
-            self.profiles.as_ref(),
-            account_id,
-            Some((profile.generation(), account.secret_ref().owner())),
-        )
-        .await?;
-        let public_key = self.signer.public_key(&secret).await?;
-        if public_key.as_bytes() != account_id.as_bytes() {
-            return Err(error(
-                ContractErrorCode::Integrity,
-                "设备密文与钱包 AccountId 不一致",
-            ));
-        }
-        TransactionBuilder::new(chain_client, nonce_source, self.signer.as_ref())
-            .build_transfer_with_remark(&secret, account_id, destination, amount_fen, remark)
-            .await
     }
 
     pub async fn delete_account(&self, account_id: AccountId32) -> Result<(), EngineError> {
@@ -1426,13 +1620,104 @@ impl WalletService {
             .revision()
             .checked_add(1)
             .ok_or_else(|| error(ContractErrorCode::InvalidState, "钱包 revision 已耗尽"))?;
-        let candidate = WalletState::try_from_parts(
+        let ordered_account_ids = order_after_hot_profile_change(current, profile.as_ref());
+        let candidate = WalletState::try_from_catalog_parts(
             next_revision,
             profile,
+            current.cold_accounts().to_vec(),
+            ordered_account_ids,
+            current.next_cold_wallet_index(),
             provisioning,
             cleanup,
             cleanup_queue,
         )?;
+        self.commit_candidate(current, candidate).await
+    }
+
+    async fn import_cold_account_locked(
+        &self,
+        account_id: AccountId32,
+        name: &str,
+    ) -> Result<ColdWalletAccount, EngineError> {
+        let state = self.catalog_mutation_state().await?;
+        if state.account_sign_mode(account_id).is_some() {
+            return Err(conflict("该 AccountId 已存在于热钱包或冷账户"));
+        }
+        if state.cold_accounts().len() >= MAX_COLD_WALLET_ACCOUNTS {
+            return Err(error(
+                ContractErrorCode::InvalidState,
+                "冷账户数量已达到持久化合同上限",
+            ));
+        }
+        let wallet_index = state.next_cold_wallet_index();
+        let next_cold_wallet_index = wallet_index.checked_add(1).ok_or_else(|| {
+            error(
+                ContractErrorCode::InvalidState,
+                "冷账户 wallet index 已耗尽",
+            )
+        })?;
+        let account = ColdWalletAccount::try_new(
+            wallet_index,
+            account_id,
+            citizen_ss58_address(account_id),
+            name,
+            self.clock.now_millis()?,
+        )?;
+        let mut cold_accounts = state.cold_accounts().to_vec();
+        cold_accounts.push(account.clone());
+        let mut ordered = state.ordered_account_ids().to_vec();
+        ordered.push(account_id);
+        self.commit_catalog_state(&state, cold_accounts, ordered, next_cold_wallet_index)
+            .await?;
+        Ok(account)
+    }
+
+    /// 冷账户/顺序写入不得为方便而重放热钱包 cleanup，因为那会触发金库调用。
+    async fn catalog_mutation_state(&self) -> Result<WalletState, EngineError> {
+        let state = self.profiles.load().await?;
+        require_no_private_key_view(&state)?;
+        if state.provisioning().is_some()
+            || state.cleanup().is_some()
+            || !state.cleanup_queue().is_empty()
+        {
+            return Err(error(
+                ContractErrorCode::InvalidState,
+                "钱包仍有未完成的热钱包操作计划",
+            ));
+        }
+        Ok(state)
+    }
+
+    async fn commit_catalog_state(
+        &self,
+        current: &WalletState,
+        cold_accounts: Vec<ColdWalletAccount>,
+        ordered_account_ids: Vec<AccountId32>,
+        next_cold_wallet_index: u32,
+    ) -> Result<WalletState, EngineError> {
+        require_no_private_key_view(current)?;
+        let next_revision = current
+            .revision()
+            .checked_add(1)
+            .ok_or_else(|| error(ContractErrorCode::InvalidState, "钱包 revision 已耗尽"))?;
+        let candidate = WalletState::try_from_catalog_parts(
+            next_revision,
+            current.profile().cloned(),
+            cold_accounts,
+            ordered_account_ids,
+            next_cold_wallet_index,
+            None,
+            None,
+            Vec::new(),
+        )?;
+        self.commit_candidate(current, candidate).await
+    }
+
+    async fn commit_candidate(
+        &self,
+        current: &WalletState,
+        candidate: WalletState,
+    ) -> Result<WalletState, EngineError> {
         match self
             .profiles
             .compare_and_swap(current.revision(), candidate.clone())
@@ -1453,6 +1738,60 @@ impl WalletService {
             }
         }
     }
+}
+
+/// 热 profile 变化时保留所有仍存在账户的相对顺序，并把新增热账户稳定追加到末尾。
+fn order_after_hot_profile_change(
+    current: &WalletState,
+    profile: Option<&WalletProfile>,
+) -> Vec<AccountId32> {
+    let valid_ids: BTreeSet<_> = profile
+        .into_iter()
+        .flat_map(WalletProfile::accounts)
+        .map(WalletAccount::account_id)
+        .chain(
+            current
+                .cold_accounts()
+                .iter()
+                .map(ColdWalletAccount::account_id),
+        )
+        .collect();
+    let mut ordered: Vec<_> = current
+        .ordered_account_ids()
+        .iter()
+        .copied()
+        .filter(|account_id| valid_ids.contains(account_id))
+        .collect();
+    if let Some(profile) = profile {
+        for account in profile.accounts() {
+            if !ordered.contains(&account.account_id()) {
+                ordered.push(account.account_id());
+            }
+        }
+    }
+    for account in current.cold_accounts() {
+        if !ordered.contains(&account.account_id()) {
+            ordered.push(account.account_id());
+        }
+    }
+    ordered
+}
+
+/// 把持久状态投影成稳定公开事实；revision 只用于观察，不能拿该副本执行 CAS。
+fn visible_wallet_state(state: &WalletState) -> Result<WalletState, EngineError> {
+    let profile = stable_profile(state);
+    let ordered_account_ids = order_after_hot_profile_change(state, profile.as_ref());
+    WalletState::try_from_catalog_parts(
+        state.revision(),
+        profile,
+        state.cold_accounts().to_vec(),
+        ordered_account_ids,
+        state.next_cold_wallet_index(),
+        None,
+        None,
+        Vec::new(),
+    )
+    .map_err(EngineError::from)
 }
 
 fn cleanup_from_provisioning(

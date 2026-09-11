@@ -358,7 +358,8 @@ class LocalTxStore {
   /// `inBlock` 只是内部进度，未获得 finalized 前始终属于 UI 的“待确认”。
   /// **关键:保留 blockHash(不清空)** —— `dropped` 按设计不算失败,而 blockHash
   /// 是 ChainTxMonitor 确认判据一(锚比对)的定点锚;清空会让记录与锚路径失联。
-  /// 锚可能过期无害:确认前会与最终链哈希比对,不等就降级 nonce 兜底。
+  /// 锚可能过期无害：确认前会与最终链哈希比对；不一致时保持 pending，
+  /// 等待 finalized 前向扫描找到准确块体和同 index System 终态。
   /// 不影响已最终性确认或明确失败的记录。
   static Future<void> markLocalSubmitPending({
     required String accountId,
@@ -410,7 +411,7 @@ class LocalTxStore {
   /// 由 ChainTxMonitor 调用。recordKey 全程不变（始终 submitRecordKey），状态就地
   /// 流转，绝不另建第二条记录。块信息按来源可选：
   /// - 最终块里按 txHash 定位到（前向扫描 / 锚比对路径）→ 带 blockHash+blockNumber；
-  /// - nonce 兜底路径（只证明"已上链"，不知道具体块）→ 两者传 null，保留原字段。
+  /// 没有准确块体与同 index System 终态时不得调用本入口。
   static Future<void> markLocalSubmitFinalized({
     required String accountId,
     required String txHash,

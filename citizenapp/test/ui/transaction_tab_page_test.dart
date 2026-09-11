@@ -5,7 +5,7 @@ import 'package:citizenapp/my/user/contact_book_page.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/transaction/onchain-transaction/onchain_payment_page.dart';
 import 'package:citizenapp/transaction/personal-manage/personal_account_entry.dart';
-import 'package:citizenapp/transaction/shared/local_tx_store.dart';
+import 'package:citizenapp/transaction/history/data/local_tx_store.dart';
 import 'package:citizenapp/transaction/transaction_tab_page.dart';
 import 'package:citizenapp/ui/widgets/chain_progress_banner.dart';
 import 'package:citizenapp/wallet/core/wallet_manager.dart';

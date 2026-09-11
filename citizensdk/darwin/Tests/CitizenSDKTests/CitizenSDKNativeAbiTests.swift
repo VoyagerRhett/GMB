@@ -77,7 +77,10 @@ final class CitizenSDKNativeAbiTests: XCTestCase {
         XCTAssertGreaterThan(MemoryLayout<citizensdk_create_options_t>.size, 0)
         XCTAssertGreaterThan(MemoryLayout<citizensdk_host_services_v1_t>.size, 0)
         XCTAssertGreaterThan(MemoryLayout<citizensdk_event_t>.size, 0)
-        XCTAssertEqual(citizenSDKHostBytesWrappedDEK, 1)
+        XCTAssertEqual(CITIZENSDK_HOST_BYTES_WRAPPED_DEK, 1)
+        XCTAssertEqual(CITIZENSDK_OK, 0)
+        XCTAssertEqual(CITIZENSDK_EXTERNAL_SIGNER_QR_V1, 1)
+        XCTAssertEqual(CITIZENSDK_SIGNING_COMPLETED, 1)
     }
 
     func testHeaderExportsExactUniqueCitizenSdkSymbolsIncludingModulesAndVerify() throws {
@@ -86,10 +89,8 @@ final class CitizenSDKNativeAbiTests: XCTestCase {
             .deletingLastPathComponent().deletingLastPathComponent()
         let header = sdkRoot.appendingPathComponent("include/citizensdk.h")
         let source = try String(contentsOf: header, encoding: .utf8)
-        // UINT32_C 嵌套宏不由 Swift 导入；直接核对唯一公开 C 定义，不创建第二个常量或别名。
-        let types = try String(contentsOf: sdkRoot.appendingPathComponent("include/citizensdk_types.h"), encoding: .utf8)
-        XCTAssertNotNil(types.range(of: #"(?m)^#define\s+CITIZENSDK_RESULT_ACCOUNT_BALANCES\s+UINT32_C\(18\)\s*$"#,
-                                   options: .regularExpression))
+        // 公开数值合同使用Clang可直接导入Swift的字面量宏，不维护第二份Swift常量。
+        XCTAssertEqual(CITIZENSDK_RESULT_ACCOUNT_BALANCES, 18)
         let regex = try NSRegularExpression(pattern: #"\bcitizensdk_[a-z0-9_]+\s*\("#)
         let range = NSRange(source.startIndex..<source.endIndex, in: source)
         let names = Set(regex.matches(in: source, range: range).compactMap { match -> String? in
@@ -98,7 +99,7 @@ final class CitizenSDKNativeAbiTests: XCTestCase {
                 $0.trimmingCharacters(in: .whitespacesAndNewlines)
             }
         })
-        XCTAssertEqual(names.count, 89)
+        XCTAssertEqual(names.count, 121)
         XCTAssertTrue(names.isSuperset(of: ["citizensdk_review_qr_sign_request", "citizensdk_sign_qr_request", "citizensdk_result_copy_qr"]))
         XCTAssertFalse(names.contains("citizensdk_qr_signing_bytes"))
         XCTAssertFalse(names.contains("citizensdk_qr_create_sign_response"))

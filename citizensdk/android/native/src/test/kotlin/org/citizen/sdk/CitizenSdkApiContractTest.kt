@@ -128,26 +128,7 @@ class CitizenSdkApiContractTest {
     }
 
     @Test
-    fun `native facade enforces history and sign allocation boundaries`() {
-        CitizenSdkInputLimits.requireHistoryAccountCount(1)
-        CitizenSdkInputLimits.requireHistoryAccountCount(1990)
-        CitizenSdkInputLimits.requireUniqueHistoryAccountIds(
-            arrayOf(ByteArray(32) { 1 }, ByteArray(32) { 2 }),
-        )
-        assertEquals(
-            CitizenSdkErrorCode.INVALID_ARGUMENT,
-            assertThrows(CitizenSdkException::class.java) {
-                CitizenSdkInputLimits.requireUniqueHistoryAccountIds(
-                    arrayOf(ByteArray(32) { 1 }, ByteArray(32) { 1 }),
-                )
-            }.code,
-        )
-        assertEquals(
-            CitizenSdkErrorCode.INVALID_ARGUMENT,
-            assertThrows(CitizenSdkException::class.java) {
-                CitizenSdkInputLimits.requireHistoryAccountCount(1991)
-            }.code,
-        )
+    fun `native facade enforces sign and wallet allocation boundaries`() {
         CitizenSdkInputLimits.requireSignPayload(16 * 1024 * 1024)
         CitizenSdkInputLimits.requireSignPayload(0)
         assertEquals(
@@ -176,20 +157,6 @@ class CitizenSdkApiContractTest {
                 CitizenSdkInputLimits.requireAddAccountIndices(intArrayOf(1, 1))
             }.code,
         )
-        CitizenSdkInputLimits.requireTransferRemark(99)
-        assertEquals(
-            CitizenSdkErrorCode.INVALID_ARGUMENT,
-            assertThrows(CitizenSdkException::class.java) {
-                CitizenSdkInputLimits.requireTransferRemark(100)
-            }.code,
-        )
-        CitizenSdkInputLimits.requirePositiveTransferAmount(CitizenU128("1"))
-        assertEquals(
-            CitizenSdkErrorCode.INVALID_ARGUMENT,
-            assertThrows(CitizenSdkException::class.java) {
-                CitizenSdkInputLimits.requirePositiveTransferAmount(CitizenU128("0"))
-            }.code,
-        )
         CitizenSdkInputLimits.requireWalletAccountNameInput("x".repeat(128))
         assertEquals(
             CitizenSdkErrorCode.INVALID_ARGUMENT,
@@ -208,7 +175,9 @@ class CitizenSdkApiContractTest {
         val names = type.methods.map { it.name }
         assertTrue("start" in names)
         assertTrue("stop" in names)
-        assertTrue("transferWithRemarkOperation" in names)
+        assertTrue("getTransactionHistory" in names)
+        assertTrue("syncTransactionHistory" in names)
+        assertTrue(names.none { it.contains("transferWithRemark", ignoreCase = true) })
         assertTrue(names.none { it.contains("handle", ignoreCase = true) })
         assertNotNull(CitizenSdkOperation::class.java.getMethod("cancel"))
     }

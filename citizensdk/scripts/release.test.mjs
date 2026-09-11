@@ -198,6 +198,17 @@ test('钱包输入 ABI 与三种词数完整进入同一分发合同', () => {
   assertCoreRustSource(citizenSdkRoot);
 });
 
+test('公开数值ABI使用Swift可导入的唯一C字面量合同', () => {
+  const header = readFileSync(join(citizenSdkRoot, 'include/citizensdk_types.h'), 'utf8');
+  assert.doesNotMatch(header, /(?:UINT32_C|INT32_C|UINT64_C)\(/u);
+  for (const contract of [
+    '#define CITIZENSDK_OK 0',
+    '#define CITIZENSDK_EXTERNAL_SIGNER_QR_V1 1U',
+    '#define CITIZENSDK_SIGNING_COMPLETED 1U',
+    '#define CITIZENSDK_HOST_BYTES_WRAPPED_DEK 1U',
+  ]) assert.match(header, new RegExp(`^${contract}$`, 'mu'));
+});
+
 // 直接执行构建器中的唯一函数体；不 source 整个构建器，避免合同测试触发
 // mkdir、依赖解析或编译，也不维护第二份 ELF/安装验收算法。
 function nativeShellFunctions(names) {
@@ -538,7 +549,7 @@ function windowsInstallFixture(root) {
         ? 'windows/include/citizen_sdk/citizensdk_host.h' : 'include/citizensdk.h');
       const names = [...new Set([...readFileSync(header, 'utf8')
         .matchAll(/\b(citizensdk_[a-z0-9_]+)\s*\(/gu)].map((m) => m[1]))].sort();
-      assert.equal(names.length, host ? 17 : 89);
+      assert.equal(names.length, host ? 17 : 117);
       if (host) names.push(...qrImageSymbols());
       if (!host) names.push(...CITIZENSDK_INTERNAL_SYMBOLS);
       names.sort();
@@ -756,7 +767,7 @@ function writeLinuxInstallFixture(prefix, platform, options = {}) {
   const configVersion = readFileSync(join(citizenSdkRoot, 'linux/cmake/CitizenSDKConfigVersion.cmake.in'), 'utf8')
     .replaceAll('@PROJECT_VERSION@', version)
     .replaceAll('@PROJECT_VERSION_MAJOR@', version.split('.')[0]);
-  // 以下指令来自本机官方 CMake 4.2.3 configure/export 的完整输出；只省略
+  // 以下指令来自官方 CMake configure/export 的完整输出；只省略
   // 生成器注释与空行，不省略任何保护、路径推导、目标属性或导入文件检查。
   const targets = [
     'if("${CMAKE_MAJOR_VERSION}.${CMAKE_MINOR_VERSION}" LESS 2.8)',
@@ -1164,7 +1175,7 @@ function citizenSdkSymbols() {
   const symbols = [...new Set(
     [...header.matchAll(/\b(citizensdk_[a-z0-9_]+)\s*\(/g)].map((match) => match[1]),
   )].sort();
-  assert.equal(symbols.length, 89);
+  assert.equal(symbols.length, 117);
   return symbols;
 }
 
@@ -1197,8 +1208,8 @@ test('私钥查看私有ABI固定四符号和布局，公开头不声明内部�
     assert.ok(header.includes(`offsetof(citizensdk_internal_private_key_view_v1_t, ${field}) == ${offset}`));
   }
   assert.doesNotMatch(readFileSync(join(citizenSdkRoot, 'include/citizensdk.h'), 'utf8'), /citizensdk_internal_/u);
-  assert.equal(citizenSdkSymbols().length, 89);
-  assert.equal(citizenSdkLinkedSymbols().length, 93);
+  assert.equal(citizenSdkSymbols().length, 117);
+  assert.equal(citizenSdkLinkedSymbols().length, 121);
 });
 
 function citizenSdkExportSymbols() {
@@ -2099,6 +2110,38 @@ gradle_bin="$FIXTURE_ROOT/gradle fixture"
   }
 });
 
+test('Android接受调用产品位于SDK子工作根外的Gradle依赖缓存', () => {
+  const functions = nativeShellFunctions([
+    'fail', 'assert_safe_directory_path', 'local_build_path_is_allowed',
+    'prepare_external_cache_directory',
+  ]);
+  const android = nativeShellFunctions(['build_android']);
+  const root = mkdtempSync(join(workRoot, 'android-external-gradle-cache-'));
+  const sdk = join(root, 'sdk');
+  const cache = join(root, 'product-cache', 'dependencies', 'gradle');
+  mkdirSync(sdk);
+  const run = path => spawnSync('/bin/bash', ['-c', `${functions}\nsdk_dir="$SDK_ROOT"\nprepare_external_cache_directory "$CACHE_ROOT" "Android Gradle 依赖缓存"`], {
+    env: { PATH: '/usr/bin:/bin', SDK_ROOT: sdk, CACHE_ROOT: path },
+    encoding: 'utf8', timeout: 5000,
+  });
+  try {
+    const accepted = run(cache);
+    assert.equal(accepted.status, 0, accepted.stderr);
+    assert.ok(lstatSync(cache).isDirectory());
+
+    const rejected = run(join(sdk, 'generated-gradle-cache'));
+    assert.equal(rejected.status, 1);
+    assert.match(rejected.stderr, /必须位于 CitizenSDK 源码树之外/u);
+
+    assert.match(android, /prepare_external_cache_directory "\$gradle_user_home" "Android Gradle 依赖缓存"/u);
+    assert.match(android, /prepare_safe_directory "\$work_dir" "\$gradle_user_home" "Android Gradle 依赖缓存"/u);
+    assert.doesNotMatch(android,
+      /"\$android_build_dir" "\$gradle_project_cache" "\$gradle_user_home"/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('Android任务工程仅生成入口配置且并发隔离并拒绝链接路径', async () => {
   const root = mkdtempSync(join(workRoot, 'android-gradle-project-'));
   const source = nativeShellFunctions([
@@ -2539,7 +2582,7 @@ test('Apple XCFramework 固定三个 arm64 技术变体、产品 ABI、版本与
     });
     assert.throws(
       () => assertAppleReleaseProjection(missingSymbol),
-      /精确导出 92 个 citizensdk_/,
+      /精确导出 117 个 citizensdk_/,
     );
 
     const legacySymbol = join(root, 'legacy-symbol');
@@ -3073,7 +3116,7 @@ test('Windows 薄 Host 与正式 Flutter 适配保持唯一 Core 和官方注册
   const functions = [...new Set([...header.matchAll(/\b(citizensdk_host_[a-z0-9_]+)\s*\(/gu)].map((m) => m[1]))].sort();
   assert.equal(exported.length, 20);
   assert.deepEqual(exported, [...functions, ...qrImageSymbols()].sort());
-  assert.equal(citizenSdkSymbols().length, 89);
+  assert.equal(citizenSdkSymbols().length, 117);
   assert.match(header, /void \*hwnd;/u);
   assert.doesNotMatch(header.replaceAll('citizensdk_host_view_account_private_key', ''), /gtk_parent|private_key|plaintext_dek|mnemonic_utf8/u);
   const cmake = readFileSync(join(citizenSdkRoot, 'windows/CMakeLists.txt'), 'utf8');
@@ -4266,7 +4309,7 @@ test('模块选择和独立签名历史门面只投影同一Core，不产生第�
   }
 });
 
-test('Dart、Android、Darwin、Linux、Windows 固定同一 Flutter 双通道和 36 方法合同', () => {
+test('Dart、Android、Darwin、Linux、Windows 固定同一 Flutter 双通道和 63 方法合同', () => {
   const root = mkdtempSync(join(workRoot, 'release-flutter-contract-test-'));
   const sources = [
     'lib/src/platform/citizen_sdk_flutter_codec.dart',
@@ -4290,21 +4333,21 @@ test('Dart、Android、Darwin、Linux、Windows 固定同一 Flutter 双通道�
     const methodSource = readFileSync(linuxMethods, 'utf8');
     writeFileSync(
       linuxMethods,
-      methodSource.replace('"syncFinalizedHistory",', '"syncFinalizedHistorY",'),
+      methodSource.replace('"syncTransactionHistory",', '"syncTransactionHistorY",'),
     );
     assert.throws(
       () => assertFlutterBindingContract(root),
-      /Linux Flutter 方法合同漂移：必须精确为固定 36 项/,
+      /Linux Flutter 方法合同漂移：必须精确为固定 63 项/,
     );
 
     writeFileSync(
       linuxMethods,
-      methodSource.replace('    "initializeFinalizedHistory", "syncFinalizedHistory",\n',
-                           '    "initializeFinalizedHistory",\n'),
+      methodSource.replace('    "getTransactionHistory", "syncTransactionHistory",\n',
+                           '    "getTransactionHistory",\n'),
     );
     assert.throws(
       () => assertFlutterBindingContract(root),
-      /Linux Flutter 方法合同漂移：必须精确为固定 36 项/,
+      /Linux Flutter 方法合同漂移：必须精确为固定 63 项/,
     );
     writeFileSync(linuxMethods, methodSource);
 
@@ -4321,8 +4364,8 @@ test('Dart、Android、Darwin、Linux、Windows 固定同一 Flutter 双通道�
     writeFileSync(linuxChannels, channelSource);
     const windowsMethods = join(root, 'windows/src/citizen_sdk_flutter_codec.cc');
     const windowsMethodSource = readFileSync(windowsMethods, 'utf8');
-    for (const replacement of ['"syncFinalizedHistorY",', '']) {
-      writeFileSync(windowsMethods, windowsMethodSource.replace('"syncFinalizedHistory",', replacement));
+    for (const replacement of ['"syncTransactionHistorY",', '']) {
+      writeFileSync(windowsMethods, windowsMethodSource.replace('"syncTransactionHistory",', replacement));
       assert.throws(() => assertFlutterBindingContract(root), /Windows Flutter 方法合同漂移/u);
     }
     writeFileSync(windowsMethods, windowsMethodSource);
@@ -4484,7 +4527,7 @@ test('根 include 固定三文件闭集并只开放安全 citizensdk_* ABI', () 
   }
 });
 
-test('scripts 根只保留正式三文件并固定原生生产构建器', () => {
+test('scripts 根固定正式闭集、原生构建器与统一测试入口', () => {
   const root = mkdtempSync(join(workRoot, 'release-script-source-test-'));
   const scripts = join(root, 'scripts');
   try {
@@ -4492,13 +4535,41 @@ test('scripts 根只保留正式三文件并固定原生生产构建器', () => 
     assert.doesNotThrow(() => assertSdkScriptSource(root));
 
     const buildNative = join(scripts, 'build-native.sh');
+    const buildNativeSource = readFileSync(buildNative, 'utf8');
+    assert.match(buildNativeSource, /script_path="\$\{BASH_SOURCE\[0\]\}"/u);
+    assert.match(buildNativeSource, /while \[\[ -L "\$script_path" \]\]/u);
+    assert.match(buildNativeSource, /script_dir="\$\(cd "\$\(dirname "\$script_path"\)" && pwd -P\)"/u);
+    assert.doesNotMatch(buildNativeSource, /script_dir="\$\(cd "\$\(dirname "\$0"\)/u);
     writeFileSync(buildNative, `${readFileSync(buildNative, 'utf8')}\n`);
     assert.throws(
       () => assertSdkScriptSource(root),
-      /生产脚本文件哈希漂移：scripts\/build-native\.sh/,
+      /固定脚本文件哈希漂移：scripts\/build-native\.sh/,
     );
 
     copyFileSync(join(citizenSdkRoot, 'scripts', 'build-native.sh'), buildNative);
+    const testEntry = join(scripts, 'test.sh');
+    const testEntrySource = readFileSync(testEntry, 'utf8');
+    assert.match(testEntrySource, /script_path="\$\{BASH_SOURCE\[0\]\}"/u);
+    assert.match(testEntrySource, /CARGO_TARGET_DIR="\$test_root\/cargo"/u);
+    assert.match(testEntrySource, /--build-dir=build/u);
+    assert.match(testEntrySource, /--no-enable-native-assets/u);
+    assert.match(testEntrySource, /--no-enable-dart-data-assets/u);
+    assert.match(testEntrySource, /pub get --offline --enforce-lockfile/u);
+    assert.match(testEntrySource, /FLUTTER_ROOT="\$flutter_sdk_root"/u);
+    assert.match(testEntrySource, /mktemp -d "\$test_root\/flutter-project\.XXXXXX"/u);
+    assert.match(testEntrySource, /ln -s "\$source" "\$project_root\/\$name"/u);
+    assert.match(testEntrySource, /project_root\/\.dart_tool\/\$name/u);
+    assert.match(testEntrySource, /entry\.name === 'citizen_sdk'/u);
+    assert.match(testEntrySource, /flutter_bin" test --no-pub --no-test-assets/u);
+    assert.match(testEntrySource, /--packages="\$project_root\/\.dart_tool\/package_config\.json"/u);
+    assert.match(testEntrySource, /源码树已存在禁止的 build 条目/u);
+    writeFileSync(testEntry, `${testEntrySource}\n`);
+    assert.throws(
+      () => assertSdkScriptSource(root),
+      /固定脚本文件哈希漂移：scripts\/test\.sh/,
+    );
+
+    copyFileSync(join(citizenSdkRoot, 'scripts', 'test.sh'), testEntry);
     writeFileSync(join(scripts, 'unreviewed-build.sh'), '#!/bin/sh\n');
     assert.throws(
       () => assertSdkScriptSource(root),
@@ -4571,7 +4642,7 @@ test('监控实现及回归测试全部进入正式 Core 来源闭集', () => {
   const root = mkdtempSync(join(workRoot, 'release-chain-monitor-source-test-'));
   try {
     writeCoreRustFixture(root);
-    for (const file of ['native/engine/src/chain_monitor.rs', 'native/engine/src/chain_monitor_tests.rs',
+    for (const file of ['native/engine/src/chain_monitor.rs',
       'native/ffi/src/chain_monitor.rs', 'native/ffi/src/chain_monitor_tests.rs']) {
       const path = join(root, file);
       const original = readFileSync(path);
@@ -4646,9 +4717,8 @@ test('P1修复的交易恢复与事件容量源码必须按逐文件摘要进入
     // 每个安全修复边界均必须纳入正式来源守卫；不得仅修改实现却遗漏固定摘要。
     for (const relative of [
       'native/contracts/src/store/transaction_history.rs',
-      'native/engine/src/transaction_builder.rs',
-      'native/engine/src/finalized_events.rs',
-      'native/engine/src/wallet_transfer_watch.rs',
+      'native/engine/src/transaction_execution.rs',
+      'native/engine/src/transaction_history.rs',
       'native/ffi/src/events.rs',
       'native/ffi/src/host_codec.rs',
     ]) {
@@ -5142,17 +5212,11 @@ test('SDK 自有测试源码固定 Core Rust、FFI、provider、根与平台合�
       });
     }
     for (const relativePath of [
-      'native/engine/src/finalized_events_tests.rs',
       'native/engine/src/qr_review_tests.rs',
-      'native/engine/src/chain_monitor_tests.rs',
       'native/ffi/src/chain_monitor_tests.rs',
-      'native/engine/src/finalized_history_runtime_tests.rs',
-      'native/engine/src/transaction_builder_tests.rs',
-      'native/engine/src/transaction_history_tests.rs',
       'native/engine/src/wallet_derivation_tests.rs',
       'native/engine/src/wallet_input_tests.rs',
       'native/engine/src/wallet_service_tests.rs',
-      'native/engine/src/wallet_transfer_watch_tests.rs',
       'native/ffi/src/composition_tests.rs',
       'native/ffi/src/host_codec_tests.rs',
       'native/ffi/src/wallet_abi_tests.rs',
@@ -5239,29 +5303,6 @@ test('SDK 自有测试源码固定 Core Rust、FFI、provider、根与平台合�
         'host_provider_contract.rs',
       ),
       hostProviderTest,
-    );
-
-    const walletWatchTest = join(
-      root,
-      'native',
-      'engine',
-      'src',
-      'wallet_transfer_watch_tests.rs',
-    );
-    rmSync(walletWatchTest);
-    assert.throws(
-      () => assertSdkTestContracts(root),
-      /内嵌测试文件闭集漂移：native\/engine\/src.*缺失=native\/engine\/src\/wallet_transfer_watch_tests\.rs/,
-    );
-    copyFileSync(
-      join(
-        citizenSdkRoot,
-        'native',
-        'engine',
-        'src',
-        'wallet_transfer_watch_tests.rs',
-      ),
-      walletWatchTest,
     );
 
     const providerTest = join(
@@ -5472,7 +5513,7 @@ test('私钥扫描器不误报自身且仍拒绝真实 PEM 标记', () => {
   }
 });
 
-test('本机打包路径执行唯一门禁，只接受两固定根的严格后代并拒绝越界及链接', () => {
+test('本机打包固定中央候选根，原生构建独立拒绝源码树输出', () => {
   const source = readFileSync(new URL('./release.mjs', import.meta.url), 'utf8');
   const constantNames = ['TATA_CONSOLE_TARGET_ROOT', 'TATA_CONSOLE_CACHE_ROOT'];
   const constants = constantNames.map((name) => {
@@ -5494,12 +5535,13 @@ test('本机打包路径执行唯一门禁，只接受两固定根的严格后�
     '/Users/rhett/TATA/tataconsole/target/gmb/citizensdk',
     '/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk',
   ];
-  // 原生构建与打包路径同组校验，避免大小写不敏感磁盘掩盖严格字符串门禁冲突。
+  // 候选打包只接受两个中央根；原生构建是可独立复用的产品入口，因此允许调用方
+  // 选择任意规范的源码树外目录，但仍必须保留同一零写源码门禁。
   const native = readFileSync(new URL('./build-native.sh', import.meta.url), 'utf8');
   assert.ok(native.includes('citizensdk_target_root="$tata_console_target_root/gmb/citizensdk"'));
   assert.ok(native.includes('tata_console_cache_root="${tata_console_target_root%/target}/cache"'));
-  assert.ok(native.includes('if [[ "$task_work" == "$tata_console_cache_root/gmb/citizensdk" ]]'));
-  assert.ok(native.includes('dependency_root="$task_work"'));
+  assert.match(native, /local_build_path_is_allowed\(\) \{[\s\S]*?"\$sdk_dir\/"\*\) return 1/u);
+  assert.match(native, /工作目录或产物目录位于 CitizenSDK 源码树/u);
   // 测试库与产物库必须平级，旧隐藏工作树不得继续成为可写根。
   assert.equal(posix.dirname(expectedRoots[0].split('/gmb/')[0]), posix.dirname(expectedRoots[1].split('/gmb/')[0]));
   for (const relative of ['android/build.gradle', 'android/native/build.gradle']) {
@@ -5856,35 +5898,24 @@ test('原生构建入口固定 Apple arm64 技术合同/最低版本且在 mkdir
       assert.equal(declarations.length, 1, `唯一生产函数：${name}`);
       return declarations[0][0];
     });
-    const predicateRoots = [
-      'tata_console_target_root', 'citizensdk_target_root', 'tata_console_cache_root',
-    ].map((name) => {
-      const declarations = [...nativeBuildScript.matchAll(new RegExp(
-        `^${name}="[^"\\n]+"$`, 'gm',
-      ))];
-      assert.equal(declarations.length, 1, `唯一生产路径常量：${name}`);
-      return declarations[0][0];
-    });
     const hostPredicate = [
       'set -euo pipefail',
-      ...predicateRoots,
+      'sdk_dir="${2%/}"',
       ...predicateFunctions,
       'assert_safe_directory_path "$1" "宿主路径合同"',
       'local_build_path_is_allowed "$1"',
     ].join('\n');
     assert.doesNotMatch(hostPredicate, /canonical_directory|\bmkdir\b/u);
-    const virtualHostTask = '/Users/rhett/TATA/tataconsole/cache/gmb/citizenapp/ios';
+    const externalOutput = join(root, 'consumer-owned', 'citizensdk', 'output');
     const hostEnvironment = {
       ...process.env,
       GITHUB_ACTIONS: 'false',
-      TATA_CONSOLE_CACHE_DIR: virtualHostTask,
     };
-    // GitHub 作业会为生产构建注入 Runner 专属根；本用例验证的是未注入时的
-    // macOS 本机默认根，必须显式隔离外层作业环境，避免把 Hosted 根混入断言。
-    delete hostEnvironment.TATA_CONSOLE_TARGET_ROOT;
+    // 产品原生构建入口可以被任意 App/第三方复用；它只要求规范绝对路径并拒绝
+    // CitizenSDK 源码树。候选打包器的两个中央根限制由前一个 VM 合同独立验证。
     const acceptedHostResult = spawnSync(
       '/bin/bash', ['-c', hostPredicate, 'citizensdk-host-path-contract',
-        join(virtualHostTask, 'citizensdk/output')], {
+        externalOutput, citizenSdkRoot], {
         cwd: workRoot,
         encoding: 'utf8',
         env: hostEnvironment,
@@ -5894,28 +5925,13 @@ test('原生构建入口固定 Apple arm64 技术合同/最低版本且在 mkdir
     assert.equal(acceptedHostResult.stdout, '');
     assert.equal(acceptedHostResult.stderr, '');
 
-    // 只改变仓库分类大小写，宿主和 SDK 子路径均合法，也必须零写入拒绝。
-    for (const repository of ['GMB', 'Gmb', 'unregistered']) {
-      const invalidTask = virtualHostTask.replace('/gmb/', `/${repository}/`);
+    for (const forbidden of [citizenSdkRoot, join(citizenSdkRoot, 'build')]) {
       const rejected = spawnSync('/bin/bash', ['-c', hostPredicate,
-        'citizensdk-host-path-contract', join(invalidTask, 'citizensdk/output')], {
-        cwd: workRoot, encoding: 'utf8',
-        env: { ...hostEnvironment, TATA_CONSOLE_CACHE_DIR: invalidTask },
+        'citizensdk-host-path-contract', forbidden, citizenSdkRoot], {
+        cwd: workRoot, encoding: 'utf8', env: hostEnvironment,
       });
       assert.equal(rejected.status, 1, rejected.stderr);
     }
-
-    const escapedHostResult = spawnSync(
-      '/bin/bash', ['-c', hostPredicate, 'citizensdk-host-path-contract',
-        join(virtualHostTask, 'other-output')], {
-        cwd: workRoot,
-        encoding: 'utf8',
-        env: hostEnvironment,
-      },
-    );
-    assert.equal(escapedHostResult.status, 1, escapedHostResult.stderr);
-    assert.equal(escapedHostResult.stdout, '');
-    assert.equal(escapedHostResult.stderr, '');
 
     const androidPlugin = readFileSync(join(citizenSdkRoot, 'android', 'build.gradle'), 'utf8');
     const androidNative = readFileSync(
@@ -6261,7 +6277,7 @@ test('Linux 安装验收执行真实文件闭集、字节、版本、平台和 E
     ]) {
       const names = [...new Set([...readFileSync(header, 'utf8')
         .matchAll(/\b(citizensdk_[a-z0-9_]+)\s*\(/g)].map((match) => match[1]))].sort();
-      assert.equal(names.length, kind === 'core' ? 89 : 17);
+      assert.equal(names.length, kind === 'core' ? 117 : 17);
       if (kind === 'host') names.push(...qrImageSymbols());
       if (kind === 'core') names.push(...CITIZENSDK_INTERNAL_SYMBOLS);
       names.sort();
@@ -6625,7 +6641,7 @@ test('产品 ABI 从完整 nm 导出集合与头文件精确对拍并拒绝任�
       [...header.matchAll(/\b(citizensdk_[a-z0-9_]+)\s*\(/g)]
         .map((match) => match[1]),
     )].sort();
-    assert.equal(expected.length, 89);
+    assert.equal(expected.length, 117);
     expected.push(...CITIZENSDK_INTERNAL_SYMBOLS);
     expected.sort();
 
@@ -7111,7 +7127,7 @@ test('macOS Hosted 消费者只用公开入口并在 Release 显式验收生命�
   assert.match(source, /CitizenSdkErrorCode\.notReady/u);
   assert.match(source, /CitizenSdkErrorCode\.invalidState/u);
   assert.match(source, /event\.sequence <= eventSequence/u);
-  assert.match(source, /case CitizenSdkTransferProgress\(\):[\s\S]*?eventFailed = true/u);
+  assert.doesNotMatch(source, /CitizenSdkTransferProgress|transferProgress/u);
   assert.match(source, /await opened\.start\(\)[\s\S]*?await opened\.stop\(\)/u);
   assert.match(source, /await opened\.close\(\)[\s\S]*?await opened\.close\(\)/u);
   assert.match(source, /await _until\(\(\) => eventsDone\);[\s\S]*?await subscription\.cancel\(\)[\s\S]*?_require\(!eventFailed\)/u);

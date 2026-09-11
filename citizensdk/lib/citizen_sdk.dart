@@ -11,5 +11,6 @@ export 'src/api/citizen_wallet.dart';
 export 'src/models/citizen_account.dart';
 export 'src/models/citizen_capability.dart';
 export 'src/models/citizen_chain_state.dart';
+export 'src/models/citizen_signing.dart';
 export 'src/models/citizen_transaction.dart';
 export 'src/models/citizen_wallet.dart';

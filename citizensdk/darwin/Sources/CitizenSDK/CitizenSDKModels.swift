@@ -27,13 +27,19 @@ public enum CitizenSDKLifecycle: UInt32, Sendable {
 
 public enum CitizenFinality: UInt32, Sendable { case best = 1, finalized = 2 }
 public enum CitizenWalletOrigin: UInt32, Sendable { case created = 1, imported = 2 }
-public enum CitizenTransferResolution: UInt32, Sendable {
+public enum CitizenWalletSignMode: UInt32, Sendable { case hot = 1, cold = 2 }
+public enum CitizenSigningTransform: UInt32, Sendable {
+    case raw = 1
+    case substrateSigningPayload = 2
+    case blake2Domain = 3
+}
+public enum CitizenExternalSignerTransport: UInt32, Sendable { case qrV1 = 1 }
+@frozen public enum CitizenTransactionResolution: UInt32, Sendable {
     case finalizedSuccess = 1, finalizedFailed = 2, poolRejected = 3
 }
-public enum CitizenHistoryStatus: UInt32, Sendable {
+public enum CitizenTransactionHistoryStatus: UInt32, Sendable {
     case pending = 1, inBlock = 2, poolRejected = 3, finalizedSuccess = 4, finalizedFailed = 5
 }
-public enum CitizenTransferDirection: UInt32, Sendable { case outgoing = 1, incoming = 2 }
 public enum CitizenExecutionStatus: UInt32, Sendable { case success = 1, failed = 2, unverified = 3 }
 
 public enum CitizenCapabilityName: UInt32, CaseIterable, Sendable {
@@ -133,6 +139,52 @@ public struct CitizenBlockRef: Equatable, Sendable {
     }
 }
 
+public struct CitizenChainSyncStatus: Equatable, Sendable {
+    public let peerCount: UInt64
+    public let isSyncing: Bool
+    public let isUsable: Bool
+    public let best: CitizenBlockRef
+    public let finalized: CitizenBlockRef
+}
+
+public struct CitizenBlockHeader: Equatable, Sendable {
+    public let block: CitizenBlockRef
+    public let parentHash: Data
+    public let stateRoot: Data
+    public let extrinsicsRoot: Data
+    public let digest: Data
+}
+
+public struct CitizenBlockBody: Equatable, Sendable {
+    public let block: CitizenBlockRef
+    public let extrinsics: [Data]
+}
+
+public struct CitizenRuntimeContext: Equatable, Sendable {
+    public let block: CitizenBlockRef
+    public let specVersion: UInt32
+    public let transactionVersion: UInt32
+    public let metadata: Data
+}
+
+/// Explicit smoldot state transport only; this is not a legacy-app migration envelope.
+public struct CitizenChainState: Equatable, Sendable {
+    public let formatVersion: UInt32
+    public let finalized: CitizenBlockRef
+    public let database: Data
+
+    public init(formatVersion: UInt32, finalized: CitizenBlockRef, database: Data) throws {
+        try CitizenSDKChecks.require(formatVersion > 0, "chain state format version must be nonzero")
+        try CitizenSDKChecks.require(finalized.finality == .finalized,
+                                     "chain state anchor must be finalized")
+        try CitizenSDKChecks.require((1...256 * 1_024).contains(database.count),
+                                     "chain state database is invalid")
+        self.formatVersion = formatVersion
+        self.finalized = finalized
+        self.database = database
+    }
+}
+
 public struct CitizenCapabilityStatus: Equatable, Sendable {
     public let name: CitizenCapabilityName
     public let reason: CitizenCapabilityReason
@@ -186,12 +238,81 @@ public struct CitizenWalletProfile: Equatable, Sendable {
     public let accounts: [CitizenWalletAccount]
 }
 
+/// One secret-free entry in the globally ordered hot/cold wallet catalog.
+public struct CitizenWalletStateAccount: Equatable, Sendable {
+    public let signMode: CitizenWalletSignMode
+    public let walletIndex: UInt32
+    public let accountIndex: UInt32?
+    public let accountID: Data
+    public let ss58Address: String
+    public let name: String
+    public let createdAtMillis: UInt64
+    public let isDefault: Bool
+}
+
+/// Stable public wallet snapshot. The first account is the only default projection.
+public struct CitizenWalletState: Equatable, Sendable {
+    public let revision: UInt64
+    public let hotProfile: CitizenWalletProfile?
+    public let accounts: [CitizenWalletStateAccount]
+
+    public var defaultAccount: CitizenWalletStateAccount? { accounts.first }
+}
+
 public struct CitizenSignature: Equatable, Sendable {
     public let bytes: Data
     internal init(_ bytes: Data) throws {
         try CitizenSDKChecks.require(bytes.count == 64, "sr25519 signature must contain exactly 64 bytes")
         self.bytes = bytes
     }
+}
+
+/// Product-independent signing input. Payload, domain and QR action are opaque
+/// protocol bytes owned by the integrating application.
+public struct CitizenSigningIntent: Equatable, Sendable {
+    public let accountID: Data
+    public let payload: Data
+    public let transform: CitizenSigningTransform
+    public let domain: Data
+    public let externalSignerTransport: CitizenExternalSignerTransport?
+    public let opaqueAction: UInt16
+    public let ttlSeconds: UInt64
+
+    public init(accountID: Data, payload: Data, transform: CitizenSigningTransform,
+                domain: Data = Data(),
+                externalSignerTransport: CitizenExternalSignerTransport? = nil,
+                opaqueAction: UInt16 = 0, ttlSeconds: UInt64 = 120) throws {
+        try CitizenSDKChecks.require(accountID.count == 32, "accountID must contain 32 bytes")
+        try CitizenSDKChecks.require((1...16 * 1_024 * 1_024).contains(payload.count),
+                                     "payload must contain 1...16 MiB bytes")
+        try CitizenSDKChecks.require((1...300).contains(ttlSeconds), "ttlSeconds must be 1...300")
+        try CitizenSDKChecks.require(
+            (transform == .blake2Domain && (1...32).contains(domain.count)) ||
+            (transform != .blake2Domain && domain.isEmpty),
+            "signing transform/domain combination is invalid"
+        )
+        self.accountID = accountID
+        self.payload = payload
+        self.transform = transform
+        self.domain = domain
+        self.externalSignerTransport = externalSignerTransport
+        self.opaqueAction = opaqueAction
+        self.ttlSeconds = ttlSeconds
+    }
+}
+
+@frozen public enum CitizenSigningOutcome: Equatable, Sendable {
+    case completed(accountID: Data, payloadHash: Data, signature: CitizenSignature)
+    case externalPending(accountID: Data, payloadHash: Data,
+                         transport: CitizenExternalSignerTransport,
+                         expiresAt: UInt64, sessionID: String, transportRequest: String)
+}
+
+@frozen public enum CitizenDefaultAccountChangeOutcome: Equatable, Sendable {
+    case completed(currentDefaultAccountID: Data, payloadHash: Data, committedRevision: UInt64)
+    case externalPending(currentDefaultAccountID: Data, payloadHash: Data,
+                         transport: CitizenExternalSignerTransport,
+                         expiresAt: UInt64, sessionID: String, transportRequest: String)
 }
 
 public struct CitizenExecution: Equatable, Sendable {
@@ -203,51 +324,59 @@ public struct CitizenExecution: Equatable, Sendable {
     public let errorIndex: UInt8?
 }
 
-public struct CitizenWalletTransfer: Equatable, Sendable {
+/// Secret-free summary for one non-persistent Core-owned transaction preparation.
+public struct CitizenPreparedTransaction: Equatable, Sendable {
+    public let preparationID: String
+    public let sourceAccountID: Data
+    public let callDataHash: Data
+    public let bestBlock: CitizenBlockRef
+    public let runtimeSpecNumber: UInt32
+    public let transactionFormatNumber: UInt32
+    public let nonce: UInt64
+}
+
+public struct CitizenTransactionExternalSigningPending: Equatable, Sendable {
+    public let executionID: String
+    public let sourceAccountID: Data
+    public let callDataHash: Data
+    public let expiresAt: UInt64
+    public let qrRequest: String
+}
+
+public struct CitizenTransactionExecutionCompleted: Equatable, Sendable {
+    public let executionID: String
+    public let sourceAccountID: Data
+    public let callDataHash: Data
     public let transactionHash: Data
-    public let resolution: CitizenTransferResolution
+    public let resolution: CitizenTransactionResolution
     public let execution: CitizenExecution?
     public let poolRejectionReason: String?
+    public let replacementHash: Data?
 }
 
-public struct CitizenHistoryCursor: Equatable, Sendable {
-    public let accountID: Data
-    public let trackingStartBlock: CitizenBlockRef
-    public let lastSyncedBlock: CitizenBlockRef
+@frozen public enum CitizenTransactionExecution: Equatable, Sendable {
+    case externalSigningPending(CitizenTransactionExternalSigningPending)
+    case completed(CitizenTransactionExecutionCompleted)
 }
 
-public struct CitizenHistoryRecord: Equatable, Sendable {
-    public let accountID: Data
+/// Product-independent public projection of one SDK-submitted transaction.
+public struct CitizenTransactionHistoryRecord: Equatable, Sendable {
+    public let executionID: String
+    public let sourceAccountID: Data
+    public let callDataHash: Data
     public let transactionHash: Data
-    public let nonce: UInt64
-    public let destinationAccountID: Data
-    public let amountFen: CitizenU128
-    public let status: CitizenHistoryStatus
+    public let status: CitizenTransactionHistoryStatus
     public let block: CitizenBlockRef?
     public let execution: CitizenExecution?
+    public let replacementHash: Data?
     public let createdAtMillis: UInt64
     public let updatedAtMillis: UInt64
-    public let remark: Data
     public let poolRejectionReason: String?
 }
 
-public struct CitizenFinalizedTransfer: Equatable, Sendable {
-    public let trackedAccountID: Data
-    public let fromAccountID: Data
-    public let toAccountID: Data
-    public let amountFen: CitizenU128
-    public let block: CitizenBlockRef
-    public let eventRecordIndex: UInt32
-    public let extrinsicIndex: UInt32?
-    public let direction: CitizenTransferDirection
-    public let sourcePallet: String
-    public let remarkDisplay: String
-    public let remarkBytes: Data
-}
-
-public struct CitizenTransactionHistory: Equatable, Sendable {
+/// Newest-first deterministic page from the SDK's execution-only store.
+public struct CitizenTransactionHistoryPage: Equatable, Sendable {
     public let revision: UInt64
-    public let cursors: [CitizenHistoryCursor]
-    public let records: [CitizenHistoryRecord]
-    public let transfers: [CitizenFinalizedTransfer]
+    public let records: [CitizenTransactionHistoryRecord]
+    public let nextBeforeExecutionID: String?
 }

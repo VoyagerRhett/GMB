@@ -9,6 +9,7 @@ import '../crypto/account_codec.dart';
 import '../models/citizen_account.dart';
 import '../models/citizen_capability.dart';
 import '../models/citizen_chain_state.dart';
+import '../models/citizen_signing.dart';
 import '../models/citizen_transaction.dart';
 import '../models/citizen_wallet.dart';
 
@@ -22,9 +23,19 @@ final class CitizenSdkFlutterCodec {
   static const int protocolVersion = 1;
   static const int maximumSessionIdCodeUnits = 128;
   static const int maximumAdditionalWalletAccounts = 1989;
-  static const int maximumHistoryAccounts = 1990;
+  static const int maximumWalletCatalogAccounts = 3980;
+  static const int maximumDefaultAccountChangeAccounts = 256;
   static const int maximumBalanceAccounts = 1990;
   static const int maximumSigningPayloadBytes = 16 * 1024 * 1024;
+  static const int maximumStorageKeyBytes = 4 * 1024;
+  static const int maximumStorageBatchKeys = 1024;
+  static const int maximumStorageBatchKeyBytes = 1024 * 1024;
+  static const int maximumHeaderDigestBytes = 1024 * 1024;
+  static const int maximumBlockBodyExtrinsics = 16 * 1024;
+  static const int maximumBlockBodyBytes = 64 * 1024 * 1024;
+  static const int maximumRuntimeMetadataBytes = 64 * 1024 * 1024;
+  static const int maximumTransactionCallDataBytes = 1024 * 1024;
+  static const int maximumExportedStateBytes = 256 * 1024;
   static const int maximumQrTextBytes = 2331;
   static const int maximumQrReviewPayloadBytes = 1920;
   static const int maximumQrImageBytes = 16 * 1024 * 1024;
@@ -36,6 +47,18 @@ final class CitizenSdkFlutterCodec {
     'close',
     'getCapabilities',
     'getFinalizedHead',
+    'getSyncStatus',
+    'getBestHead',
+    'getFinalizedBlockAt',
+    'resolveFinalizedBlock',
+    'getBlockHeader',
+    'getBlockBody',
+    'getRuntimeContext',
+    'getStorage',
+    'getStorageBatch',
+    'getSystemEvents',
+    'exportState',
+    'importState',
     'getGenesisHash',
     'getAccountBalance',
     'getAccountBalances',
@@ -43,6 +66,12 @@ final class CitizenSdkFlutterCodec {
     'getFeeSnapshot',
     'getWalletProfile',
     'viewAccountPrivateKey',
+    'getWalletState',
+    'importColdAccountId',
+    'importColdAccountSs58',
+    'reorderWalletAccountsWithoutDefaultChange',
+    'renameAccount',
+    'deleteAccount',
     'createWallet',
     'importWallet',
     'addWalletAccounts',
@@ -52,10 +81,19 @@ final class CitizenSdkFlutterCodec {
     'deleteWallet',
     'reconcileWalletCleanup',
     'signWalletPayload',
+    'beginSigning',
+    'consumeExternalSignature',
+    'cancelSigning',
+    'beginDefaultAccountChange',
+    'consumeDefaultAccountChange',
     'verifySignature',
-    'transferWithRemark',
-    'initializeFinalizedHistory',
-    'syncFinalizedHistory',
+    'prepareTransaction',
+    'cancelPreparedTransaction',
+    'executePreparedTransaction',
+    'consumePreparedTransactionQrResponse',
+    'cancelPreparedTransactionExecution',
+    'getTransactionHistory',
+    'syncTransactionHistory',
     'qrParse',
     'qrCreateSignRequest',
     'qrConsumeSignResponse',
@@ -229,7 +267,6 @@ final class CitizenSdkFlutterCodec {
       'lifecycleChanged' => _decodeLifecycleEvent(sequence, payload),
       'historyChanged' => _decodeHistoryEvent(sequence, payload),
       'capabilitiesChanged' => _decodeCapabilitiesEvent(sequence, payload),
-      'transferProgress' => _decodeTransferProgress(sequence, payload),
       _ => throw _decodeFailure('未知事件类型：$type'),
     };
     return DecodedCitizenSdkEvent(
@@ -299,6 +336,125 @@ final class CitizenSdkFlutterCodec {
         (candidate) => candidate.name == finalityName,
         orElse: () => throw _decodeFailure('未知 block.finality：$finalityName'),
       ),
+    );
+  }
+
+  List<Object?> encodeBlock(CitizenBlockRef block) {
+    final encoded = <Object?>[
+      block.hash,
+      block.number.toString(),
+      block.finality.name,
+    ];
+    decodeBlock(encoded);
+    return encoded;
+  }
+
+  CitizenChainSyncStatus decodeSyncStatus(Object? raw) {
+    final tuple = _tuple(raw, 5, 'chain sync status');
+    final status = CitizenChainSyncStatus(
+      peerCount: _u64Decimal(tuple[0], 'sync.peerCount'),
+      isSyncing: _boolean(tuple[1], 'sync.isSyncing'),
+      isUsable: _boolean(tuple[2], 'sync.isUsable'),
+      best: decodeBlock(tuple[3]),
+      finalized: decodeBlock(tuple[4]),
+    );
+    if (status.best.finality != CitizenBlockFinality.best ||
+        status.finalized.finality != CitizenBlockFinality.finalized ||
+        status.finalized.number > status.best.number) {
+      throw _decodeFailure('同步状态的 best/finalized 锚不一致');
+    }
+    return status;
+  }
+
+  CitizenBlockHeader decodeBlockHeader(Object? raw) {
+    final tuple = _tuple(raw, 5, 'block header');
+    final digest = _bytes(tuple[4], 'blockHeader.digest');
+    if (digest.length > maximumHeaderDigestBytes) {
+      throw _decodeFailure('blockHeader.digest 超过 1 MiB');
+    }
+    return CitizenBlockHeader(
+      block: decodeBlock(tuple[0]),
+      parentHash: _hex32(tuple[1], 'blockHeader.parentHash'),
+      stateRoot: _hex32(tuple[2], 'blockHeader.stateRoot'),
+      extrinsicsRoot: _hex32(tuple[3], 'blockHeader.extrinsicsRoot'),
+      digest: digest,
+    );
+  }
+
+  CitizenBlockBody decodeBlockBody(Object? raw) {
+    final tuple = _tuple(raw, 2, 'block body');
+    final values = _list(tuple[1], 'blockBody.extrinsics');
+    if (values.length > maximumBlockBodyExtrinsics) {
+      throw _decodeFailure('blockBody.extrinsics 超过 16384 项');
+    }
+    var total = 0;
+    final extrinsics = <Uint8List>[];
+    for (var index = 0; index < values.length; index++) {
+      final bytes = _bytes(values[index], 'blockBody.extrinsics[$index]');
+      if (bytes.isEmpty) throw _decodeFailure('block body 不允许空 extrinsic');
+      total += bytes.length;
+      if (total > maximumBlockBodyBytes) {
+        throw _decodeFailure('block body 超过 64 MiB');
+      }
+      extrinsics.add(bytes);
+    }
+    return CitizenBlockBody(
+      block: decodeBlock(tuple[0]),
+      extrinsics: extrinsics,
+    );
+  }
+
+  CitizenRuntimeContext decodeRuntimeContext(Object? raw) {
+    final tuple = _tuple(raw, 4, 'runtime context');
+    final metadata = _bytes(tuple[3], 'runtime.metadata');
+    if (metadata.isEmpty || metadata.length > maximumRuntimeMetadataBytes) {
+      throw _decodeFailure('runtime.metadata 必须为 1..64 MiB');
+    }
+    return CitizenRuntimeContext(
+      block: decodeBlock(tuple[0]),
+      specVersion: _u32Int(tuple[1], 'runtime.specVersion'),
+      transactionVersion: _u32Int(tuple[2], 'runtime.transactionVersion'),
+      metadata: metadata,
+    );
+  }
+
+  Uint8List? decodeStorage(Object? raw) {
+    if (raw == null) return null;
+    return _bytes(raw, 'storage value');
+  }
+
+  List<Uint8List?> decodeStorageBatch(Object? raw) {
+    final values = _list(raw, 'storage batch');
+    if (values.length > maximumStorageBatchKeys) {
+      throw _decodeFailure('storage batch 响应超过 1024 项');
+    }
+    var total = 0;
+    final decoded = values.map((value) {
+      final bytes = decodeStorage(value);
+      total += bytes?.length ?? 0;
+      if (total > maximumBlockBodyBytes) {
+        throw _decodeFailure('storage batch 响应总长度超过 64 MiB');
+      }
+      return bytes;
+    });
+    return List<Uint8List?>.unmodifiable(decoded);
+  }
+
+  CitizenChainState decodeChainState(Object? raw) {
+    final tuple = _tuple(raw, 3, 'chain state');
+    final formatVersion = _u32Int(tuple[0], 'chainState.formatVersion');
+    final finalized = decodeBlock(tuple[1]);
+    final database = _bytes(tuple[2], 'chainState.database');
+    if (formatVersion == 0 ||
+        finalized.finality != CitizenBlockFinality.finalized ||
+        database.isEmpty ||
+        database.length > maximumExportedStateBytes) {
+      throw _decodeFailure('chain state 的 finalized/database 无效');
+    }
+    return CitizenChainState(
+      formatVersion: formatVersion,
+      finalized: finalized,
+      database: database,
     );
   }
 
@@ -478,6 +634,90 @@ final class CitizenSdkFlutterCodec {
     );
   }
 
+  CitizenWalletState decodeWalletState(Object? raw) {
+    final tuple = _tuple(raw, 3, 'wallet state');
+    final revision = _u64Decimal(tuple[0], 'walletState.revision');
+    final hotProfile = decodeWalletProfile(tuple[1]);
+    final accountsRaw = _list(tuple[2], 'walletState.accounts');
+    if (accountsRaw.length > maximumWalletCatalogAccounts) {
+      throw _decodeFailure('统一钱包目录超过 3980 项');
+    }
+    final accounts = <CitizenWalletStateAccount>[];
+    for (var index = 0; index < accountsRaw.length; index++) {
+      final account = _tuple(
+        accountsRaw[index],
+        8,
+        'walletState.account[$index]',
+      );
+      final signModeText = _string(account[0], 'stateAccount.signMode');
+      final signMode = CitizenWalletSignMode.values.firstWhere(
+        (candidate) => candidate.name == signModeText,
+        orElse: () => throw _decodeFailure('未知钱包签名模式：$signModeText'),
+      );
+      final walletIndex = _u32Int(account[1], 'stateAccount.walletIndex');
+      final accountIndex = account[2] == null
+          ? null
+          : _accountIndex(account[2], 'stateAccount.accountIndex');
+      final accountId = _hex32(account[3], 'stateAccount.accountId');
+      final ss58Address = _string(account[4], 'stateAccount.ss58Address');
+      final name = _string(account[5], 'stateAccount.name');
+      final isDefault = _boolean(account[7], 'stateAccount.isDefault');
+      if (!_validAccountName(name) ||
+          ss58Address != citizenSs58FromAccountId(accountId) ||
+          isDefault != (index == 0) ||
+          (signMode == CitizenWalletSignMode.hot &&
+              (walletIndex != 0 || accountIndex == null)) ||
+          (signMode == CitizenWalletSignMode.cold &&
+              (walletIndex == 0 || accountIndex != null))) {
+        throw _decodeFailure('统一钱包账户事实不一致');
+      }
+      accounts.add(
+        CitizenWalletStateAccount(
+          signMode: signMode,
+          walletIndex: walletIndex,
+          accountIndex: accountIndex,
+          accountId: accountId,
+          ss58Address: ss58Address,
+          name: name,
+          createdAtMillis: _u64Decimal(
+            account[6],
+            'stateAccount.createdAtMillis',
+          ),
+          isDefault: isDefault,
+        ),
+      );
+    }
+    final accountIds = accounts.map((account) => account.accountId).toSet();
+    final coldWalletIndices = accounts
+        .where((account) => account.signMode == CitizenWalletSignMode.cold)
+        .map((account) => account.walletIndex)
+        .toSet();
+    final hotIds =
+        hotProfile?.accounts.map((account) => account.accountId).toSet() ??
+        const <String>{};
+    final projectedHotIds = accounts
+        .where((account) => account.signMode == CitizenWalletSignMode.hot)
+        .map((account) => account.accountId)
+        .toSet();
+    if (accountIds.length != accounts.length ||
+        coldWalletIndices.length !=
+            accounts
+                .where(
+                  (account) => account.signMode == CitizenWalletSignMode.cold,
+                )
+                .length ||
+        hotIds.length != projectedHotIds.length ||
+        !hotIds.containsAll(projectedHotIds) ||
+        !projectedHotIds.containsAll(hotIds)) {
+      throw _decodeFailure('统一钱包目录的账户闭集不一致');
+    }
+    return CitizenWalletState(
+      revision: revision,
+      hotProfile: hotProfile,
+      accounts: accounts,
+    );
+  }
+
   CitizenWalletSignature decodeSignature({
     required String accountId,
     required Object? raw,
@@ -487,68 +727,241 @@ final class CitizenSdkFlutterCodec {
     return CitizenWalletSignature(accountId: accountId, bytes: bytes);
   }
 
-  CitizenWalletTransfer decodeTransfer(Object? raw) {
-    final tuple = _tuple(raw, 4, 'wallet transfer');
-    final resolutionText = _string(tuple[1], 'transfer.resolution');
-    final transfer = CitizenWalletTransfer(
-      transactionHash: _hex32(tuple[0], 'transfer.transactionHash'),
-      resolution: CitizenTransferResolution.values.firstWhere(
-        (candidate) => candidate.name == resolutionText,
-        orElse: () =>
-            throw _decodeFailure('未知 transfer resolution：$resolutionText'),
-      ),
-      execution: tuple[2] == null ? null : _decodeExecution(tuple[2]),
-      poolRejectionReason: _nullableString(
-        tuple[3],
-        'transfer.poolRejectionReason',
-      ),
-    );
-    final execution = transfer.execution;
-    final valid = switch (transfer.resolution) {
-      CitizenTransferResolution.finalizedSuccess =>
-        execution?.status == CitizenExecutionStatus.success &&
-            transfer.poolRejectionReason == null,
-      CitizenTransferResolution.finalizedFailed =>
-        execution?.status == CitizenExecutionStatus.failed &&
-            transfer.poolRejectionReason == null,
-      CitizenTransferResolution.poolRejected =>
-        execution == null &&
-            (transfer.poolRejectionReason?.trim().isNotEmpty ?? false),
-    };
-    if (!valid) throw _decodeFailure('wallet transfer 终态字段不一致');
-    return transfer;
+  CitizenSigningOutcome decodeSigningOutcome(Object? raw) {
+    final tuple = _tuple(raw, 7, 'signing outcome');
+    final status = _string(tuple[0], 'signing.status');
+    final accountId = _hex32(tuple[1], 'signing.accountId');
+    final payloadHash = _hex32(tuple[2], 'signing.payloadHash');
+    if (status == 'completed') {
+      if (tuple[4] != null || tuple[5] != null || tuple[6] != null) {
+        throw _decodeFailure('completed signing 不得携带 external session 字段');
+      }
+      final signature = _bytes(tuple[3], 'signing.signature');
+      if (signature.length != 64) {
+        throw _decodeFailure('completed signing 必须携带 64 字节签名');
+      }
+      return CitizenSigningCompleted(
+        accountId: accountId,
+        payloadHash: payloadHash,
+        signature: signature,
+      );
+    }
+    if (status == 'externalPending') {
+      if (tuple[3] != null) {
+        throw _decodeFailure('pending signing 不得提前携带签名');
+      }
+      final sessionId = _string(tuple[5], 'signing.sessionId');
+      final request = _string(tuple[6], 'signing.transportRequest');
+      if (!_validSessionId(sessionId) ||
+          request.isEmpty ||
+          request.length > maximumQrTextBytes) {
+        throw _decodeFailure(
+          'pending signing 的 session 或 transport request 无效',
+        );
+      }
+      return CitizenExternalSigningPending(
+        accountId: accountId,
+        payloadHash: payloadHash,
+        transport: CitizenExternalSignerTransport.qrV1,
+        expiresAt: _u64Decimal(tuple[4], 'signing.expiresAt'),
+        sessionId: sessionId,
+        transportRequest: request,
+      );
+    }
+    throw _decodeFailure('未知 signing outcome：$status');
   }
 
-  CitizenTransactionHistory decodeHistory(Object? raw) {
-    final tuple = _tuple(raw, 4, 'history');
-    final history = CitizenTransactionHistory(
-      revision: _u64Decimal(tuple[0], 'history.revision'),
-      cursors: _decodeList(tuple[1], 'history.cursors', _decodeCursor),
-      records: _decodeList(tuple[2], 'history.records', _decodeHistoryRecord),
-      transfers: _decodeList(
-        tuple[3],
-        'history.transfers',
-        _decodeFinalizedTransfer,
-      ),
-    );
-    final cursorKeys = history.cursors
-        .map((cursor) => cursor.accountId)
-        .toSet();
-    final recordKeys = history.records
-        .map((record) => '${record.accountId}:${record.transactionHash}')
-        .toSet();
-    final transferKeys = history.transfers
-        .map(
-          (transfer) =>
-              '${transfer.trackedAccountId}:${transfer.block.hash}:${transfer.eventRecordIndex}',
-        )
-        .toSet();
-    if (cursorKeys.length != history.cursors.length ||
-        recordKeys.length != history.records.length ||
-        transferKeys.length != history.transfers.length) {
-      throw _decodeFailure('交易游标、账户/交易哈希键或 finalized 事件键重复');
+  CitizenDefaultAccountChangeOutcome decodeDefaultAccountChangeOutcome(
+    Object? raw,
+  ) {
+    final tuple = _tuple(raw, 7, 'default account change');
+    final status = _string(tuple[0], 'defaultChange.status');
+    final current = _hex32(tuple[1], 'defaultChange.currentAccountId');
+    final hash = _hex32(tuple[2], 'defaultChange.payloadHash');
+    if (status == 'completed') {
+      if (tuple[4] != null || tuple[5] != null || tuple[6] != null) {
+        throw _decodeFailure('completed default change 不得携带 external 字段');
+      }
+      return CitizenDefaultAccountChangeCompleted(
+        currentDefaultAccountId: current,
+        payloadHash: hash,
+        committedRevision: _u64Decimal(tuple[3], 'defaultChange.revision'),
+      );
     }
-    return history;
+    if (status == 'externalPending') {
+      if (tuple[3] != null) {
+        throw _decodeFailure('pending default change 不得携带 committed revision');
+      }
+      final sessionId = _string(tuple[5], 'defaultChange.sessionId');
+      final request = _string(tuple[6], 'defaultChange.transportRequest');
+      if (!_validSessionId(sessionId) ||
+          request.isEmpty ||
+          request.length > maximumQrTextBytes) {
+        throw _decodeFailure(
+          'pending default change 的 session 或 transport request 无效',
+        );
+      }
+      return CitizenDefaultAccountChangePending(
+        currentDefaultAccountId: current,
+        payloadHash: hash,
+        transport: CitizenExternalSignerTransport.qrV1,
+        expiresAt: _u64Decimal(tuple[4], 'defaultChange.expiresAt'),
+        sessionId: sessionId,
+        transportRequest: request,
+      );
+    }
+    throw _decodeFailure('未知 default account change outcome：$status');
+  }
+
+  CitizenTransactionHistoryPage decodeTransactionHistoryPage(Object? raw) {
+    final tuple = _tuple(raw, 3, 'transactionHistoryPage');
+    final page = CitizenTransactionHistoryPage(
+      revision: _u64Decimal(tuple[0], 'transactionHistoryPage.revision'),
+      records: _decodeList(
+        tuple[1],
+        'transactionHistoryPage.records',
+        _decodeTransactionHistoryRecord,
+      ),
+      nextBeforeExecutionId: tuple[2] == null
+          ? null
+          : _hex16(tuple[2], 'transactionHistoryPage.nextBeforeExecutionId'),
+    );
+    final ids = page.records.map((record) => record.executionId).toSet();
+    final hashes = page.records.map((record) => record.transactionHash).toSet();
+    if (ids.length != page.records.length ||
+        hashes.length != page.records.length) {
+      throw _decodeFailure(
+        'transaction history page 包含重复 executionId 或 transactionHash',
+      );
+    }
+    if (page.nextBeforeExecutionId != null &&
+        (page.records.isEmpty ||
+            page.nextBeforeExecutionId != page.records.last.executionId)) {
+      throw _decodeFailure('transaction history page 的 next cursor 不属于末条记录');
+    }
+    return page;
+  }
+
+  CitizenPreparedTransaction decodePreparedTransaction(Object? raw) {
+    final tuple = _list(raw, 'preparedTransaction');
+    _expectLength(tuple, 7, 'preparedTransaction');
+    final preparationId = _string(
+      tuple[0],
+      'preparedTransaction.preparationId',
+    );
+    if (!RegExp(r'^0x[0-9a-f]{32}$').hasMatch(preparationId)) {
+      throw _decodeFailure('preparedTransaction.preparationId 必须是 16 字节小写十六进制');
+    }
+    final source = _hex32(tuple[1], 'preparedTransaction.sourceAccountId');
+    final callHash = _hex32(tuple[2], 'preparedTransaction.callDataHash');
+    final runtimeSpec = _nonNegativeInt(
+      tuple[4],
+      'preparedTransaction.runtimeSpecNumber',
+    );
+    final transactionFormat = _nonNegativeInt(
+      tuple[5],
+      'preparedTransaction.transactionFormatNumber',
+    );
+    if (runtimeSpec > 0xffffffff || transactionFormat > 0xffffffff) {
+      throw _decodeFailure('preparedTransaction runtime 数值必须是 uint32');
+    }
+    final bestBlock = decodeBlock(tuple[3]);
+    if (bestBlock.finality != CitizenBlockFinality.best) {
+      throw _decodeFailure('preparedTransaction.bestBlock 必须是 best 锚点');
+    }
+    return CitizenPreparedTransaction(
+      preparationId: preparationId,
+      sourceAccountId: citizenAccountIdBytes(source),
+      callDataHash: citizenAccountIdBytes(callHash),
+      bestBlock: bestBlock,
+      runtimeSpecNumber: runtimeSpec,
+      transactionFormatNumber: transactionFormat,
+      nonce: _u64Decimal(tuple[6], 'preparedTransaction.nonce'),
+    );
+  }
+
+  CitizenTransactionExecution decodeTransactionExecution(Object? raw) {
+    final tuple = _tuple(raw, 10, 'transactionExecution');
+    final status = _nonNegativeInt(tuple[0], 'transactionExecution.status');
+    final executionId = _string(tuple[1], 'transactionExecution.executionId');
+    if (!RegExp(r'^0x[0-9a-f]{32}$').hasMatch(executionId)) {
+      throw _decodeFailure('transactionExecution.executionId 必须是 16 字节小写十六进制');
+    }
+    final source = citizenAccountIdBytes(
+      _hex32(tuple[2], 'transactionExecution.sourceAccountId'),
+    );
+    final callHash = citizenAccountIdBytes(
+      _hex32(tuple[3], 'transactionExecution.callDataHash'),
+    );
+    if (status == 1) {
+      if (tuple[4] != null ||
+          tuple[7] != null ||
+          tuple[8] != null ||
+          tuple[9] != null) {
+        throw _decodeFailure('external pending 携带了 terminal 字段');
+      }
+      final expires = _u64Decimal(tuple[5], 'transactionExecution.expiresAt');
+      final request = _string(tuple[6], 'transactionExecution.qrRequest');
+      if (expires <= BigInt.zero ||
+          utf8.encode(request).length < 1 ||
+          utf8.encode(request).length > maximumQrTextBytes) {
+        throw _decodeFailure('external pending QR_V1 字段无效');
+      }
+      return CitizenTransactionExternalSigningPending(
+        executionId: executionId,
+        sourceAccountId: source,
+        callDataHash: callHash,
+        qrRequest: request,
+        expiresAt: DateTime.fromMillisecondsSinceEpoch(
+          (expires * BigInt.from(1000)).toInt(),
+          isUtc: true,
+        ),
+      );
+    }
+    if (status < 2 || status > 4 || tuple[5] != null || tuple[6] != null) {
+      throw _decodeFailure('transaction terminal status/QR 字段无效');
+    }
+    final transactionHash = citizenAccountIdBytes(
+      _hex32(tuple[4], 'transactionExecution.transactionHash'),
+    );
+    final execution = tuple[7] == null ? null : _decodeExecution(tuple[7]);
+    final reason = tuple[8] == null
+        ? null
+        : _string(tuple[8], 'transactionExecution.reason');
+    final replacement = tuple[9] == null
+        ? null
+        : citizenAccountIdBytes(
+            _hex32(tuple[9], 'transactionExecution.replacementHash'),
+          );
+    final resolution = switch (status) {
+      2 => CitizenTransactionResolution.finalizedSuccess,
+      3 => CitizenTransactionResolution.finalizedFailed,
+      4 => CitizenTransactionResolution.poolRejected,
+      _ => throw _decodeFailure('transaction terminal status 无效'),
+    };
+    final valid = switch (resolution) {
+      CitizenTransactionResolution.finalizedSuccess =>
+        execution?.status == CitizenExecutionStatus.success &&
+            reason == null &&
+            replacement == null,
+      CitizenTransactionResolution.finalizedFailed =>
+        execution?.status == CitizenExecutionStatus.failed &&
+            reason == null &&
+            replacement == null,
+      CitizenTransactionResolution.poolRejected =>
+        execution == null && (reason?.trim().isNotEmpty ?? false),
+    };
+    if (!valid) throw _decodeFailure('transaction terminal 字段不一致');
+    return CitizenTransactionExecutionCompleted(
+      executionId: executionId,
+      sourceAccountId: source,
+      callDataHash: callHash,
+      transactionHash: transactionHash,
+      resolution: resolution,
+      execution: execution,
+      poolRejectionReason: reason,
+      replacementHash: replacement,
+    );
   }
 
   void _validateRequestFields(String method, List<Object?> fields) {
@@ -558,13 +971,79 @@ final class CitizenSdkFlutterCodec {
       case 'close':
       case 'getCapabilities':
       case 'getFinalizedHead':
+      case 'getSyncStatus':
+      case 'getBestHead':
+      case 'exportState':
       case 'getGenesisHash':
       case 'getFeeSnapshot':
       case 'getWalletProfile':
+      case 'getWalletState':
       case 'importWallet':
       case 'deleteWallet':
       case 'reconcileWalletCleanup':
         _expectLength(fields, 0, '$method fields');
+        return;
+      case 'getFinalizedBlockAt':
+        _expectLength(fields, 1, '$method fields');
+        _u64Decimal(fields[0], '$method.number');
+        return;
+      case 'resolveFinalizedBlock':
+        _expectLength(fields, 2, '$method fields');
+        _hex32(fields[0], '$method.hash');
+        _u64Decimal(fields[1], '$method.number');
+        return;
+      case 'getBlockHeader':
+      case 'getBlockBody':
+      case 'getRuntimeContext':
+      case 'getSystemEvents':
+        _expectLength(fields, 1, '$method fields');
+        final block = decodeBlock(fields[0]);
+        if (method == 'getSystemEvents' &&
+            block.finality != CitizenBlockFinality.finalized) {
+          throw _decodeFailure('getSystemEvents 只接受 finalized 块');
+        }
+        return;
+      case 'getStorage':
+        _expectLength(fields, 2, '$method fields');
+        decodeBlock(fields[0]);
+        final key = _bytes(fields[1], '$method.key');
+        if (key.isEmpty || key.length > maximumStorageKeyBytes) {
+          throw _decodeFailure('storage key 必须为 1..4 KiB');
+        }
+        return;
+      case 'getStorageBatch':
+        _expectLength(fields, 2, '$method fields');
+        decodeBlock(fields[0]);
+        final keys = _list(fields[1], '$method.keys');
+        if (keys.isEmpty || keys.length > maximumStorageBatchKeys) {
+          throw _decodeFailure('storage batch 必须包含 1..1024 个 key');
+        }
+        var total = 0;
+        for (var index = 0; index < keys.length; index++) {
+          final item = _bytes(keys[index], '$method.keys[$index]');
+          if (item.isEmpty || item.length > maximumStorageKeyBytes) {
+            throw _decodeFailure('storage batch key 必须为 1..4 KiB');
+          }
+          total += item.length;
+          if (total > maximumStorageBatchKeyBytes) {
+            throw _decodeFailure('storage batch key 总长度超过 1 MiB');
+          }
+        }
+        return;
+      case 'importState':
+        _expectLength(fields, 3, '$method fields');
+        _positiveInt(fields[0], '$method.formatVersion');
+        final finalized = decodeBlock(fields[1]);
+        final database = _bytes(fields[2], '$method.database');
+        if (finalized.finality != CitizenBlockFinality.finalized ||
+            database.isEmpty ||
+            database.length > maximumExportedStateBytes) {
+          throw _decodeFailure('importState 的 finalized/database 无效');
+        }
+        return;
+      case 'deleteAccount':
+        _expectLength(fields, 1, '$method fields');
+        _hex32(fields[0], '$method.accountId');
         return;
       case 'getAccountBalance':
       case 'getAccountNonce':
@@ -596,11 +1075,39 @@ final class CitizenSdkFlutterCodec {
         _validateIndices(fields[0]);
         return;
       case 'renameWalletAccount':
+      case 'renameAccount':
         _expectLength(fields, 2, 'renameWalletAccount fields');
         _hex32(fields[0], 'renameWalletAccount.accountId');
         final name = _string(fields[1], 'renameWalletAccount.name');
         if (!_validAccountName(name)) {
           throw _decodeFailure('账户名称必须已修剪、含 1..30 个 Unicode scalar 且无控制字符');
+        }
+        return;
+      case 'importColdAccountId':
+        _expectLength(fields, 2, '$method fields');
+        _hex32(fields[0], '$method.accountId');
+        final idName = _string(fields[1], '$method.name');
+        if (!_validAccountName(idName)) {
+          throw _decodeFailure('账户名称必须已修剪、含 1..30 个 Unicode scalar 且无控制字符');
+        }
+        return;
+      case 'importColdAccountSs58':
+        _expectLength(fields, 2, '$method fields');
+        final ss58 = _string(fields[0], '$method.ss58Address');
+        final ss58Name = _string(fields[1], '$method.name');
+        if (ss58.isEmpty || ss58.length > 64 || !_validAccountName(ss58Name)) {
+          throw _decodeFailure('冷账户 SS58 或账户名称无效');
+        }
+        return;
+      case 'reorderWalletAccountsWithoutDefaultChange':
+        _expectLength(fields, 2, '$method fields');
+        _u64Decimal(fields[0], '$method.expectedRevision');
+        final ordered = _list(fields[1], '$method.accountIds');
+        if (ordered.isEmpty || ordered.length > maximumWalletCatalogAccounts) {
+          throw _decodeFailure('统一钱包重排必须包含 1..3980 个账户');
+        }
+        for (final accountId in ordered) {
+          _hex32(accountId, '$method.accountId');
         }
         return;
       case 'signWalletPayload':
@@ -611,6 +1118,63 @@ final class CitizenSdkFlutterCodec {
           throw _decodeFailure('签名 payload 不能超过 16 MiB');
         }
         return;
+      case 'beginSigning':
+        _expectLength(fields, 7, '$method fields');
+        _hex32(fields[0], '$method.accountId');
+        final signingPayload = _bytesView(fields[1], '$method.payload');
+        if (signingPayload.isEmpty ||
+            signingPayload.length > maximumSigningPayloadBytes) {
+          throw _decodeFailure('通用签名 payload 必须包含 1..16 MiB 字节');
+        }
+        final transform = _string(fields[2], '$method.transform');
+        final domain = _bytesView(fields[3], '$method.domain');
+        if (transform == 'blake2Domain') {
+          if (domain.isEmpty || domain.length > 32) {
+            throw _decodeFailure('blake2Domain 必须包含 1..32 字节 domain');
+          }
+        } else if ((transform != 'raw' &&
+                transform != 'substrateSigningPayload') ||
+            domain.isNotEmpty) {
+          throw _decodeFailure('签名 transform/domain 组合无效');
+        }
+        final transport = _string(fields[4], '$method.transport');
+        if (transport != 'none' && transport != 'qrV1') {
+          throw _decodeFailure('未知 external signer transport');
+        }
+        if (_nonNegativeInt(fields[5], '$method.opaqueAction') > 0xffff) {
+          throw _decodeFailure('opaqueAction 必须是 uint16');
+        }
+        final signingTtl = _positiveInt(fields[6], '$method.ttlSeconds');
+        if (signingTtl > 300) throw _decodeFailure('signing ttl 必须位于 1..300 秒');
+        return;
+      case 'consumeExternalSignature':
+      case 'consumeDefaultAccountChange':
+        _expectLength(fields, 2, '$method fields');
+        final signingSession = _string(fields[0], '$method.sessionId');
+        if (!_validSessionId(signingSession))
+          throw _decodeFailure('signing sessionId 无效');
+        _qrText(fields[1], '$method.response');
+        return;
+      case 'cancelSigning':
+        _expectLength(fields, 1, '$method fields');
+        if (!_validSessionId(_string(fields[0], '$method.sessionId'))) {
+          throw _decodeFailure('signing sessionId 无效');
+        }
+        return;
+      case 'beginDefaultAccountChange':
+        _expectLength(fields, 3, '$method fields');
+        _u64Decimal(fields[0], '$method.expectedRevision');
+        final defaultOrder = _list(fields[1], '$method.accountIds');
+        if (defaultOrder.isEmpty ||
+            defaultOrder.length > maximumDefaultAccountChangeAccounts) {
+          throw _decodeFailure('默认账户目标顺序必须包含 1..256 个账户');
+        }
+        for (final accountId in defaultOrder) {
+          _hex32(accountId, '$method.accountId');
+        }
+        final defaultTtl = _positiveInt(fields[2], '$method.ttlSeconds');
+        if (defaultTtl > 300) throw _decodeFailure('默认账户 ttl 必须位于 1..300 秒');
+        return;
       case 'verifySignature':
         _expectLength(fields, 3, 'verifySignature fields');
         _hex32(fields[0], 'verifySignature.accountId');
@@ -620,22 +1184,53 @@ final class CitizenSdkFlutterCodec {
           throw _decodeFailure('验签要求 64 字节签名及不超过 16 MiB 的消息');
         }
         return;
-      case 'transferWithRemark':
-        _expectLength(fields, 4, 'transferWithRemark fields');
-        _hex32(fields[0], 'transfer.sourceAccountId');
-        _hex32(fields[1], 'transfer.destinationAccountId');
-        if (_u128Decimal(fields[2], 'transfer.amountFen') <= BigInt.zero) {
-          throw _decodeFailure('transfer.amountFen 必须大于 0');
-        }
-        final remark = _string(fields[3], 'transfer.remark');
-        if (remark.length > 99 || utf8.encode(remark).length > 99) {
-          throw _decodeFailure('transfer.remark 不能超过 99 UTF-8 字节');
+      case 'prepareTransaction':
+        _expectLength(fields, 2, '$method fields');
+        _hex32(fields[0], '$method.sourceAccountId');
+        final callData = _bytesView(fields[1], '$method.callData');
+        if (callData.isEmpty ||
+            callData.length > maximumTransactionCallDataBytes) {
+          throw _decodeFailure('prepareTransaction.callData 必须包含 1..1 MiB 字节');
         }
         return;
-      case 'initializeFinalizedHistory':
-      case 'syncFinalizedHistory':
+      case 'cancelPreparedTransaction':
         _expectLength(fields, 1, '$method fields');
-        _validateAccountIds(fields[0], '$method.accountIds');
+        final preparationId = _string(fields[0], '$method.preparationId');
+        if (!RegExp(r'^0x[0-9a-f]{32}$').hasMatch(preparationId)) {
+          throw _decodeFailure('cancelPreparedTransaction.preparationId 无效');
+        }
+        return;
+      case 'executePreparedTransaction':
+      case 'cancelPreparedTransactionExecution':
+        _expectLength(fields, 1, '$method fields');
+        final id = _string(fields[0], '$method.id');
+        if (!RegExp(r'^0x[0-9a-f]{32}$').hasMatch(id)) {
+          throw _decodeFailure('$method id 无效');
+        }
+        return;
+      case 'consumePreparedTransactionQrResponse':
+        _expectLength(fields, 2, '$method fields');
+        final id = _string(fields[0], '$method.executionId');
+        final response = _string(fields[1], '$method.response');
+        final responseBytes = utf8.encode(response).length;
+        if (!RegExp(r'^0x[0-9a-f]{32}$').hasMatch(id) ||
+            responseBytes < 1 ||
+            responseBytes > maximumQrTextBytes) {
+          throw _decodeFailure('$method 参数无效');
+        }
+        return;
+      case 'getTransactionHistory':
+        _expectLength(fields, 2, '$method fields');
+        if (fields[0] != null) {
+          _hex16(fields[0], '$method.beforeExecutionId');
+        }
+        final limit = _u32Int(fields[1], '$method.limit');
+        if (limit < 1 || limit > 100) {
+          throw _decodeFailure('$method.limit 必须在 1..100 范围内');
+        }
+        return;
+      case 'syncTransactionHistory':
+        _expectLength(fields, 0, '$method fields');
         return;
       case 'qrScan':
         _expectLength(fields, 0, '$method fields');
@@ -745,6 +1340,51 @@ final class CitizenSdkFlutterCodec {
           throw _decodeFailure('getFinalizedHead 必须返回 finalized 块');
         }
         return;
+      case 'getSyncStatus':
+        _expectLength(value, 1, '$method value');
+        decodeSyncStatus(value[0]);
+        return;
+      case 'getBestHead':
+        _expectLength(value, 1, '$method value');
+        if (decodeBlock(value[0]).finality != CitizenBlockFinality.best) {
+          throw _decodeFailure('getBestHead 必须返回 best 块');
+        }
+        return;
+      case 'getFinalizedBlockAt':
+      case 'resolveFinalizedBlock':
+        _expectLength(value, 1, '$method value');
+        if (decodeBlock(value[0]).finality != CitizenBlockFinality.finalized) {
+          throw _decodeFailure('$method 必须返回 finalized 块');
+        }
+        return;
+      case 'getBlockHeader':
+        _expectLength(value, 1, '$method value');
+        decodeBlockHeader(value[0]);
+        return;
+      case 'getBlockBody':
+        _expectLength(value, 1, '$method value');
+        decodeBlockBody(value[0]);
+        return;
+      case 'getRuntimeContext':
+        _expectLength(value, 1, '$method value');
+        decodeRuntimeContext(value[0]);
+        return;
+      case 'getStorage':
+      case 'getSystemEvents':
+        _expectLength(value, 1, '$method value');
+        decodeStorage(value[0]);
+        return;
+      case 'getStorageBatch':
+        _expectLength(value, 1, '$method value');
+        decodeStorageBatch(value[0]);
+        return;
+      case 'exportState':
+        _expectLength(value, 1, '$method value');
+        decodeChainState(value[0]);
+        return;
+      case 'importState':
+        _expectLength(value, 0, '$method value');
+        return;
       case 'getGenesisHash':
         _expectLength(value, 1, '$method value');
         _hex32(value[0], 'genesisHash');
@@ -777,6 +1417,15 @@ final class CitizenSdkFlutterCodec {
         _expectLength(value, 1, '$method value');
         decodeWalletProfile(value[0]);
         return;
+      case 'getWalletState':
+      case 'importColdAccountId':
+      case 'importColdAccountSs58':
+      case 'reorderWalletAccountsWithoutDefaultChange':
+      case 'renameAccount':
+      case 'deleteAccount':
+        _expectLength(value, 1, '$method value');
+        decodeWalletState(value[0]);
+        return;
       case 'signWalletPayload':
         _expectLength(value, 1, '$method value');
         final signature = _bytes(value[0], 'signature');
@@ -784,14 +1433,40 @@ final class CitizenSdkFlutterCodec {
           throw _decodeFailure('sr25519 signature 必须是 64 字节');
         }
         return;
-      case 'transferWithRemark':
+      case 'beginSigning':
+      case 'consumeExternalSignature':
         _expectLength(value, 1, '$method value');
-        decodeTransfer(value[0]);
+        decodeSigningOutcome(value[0]);
         return;
-      case 'initializeFinalizedHistory':
-      case 'syncFinalizedHistory':
+      case 'beginDefaultAccountChange':
+      case 'consumeDefaultAccountChange':
         _expectLength(value, 1, '$method value');
-        decodeHistory(value[0]);
+        decodeDefaultAccountChangeOutcome(value[0]);
+        return;
+      case 'cancelSigning':
+        _expectLength(value, 1, '$method value');
+        _boolean(value[0], '$method.cancelled');
+        return;
+      case 'prepareTransaction':
+        _expectLength(value, 1, '$method value');
+        decodePreparedTransaction(value[0]);
+        return;
+      case 'executePreparedTransaction':
+      case 'consumePreparedTransactionQrResponse':
+        _expectLength(value, 1, '$method value');
+        decodeTransactionExecution(value[0]);
+        return;
+      case 'cancelPreparedTransaction':
+      case 'cancelPreparedTransactionExecution':
+        _expectLength(value, 1, '$method value');
+        if (value[0] != null) {
+          throw _decodeFailure('$method value 必须是 null');
+        }
+        return;
+      case 'getTransactionHistory':
+      case 'syncTransactionHistory':
+        _expectLength(value, 1, '$method value');
+        decodeTransactionHistoryPage(value[0]);
         return;
       case 'qrParse':
       case 'qrScan':
@@ -981,50 +1656,6 @@ final class CitizenSdkFlutterCodec {
     );
   }
 
-  CitizenSdkTransferProgress _decodeTransferProgress(
-    int sequence,
-    List<Object?> payload,
-  ) {
-    _expectLength(payload, 5, 'transfer progress');
-    final statusText = _string(payload[1], 'progress.status');
-    final event = CitizenSdkTransferProgress(
-      sequence: sequence,
-      requestSequence: _positiveInt(payload[0], 'progress.requestSequence'),
-      status: CitizenTransferProgressStatus.values.firstWhere(
-        (candidate) => candidate.name == statusText,
-        orElse: () => throw _decodeFailure('未知 transfer status：$statusText'),
-      ),
-      block: payload[2] == null ? null : decodeBlock(payload[2]),
-      replacementHash: payload[3] == null
-          ? null
-          : _hex32(payload[3], 'progress.replacementHash'),
-      peerCount: _u32Int(payload[4], 'progress.peerCount'),
-    );
-    final hasBlock = event.block != null;
-    final hasReplacement = event.replacementHash != null;
-    final valid = switch (event.status) {
-      CitizenTransferProgressStatus.ready ||
-      CitizenTransferProgressStatus.future ||
-      CitizenTransferProgressStatus.dropped ||
-      CitizenTransferProgressStatus.invalid =>
-        !hasBlock && !hasReplacement && event.peerCount == 0,
-      CitizenTransferProgressStatus.broadcast => !hasBlock && !hasReplacement,
-      CitizenTransferProgressStatus.inBlock ||
-      CitizenTransferProgressStatus.retracted =>
-        hasBlock && !hasReplacement && event.peerCount == 0,
-      CitizenTransferProgressStatus.finalized =>
-        event.block?.finality == CitizenBlockFinality.finalized &&
-            !hasReplacement &&
-            event.peerCount == 0,
-      CitizenTransferProgressStatus.finalityTimeout =>
-        !hasReplacement && event.peerCount == 0,
-      CitizenTransferProgressStatus.usurped =>
-        !hasBlock && hasReplacement && event.peerCount == 0,
-    };
-    if (!valid) throw _decodeFailure('transfer progress 状态字段不一致');
-    return event;
-  }
-
   CitizenExecution _decodeExecution(Object? raw) {
     final tuple = _tuple(raw, 6, 'execution');
     final statusText = _string(tuple[0], 'execution.status');
@@ -1059,129 +1690,79 @@ final class CitizenSdkFlutterCodec {
     return execution;
   }
 
-  CitizenHistoryCursor _decodeCursor(Object? raw) {
-    final tuple = _tuple(raw, 3, 'history cursor');
-    final cursor = CitizenHistoryCursor(
-      accountId: _hex32(tuple[0], 'cursor.accountId'),
-      trackingStartBlock: decodeBlock(tuple[1]),
-      lastSyncedBlock: decodeBlock(tuple[2]),
-    );
-    if (cursor.trackingStartBlock.finality != CitizenBlockFinality.finalized ||
-        cursor.lastSyncedBlock.finality != CitizenBlockFinality.finalized ||
-        cursor.lastSyncedBlock.number < cursor.trackingStartBlock.number ||
-        (cursor.lastSyncedBlock.number == cursor.trackingStartBlock.number &&
-            !_sameBlock(cursor.lastSyncedBlock, cursor.trackingStartBlock))) {
-      throw _decodeFailure('history cursor 必须锚定 finalized 块且不能倒退或同高换 hash');
-    }
-    return cursor;
-  }
-
-  CitizenHistoryRecord _decodeHistoryRecord(Object? raw) {
-    final tuple = _tuple(raw, 12, 'history record');
-    final statusText = _string(tuple[5], 'record.status');
-    final record = CitizenHistoryRecord(
-      accountId: _hex32(tuple[0], 'record.accountId'),
-      transactionHash: _hex32(tuple[1], 'record.transactionHash'),
-      nonce: _u64Decimal(tuple[2], 'record.nonce'),
-      destinationAccountId: _hex32(tuple[3], 'record.destinationAccountId'),
-      amountFen: _u128Decimal(tuple[4], 'record.amountFen'),
-      status: CitizenHistoryStatus.values.firstWhere(
-        (candidate) => candidate.name == statusText,
-        orElse: () => throw _decodeFailure('未知 history status：$statusText'),
+  CitizenTransactionHistoryRecord _decodeTransactionHistoryRecord(Object? raw) {
+    final tuple = _tuple(raw, 11, 'transaction history record');
+    final statusText = _string(tuple[4], 'transactionHistoryRecord.status');
+    final record = CitizenTransactionHistoryRecord(
+      executionId: _hex16(tuple[0], 'transactionHistoryRecord.executionId'),
+      sourceAccountId: _hex32(
+        tuple[1],
+        'transactionHistoryRecord.sourceAccountId',
       ),
-      block: tuple[6] == null ? null : decodeBlock(tuple[6]),
-      execution: tuple[7] == null ? null : _decodeExecution(tuple[7]),
-      createdAtMillis: _u64Decimal(tuple[8], 'record.createdAtMillis'),
-      updatedAtMillis: _u64Decimal(tuple[9], 'record.updatedAtMillis'),
-      remark: _string(tuple[10], 'record.remark'),
+      callDataHash: _hex32(tuple[2], 'transactionHistoryRecord.callDataHash'),
+      transactionHash: _hex32(
+        tuple[3],
+        'transactionHistoryRecord.transactionHash',
+      ),
+      status: CitizenTransactionHistoryStatus.values.firstWhere(
+        (candidate) => candidate.name == statusText,
+        orElse: () =>
+            throw _decodeFailure('未知 transaction history status：$statusText'),
+      ),
+      block: tuple[5] == null ? null : decodeBlock(tuple[5]),
+      execution: tuple[6] == null ? null : _decodeExecution(tuple[6]),
+      replacementHash: tuple[7] == null
+          ? null
+          : _hex32(tuple[7], 'transactionHistoryRecord.replacementHash'),
+      createdAtMillis: _u64Decimal(
+        tuple[8],
+        'transactionHistoryRecord.createdAtMillis',
+      ),
+      updatedAtMillis: _u64Decimal(
+        tuple[9],
+        'transactionHistoryRecord.updatedAtMillis',
+      ),
       poolRejectionReason: _nullableString(
-        tuple[11],
-        'record.poolRejectionReason',
+        tuple[10],
+        'transactionHistoryRecord.poolRejectionReason',
       ),
     );
     final reasonPresent =
-        record.poolRejectionReason != null &&
-        record.poolRejectionReason!.trim().isNotEmpty;
+        record.poolRejectionReason?.trim().isNotEmpty ?? false;
     final finalizedExecutionMatches =
         record.block != null &&
         record.execution != null &&
         _sameBlock(record.block!, record.execution!.block);
     final valid = switch (record.status) {
-      CitizenHistoryStatus.pending =>
+      CitizenTransactionHistoryStatus.pending =>
         record.block == null &&
             record.execution == null &&
+            record.replacementHash == null &&
             record.poolRejectionReason == null,
-      CitizenHistoryStatus.inBlock =>
+      CitizenTransactionHistoryStatus.inBlock =>
         record.block != null &&
             record.execution == null &&
+            record.replacementHash == null &&
             record.poolRejectionReason == null,
-      CitizenHistoryStatus.poolRejected =>
+      CitizenTransactionHistoryStatus.poolRejected =>
         record.block == null && record.execution == null && reasonPresent,
-      CitizenHistoryStatus.finalizedSuccess =>
+      CitizenTransactionHistoryStatus.finalizedSuccess =>
         record.block?.finality == CitizenBlockFinality.finalized &&
             record.execution?.status == CitizenExecutionStatus.success &&
             finalizedExecutionMatches &&
+            record.replacementHash == null &&
             record.poolRejectionReason == null,
-      CitizenHistoryStatus.finalizedFailed =>
+      CitizenTransactionHistoryStatus.finalizedFailed =>
         record.block?.finality == CitizenBlockFinality.finalized &&
             record.execution?.status == CitizenExecutionStatus.failed &&
             finalizedExecutionMatches &&
+            record.replacementHash == null &&
             record.poolRejectionReason == null,
     };
-    if (!valid ||
-        record.amountFen <= BigInt.zero ||
-        record.updatedAtMillis < record.createdAtMillis ||
-        utf8.encode(record.remark).length > 99) {
-      throw _decodeFailure('history record 的金额、时间、备注或状态字段不一致');
+    if (!valid || record.updatedAtMillis < record.createdAtMillis) {
+      throw _decodeFailure('transaction history record 的状态或时间字段不一致');
     }
     return record;
-  }
-
-  CitizenFinalizedTransfer _decodeFinalizedTransfer(Object? raw) {
-    final tuple = _tuple(raw, 11, 'finalized transfer');
-    final directionText = _string(tuple[7], 'transfer.direction');
-    final transfer = CitizenFinalizedTransfer(
-      trackedAccountId: _hex32(tuple[0], 'transfer.trackedAccountId'),
-      fromAccountId: _hex32(tuple[1], 'transfer.fromAccountId'),
-      toAccountId: _hex32(tuple[2], 'transfer.toAccountId'),
-      amountFen: _u128Decimal(tuple[3], 'transfer.amountFen'),
-      block: decodeBlock(tuple[4]),
-      eventRecordIndex: _u32Int(tuple[5], 'transfer.eventRecordIndex'),
-      extrinsicIndex: _nullableU32Int(tuple[6], 'transfer.extrinsicIndex'),
-      direction: CitizenTransferDirection.values.firstWhere(
-        (candidate) => candidate.name == directionText,
-        orElse: () =>
-            throw _decodeFailure('未知 transfer direction：$directionText'),
-      ),
-      sourcePallet: _string(tuple[8], 'transfer.sourcePallet'),
-      remarkDisplay: _string(tuple[9], 'transfer.remarkDisplay'),
-      remarkBytes: _bytes(tuple[10], 'transfer.remarkBytes'),
-    );
-    final expectedDirection = transfer.trackedAccountId == transfer.toAccountId
-        ? CitizenTransferDirection.incoming
-        : CitizenTransferDirection.outgoing;
-    final remarkProjection = utf8.decode(
-      transfer.remarkBytes,
-      allowMalformed: true,
-    );
-    final sourceValid = switch (transfer.sourcePallet) {
-      'Balances' =>
-        transfer.remarkBytes.isEmpty && transfer.remarkDisplay.isEmpty,
-      'OnchainTransaction' => transfer.extrinsicIndex != null,
-      _ => false,
-    };
-    if (transfer.block.finality != CitizenBlockFinality.finalized ||
-        transfer.amountFen <= BigInt.zero ||
-        transfer.fromAccountId == transfer.toAccountId ||
-        (transfer.trackedAccountId != transfer.fromAccountId &&
-            transfer.trackedAccountId != transfer.toAccountId) ||
-        transfer.direction != expectedDirection ||
-        transfer.remarkBytes.length > 99 ||
-        transfer.remarkDisplay != remarkProjection ||
-        !sourceValid) {
-      throw _decodeFailure('finalized transfer 的链事实、方向、来源或备注投影不一致');
-    }
-    return transfer;
   }
 
   List<T> _decodeList<T>(Object? raw, String name, T Function(Object?) decode) {
@@ -1202,19 +1783,6 @@ final class CitizenSdkFlutterCodec {
     }
     if (indices.toSet().length != indices.length) {
       throw _decodeFailure('indices 不能重复');
-    }
-  }
-
-  void _validateAccountIds(Object? raw, String name) {
-    final values = _list(raw, name);
-    if (values.isEmpty || values.length > maximumHistoryAccounts) {
-      throw _decodeFailure('$name 必须包含 1..1990 个账户');
-    }
-    final accountIds = values
-        .map<String>((value) => _hex32(value, name))
-        .toList(growable: false);
-    if (accountIds.toSet().length != accountIds.length) {
-      throw _decodeFailure('$name 不能重复');
     }
   }
 
@@ -1367,6 +1935,14 @@ final class CitizenSdkFlutterCodec {
     final value = _string(raw, name);
     if (value.length != 66 || !RegExp(r'^0x[0-9a-f]{64}$').hasMatch(value)) {
       throw _decodeFailure('$name 必须是 0x 加 64 位小写十六进制');
+    }
+    return value;
+  }
+
+  String _hex16(Object? raw, String name) {
+    final value = _string(raw, name);
+    if (value.length != 34 || !RegExp(r'^0x[0-9a-f]{32}$').hasMatch(value)) {
+      throw _decodeFailure('$name 必须是 0x 加 32 位小写十六进制');
     }
     return value;
   }

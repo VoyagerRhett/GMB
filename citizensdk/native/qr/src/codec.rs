@@ -1,12 +1,12 @@
 use std::collections::BTreeSet;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use blake2::{digest::Update, digest::VariableOutput, Blake2bVar};
-use citizen_sdk_contracts::{AccountId32, Sr25519PublicKey, Sr25519Signature};
+use citizen_sdk_contracts::{
+    apply_signing_transform, AccountId32, SigningTransform, Sr25519PublicKey, Sr25519Signature,
+};
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value};
 
-use crate::chain_actions::is_registered_chain_action;
 use crate::{QrClock, SystemQrClock};
 
 pub const QR_V1: &str = "QR_V1";
@@ -107,7 +107,10 @@ pub enum QrCode {
 pub fn parse(raw: &str) -> QrResult<QrCode> {
     let now = SystemQrClock.now_epoch_seconds();
     if now == 0 {
-        return Err(QrError::new(QrErrorCode::ClockUnavailable, "系统时钟不可用"));
+        return Err(QrError::new(
+            QrErrorCode::ClockUnavailable,
+            "系统时钟不可用",
+        ));
     }
     parse_at(raw, now)
 }
@@ -195,7 +198,6 @@ impl SignRequest {
 
     pub fn encode(&self) -> QrResult<String> {
         validate_request_id(&self.request_id)?;
-        validate_chain_action(self.action)?;
         validate_expiry_value(self.expires_at)?;
         if self.review_payload.is_empty() {
             return Err(invalid_field("签名请求的期限和审阅载荷不能为空"));
@@ -206,7 +208,6 @@ impl SignRequest {
                 "审阅载荷超过单码安全上限",
             ));
         }
-        validate_action_binding(self.action, &self.review_payload)?;
         checked_json(serde_json::json!({
             "p": QR_V1,
             "k": 1,
@@ -272,20 +273,11 @@ impl AccountIdCode {
 
 /// Substrate `SignedPayload::using_encoded` 的唯一签名字节规则。
 pub(crate) fn signing_bytes(review_payload: &[u8]) -> QrResult<Vec<u8>> {
-    if review_payload.is_empty() || review_payload.len() > MAX_REVIEW_PAYLOAD_BYTES {
+    if review_payload.len() > MAX_REVIEW_PAYLOAD_BYTES {
         return Err(invalid_field("review_payload 长度无效"));
     }
-    if review_payload.len() <= 256 {
-        return Ok(review_payload.to_vec());
-    }
-    let mut output = vec![0_u8; 32];
-    let mut hasher = Blake2bVar::new(output.len())
-        .map_err(|_| QrError::new(QrErrorCode::InvalidFormat, "无法初始化 blake2_256"))?;
-    hasher.update(review_payload);
-    hasher
-        .finalize_variable(&mut output)
-        .map_err(|_| QrError::new(QrErrorCode::InvalidFormat, "无法生成 blake2_256"))?;
-    Ok(output)
+    apply_signing_transform(review_payload, &SigningTransform::SubstrateSigningPayload)
+        .map_err(|_| invalid_field("review_payload 长度无效"))
 }
 
 fn parse_sign_request(envelope: &Map<String, Value>, now: u64) -> QrResult<QrCode> {
@@ -298,7 +290,6 @@ fn parse_sign_request(envelope: &Map<String, Value>, now: u64) -> QrResult<QrCod
     exact_keys(body, &["a", "g", "u", "d"])?;
     let action =
         u16::try_from(unsigned(body, "a")?).map_err(|_| invalid_field("签名动作超出 u16"))?;
-    validate_chain_action(action)?;
     if unsigned(body, "g")? != 1 {
         return Err(invalid_field("签名算法只允许 sr25519"));
     }
@@ -310,7 +301,6 @@ fn parse_sign_request(envelope: &Map<String, Value>, now: u64) -> QrResult<QrCod
     if review_payload.is_empty() {
         return Err(invalid_field("review_payload 不能为空"));
     }
-    validate_action_binding(action, &review_payload)?;
     Ok(QrCode::SignRequest(SignRequest {
         request_id,
         expires_at,
@@ -370,25 +360,6 @@ fn parse_account_id(envelope: &Map<String, Value>) -> QrResult<QrCode> {
     Ok(QrCode::AccountId(AccountIdCode {
         account_id: AccountId32::from_bytes(decode_account_id(string(body, "n")?)?),
     }))
-}
-
-fn validate_chain_action(action: u16) -> QrResult<()> {
-    if !is_registered_chain_action(action) {
-        return Err(QrError::new(
-            QrErrorCode::UnsupportedAction,
-            "CitizenSDK 扫码签名只接受已登记区块链调用动作",
-        ));
-    }
-    Ok(())
-}
-
-/// SignedPayload 以 Runtime call 的 pallet/call 两字节开头。公开 action 必须与
-/// 实际签名载荷绑定，拒绝审阅标题与最终链调用不一致的请求。
-fn validate_action_binding(action: u16, payload: &[u8]) -> QrResult<()> {
-    if payload.len() < 2 || u16::from_be_bytes([payload[0], payload[1]]) != action {
-        return Err(invalid_field("action 与 review_payload 的链调用索引不一致"));
-    }
-    Ok(())
 }
 
 /// serde_json 的默认 Value 会覆盖重复对象键；QR_V1 在覆盖发生前失败关闭。
@@ -653,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_fields_and_non_chain_actions() {
+    fn rejects_unknown_fields_but_accepts_any_opaque_u16_action() {
         let encoded = request().encode().unwrap();
         let injected = encoded.replacen("{\"a\"", "{\"extra\":true,\"a\"", 1);
         assert_eq!(
@@ -662,14 +633,13 @@ mod tests {
         );
         let mut request = request();
         request.action = 2;
-        assert_eq!(
-            request.encode().unwrap_err().code(),
-            QrErrorCode::UnsupportedAction
-        );
+        request.review_payload = b"third-party opaque payload".to_vec();
+        let encoded = request.encode().unwrap();
+        assert_eq!(parse(&encoded, 99), Ok(QrCode::SignRequest(request)));
     }
 
     #[test]
-    fn rejects_duplicate_keys_and_action_payload_mismatch() {
+    fn rejects_duplicate_keys_without_imposing_payload_action_semantics() {
         let encoded = request().encode().unwrap();
         // serde_json 的对象键序不是协议合同的一部分；直接在根对象首位插入
         // 第二个 `p`，保证无论规范编码的键顺序如何都确实形成重复键。
@@ -680,10 +650,8 @@ mod tests {
         );
         let mut mismatched = request();
         mismatched.review_payload[1] = 1;
-        assert_eq!(
-            mismatched.encode().unwrap_err().code(),
-            QrErrorCode::InvalidField
-        );
+        let encoded = mismatched.encode().unwrap();
+        assert_eq!(parse(&encoded, 99), Ok(QrCode::SignRequest(mismatched)));
     }
 
     #[test]
@@ -704,20 +672,49 @@ mod tests {
     fn expiry_uses_the_same_exact_positive_i64_domain_in_every_wire_kind() {
         let mut request = request();
         request.expires_at = i64::MAX as u64;
-        let response = SignResponse { request_id: request.request_id.clone(), expires_at: request.expires_at, signer_public_key: request.signer_public_key, signature: Sr25519Signature::from_bytes([0; 64]) };
-        let transfer = UserTransfer { request_id: request.request_id.clone(), expires_at: request.expires_at, account_id: AccountId32::from_bytes([7; 32]), amount: "1".into(), symbol: "GMB".into(), memo: String::new(), bank_cid_number: "1".into() };
-        for text in [request.encode().unwrap(), response.encode().unwrap(), transfer.encode().unwrap()] {
+        let response = SignResponse {
+            request_id: request.request_id.clone(),
+            expires_at: request.expires_at,
+            signer_public_key: request.signer_public_key,
+            signature: Sr25519Signature::from_bytes([0; 64]),
+        };
+        let transfer = UserTransfer {
+            request_id: request.request_id.clone(),
+            expires_at: request.expires_at,
+            account_id: AccountId32::from_bytes([7; 32]),
+            amount: "1".into(),
+            symbol: "GMB".into(),
+            memo: String::new(),
+            bank_cid_number: "1".into(),
+        };
+        for text in [
+            request.encode().unwrap(),
+            response.encode().unwrap(),
+            transfer.encode().unwrap(),
+        ] {
             assert!(parse(&text, 99).is_ok());
             let invalid = text.replace(&i64::MAX.to_string(), &(i64::MAX as u64 + 1).to_string());
-            assert_eq!(parse(&invalid, 99).unwrap_err().code(), QrErrorCode::InvalidField);
+            assert_eq!(
+                parse(&invalid, 99).unwrap_err().code(),
+                QrErrorCode::InvalidField
+            );
         }
         request.expires_at += 1;
-        assert_eq!(request.encode().unwrap_err().code(), QrErrorCode::InvalidField);
+        assert_eq!(
+            request.encode().unwrap_err().code(),
+            QrErrorCode::InvalidField
+        );
         let mut response = response;
         response.expires_at += 1;
-        assert_eq!(response.encode().unwrap_err().code(), QrErrorCode::InvalidField);
+        assert_eq!(
+            response.encode().unwrap_err().code(),
+            QrErrorCode::InvalidField
+        );
         let mut transfer = transfer;
         transfer.expires_at += 1;
-        assert_eq!(transfer.encode().unwrap_err().code(), QrErrorCode::InvalidField);
+        assert_eq!(
+            transfer.encode().unwrap_err().code(),
+            QrErrorCode::InvalidField
+        );
     }
 }

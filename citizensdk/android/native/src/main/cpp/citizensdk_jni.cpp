@@ -22,7 +22,6 @@ namespace {
 constexpr uint32_t kWireVersion = 1;
 constexpr int32_t kOk = CITIZENSDK_OK;
 constexpr jsize kMaxWalletSecretBytes = 1024;
-constexpr jsize kMaxTransferRemarkBytes = 99;
 constexpr jsize kMaxWalletAccountIndices = 1989;
 constexpr size_t kMaxQrTextBytes = 2331;
 constexpr size_t kMaxQrReviewBytes = 1920;
@@ -240,129 +239,180 @@ bool write_wallet_accounts(citizensdk_result_handle_t result,
   return true;
 }
 
-bool copy_wallet_transfer(citizensdk_result_handle_t result,
-                          WireWriter *payload) {
-  auto info = info_value<citizensdk_wallet_transfer_info_t>();
-  uint64_t required = 0;
-  int32_t code = citizensdk_result_get_wallet_transfer(
-      result, &info, nullptr, 0, &required);
-  if (code != kOk || required > 64 * 1024) return false;
-  std::vector<uint8_t> reason(static_cast<size_t>(required));
-  info = info_value<citizensdk_wallet_transfer_info_t>();
-  if (citizensdk_result_get_wallet_transfer(
-          result, &info, reason.empty() ? nullptr : reason.data(), required,
-          &required) != kOk) {
+bool write_wallet_state(citizensdk_result_handle_t result,
+                        WireWriter *payload) {
+  auto state = info_value<citizensdk_wallet_state_info_t>();
+  auto profile = info_value<citizensdk_wallet_profile_info_t>();
+  if (citizensdk_result_get_wallet_state(result, &state) != kOk ||
+      citizensdk_result_get_wallet_profile(result, &profile) != kOk ||
+      state.account_count > 3980 || profile.account_count > 1990 ||
+      profile.present > 1 || state.has_default_account > 1 ||
+      ((state.account_count == 0) != (state.has_default_account == 0)) ||
+      (profile.present != 0 &&
+       (profile.wallet_index != 0 ||
+        (profile.origin != CITIZENSDK_WALLET_ORIGIN_CREATED &&
+         profile.origin != CITIZENSDK_WALLET_ORIGIN_IMPORTED)))) {
     return false;
   }
-  payload->fixed(info.transaction_hash, 32);
-  payload->u32(info.resolution);
-  payload->u8(info.has_execution == 0 ? 0 : 1);
-  if (info.has_execution != 0) write_execution(payload, info.execution);
-  payload->u8(reason.empty() ? 0 : 1);
-  if (!reason.empty()) payload->text(reason);
+  payload->u64(state.revision);
+  payload->u8(profile.present == 0 ? 0 : 1);
+  if (profile.present != 0) {
+    payload->u32(profile.origin);
+    payload->u32(profile.wallet_index);
+    payload->u64(profile.created_at_millis);
+    payload->fixed(profile.master_account_id.bytes, 32);
+    payload->fixed(profile.active_account_id.bytes, 32);
+    payload->u32(profile.account_count);
+  }
+  payload->u32(state.account_count);
+  for (uint32_t index = 0; index < state.account_count; ++index) {
+    auto account = info_value<citizensdk_wallet_state_account_info_t>();
+    uint64_t ss58_required = 0;
+    uint64_t name_required = 0;
+    int32_t code = citizensdk_result_get_wallet_state_account(
+        result, index, &account, nullptr, 0, &ss58_required, nullptr, 0,
+        &name_required);
+    if (code != kOk || ss58_required > 1024 || name_required > 1024 ||
+        account.has_account_index > 1 || account.is_default > 1 ||
+        account.is_default != (index == 0 ? 1U : 0U) ||
+        (index == 0 && state.has_default_account != 0 &&
+         std::memcmp(account.account_id.bytes, state.default_account_id.bytes, 32) != 0) ||
+        !((account.sign_mode == CITIZENSDK_WALLET_SIGN_HOT &&
+           account.wallet_index == 0 && account.has_account_index == 1) ||
+          (account.sign_mode == CITIZENSDK_WALLET_SIGN_COLD &&
+           account.wallet_index > 0 && account.has_account_index == 0))) return false;
+    std::vector<uint8_t> ss58(static_cast<size_t>(ss58_required));
+    std::vector<uint8_t> name(static_cast<size_t>(name_required));
+    account = info_value<citizensdk_wallet_state_account_info_t>();
+    code = citizensdk_result_get_wallet_state_account(
+        result, index, &account, ss58.empty() ? nullptr : ss58.data(),
+        ss58_required, &ss58_required, name.empty() ? nullptr : name.data(),
+        name_required, &name_required);
+    if (code != kOk || account.has_account_index > 1 || account.is_default > 1 ||
+        account.is_default != (index == 0 ? 1U : 0U)) return false;
+    payload->u32(account.sign_mode);
+    payload->u32(account.wallet_index);
+    payload->u8(account.has_account_index == 0 ? 0 : 1);
+    if (account.has_account_index != 0) payload->u32(account.account_index);
+    payload->fixed(account.account_id.bytes, 32);
+    payload->text(ss58);
+    payload->text(name);
+    payload->u64(account.created_at_millis);
+    payload->u8(account.is_default == 0 ? 0 : 1);
+  }
   return true;
 }
 
-bool copy_history_record(citizensdk_result_handle_t result, uint32_t index,
-                         WireWriter *payload) {
-  auto info = info_value<citizensdk_history_record_info_t>();
-  uint64_t remark_required = 0;
-  uint64_t reason_required = 0;
-  int32_t code = citizensdk_result_get_history_record(
-      result, index, &info, nullptr, 0, &remark_required, nullptr, 0,
-      &reason_required);
-  if (code != kOk || remark_required > 64 * 1024 ||
-      reason_required > 64 * 1024) return false;
-  std::vector<uint8_t> remark(static_cast<size_t>(remark_required));
-  std::vector<uint8_t> reason(static_cast<size_t>(reason_required));
-  info = info_value<citizensdk_history_record_info_t>();
-  if (citizensdk_result_get_history_record(
-          result, index, &info, remark.empty() ? nullptr : remark.data(),
-          remark_required, &remark_required,
-          reason.empty() ? nullptr : reason.data(), reason_required,
-          &reason_required) != kOk) {
-    return false;
-  }
+bool write_signing_outcome(citizensdk_result_handle_t result,
+                           WireWriter *payload) {
+  auto info = info_value<citizensdk_signing_outcome_info_t>();
+  uint64_t signature_required = 0, session_required = 0, request_required = 0;
+  int32_t code = citizensdk_result_get_signing_outcome(
+      result, &info, nullptr, 0, &signature_required, nullptr, 0,
+      &session_required, nullptr, 0, &request_required);
+  if (code != kOk || signature_required > 64 || session_required > 128 ||
+      request_required > kMaxQrTextBytes) return false;
+  std::vector<uint8_t> signature(static_cast<size_t>(signature_required));
+  std::vector<uint8_t> session(static_cast<size_t>(session_required));
+  std::vector<uint8_t> request(static_cast<size_t>(request_required));
+  info = info_value<citizensdk_signing_outcome_info_t>();
+  code = citizensdk_result_get_signing_outcome(
+      result, &info, signature.empty() ? nullptr : signature.data(),
+      signature.size(), &signature_required,
+      session.empty() ? nullptr : session.data(), session.size(),
+      &session_required, request.empty() ? nullptr : request.data(),
+      request.size(), &request_required);
+  if (code != kOk || (info.status == CITIZENSDK_SIGNING_COMPLETED &&
+      (signature.size() != 64 || !session.empty() || !request.empty())) ||
+      (info.status == CITIZENSDK_SIGNING_EXTERNAL_PENDING &&
+      (!signature.empty() || session.size() < 16 || request.empty() ||
+       info.transport != CITIZENSDK_EXTERNAL_SIGNER_QR_V1))) return false;
+  payload->u32(info.status);
   payload->fixed(info.account_id.bytes, 32);
+  payload->fixed(info.payload_hash, 32);
+  if (info.status == CITIZENSDK_SIGNING_COMPLETED) {
+    payload->fixed(signature.data(), signature.size());
+  } else if (info.status == CITIZENSDK_SIGNING_EXTERNAL_PENDING) {
+    payload->u64(info.expires_at); payload->text(session); payload->text(request);
+  } else return false;
+  return true;
+}
+
+bool write_default_account_change(citizensdk_result_handle_t result,
+                                  WireWriter *payload) {
+  auto info = info_value<citizensdk_default_account_change_info_t>();
+  uint64_t session_required = 0, request_required = 0;
+  int32_t code = citizensdk_result_get_default_account_change(
+      result, &info, nullptr, 0, &session_required, nullptr, 0,
+      &request_required);
+  if (code != kOk || session_required > 128 || request_required > kMaxQrTextBytes)
+    return false;
+  std::vector<uint8_t> session(static_cast<size_t>(session_required));
+  std::vector<uint8_t> request(static_cast<size_t>(request_required));
+  info = info_value<citizensdk_default_account_change_info_t>();
+  code = citizensdk_result_get_default_account_change(
+      result, &info, session.empty() ? nullptr : session.data(), session.size(),
+      &session_required, request.empty() ? nullptr : request.data(), request.size(),
+      &request_required);
+  if (code != kOk || (info.status == CITIZENSDK_SIGNING_COMPLETED &&
+      (!session.empty() || !request.empty() || info.committed_revision == 0)) ||
+      (info.status == CITIZENSDK_SIGNING_EXTERNAL_PENDING &&
+      (session.size() < 16 || request.empty() ||
+       info.transport != CITIZENSDK_EXTERNAL_SIGNER_QR_V1))) return false;
+  payload->u32(info.status);
+  payload->fixed(info.current_default_account_id.bytes, 32);
+  payload->fixed(info.payload_hash, 32);
+  if (info.status == CITIZENSDK_SIGNING_COMPLETED) {
+    payload->u64(info.committed_revision);
+  } else if (info.status == CITIZENSDK_SIGNING_EXTERNAL_PENDING) {
+    payload->u64(info.expires_at); payload->text(session); payload->text(request);
+  } else return false;
+  return true;
+}
+
+bool copy_transaction_history_record(citizensdk_result_handle_t result,
+                                     uint32_t index, WireWriter *payload) {
+  auto info = info_value<citizensdk_transaction_history_record_info_t>();
+  uint64_t reason_required = 0;
+  int32_t code = citizensdk_result_get_transaction_history_record(
+      result, index, &info, nullptr, 0, &reason_required);
+  if (code != kOk || reason_required > 512) return false;
+  std::vector<uint8_t> reason(static_cast<size_t>(reason_required));
+  info = info_value<citizensdk_transaction_history_record_info_t>();
+  if (citizensdk_result_get_transaction_history_record(
+          result, index, &info, reason.empty() ? nullptr : reason.data(),
+          reason.size(), &reason_required) != kOk) return false;
+  payload->fixed(info.execution_id.bytes, 16);
+  payload->fixed(info.source_account_id.bytes, 32);
+  payload->fixed(info.call_data_hash, 32);
   payload->fixed(info.transaction_hash, 32);
-  payload->u64(info.nonce);
-  payload->fixed(info.destination_account_id.bytes, 32);
-  payload->u64(info.amount_fen.low);
-  payload->u64(info.amount_fen.high);
   payload->u32(info.status);
   payload->u8(info.has_block == 0 ? 0 : 1);
   if (info.has_block != 0) write_block(payload, info.block);
   payload->u8(info.has_execution == 0 ? 0 : 1);
   if (info.has_execution != 0) write_execution(payload, info.execution);
+  payload->u8(info.has_replacement_hash == 0 ? 0 : 1);
+  if (info.has_replacement_hash != 0) payload->fixed(info.replacement_hash, 32);
   payload->u64(info.created_at_millis);
   payload->u64(info.updated_at_millis);
-  payload->bytes(remark.data(), remark.size());
   payload->u8(reason.empty() ? 0 : 1);
   if (!reason.empty()) payload->text(reason);
   return true;
 }
 
-bool copy_finalized_transfer(citizensdk_result_handle_t result, uint32_t index,
-                             WireWriter *payload) {
-  auto info = info_value<citizensdk_finalized_transfer_info_t>();
-  uint64_t pallet_required = 0;
-  uint64_t display_required = 0;
-  uint64_t remark_required = 0;
-  int32_t code = citizensdk_result_get_finalized_transfer(
-      result, index, &info, nullptr, 0, &pallet_required, nullptr, 0,
-      &display_required, nullptr, 0, &remark_required);
-  if (code != kOk || pallet_required > 1024 || display_required > 64 * 1024 ||
-      remark_required > 64 * 1024) return false;
-  std::vector<uint8_t> pallet(static_cast<size_t>(pallet_required));
-  std::vector<uint8_t> display(static_cast<size_t>(display_required));
-  std::vector<uint8_t> remark(static_cast<size_t>(remark_required));
-  info = info_value<citizensdk_finalized_transfer_info_t>();
-  if (citizensdk_result_get_finalized_transfer(
-          result, index, &info, pallet.empty() ? nullptr : pallet.data(),
-          pallet_required, &pallet_required,
-          display.empty() ? nullptr : display.data(), display_required,
-          &display_required, remark.empty() ? nullptr : remark.data(),
-          remark_required, &remark_required) != kOk) {
-    return false;
-  }
-  payload->fixed(info.tracked_account_id.bytes, 32);
-  payload->fixed(info.from_account_id.bytes, 32);
-  payload->fixed(info.to_account_id.bytes, 32);
-  payload->u64(info.amount_fen.low);
-  payload->u64(info.amount_fen.high);
-  write_block(payload, info.block);
-  payload->u32(info.event_record_index);
-  payload->u8(info.has_extrinsic_index == 0 ? 0 : 1);
-  if (info.has_extrinsic_index != 0) payload->u32(info.extrinsic_index);
-  payload->u32(info.direction);
-  payload->text(pallet);
-  payload->text(display);
-  payload->bytes(remark.data(), remark.size());
-  return true;
-}
-
-bool write_history(citizensdk_result_handle_t result, WireWriter *payload) {
-  auto info = info_value<citizensdk_history_info_t>();
-  if (citizensdk_result_get_history_info(result, &info) != kOk ||
-      info.cursor_count > 1990 || info.record_count > 100000 ||
-      info.transfer_count > 100000) return false;
+bool write_transaction_history_page(citizensdk_result_handle_t result,
+                                    WireWriter *payload) {
+  auto info = info_value<citizensdk_transaction_history_page_info_t>();
+  if (citizensdk_result_get_transaction_history_page(result, &info) != kOk ||
+      info.record_count > 100) return false;
   payload->u64(info.revision);
-  payload->u32(info.cursor_count);
-  for (uint32_t index = 0; index < info.cursor_count; ++index) {
-    auto cursor = info_value<citizensdk_history_cursor_info_t>();
-    if (citizensdk_result_get_history_cursor(result, index, &cursor) != kOk)
-      return false;
-    payload->fixed(cursor.account_id.bytes, 32);
-    write_block(payload, cursor.tracking_start_block);
-    write_block(payload, cursor.last_synced_block);
-  }
   payload->u32(info.record_count);
   for (uint32_t index = 0; index < info.record_count; ++index) {
-    if (!copy_history_record(result, index, payload)) return false;
+    if (!copy_transaction_history_record(result, index, payload)) return false;
   }
-  payload->u32(info.transfer_count);
-  for (uint32_t index = 0; index < info.transfer_count; ++index) {
-    if (!copy_finalized_transfer(result, index, payload)) return false;
+  payload->u8(info.has_next_before_execution_id == 0 ? 0 : 1);
+  if (info.has_next_before_execution_id != 0) {
+    payload->fixed(info.next_before_execution_id.bytes, 16);
   }
   return true;
 }
@@ -413,10 +463,28 @@ bool account(JNIEnv *env, jbyteArray source, citizensdk_account_id_t *out) {
   return true;
 }
 
-bool accounts(JNIEnv *env, jbyteArray source, jint count,
-              std::vector<citizensdk_account_id_t> *out, bool allow_empty = false) {
+bool block_ref(JNIEnv *env, jbyteArray hash, jlong number, jint finality,
+               citizensdk_block_ref_t *out) {
   std::vector<uint8_t> bytes;
-  if (count < 0 || (!allow_empty && count == 0) || count > 1990 || !take_bytes(env, source, &bytes) ||
+  if (!take_bytes(env, hash, &bytes) || bytes.size() != 32 ||
+      (finality != CITIZENSDK_FINALITY_BEST &&
+       finality != CITIZENSDK_FINALITY_FINALIZED)) {
+    throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT,
+              "CitizenChain block reference is invalid");
+    return false;
+  }
+  *out = info_value<citizensdk_block_ref_t>();
+  std::memcpy(out->hash, bytes.data(), 32);
+  out->number = static_cast<uint64_t>(number);
+  out->finality = static_cast<uint32_t>(finality);
+  return true;
+}
+
+bool accounts(JNIEnv *env, jbyteArray source, jint count,
+              std::vector<citizensdk_account_id_t> *out, bool allow_empty = false,
+              jint maximum = 1990) {
+  std::vector<uint8_t> bytes;
+  if (count < 0 || (!allow_empty && count == 0) || count > maximum || !take_bytes(env, source, &bytes) ||
       bytes.size() != static_cast<size_t>(count) * 32) {
     throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT,
               "CitizenChain account array is invalid");
@@ -526,6 +594,144 @@ jlong native_finalized_head(JNIEnv *env, jobject, jlong raw) {
       env, bridge, [](auto handle, auto *out) { return citizensdk_get_finalized_head(handle, out); });
 }
 
+jlong native_sync_status(JNIEnv *env, jobject, jlong raw) {
+  auto bridge = bridge_from(env, raw);
+  return bridge == nullptr ? 0 : begin_request(
+      env, bridge, [](auto handle, auto *out) { return citizensdk_get_sync_status(handle, out); });
+}
+
+jlong native_best_head(JNIEnv *env, jobject, jlong raw) {
+  auto bridge = bridge_from(env, raw);
+  return bridge == nullptr ? 0 : begin_request(
+      env, bridge, [](auto handle, auto *out) { return citizensdk_get_best_head(handle, out); });
+}
+
+jlong native_finalized_block_at(JNIEnv *env, jobject, jlong raw, jlong number) {
+  auto bridge = bridge_from(env, raw);
+  return bridge == nullptr ? 0 : begin_request(env, bridge, [number](auto handle, auto *out) {
+    return citizensdk_get_finalized_block_at(handle, static_cast<uint64_t>(number), out);
+  });
+}
+
+jlong native_resolve_finalized_block(JNIEnv *env, jobject, jlong raw,
+                                     jbyteArray hash, jlong number) {
+  auto bridge = bridge_from(env, raw);
+  std::vector<uint8_t> bytes;
+  if (bridge == nullptr || !take_bytes(env, hash, &bytes) || bytes.size() != 32) {
+    if (!env->ExceptionCheck()) throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT, "block hash must contain 32 bytes");
+    return 0;
+  }
+  return begin_request(env, bridge, [&bytes, number](auto handle, auto *out) {
+    return citizensdk_resolve_finalized_block(handle, bytes.data(), static_cast<uint64_t>(number), out);
+  });
+}
+
+template <typename Call>
+jlong native_block_request(JNIEnv *env, jlong raw, jbyteArray hash, jlong number,
+                           jint finality, Call call) {
+  auto bridge = bridge_from(env, raw);
+  citizensdk_block_ref_t block{};
+  if (bridge == nullptr || !block_ref(env, hash, number, finality, &block)) return 0;
+  return begin_request(env, bridge, [&block, &call](auto handle, auto *out) {
+    return call(handle, &block, out);
+  });
+}
+
+jlong native_block_header(JNIEnv *env, jobject, jlong raw, jbyteArray hash,
+                          jlong number, jint finality) {
+  return native_block_request(env, raw, hash, number, finality,
+      [](auto handle, auto *block, auto *out) { return citizensdk_get_block_header_at(handle, block, out); });
+}
+
+jlong native_block_body(JNIEnv *env, jobject, jlong raw, jbyteArray hash,
+                        jlong number, jint finality) {
+  return native_block_request(env, raw, hash, number, finality,
+      [](auto handle, auto *block, auto *out) { return citizensdk_get_block_body_at(handle, block, out); });
+}
+
+jlong native_runtime_context(JNIEnv *env, jobject, jlong raw, jbyteArray hash,
+                             jlong number, jint finality) {
+  return native_block_request(env, raw, hash, number, finality,
+      [](auto handle, auto *block, auto *out) { return citizensdk_get_runtime_context_at(handle, block, out); });
+}
+
+jlong native_system_events(JNIEnv *env, jobject, jlong raw, jbyteArray hash,
+                           jlong number, jint finality) {
+  return native_block_request(env, raw, hash, number, finality,
+      [](auto handle, auto *block, auto *out) { return citizensdk_get_system_events_at(handle, block, out); });
+}
+
+jlong native_storage(JNIEnv *env, jobject, jlong raw, jbyteArray hash,
+                     jlong number, jint finality, jbyteArray key) {
+  auto bridge = bridge_from(env, raw);
+  citizensdk_block_ref_t block{};
+  std::vector<uint8_t> bytes;
+  if (bridge == nullptr || !block_ref(env, hash, number, finality, &block) ||
+      !take_bytes(env, key, &bytes) || bytes.empty() || bytes.size() > 4096) {
+    if (!env->ExceptionCheck()) throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT, "storage key is invalid");
+    return 0;
+  }
+  return begin_request(env, bridge, [&block, &bytes](auto handle, auto *out) {
+    return citizensdk_get_storage_at(handle, &block, view(bytes), out);
+  });
+}
+
+jlong native_storage_batch(JNIEnv *env, jobject, jlong raw, jbyteArray hash,
+                           jlong number, jint finality, jobjectArray keys) {
+  auto bridge = bridge_from(env, raw);
+  citizensdk_block_ref_t block{};
+  if (bridge == nullptr || !block_ref(env, hash, number, finality, &block) || keys == nullptr) return 0;
+  const jsize count = env->GetArrayLength(keys);
+  if (env->ExceptionCheck() || count <= 0 || count > 1024) {
+    throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT, "storage key batch is invalid");
+    return 0;
+  }
+  std::vector<std::vector<uint8_t>> owned(static_cast<size_t>(count));
+  size_t total = 0;
+  for (jsize index = 0; index < count; ++index) {
+    auto item = static_cast<jbyteArray>(env->GetObjectArrayElement(keys, index));
+    const bool copied = item != nullptr && take_bytes(env, item, &owned[static_cast<size_t>(index)]);
+    if (item != nullptr) env->DeleteLocalRef(item);
+    const size_t length = owned[static_cast<size_t>(index)].size();
+    if (!copied || length == 0 || length > 4096 || total > 1024U * 1024U - length) {
+      if (!env->ExceptionCheck()) throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT, "storage key batch is invalid");
+      return 0;
+    }
+    total += length;
+  }
+  std::vector<citizensdk_bytes_view_t> views;
+  views.reserve(owned.size());
+  for (const auto &item : owned) views.push_back(view(item));
+  return begin_request(env, bridge, [&block, &views](auto handle, auto *out) {
+    return citizensdk_get_storage_batch_at(
+        handle, &block, views.data(), static_cast<uint32_t>(views.size()), out);
+  });
+}
+
+jlong native_export_state(JNIEnv *env, jobject, jlong raw) {
+  auto bridge = bridge_from(env, raw);
+  return bridge == nullptr ? 0 : begin_request(
+      env, bridge, [](auto handle, auto *out) { return citizensdk_export_state(handle, out); });
+}
+
+jlong native_import_state(JNIEnv *env, jobject, jlong raw, jint format_version,
+                          jbyteArray hash, jlong number, jint finality,
+                          jbyteArray database) {
+  auto bridge = bridge_from(env, raw);
+  citizensdk_block_ref_t block{};
+  std::vector<uint8_t> bytes;
+  if (bridge == nullptr || !block_ref(env, hash, number, finality, &block) ||
+      block.finality != CITIZENSDK_FINALITY_FINALIZED ||
+      !take_bytes(env, database, &bytes) || bytes.empty() || bytes.size() > 256U * 1024U) {
+    if (!env->ExceptionCheck()) throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT, "chain state is invalid");
+    return 0;
+  }
+  return begin_request(env, bridge, [&block, &bytes, format_version](auto handle, auto *out) {
+    return citizensdk_import_state(
+        handle, &block, static_cast<uint32_t>(format_version), view(bytes), out);
+  });
+}
+
 jbyteArray native_genesis_hash(JNIEnv *env, jobject, jlong raw) {
   auto bridge = bridge_from(env, raw);
   if (bridge == nullptr) return nullptr;
@@ -578,6 +784,70 @@ jlong native_wallet_profile(JNIEnv *env, jobject, jlong raw) {
   auto bridge = bridge_from(env, raw);
   return bridge == nullptr ? 0 : begin_request(env, bridge, [](auto handle, auto *out) {
     return citizensdk_get_wallet_profile(handle, out);
+  });
+}
+
+jlong native_wallet_state(JNIEnv *env, jobject, jlong raw) {
+  auto bridge = bridge_from(env, raw);
+  return bridge == nullptr ? 0 : begin_request(env, bridge, [](auto handle, auto *out) {
+    return citizensdk_get_wallet_state(handle, out);
+  });
+}
+
+jlong native_import_cold_id(JNIEnv *env, jobject, jlong raw,
+                            jbyteArray account_bytes, jbyteArray name_bytes) {
+  auto bridge = bridge_from(env, raw);
+  citizensdk_account_id_t value{};
+  std::vector<uint8_t> name;
+  if (bridge == nullptr || !account(env, account_bytes, &value) ||
+      !take_bytes(env, name_bytes, &name)) return 0;
+  return begin_request(env, bridge, [&value, &name](auto handle, auto *out) {
+    return citizensdk_import_cold_account_id(handle, &value, view(name), out);
+  });
+}
+
+jlong native_import_cold_ss58(JNIEnv *env, jobject, jlong raw,
+                              jbyteArray address_bytes, jbyteArray name_bytes) {
+  auto bridge = bridge_from(env, raw);
+  std::vector<uint8_t> address;
+  std::vector<uint8_t> name;
+  if (bridge == nullptr || !take_bytes(env, address_bytes, &address) ||
+      !take_bytes(env, name_bytes, &name)) return 0;
+  return begin_request(env, bridge, [&address, &name](auto handle, auto *out) {
+    return citizensdk_import_cold_account_ss58(handle, view(address), view(name), out);
+  });
+}
+
+jlong native_reorder_wallet(JNIEnv *env, jobject, jlong raw, jlong revision,
+                            jbyteArray account_bytes, jint count) {
+  auto bridge = bridge_from(env, raw);
+  std::vector<citizensdk_account_id_t> values;
+  if (bridge == nullptr || !accounts(env, account_bytes, count, &values, false, 3980)) return 0;
+  return begin_request(env, bridge, [&values, revision](auto handle, auto *out) {
+    return citizensdk_reorder_wallet_accounts_without_default_change(
+        handle, static_cast<uint64_t>(revision), values.data(),
+        static_cast<uint32_t>(values.size()), out);
+  });
+}
+
+jlong native_rename_any(JNIEnv *env, jobject, jlong raw, jbyteArray account_bytes,
+                        jbyteArray name_bytes) {
+  auto bridge = bridge_from(env, raw);
+  citizensdk_account_id_t value{};
+  std::vector<uint8_t> name;
+  if (bridge == nullptr || !account(env, account_bytes, &value) ||
+      !take_bytes(env, name_bytes, &name)) return 0;
+  return begin_request(env, bridge, [&value, &name](auto handle, auto *out) {
+    return citizensdk_rename_account(handle, &value, view(name), out);
+  });
+}
+
+jlong native_delete_any(JNIEnv *env, jobject, jlong raw, jbyteArray account_bytes) {
+  auto bridge = bridge_from(env, raw);
+  citizensdk_account_id_t value{};
+  if (bridge == nullptr || !account(env, account_bytes, &value)) return 0;
+  return begin_request(env, bridge, [&value](auto handle, auto *out) {
+    return citizensdk_delete_account(handle, &value, out);
   });
 }
 
@@ -702,6 +972,98 @@ jlong native_sign(JNIEnv *env, jobject, jlong raw, jbyteArray account_bytes,
   });
 }
 
+// Generic signing deliberately treats payload/domain/action as application-owned
+// opaque values. Core alone selects hot Vault signing or a cold external session.
+jlong native_begin_signing(JNIEnv *env, jobject, jlong raw,
+                           jbyteArray account_bytes, jbyteArray payload_bytes,
+                           jint transform, jbyteArray domain_bytes,
+                           jint transport, jint action, jlong ttl_seconds) {
+  auto bridge = bridge_from(env, raw);
+  citizensdk_account_id_t account_id{};
+  std::vector<uint8_t> payload;
+  std::vector<uint8_t> domain;
+  if (payload_bytes == nullptr ||
+      env->GetArrayLength(payload_bytes) > 16 * 1024 * 1024 ||
+      domain_bytes == nullptr || env->GetArrayLength(domain_bytes) > 32 ||
+      action < 0 || action > 0xffff || ttl_seconds < 0) {
+    throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT,
+              "Generic signing input is invalid");
+    return 0;
+  }
+  if (bridge == nullptr || !account(env, account_bytes, &account_id) ||
+      !take_bytes(env, payload_bytes, &payload) ||
+      !take_bytes(env, domain_bytes, &domain)) return 0;
+  return begin_request(env, bridge,
+      [&account_id, &payload, transform, &domain, transport, action,
+       ttl_seconds](auto handle, auto *out) {
+        return citizensdk_begin_signing(
+            handle, &account_id, view(payload),
+            static_cast<citizensdk_signing_transform_t>(transform), view(domain),
+            static_cast<citizensdk_external_signer_transport_t>(transport),
+            static_cast<uint16_t>(action), static_cast<uint64_t>(ttl_seconds), out);
+      });
+}
+
+jlong native_consume_external_signature(JNIEnv *env, jobject, jlong raw,
+                                        jbyteArray session_bytes,
+                                        jbyteArray response_bytes) {
+  auto bridge = bridge_from(env, raw);
+  std::vector<uint8_t> session;
+  std::vector<uint8_t> response;
+  if (bridge == nullptr || !take_bytes(env, session_bytes, &session) ||
+      !take_bytes(env, response_bytes, &response)) return 0;
+  return begin_request(env, bridge, [&session, &response](auto handle, auto *out) {
+    return citizensdk_consume_external_signature(handle, view(session),
+                                                  view(response), out);
+  });
+}
+
+jboolean native_cancel_signing_session(JNIEnv *env, jobject, jlong raw,
+                                       jbyteArray session_bytes) {
+  auto bridge = bridge_from(env, raw);
+  std::vector<uint8_t> session;
+  if (bridge == nullptr || !take_bytes(env, session_bytes, &session)) return JNI_FALSE;
+  uint8_t cancelled = 0;
+  const int32_t code = citizensdk_cancel_signing_session(
+      bridge->handle(), view(session), &cancelled);
+  if (code != kOk || cancelled > 1) {
+    throw_sdk(env, code == kOk ? CITIZENSDK_ERROR_INTEGRITY : code,
+              "Generic signing session cancellation failed");
+    return JNI_FALSE;
+  }
+  return cancelled == 0 ? JNI_FALSE : JNI_TRUE;
+}
+
+jlong native_begin_default_account_change(JNIEnv *env, jobject, jlong raw,
+                                          jlong expected_revision,
+                                          jbyteArray account_bytes, jint count,
+                                          jlong ttl_seconds) {
+  auto bridge = bridge_from(env, raw);
+  std::vector<citizensdk_account_id_t> values;
+  if (ttl_seconds < 0 || bridge == nullptr ||
+      !accounts(env, account_bytes, count, &values, false, 256)) return 0;
+  return begin_request(env, bridge,
+      [expected_revision, &values, ttl_seconds](auto handle, auto *out) {
+        return citizensdk_begin_default_account_change(
+            handle, static_cast<uint64_t>(expected_revision), values.data(),
+            static_cast<uint32_t>(values.size()), static_cast<uint64_t>(ttl_seconds), out);
+      });
+}
+
+jlong native_consume_default_account_change(JNIEnv *env, jobject, jlong raw,
+                                            jbyteArray session_bytes,
+                                            jbyteArray response_bytes) {
+  auto bridge = bridge_from(env, raw);
+  std::vector<uint8_t> session;
+  std::vector<uint8_t> response;
+  if (bridge == nullptr || !take_bytes(env, session_bytes, &session) ||
+      !take_bytes(env, response_bytes, &response)) return 0;
+  return begin_request(env, bridge, [&session, &response](auto handle, auto *out) {
+    return citizensdk_consume_default_account_change(handle, view(session),
+                                                      view(response), out);
+  });
+}
+
 void native_validate_modules(JNIEnv *env, jclass, jint modules) {
   const int32_t code = citizensdk_validate_modules(static_cast<uint32_t>(modules));
   if (code != CITIZENSDK_OK) throw_sdk(env, code, "Invalid CitizenSDK modules");
@@ -733,52 +1095,113 @@ jboolean native_verify(JNIEnv *env, jclass, jbyteArray account_bytes,
   return valid == 1 ? JNI_TRUE : JNI_FALSE;
 }
 
-jlong native_transfer(JNIEnv *env, jobject, jlong raw, jbyteArray source_bytes,
-                      jbyteArray destination_bytes, jlong low, jlong high,
-                      jbyteArray remark_bytes) {
+jlong native_prepare_transaction(JNIEnv *env, jobject, jlong raw,
+                                 jbyteArray source_bytes,
+                                 jbyteArray call_data_bytes) {
   auto bridge = bridge_from(env, raw);
   citizensdk_account_id_t source{};
-  citizensdk_account_id_t destination{};
-  std::vector<uint8_t> remark;
-  if (remark_bytes == nullptr ||
-      env->GetArrayLength(remark_bytes) > kMaxTransferRemarkBytes) {
+  std::vector<uint8_t> call_data;
+  if (call_data_bytes == nullptr || env->GetArrayLength(call_data_bytes) <= 0 ||
+      env->GetArrayLength(call_data_bytes) > 1024 * 1024) {
     throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT,
-              "Transfer remark exceeds 99 UTF-8 bytes");
+              "Transaction callData must contain 1..1 MiB bytes");
     return 0;
   }
   if (bridge == nullptr || !account(env, source_bytes, &source) ||
-      !account(env, destination_bytes, &destination) ||
-      !take_bytes(env, remark_bytes, &remark)) return 0;
-  citizensdk_u128_t amount{static_cast<uint64_t>(low), static_cast<uint64_t>(high)};
-  return begin_request(env, bridge,
-                       [&source, &destination, amount, &remark](auto handle, auto *out) {
-    return citizensdk_transfer_with_remark(handle, &source, &destination,
-                                           amount, view(remark), out);
+      !take_bytes(env, call_data_bytes, &call_data)) return 0;
+  return begin_request(env, bridge, [&source, &call_data](auto handle, auto *out) {
+    return citizensdk_prepare_transaction(handle, &source, view(call_data), out);
   });
 }
 
-jlong native_history(JNIEnv *env, jlong raw, jbyteArray account_bytes,
-                     jint count, bool initialize) {
+void native_release_prepared_transaction(JNIEnv *env, jobject, jlong raw,
+                                         jlong token) {
   auto bridge = bridge_from(env, raw);
-  std::vector<citizensdk_account_id_t> values;
-  if (bridge == nullptr || !accounts(env, account_bytes, count, &values)) return 0;
-  return begin_request(env, bridge, [&values, initialize](auto handle, auto *out) {
-    return initialize
-               ? citizensdk_initialize_finalized_history(
-                     handle, values.data(), static_cast<uint32_t>(values.size()), out)
-               : citizensdk_sync_finalized_history_batch(
-                     handle, values.data(), static_cast<uint32_t>(values.size()), out);
+  if (bridge == nullptr || token <= 0) {
+    throw_sdk(env, CITIZENSDK_ERROR_INVALID_HANDLE,
+              "Prepared transaction handle is invalid");
+    return;
+  }
+  const int32_t code = citizensdk_prepared_transaction_release(
+      bridge->handle(), static_cast<uint64_t>(token));
+  if (code != kOk) {
+    throw_sdk(env, code, "Prepared transaction release failed");
+  }
+}
+
+jlong native_execute_prepared_transaction(JNIEnv *env, jobject, jlong raw, jlong token) {
+  auto bridge = bridge_from(env, raw);
+  if (bridge == nullptr || token <= 0) {
+    throw_sdk(env, CITIZENSDK_ERROR_INVALID_HANDLE, "Prepared transaction handle is invalid");
+    return 0;
+  }
+  return begin_request(env, bridge, [token](auto handle, auto *out) {
+    return citizensdk_execute_prepared_transaction(handle, static_cast<uint64_t>(token), out);
   });
 }
 
-jlong native_history_initialize(JNIEnv *env, jobject, jlong raw,
-                                jbyteArray values, jint count) {
-  return native_history(env, raw, values, count, true);
+jlong native_consume_prepared_transaction_qr(JNIEnv *env, jobject, jlong raw,
+                                              jbyteArray id_bytes,
+                                              jbyteArray response_bytes) {
+  auto bridge = bridge_from(env, raw);
+  std::vector<uint8_t> id;
+  std::vector<uint8_t> response;
+  if (bridge == nullptr || !take_bytes(env, id_bytes, &id) || id.size() != 16 ||
+      !take_bytes(env, response_bytes, &response) || response.empty()) {
+    if (!env->ExceptionCheck()) throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT, "Execution id/QR_V1 response is invalid");
+    return 0;
+  }
+  citizensdk_transaction_execution_id_t execution{};
+  std::copy(id.begin(), id.end(), execution.bytes);
+  return begin_request(env, bridge, [&execution, &response](auto handle, auto *out) {
+    return citizensdk_transaction_execution_consume_qr_response(
+        handle, &execution, view(response), out);
+  });
 }
 
-jlong native_history_sync(JNIEnv *env, jobject, jlong raw, jbyteArray values,
-                          jint count) {
-  return native_history(env, raw, values, count, false);
+void native_cancel_prepared_transaction_execution(JNIEnv *env, jobject, jlong raw,
+                                                   jbyteArray id_bytes) {
+  auto bridge = bridge_from(env, raw);
+  std::vector<uint8_t> id;
+  if (bridge == nullptr || !take_bytes(env, id_bytes, &id) || id.size() != 16) {
+    if (!env->ExceptionCheck()) throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT, "Execution id is invalid");
+    return;
+  }
+  citizensdk_transaction_execution_id_t execution{};
+  std::copy(id.begin(), id.end(), execution.bytes);
+  const auto code = citizensdk_transaction_execution_cancel(bridge->handle(), &execution);
+  if (code != kOk) throw_sdk(env, code, "Transaction execution cancel failed");
+}
+
+jlong native_get_transaction_history(JNIEnv *env, jobject, jlong raw,
+                                     jbyteArray before_bytes, jint limit) {
+  auto bridge = bridge_from(env, raw);
+  if (bridge == nullptr || limit < 1 || limit > 100) {
+    if (!env->ExceptionCheck()) throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                                         "Transaction history limit is invalid");
+    return 0;
+  }
+  citizensdk_transaction_execution_id_t before{};
+  std::vector<uint8_t> bytes;
+  const bool has_before = before_bytes != nullptr;
+  if (has_before && (!take_bytes(env, before_bytes, &bytes) || bytes.size() != 16)) {
+    if (!env->ExceptionCheck()) throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                                         "Transaction history cursor is invalid");
+    return 0;
+  }
+  if (has_before) std::copy(bytes.begin(), bytes.end(), before.bytes);
+  return begin_request(env, bridge, [&before, has_before, limit](auto handle, auto *out) {
+    return citizensdk_get_transaction_history(
+        handle, has_before ? &before : nullptr, static_cast<uint32_t>(limit), out);
+  });
+}
+
+jlong native_sync_transaction_history(JNIEnv *env, jobject, jlong raw) {
+  auto bridge = bridge_from(env, raw);
+  if (bridge == nullptr) return 0;
+  return begin_request(env, bridge, [](auto handle, auto *out) {
+    return citizensdk_sync_transaction_history(handle, out);
+  });
 }
 
 // 输入检查无持久化副作用，错误消息来自 Core 固定模板，不回显秘密。
@@ -1186,12 +1609,30 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char *>("nativeStop"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_stop)},
     {const_cast<char *>("nativeCancel"), const_cast<char *>("(JJ)Z"), reinterpret_cast<void *>(native_cancel)},
     {const_cast<char *>("nativeGetFinalizedHead"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_finalized_head)},
+    {const_cast<char *>("nativeGetSyncStatus"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_sync_status)},
+    {const_cast<char *>("nativeGetBestHead"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_best_head)},
+    {const_cast<char *>("nativeGetFinalizedBlockAt"), const_cast<char *>("(JJ)J"), reinterpret_cast<void *>(native_finalized_block_at)},
+    {const_cast<char *>("nativeResolveFinalizedBlock"), const_cast<char *>("(J[BJ)J"), reinterpret_cast<void *>(native_resolve_finalized_block)},
+    {const_cast<char *>("nativeGetBlockHeader"), const_cast<char *>("(J[BJI)J"), reinterpret_cast<void *>(native_block_header)},
+    {const_cast<char *>("nativeGetBlockBody"), const_cast<char *>("(J[BJI)J"), reinterpret_cast<void *>(native_block_body)},
+    {const_cast<char *>("nativeGetRuntimeContext"), const_cast<char *>("(J[BJI)J"), reinterpret_cast<void *>(native_runtime_context)},
+    {const_cast<char *>("nativeGetStorage"), const_cast<char *>("(J[BJI[B)J"), reinterpret_cast<void *>(native_storage)},
+    {const_cast<char *>("nativeGetStorageBatch"), const_cast<char *>("(J[BJI[[B)J"), reinterpret_cast<void *>(native_storage_batch)},
+    {const_cast<char *>("nativeGetSystemEvents"), const_cast<char *>("(J[BJI)J"), reinterpret_cast<void *>(native_system_events)},
+    {const_cast<char *>("nativeExportState"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_export_state)},
+    {const_cast<char *>("nativeImportState"), const_cast<char *>("(JI[BJI[B)J"), reinterpret_cast<void *>(native_import_state)},
     {const_cast<char *>("nativeGetGenesisHash"), const_cast<char *>("(J)[B"), reinterpret_cast<void *>(native_genesis_hash)},
     {const_cast<char *>("nativeGetAccountBalance"), const_cast<char *>("(J[B)J"), reinterpret_cast<void *>(native_balance)},
     {const_cast<char *>("nativeGetAccountBalances"), const_cast<char *>("(J[BI)J"), reinterpret_cast<void *>(native_balances)},
     {const_cast<char *>("nativeGetAccountNonce"), const_cast<char *>("(J[B)J"), reinterpret_cast<void *>(native_nonce)},
     {const_cast<char *>("nativeGetFeeSnapshot"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_fee)},
     {const_cast<char *>("nativeGetWalletProfile"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_wallet_profile)},
+    {const_cast<char *>("nativeGetWalletState"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_wallet_state)},
+    {const_cast<char *>("nativeImportColdAccountId"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_import_cold_id)},
+    {const_cast<char *>("nativeImportColdAccountSs58"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_import_cold_ss58)},
+    {const_cast<char *>("nativeReorderWalletAccounts"), const_cast<char *>("(JJ[BI)J"), reinterpret_cast<void *>(native_reorder_wallet)},
+    {const_cast<char *>("nativeRenameAccount"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_rename_any)},
+    {const_cast<char *>("nativeDeleteAccount"), const_cast<char *>("(J[B)J"), reinterpret_cast<void *>(native_delete_any)},
     {const_cast<char *>("nativeOpenPrivateKeyView"), const_cast<char *>("(J[BLorg/citizen/sdk/ui/CitizenSdkPrivateKeyDisplayBuffer;)[J"), reinterpret_cast<void *>(native_open_private_key_view)},
     {const_cast<char *>("nativeRevealPrivateKeyView"), const_cast<char *>("(JJ)V"), reinterpret_cast<void *>(native_reveal_private_key_view)},
     {const_cast<char *>("nativeCancelPrivateKeyView"), const_cast<char *>("(JJ)V"), reinterpret_cast<void *>(native_cancel_private_key_view)},
@@ -1203,6 +1644,11 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char *>("nativeDeleteWallet"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_delete_wallet)},
     {const_cast<char *>("nativeReconcileWalletCleanup"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_reconcile)},
     {const_cast<char *>("nativeSignWalletPayload"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_sign)},
+    {const_cast<char *>("nativeBeginSigning"), const_cast<char *>("(J[B[BI[BIIJ)J"), reinterpret_cast<void *>(native_begin_signing)},
+    {const_cast<char *>("nativeConsumeExternalSignature"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_consume_external_signature)},
+    {const_cast<char *>("nativeCancelSigningSession"), const_cast<char *>("(J[B)Z"), reinterpret_cast<void *>(native_cancel_signing_session)},
+    {const_cast<char *>("nativeBeginDefaultAccountChange"), const_cast<char *>("(JJ[BIJ)J"), reinterpret_cast<void *>(native_begin_default_account_change)},
+    {const_cast<char *>("nativeConsumeDefaultAccountChange"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_consume_default_account_change)},
     {const_cast<char *>("nativeQrParse"), const_cast<char *>("(J[B)[B"), reinterpret_cast<void *>(native_qr_parse)},
     {const_cast<char *>("nativeQrCreateSignRequest"), const_cast<char *>("(JI[B[BJ)[B"), reinterpret_cast<void *>(native_qr_create_request)},
     {const_cast<char *>("nativeReviewQrSignRequest"), const_cast<char *>("(J[B)J"), reinterpret_cast<void *>(native_review_qr_request)},
@@ -1214,9 +1660,13 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char *>("nativeQrEncodeUserTransfer"), const_cast<char *>("(J[BJ[B[B[B[B[B)[B"), reinterpret_cast<void *>(native_qr_encode_transfer)},
     {const_cast<char *>("nativeQrDecodeLuminance"), const_cast<char *>("(J[BIII)[B"), reinterpret_cast<void *>(native_qr_decode_luminance)},
     {const_cast<char *>("nativeQrEncode"), const_cast<char *>("(J[BI)[B"), reinterpret_cast<void *>(native_qr_encode_image)},
-    {const_cast<char *>("nativeTransferWithRemark"), const_cast<char *>("(J[B[BJJ[B)J"), reinterpret_cast<void *>(native_transfer)},
-    {const_cast<char *>("nativeInitializeFinalizedHistory"), const_cast<char *>("(J[BI)J"), reinterpret_cast<void *>(native_history_initialize)},
-    {const_cast<char *>("nativeSyncFinalizedHistory"), const_cast<char *>("(J[BI)J"), reinterpret_cast<void *>(native_history_sync)},
+    {const_cast<char *>("nativePrepareTransaction"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_prepare_transaction)},
+    {const_cast<char *>("nativeReleasePreparedTransaction"), const_cast<char *>("(JJ)V"), reinterpret_cast<void *>(native_release_prepared_transaction)},
+    {const_cast<char *>("nativeExecutePreparedTransaction"), const_cast<char *>("(JJ)J"), reinterpret_cast<void *>(native_execute_prepared_transaction)},
+    {const_cast<char *>("nativeConsumePreparedTransactionQrResponse"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_consume_prepared_transaction_qr)},
+    {const_cast<char *>("nativeCancelPreparedTransactionExecution"), const_cast<char *>("(J[B)V"), reinterpret_cast<void *>(native_cancel_prepared_transaction_execution)},
+    {const_cast<char *>("nativeGetTransactionHistory"), const_cast<char *>("(J[BI)J"), reinterpret_cast<void *>(native_get_transaction_history)},
+    {const_cast<char *>("nativeSyncTransactionHistory"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_sync_transaction_history)},
     {const_cast<char *>("nativePrepareWalletCreation"), const_cast<char *>("(JI[B)J"), reinterpret_cast<void *>(native_prepare)},
     {const_cast<char *>("nativeValidateWalletPassword"), const_cast<char *>("([B)V"), reinterpret_cast<void *>(native_validate_password)},
     {const_cast<char *>("nativeValidateWalletMnemonic"), const_cast<char *>("([BI)V"), reinterpret_cast<void *>(native_validate_mnemonic)},
@@ -1391,6 +1841,75 @@ bool encode_result(citizensdk_result_handle_t result, uint64_t prepared_token,
       if (valid) write_block(&payload, block);
       break;
     }
+    case CITIZENSDK_RESULT_STORAGE_VALUE: {
+      uint8_t present = 0;
+      uint64_t required = 0;
+      valid = citizensdk_result_copy_storage(result, &present, nullptr, 0, &required) == kOk &&
+              required <= 64U * 1024U * 1024U;
+      std::vector<uint8_t> bytes(valid ? static_cast<size_t>(required) : 0);
+      if (valid) valid = citizensdk_result_copy_storage(
+          result, &present, bytes.empty() ? nullptr : bytes.data(), required, &required) == kOk &&
+          required == bytes.size() && present <= 1;
+      if (valid) {
+        payload.u8(present);
+        if (present != 0) payload.bytes(bytes.data(), bytes.size());
+      }
+      break;
+    }
+    case CITIZENSDK_RESULT_STORAGE_BATCH: {
+      uint32_t count = 0;
+      valid = citizensdk_result_get_storage_batch_count(result, &count) == kOk && count <= 1024;
+      if (valid) payload.u32(count);
+      uint64_t total = 0;
+      for (uint32_t index = 0; valid && index < count; ++index) {
+        uint8_t present = 0;
+        uint64_t required = 0;
+        valid = citizensdk_result_copy_storage_batch_item(
+            result, index, &present, nullptr, 0, &required) == kOk && present <= 1;
+        valid = valid && required <= 64U * 1024U * 1024U - total;
+        if (valid) total += required;
+        std::vector<uint8_t> bytes(valid ? static_cast<size_t>(required) : 0);
+        if (valid) valid = citizensdk_result_copy_storage_batch_item(
+            result, index, &present, bytes.empty() ? nullptr : bytes.data(), required, &required) == kOk &&
+            required == bytes.size();
+        if (valid) {
+          payload.u8(present);
+          if (present != 0) payload.bytes(bytes.data(), bytes.size());
+        }
+      }
+      break;
+    }
+    case CITIZENSDK_RESULT_RUNTIME_CONTEXT: {
+      auto value = info_value<citizensdk_runtime_context_info_t>();
+      uint64_t required = 0;
+      valid = citizensdk_result_get_runtime_context(result, &value, nullptr, 0, &required) == kOk &&
+              required > 0 && required <= 64U * 1024U * 1024U;
+      std::vector<uint8_t> metadata(valid ? static_cast<size_t>(required) : 0);
+      if (valid) valid = citizensdk_result_get_runtime_context(
+          result, &value, metadata.data(), required, &required) == kOk && required == metadata.size();
+      if (valid) {
+        write_block(&payload, value.block);
+        payload.u32(value.spec_version);
+        payload.u32(value.transaction_version);
+        payload.bytes(metadata.data(), metadata.size());
+      }
+      break;
+    }
+    case CITIZENSDK_RESULT_EXPORTED_STATE: {
+      auto value = info_value<citizensdk_exported_state_info_t>();
+      uint64_t required = 0;
+      valid = citizensdk_result_get_exported_state(result, &value, nullptr, 0, &required) == kOk &&
+              required > 0 && required <= 256U * 1024U;
+      std::vector<uint8_t> database(valid ? static_cast<size_t>(required) : 0);
+      if (valid) valid = citizensdk_result_get_exported_state(
+          result, &value, database.data(), required, &required) == kOk && required == database.size();
+      if (valid) {
+        payload.u32(value.format_version);
+        write_block(&payload, value.finalized);
+        payload.bytes(database.data(), database.size());
+      }
+      break;
+    }
     case CITIZENSDK_RESULT_ACCOUNT_BALANCE: {
       auto value = info_value<citizensdk_account_balance_info_t>();
       valid = citizensdk_result_get_account_balance(result, &value) == kOk;
@@ -1454,11 +1973,8 @@ bool encode_result(citizensdk_result_handle_t result, uint64_t prepared_token,
       }
       break;
     }
-    case CITIZENSDK_RESULT_WALLET_TRANSFER:
-      valid = copy_wallet_transfer(result, &payload);
-      break;
-    case CITIZENSDK_RESULT_TRANSACTION_HISTORY:
-      valid = write_history(result, &payload);
+    case CITIZENSDK_RESULT_TRANSACTION_HISTORY_PAGE:
+      valid = write_transaction_history_page(result, &payload);
       break;
     case CITIZENSDK_RESULT_QR_REVIEW:
     case CITIZENSDK_RESULT_QR_SIGNED: {
@@ -1471,6 +1987,135 @@ bool encode_result(citizensdk_result_handle_t result, uint64_t prepared_token,
         if (valid) payload.u64(result);
       }
       if (valid) payload.text(json);
+      break;
+    }
+    case CITIZENSDK_RESULT_WALLET_STATE:
+      valid = write_wallet_state(result, &payload);
+      break;
+    case CITIZENSDK_RESULT_SIGNING_OUTCOME:
+      valid = write_signing_outcome(result, &payload);
+      break;
+    case CITIZENSDK_RESULT_DEFAULT_ACCOUNT_CHANGE:
+      valid = write_default_account_change(result, &payload);
+      break;
+    case CITIZENSDK_RESULT_CHAIN_SYNC_STATUS: {
+      auto value = info_value<citizensdk_chain_sync_status_info_t>();
+      valid = citizensdk_result_get_sync_status(result, &value) == kOk &&
+              value.is_syncing <= 1 && value.is_usable <= 1;
+      if (valid) {
+        payload.u64(value.peer_count);
+        payload.u8(value.is_syncing);
+        payload.u8(value.is_usable);
+        write_block(&payload, value.best);
+        write_block(&payload, value.finalized);
+      }
+      break;
+    }
+    case CITIZENSDK_RESULT_BLOCK_HEADER: {
+      auto value = info_value<citizensdk_block_header_info_t>();
+      uint64_t required = 0;
+      valid = citizensdk_result_get_block_header(result, &value, nullptr, 0, &required) == kOk &&
+              required <= 1024U * 1024U;
+      std::vector<uint8_t> digest(valid ? static_cast<size_t>(required) : 0);
+      if (valid) valid = citizensdk_result_get_block_header(
+          result, &value, digest.empty() ? nullptr : digest.data(), required, &required) == kOk &&
+          required == digest.size();
+      if (valid) {
+        write_block(&payload, value.block);
+        payload.fixed(value.parent_hash, 32);
+        payload.fixed(value.state_root, 32);
+        payload.fixed(value.extrinsics_root, 32);
+        payload.bytes(digest.data(), digest.size());
+      }
+      break;
+    }
+    case CITIZENSDK_RESULT_BLOCK_BODY: {
+      auto value = info_value<citizensdk_block_body_info_t>();
+      valid = citizensdk_result_get_block_body_info(result, &value) == kOk &&
+              value.extrinsic_count <= 16384 && value.total_bytes <= 64U * 1024U * 1024U;
+      if (valid) {
+        write_block(&payload, value.block);
+        payload.u32(value.extrinsic_count);
+      }
+      uint64_t total = 0;
+      for (uint32_t index = 0; valid && index < value.extrinsic_count; ++index) {
+        uint64_t required = 0;
+        valid = citizensdk_result_copy_block_body_extrinsic(
+            result, index, nullptr, 0, &required) == kOk && required > 0;
+        valid = valid && required <= value.total_bytes - total;
+        if (valid) total += required;
+        std::vector<uint8_t> extrinsic(valid ? static_cast<size_t>(required) : 0);
+        if (valid) valid = citizensdk_result_copy_block_body_extrinsic(
+            result, index, extrinsic.data(), required, &required) == kOk &&
+            required == extrinsic.size();
+        if (valid) payload.bytes(extrinsic.data(), extrinsic.size());
+      }
+      valid = valid && total == value.total_bytes;
+      break;
+    }
+    case CITIZENSDK_RESULT_PREPARED_TRANSACTION: {
+      auto value = info_value<citizensdk_prepared_transaction_info_t>();
+      valid = citizensdk_result_get_prepared_transaction(result, &value) == kOk &&
+              value.prepared_transaction > 0 &&
+              value.prepared_transaction <= static_cast<uint64_t>(INT64_MAX) &&
+              value.best_block.finality == CITIZENSDK_FINALITY_BEST;
+      if (valid) {
+        payload.u64(value.prepared_transaction);
+        payload.fixed(value.preparation_id, 16);
+        payload.fixed(value.source_account_id.bytes, 32);
+        payload.fixed(value.call_data_hash, 32);
+        write_block(&payload, value.best_block);
+        payload.u32(value.runtime_spec_number);
+        payload.u32(value.transaction_format_number);
+        payload.u64(value.nonce);
+      }
+      break;
+    }
+    case CITIZENSDK_RESULT_TRANSACTION_EXECUTION: {
+      auto value = info_value<citizensdk_transaction_execution_info_t>();
+      uint64_t session_required = 0, request_required = 0, reason_required = 0;
+      valid = citizensdk_result_get_transaction_execution(
+          result, &value, nullptr, 0, &session_required, nullptr, 0,
+          &request_required, nullptr, 0, &reason_required) == kOk &&
+          session_required <= 128 && request_required <= kMaxQrTextBytes && reason_required <= 4096;
+      std::vector<uint8_t> session(valid ? static_cast<size_t>(session_required) : 0);
+      std::vector<uint8_t> request(valid ? static_cast<size_t>(request_required) : 0);
+      std::vector<uint8_t> reason(valid ? static_cast<size_t>(reason_required) : 0);
+      if (valid) valid = citizensdk_result_get_transaction_execution(
+          result, &value, session.empty() ? nullptr : session.data(), session.size(),
+          &session_required, request.empty() ? nullptr : request.data(), request.size(),
+          &request_required, reason.empty() ? nullptr : reason.data(), reason.size(),
+          &reason_required) == kOk;
+      if (valid) {
+        payload.u32(value.status);
+        payload.fixed(value.execution_id, 16);
+        payload.fixed(value.source_account_id.bytes, 32);
+        payload.fixed(value.call_data_hash, 32);
+        payload.fixed(value.transaction_hash, 32);
+        payload.u64(value.expires_at);
+        const bool has_execution = value.status == CITIZENSDK_TRANSACTION_EXECUTION_FINALIZED_SUCCESS ||
+                                   value.status == CITIZENSDK_TRANSACTION_EXECUTION_FINALIZED_FAILED;
+        payload.u8(has_execution ? 1 : 0);
+        if (has_execution) {
+          citizensdk_execution_info_t execution{};
+          execution.status = value.status == CITIZENSDK_TRANSACTION_EXECUTION_FINALIZED_SUCCESS ? 1U : 2U;
+          execution.reason_or_dispatch_variant = value.dispatch_variant;
+          execution.has_block = value.has_block;
+          execution.block = value.block;
+          execution.has_extrinsic_index = value.has_extrinsic_index;
+          execution.extrinsic_index = value.extrinsic_index;
+          execution.has_module = value.has_module_failure;
+          execution.pallet_index = value.pallet_index;
+          execution.error_index = value.error_index;
+          write_execution(&payload, execution);
+        }
+        payload.u8(reason.empty() ? 0 : 1);
+        if (!reason.empty()) payload.text(reason);
+        payload.u8(value.has_replacement_hash == 0 ? 0 : 1);
+        if (value.has_replacement_hash != 0) payload.fixed(value.replacement_hash, 32);
+        payload.u8(request.empty() ? 0 : 1);
+        if (!request.empty()) payload.text(request);
+      }
       break;
     }
     default:

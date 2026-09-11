@@ -275,19 +275,15 @@ internal final class CitizenSDKNative: @unchecked Sendable {
     }
 
     private final class Pending {
-        let operationID: String
         let decode: (UInt64) throws -> Any
         let complete: (Result<Any, Error>) -> Void
-        let progress: ((CitizenTransferProgress) -> Void)?
         let retainsResult: Bool
 
-        init(operationID: String, decode: @escaping (UInt64) throws -> Any,
+        init(decode: @escaping (UInt64) throws -> Any,
              complete: @escaping (Result<Any, Error>) -> Void,
-             progress: ((CitizenTransferProgress) -> Void)?, retainsResult: Bool) {
-            self.operationID = operationID
+             retainsResult: Bool) {
             self.decode = decode
             self.complete = complete
-            self.progress = progress
             self.retainsResult = retainsResult
         }
     }
@@ -316,11 +312,11 @@ internal final class CitizenSDKNative: @unchecked Sendable {
     /// before its out_request_id has been observed by Swift.
     private var admissionInProgress = false
     private var earlyCompletions: [UInt64: UInt64] = [:]
-    private var earlyWatches: [UInt64: [(sequence: UInt64, result: UInt64)]] = [:]
-    /// Includes completion/watch batches removed from maps but not yet fully
+    /// Includes completion batches removed from maps but not yet fully
     /// decoded, released and delivered to facade observers.
     private var queuedDeliveries = 0
     private var preparedHandles: Set<UInt64> = []
+    private var preparedTransactionHandles: [String: UInt64] = [:]
     private var eventListener: ((CitizenSDKEvent) -> Void)?
 
     private init(handle: UInt64, modules: CitizenSDKModules) {
@@ -427,6 +423,96 @@ internal final class CitizenSDKNative: @unchecked Sendable {
     func finalizedHead() throws -> CitizenSDKOperation<CitizenBlockRef> {
         try begin(accept: { citizensdk_get_finalized_head(handle, $0) }, decode: CitizenSDKNativeCodec.block)
     }
+    func syncStatus() throws -> CitizenSDKOperation<CitizenChainSyncStatus> {
+        try begin(accept: { citizensdk_get_sync_status(handle, $0) }, decode: CitizenSDKNativeCodec.syncStatus)
+    }
+    func bestHead() throws -> CitizenSDKOperation<CitizenBlockRef> {
+        try begin(accept: { citizensdk_get_best_head(handle, $0) }, decode: CitizenSDKNativeCodec.block)
+    }
+    func finalizedBlock(at number: UInt64) throws -> CitizenSDKOperation<CitizenBlockRef> {
+        try begin(accept: { citizensdk_get_finalized_block_at(handle, number, $0) },
+                  decode: CitizenSDKNativeCodec.block)
+    }
+    func resolveFinalizedBlock(hash: Data, number: UInt64) throws -> CitizenSDKOperation<CitizenBlockRef> {
+        let checked = try CitizenSDKInputLimits.accountID(hash, label: "block hash")
+        return try checked.withUnsafeBytes { bytes in
+            try begin(accept: {
+                citizensdk_resolve_finalized_block(
+                    handle, bytes.bindMemory(to: UInt8.self).baseAddress, number, $0)
+            }, decode: CitizenSDKNativeCodec.block)
+        }
+    }
+    func blockHeader(_ block: CitizenBlockRef) throws -> CitizenSDKOperation<CitizenBlockHeader> {
+        var value = cBlock(block)
+        return try withUnsafePointer(to: &value) { pointer in
+            try begin(accept: { citizensdk_get_block_header_at(handle, pointer, $0) },
+                      decode: CitizenSDKNativeCodec.blockHeader)
+        }
+    }
+    func blockBody(_ block: CitizenBlockRef) throws -> CitizenSDKOperation<CitizenBlockBody> {
+        var value = cBlock(block)
+        return try withUnsafePointer(to: &value) { pointer in
+            try begin(accept: { citizensdk_get_block_body_at(handle, pointer, $0) },
+                      decode: CitizenSDKNativeCodec.blockBody)
+        }
+    }
+    func runtimeContext(_ block: CitizenBlockRef) throws -> CitizenSDKOperation<CitizenRuntimeContext> {
+        var value = cBlock(block)
+        return try withUnsafePointer(to: &value) { pointer in
+            try begin(accept: { citizensdk_get_runtime_context_at(handle, pointer, $0) },
+                      decode: CitizenSDKNativeCodec.runtimeContext)
+        }
+    }
+    func storage(_ block: CitizenBlockRef, key: Data) throws -> CitizenSDKOperation<Data?> {
+        var value = cBlock(block)
+        return try withUnsafePointer(to: &value) { pointer in
+            try withView(key) { view in
+                try begin(accept: { citizensdk_get_storage_at(handle, pointer, view, $0) },
+                          decode: CitizenSDKNativeCodec.storage)
+            }
+        }
+    }
+    func storageBatch(_ block: CitizenBlockRef, keys: [Data]) throws -> CitizenSDKOperation<[Data?]> {
+        var value = cBlock(block)
+        return try withUnsafePointer(to: &value) { pointer in
+            try Self.withViews(keys) { views in
+                try views.withUnsafeBufferPointer { buffer in
+                    try begin(accept: {
+                        citizensdk_get_storage_batch_at(
+                            handle, pointer, buffer.baseAddress, UInt32(buffer.count), $0)
+                    }, decode: CitizenSDKNativeCodec.storageBatch)
+                }
+            }
+        }
+    }
+    func systemEvents(_ block: CitizenBlockRef) throws -> CitizenSDKOperation<Data?> {
+        var value = cBlock(block)
+        return try withUnsafePointer(to: &value) { pointer in
+            try begin(accept: { citizensdk_get_system_events_at(handle, pointer, $0) },
+                      decode: CitizenSDKNativeCodec.storage)
+        }
+    }
+    func exportState() throws -> CitizenSDKOperation<CitizenChainState> {
+        try begin(accept: { citizensdk_export_state(handle, $0) }, decode: CitizenSDKNativeCodec.chainState)
+    }
+    func importState(_ state: CitizenChainState) throws -> CitizenSDKOperation<Void> {
+        var block = cBlock(state.finalized)
+        return try withUnsafePointer(to: &block) { pointer in
+            try withView(state.database) { view in
+                try begin(accept: {
+                    citizensdk_import_state(handle, pointer, state.formatVersion, view, $0)
+                }, decode: { result in
+                    let imported = try CitizenSDKNativeCodec.block(result)
+                    guard imported == state.finalized else {
+                        throw CitizenSDKError(
+                            .integrity,
+                            "Core imported-state receipt does not match its finalized anchor")
+                    }
+                    return ()
+                })
+            }
+        }
+    }
     func genesisHash() throws -> Data {
         try callLock.withLock {
             try requireOpen()
@@ -443,6 +529,59 @@ internal final class CitizenSDKNative: @unchecked Sendable {
     }
     func walletProfile() throws -> CitizenSDKOperation<CitizenWalletProfile?> {
         try begin(accept: { citizensdk_get_wallet_profile(handle, $0) }, decode: CitizenSDKNativeCodec.profile)
+    }
+    func walletState() throws -> CitizenSDKOperation<CitizenWalletState> {
+        try begin(accept: { citizensdk_get_wallet_state(handle, $0) }, decode: CitizenSDKNativeCodec.walletState)
+    }
+
+    func importColdAccountID(_ accountID: Data, name: String) throws -> CitizenSDKOperation<CitizenWalletState> {
+        var account = try cAccount(accountID)
+        let bytes = Data(name.utf8)
+        return try withUnsafePointer(to: &account) { pointer in
+            try withView(bytes) { view in
+                try begin(accept: { citizensdk_import_cold_account_id(handle, pointer, view, $0) },
+                          decode: CitizenSDKNativeCodec.walletState)
+            }
+        }
+    }
+
+    func importColdAccountSS58(_ ss58: String, name: String) throws -> CitizenSDKOperation<CitizenWalletState> {
+        let address = Data(ss58.utf8), nameBytes = Data(name.utf8)
+        return try withView(address) { addressView in
+            try withView(nameBytes) { nameView in
+                try begin(accept: { citizensdk_import_cold_account_ss58(handle, addressView, nameView, $0) },
+                          decode: CitizenSDKNativeCodec.walletState)
+            }
+        }
+    }
+
+    func reorderWalletAccounts(expectedRevision: UInt64, accountIDs: [Data]) throws
+        -> CitizenSDKOperation<CitizenWalletState> {
+        try withAccounts(accountIDs) { pointer, count in
+            try begin(accept: {
+                citizensdk_reorder_wallet_accounts_without_default_change(
+                    handle, expectedRevision, pointer, count, $0)
+            }, decode: CitizenSDKNativeCodec.walletState)
+        }
+    }
+
+    func renameAnyAccount(_ accountID: Data, name: String) throws -> CitizenSDKOperation<CitizenWalletState> {
+        var account = try cAccount(accountID)
+        let bytes = Data(name.utf8)
+        return try withUnsafePointer(to: &account) { pointer in
+            try withView(bytes) { view in
+                try begin(accept: { citizensdk_rename_account(handle, pointer, view, $0) },
+                          decode: CitizenSDKNativeCodec.walletState)
+            }
+        }
+    }
+
+    func deleteAnyAccount(_ accountID: Data) throws -> CitizenSDKOperation<CitizenWalletState> {
+        var account = try cAccount(accountID)
+        return try withUnsafePointer(to: &account) { pointer in
+            try begin(accept: { citizensdk_delete_account(handle, pointer, $0) },
+                      decode: CitizenSDKNativeCodec.walletState)
+        }
     }
 
     /// 私有回调只借用受控显示缓冲；普通请求只解码 Empty，并持有 context 到真实终态。
@@ -601,6 +740,67 @@ internal final class CitizenSDKNative: @unchecked Sendable {
             try withView(message) { view in
                 try begin(accept: { citizensdk_sign_wallet_payload(handle, pointer, view, $0) }, decode: CitizenSDKNativeCodec.signature)
             }
+        }
+    }
+
+    /// Product-independent signing. Core owns account-mode routing and exact
+    /// transform application; this binding only borrows bounded opaque bytes.
+    func beginSigning(_ intent: CitizenSigningIntent) throws -> CitizenSDKOperation<CitizenSigningOutcome> {
+        var account = try cAccount(intent.accountID)
+        return try withUnsafePointer(to: &account) { accountPointer in
+            try Self.withViews([intent.payload, intent.domain]) { views in
+                try begin(accept: {
+                    citizensdk_begin_signing(
+                        handle, accountPointer, views[0], intent.transform.rawValue,
+                        views[1], intent.externalSignerTransport?.rawValue ?? 0,
+                        intent.opaqueAction, intent.ttlSeconds, $0)
+                }, decode: CitizenSDKNativeCodec.signingOutcome)
+            }
+        }
+    }
+
+    func consumeExternalSignature(sessionID: String, response: String) throws
+        -> CitizenSDKOperation<CitizenSigningOutcome> {
+        try Self.withViews([Data(sessionID.utf8), Data(response.utf8)]) { views in
+            try begin(accept: {
+                citizensdk_consume_external_signature(handle, views[0], views[1], $0)
+            }, decode: CitizenSDKNativeCodec.signingOutcome)
+        }
+    }
+
+    func cancelSigningSession(_ sessionID: String) throws -> Bool {
+        try callLock.withLock {
+            try requireOpen()
+            var cancelled: UInt8 = 0
+            try withView(Data(sessionID.utf8)) { view in
+                try CitizenSDKChecks.requireOK(
+                    citizensdk_cancel_signing_session(handle, view, &cancelled),
+                    "Signing session cancellation failed")
+            }
+            guard cancelled <= 1 else {
+                throw CitizenSDKError(.integrity, "Core returned invalid signing cancellation state")
+            }
+            return cancelled == 1
+        }
+    }
+
+    func beginDefaultAccountChange(expectedRevision: UInt64, accountIDs: [Data],
+                                   ttlSeconds: UInt64) throws
+        -> CitizenSDKOperation<CitizenDefaultAccountChangeOutcome> {
+        try withAccounts(accountIDs) { accounts, count in
+            try begin(accept: {
+                citizensdk_begin_default_account_change(
+                    handle, expectedRevision, accounts, count, ttlSeconds, $0)
+            }, decode: CitizenSDKNativeCodec.defaultAccountChange)
+        }
+    }
+
+    func consumeDefaultAccountChange(sessionID: String, response: String) throws
+        -> CitizenSDKOperation<CitizenDefaultAccountChangeOutcome> {
+        try Self.withViews([Data(sessionID.utf8), Data(response.utf8)]) { views in
+            try begin(accept: {
+                citizensdk_consume_default_account_change(handle, views[0], views[1], $0)
+            }, decode: CitizenSDKNativeCodec.defaultAccountChange)
         }
     }
 
@@ -820,36 +1020,132 @@ internal final class CitizenSDKNative: @unchecked Sendable {
         return CitizenSDKError(code, fallback)
     }
 
-    func transfer(source: Data, destination: Data, amount: CitizenU128, remark: Data,
-                  progress: @escaping (CitizenTransferProgress) -> Void) throws -> CitizenSDKOperation<CitizenWalletTransfer> {
+    func prepareTransaction(source: Data, callData: Data)
+        throws -> CitizenSDKOperation<CitizenPreparedTransaction> {
         var sourceAccount = try cAccount(source)
-        var destinationAccount = try cAccount(destination)
-        var cAmount = citizensdk_u128_t(); cAmount.low = amount.low; cAmount.high = amount.high
         return try withUnsafePointer(to: &sourceAccount) { sourcePointer in
-            try withUnsafePointer(to: &destinationAccount) { destinationPointer in
-                try withView(remark) { view in
-                    try begin(
-                        accept: { citizensdk_transfer_with_remark(handle, sourcePointer, destinationPointer, cAmount, view, $0) },
-                        decode: CitizenSDKNativeCodec.transfer,
-                        progress: progress
-                    )
-                }
+            try withView(callData) { view in
+                try begin(
+                    accept: { citizensdk_prepare_transaction(handle, sourcePointer, view, $0) },
+                    decode: { result in
+                        let (nativeHandle, value) = try CitizenSDKNativeCodec.preparedTransaction(result)
+                        self.routerLock.lock()
+                        let existing = self.preparedTransactionHandles.updateValue(
+                            nativeHandle, forKey: value.preparationID)
+                        self.routerLock.unlock()
+                        guard existing == nil else {
+                            _ = citizensdk_prepared_transaction_release(self.handle, nativeHandle)
+                            throw CitizenSDKError(.integrity, "Core returned a duplicate preparation identity")
+                        }
+                        return value
+                    }
+                )
             }
         }
     }
 
-    func initializeHistory(_ accountIDs: [Data]) throws -> CitizenSDKOperation<CitizenTransactionHistory> {
-        try withAccounts(accountIDs) { pointer, count in
-            try begin(accept: { citizensdk_initialize_finalized_history(handle, pointer, count, $0) },
-                      decode: CitizenSDKNativeCodec.history)
+    func cancelPreparedTransaction(_ preparationID: String) throws {
+        try callLock.withLock {
+            try requireOpen()
+            routerLock.lock()
+            let prepared = preparedTransactionHandles.removeValue(forKey: preparationID)
+            routerLock.unlock()
+            guard let prepared else {
+                throw CitizenSDKError(.notFound, "Transaction preparation was not found")
+            }
+            let status = citizensdk_prepared_transaction_release(handle, prepared)
+            guard status == CITIZENSDK_OK else {
+                routerLock.lock()
+                preparedTransactionHandles[preparationID] = prepared
+                routerLock.unlock()
+                try CitizenSDKChecks.requireOK(status, "prepared transaction release failed")
+                return
+            }
         }
     }
 
-    func syncHistory(_ accountIDs: [Data]) throws -> CitizenSDKOperation<CitizenTransactionHistory> {
-        try withAccounts(accountIDs) { pointer, count in
-            try begin(accept: { citizensdk_sync_finalized_history_batch(handle, pointer, count, $0) },
-                      decode: CitizenSDKNativeCodec.history)
+    func executePreparedTransaction(_ preparationID: String)
+        throws -> CitizenSDKOperation<CitizenTransactionExecution> {
+        routerLock.lock()
+        let prepared = preparedTransactionHandles.removeValue(forKey: preparationID)
+        routerLock.unlock()
+        guard let prepared else {
+            throw CitizenSDKError(.notFound, "Transaction preparation was not found")
         }
+        do {
+            return try begin(
+                accept: { citizensdk_execute_prepared_transaction(handle, prepared, $0) },
+                decode: CitizenSDKNativeCodec.transactionExecution)
+        } catch {
+            // Core retains the prepared handle when bounded admission fails synchronously.
+            routerLock.lock()
+            preparedTransactionHandles[preparationID] = prepared
+            routerLock.unlock()
+            throw error
+        }
+    }
+
+    func consumePreparedTransactionQrResponse(_ executionID: String, response: String)
+        throws -> CitizenSDKOperation<CitizenTransactionExecution> {
+        var identifier = try cExecutionID(executionID)
+        return try withUnsafePointer(to: &identifier) { pointer in
+            try withView(Data(response.utf8)) { responseView in
+                try begin(
+                    accept: {
+                        citizensdk_transaction_execution_consume_qr_response(
+                            handle, pointer, responseView, $0)
+                    },
+                    decode: CitizenSDKNativeCodec.transactionExecution)
+            }
+        }
+    }
+
+    func cancelPreparedTransactionExecution(_ executionID: String) throws {
+        var identifier = try cExecutionID(executionID)
+        try withUnsafePointer(to: &identifier) { pointer in
+            try CitizenSDKChecks.requireOK(
+                citizensdk_transaction_execution_cancel(handle, pointer),
+                "transaction execution cancel failed")
+        }
+    }
+
+    private func cExecutionID(_ value: String) throws -> citizensdk_transaction_execution_id_t {
+        guard value.range(of: #"^0x[0-9a-f]{32}$"#, options: .regularExpression) != nil else {
+            throw CitizenSDKError(.invalidArgument, "executionID is invalid")
+        }
+        var result = citizensdk_transaction_execution_id_t()
+        let bytes = stride(from: 2, to: value.count, by: 2).compactMap { offset -> UInt8? in
+            let start = value.index(value.startIndex, offsetBy: offset)
+            let end = value.index(start, offsetBy: 2)
+            return UInt8(value[start..<end], radix: 16)
+        }
+        guard bytes.count == 16 else { throw CitizenSDKError(.invalidArgument, "executionID is invalid") }
+        withUnsafeMutableBytes(of: &result.bytes) { $0.copyBytes(from: bytes) }
+        return result
+    }
+
+    func getTransactionHistory(beforeExecutionID: String?, limit: UInt32)
+        throws -> CitizenSDKOperation<CitizenTransactionHistoryPage> {
+        if let beforeExecutionID {
+            var identifier = try cExecutionID(beforeExecutionID)
+            return try withUnsafePointer(to: &identifier) { pointer in
+                try begin(
+                    accept: { citizensdk_get_transaction_history(handle, pointer, limit, $0) },
+                    decode: CitizenSDKNativeCodec.transactionHistoryPage
+                )
+            }
+        }
+        return try begin(
+            accept: { citizensdk_get_transaction_history(handle, nil, limit, $0) },
+            decode: CitizenSDKNativeCodec.transactionHistoryPage
+        )
+    }
+
+    func syncTransactionHistory() throws -> CitizenSDKOperation<CitizenTransactionHistoryPage> {
+        try begin(
+            accept: { citizensdk_sync_transaction_history(handle, $0) },
+            decode: CitizenSDKNativeCodec.transactionHistoryPage
+        )
     }
 
     func prepareWallet(wordCount: UInt32, password: CitizenSDKSensitiveBuffer) throws -> CitizenSDKOperation<UInt64> {
@@ -938,14 +1234,15 @@ internal final class CitizenSDKNative: @unchecked Sendable {
 
     func close() throws {
         var prepared: Set<UInt64> = []
+        var preparedTransactions: [String] = []
         try Self.withCheckpointSafeCloseGate(
             lock: callLock,
             checkpointRequired: {
                 if closed { return false }
                 routerLock.lock()
-                let isBusy = !pending.isEmpty || !earlyCompletions.isEmpty ||
-                    !earlyWatches.isEmpty || queuedDeliveries != 0
+                let isBusy = !pending.isEmpty || !earlyCompletions.isEmpty || queuedDeliveries != 0
                 prepared = preparedHandles
+                preparedTransactions = preparedTransactionHandles.keys.sorted()
                 routerLock.unlock()
                 guard !isBusy else {
                     throw CitizenSDKError(.busy, "CitizenSDK has accepted work that has not completed")
@@ -955,6 +1252,15 @@ internal final class CitizenSDKNative: @unchecked Sendable {
             lifecycle: readLifecycle
         ) {
             if closed { return }
+            for identifier in preparedTransactions {
+                try cancelPreparedTransaction(identifier)
+                routerLock.lock()
+                let removed = preparedTransactionHandles[identifier] == nil
+                routerLock.unlock()
+                guard removed else {
+                    throw CitizenSDKError(.integrity, "prepared transaction release did not commit")
+                }
+            }
             try Self.releasePreparedBeforeDestroy(
                 prepared.sorted(),
                 release: { try releasePrepared($0) },
@@ -1086,8 +1392,7 @@ internal final class CitizenSDKNative: @unchecked Sendable {
 
     private func begin<T: Sendable>(accept: (UnsafeMutablePointer<UInt64>) -> Int32,
                                     decode: @escaping (UInt64) throws -> T,
-                                    retainsResult: Bool = false,
-                                    progress: ((CitizenTransferProgress) -> Void)? = nil) throws -> CitizenSDKOperation<T> {
+                                    retainsResult: Bool = false) throws -> CitizenSDKOperation<T> {
         try callLock.withLock {
             try requireOpen()
             let cancellation = Cancellation()
@@ -1097,7 +1402,7 @@ internal final class CitizenSDKNative: @unchecked Sendable {
                 return try self.cancel(request)
             }
             routerLock.lock()
-            guard !admissionInProgress, earlyCompletions.isEmpty, earlyWatches.isEmpty else {
+            guard !admissionInProgress, earlyCompletions.isEmpty else {
                 routerLock.unlock()
                 throw CitizenSDKError(.integrity, "Core admission router is not quiescent")
             }
@@ -1107,7 +1412,6 @@ internal final class CitizenSDKNative: @unchecked Sendable {
             var requestID: UInt64 = 0
             let code = accept(&requestID)
             let pending = Pending(
-                operationID: operationID,
                 decode: { try decode($0) },
                 complete: { result in
                     operation.complete(result.flatMap { value in
@@ -1117,24 +1421,19 @@ internal final class CitizenSDKNative: @unchecked Sendable {
                         return .success(typed)
                     })
                 },
-                progress: progress,
                 retainsResult: retainsResult
             )
             routerLock.lock()
             admissionInProgress = false
             let accepted = code == 0 && requestID != 0 && self.pending[requestID] == nil
             let completion = accepted ? earlyCompletions.removeValue(forKey: requestID) : nil
-            let watches = accepted ? (earlyWatches.removeValue(forKey: requestID) ?? []) : []
-            let ownsEarlyDelivery = accepted && (completion != nil || !watches.isEmpty)
+            let ownsEarlyDelivery = accepted && completion != nil
             if ownsEarlyDelivery { queuedDeliveries += 1 }
             let rejectedCompletions = Array(earlyCompletions.values)
-            let rejectedWatches = earlyWatches.values.flatMap { $0.map(\.result) }
             earlyCompletions.removeAll(keepingCapacity: true)
-            earlyWatches.removeAll(keepingCapacity: true)
             if accepted && completion == nil { self.pending[requestID] = pending }
             routerLock.unlock()
             rejectedCompletions.forEach { _ = citizensdk_result_release($0) }
-            rejectedWatches.forEach { _ = citizensdk_result_release($0) }
 
             if code != 0 { try CitizenSDKChecks.requireOK(code, "Core request was rejected") }
             guard requestID != 0 else { throw CitizenSDKError(.integrity, "Core returned an empty request identity") }
@@ -1145,7 +1444,6 @@ internal final class CitizenSDKNative: @unchecked Sendable {
                     routerLock.lock(); queuedDeliveries -= 1; routerLock.unlock()
                 }
             }
-            watches.forEach { routeWatch(requestID: requestID, sequence: $0.sequence, result: $0.result, pending: pending) }
             if let completion { routeCompletion(result: completion, pending: pending) }
             return operation
         }
@@ -1187,22 +1485,9 @@ internal final class CitizenSDKNative: @unchecked Sendable {
             }
             if let release { _ = citizensdk_result_release(release) }
         case 2:
-            var release: UInt64?
-            routerLock.lock()
-            if let pending = pending[event.request_id] {
-                // The request stays pending while progress runs. A concurrent
-                // close fails BUSY before unsubscribe/clear and cannot wait on
-                // a progress closure that synchronously reenters any SDK API.
-                routerLock.unlock(); routeWatch(requestID: event.request_id, sequence: event.sequence,
-                                                result: event.result, pending: pending)
-            } else if admissionInProgress && earlyCompletions[event.request_id] == nil {
-                earlyWatches[event.request_id, default: []].append((event.sequence, event.result))
-                routerLock.unlock()
-            } else {
-                release = event.result
-                routerLock.unlock()
-            }
-            if let release { _ = citizensdk_result_release(release) }
+            // Flutter/Darwin no longer exposes the removed transfer convenience
+            // route. Raw Core watch results remain owned and are released here.
+            if event.result != 0 { _ = citizensdk_result_release(event.result) }
         case 3:
             enqueueDeferredStateEvent(.capabilities(sequence: event.sequence))
         case 4:
@@ -1231,13 +1516,6 @@ internal final class CitizenSDKNative: @unchecked Sendable {
         } else {
             pending.complete(outcome)
         }
-    }
-
-    private func routeWatch(requestID: UInt64, sequence: UInt64, result: UInt64, pending: Pending) {
-        defer { _ = citizensdk_result_release(result) }
-        guard let progress = pending.progress,
-              let value = try? CitizenSDKNativeCodec.watch(result, operationID: pending.operationID, sequence: sequence) else { return }
-        progress(value)
     }
 
     /// Runs only after the C callback has returned. The delivery gate and
@@ -1298,6 +1576,17 @@ internal final class CitizenSDKNative: @unchecked Sendable {
         let checked = try CitizenSDKInputLimits.accountID(data)
         var output = citizensdk_account_id_t()
         _ = withUnsafeMutableBytes(of: &output.bytes) { checked.copyBytes(to: $0) }
+        return output
+    }
+
+    private func cBlock(_ block: CitizenBlockRef) -> citizensdk_block_ref_t {
+        var output = citizensdk_block_ref_t()
+        output.struct_size = UInt32(MemoryLayout<citizensdk_block_ref_t>.size)
+        output.abi_version = 1
+        _ = withUnsafeMutableBytes(of: &output.hash) { block.hash.copyBytes(to: $0) }
+        output.number = block.number
+        output.finality = block.finality.rawValue
+        output.reserved = 0
         return output
     }
 

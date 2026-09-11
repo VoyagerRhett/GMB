@@ -17,20 +17,36 @@ internal object CitizenSdkFlutterCodec {
     const val EVENT_CHANNEL = "citizen/sdk/events/v1"
     const val PROTOCOL_VERSION = 1
     const val MAXIMUM_ADDITIONAL_WALLET_ACCOUNTS = 1989
-    const val MAXIMUM_HISTORY_ACCOUNTS = 1990
+    const val MAXIMUM_WALLET_CATALOG_ACCOUNTS = 3980
+    const val MAXIMUM_DEFAULT_ACCOUNT_CHANGE_ACCOUNTS = 256
     const val MAXIMUM_BALANCE_ACCOUNTS = 1990
     const val MAXIMUM_SIGNING_PAYLOAD_BYTES = 16 * 1024 * 1024
+    const val MAXIMUM_STORAGE_KEY_BYTES = 4 * 1024
+    const val MAXIMUM_STORAGE_BATCH_KEYS = 1024
+    const val MAXIMUM_STORAGE_BATCH_KEY_BYTES = 1024 * 1024
+    const val MAXIMUM_EXPORTED_STATE_BYTES = 256 * 1024
     const val MAXIMUM_QR_TEXT_BYTES = 2331
     const val MAXIMUM_QR_REVIEW_BYTES = 1920
     const val MAXIMUM_QR_IMAGE_BYTES = 16 * 1024 * 1024
+    const val MAXIMUM_TRANSACTION_CALL_DATA_BYTES = 1024 * 1024
 
     val methods: Set<String> = linkedSetOf(
         "open", "start", "stop", "close", "getCapabilities", "getFinalizedHead",
+        "getSyncStatus", "getBestHead", "getFinalizedBlockAt", "resolveFinalizedBlock",
+        "getBlockHeader", "getBlockBody", "getRuntimeContext", "getStorage", "getStorageBatch",
+        "getSystemEvents", "exportState", "importState",
         "getGenesisHash", "getAccountBalance", "getAccountBalances", "getAccountNonce", "getFeeSnapshot", "getWalletProfile", "viewAccountPrivateKey",
+        "getWalletState", "importColdAccountId", "importColdAccountSs58",
+        "reorderWalletAccountsWithoutDefaultChange", "renameAccount", "deleteAccount",
         "createWallet", "importWallet", "addWalletAccounts", "setActiveWalletAccount",
         "renameWalletAccount", "deleteWalletAccount", "deleteWallet",
-        "reconcileWalletCleanup", "signWalletPayload", "verifySignature", "transferWithRemark",
-        "initializeFinalizedHistory", "syncFinalizedHistory",
+        "reconcileWalletCleanup", "signWalletPayload",
+        "beginSigning", "consumeExternalSignature", "cancelSigning",
+        "beginDefaultAccountChange", "consumeDefaultAccountChange",
+        "verifySignature", "prepareTransaction", "cancelPreparedTransaction",
+        "executePreparedTransaction", "consumePreparedTransactionQrResponse",
+        "cancelPreparedTransactionExecution", "getTransactionHistory",
+        "syncTransactionHistory",
         "qrParse", "qrCreateSignRequest", "qrConsumeSignResponse", "qrCancelSignRequest", "qrEncodeAccountId",
         "qrEncodeUserTransfer", "qrDecodeLuminance", "qrEncode", "qrScan", "signQrRequest",
     )
@@ -57,6 +73,40 @@ internal object CitizenSdkFlutterCodec {
             override val requestSequence: Long,
             val accountIds: List<ByteArray>,
         ) : SessionRequest
+        data class BlockNumber(
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val number: String,
+        ) : SessionRequest
+        data class ResolveBlock(
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val hash: ByteArray,
+            val number: String,
+        ) : SessionRequest
+        data class Block(
+            val method: String,
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val block: CitizenBlockRef,
+        ) : SessionRequest
+        data class Storage(
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val block: CitizenBlockRef,
+            val key: ByteArray,
+        ) : SessionRequest
+        data class StorageBatch(
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val block: CitizenBlockRef,
+            val keys: List<ByteArray>,
+        ) : SessionRequest
+        data class ImportState(
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val state: CitizenChainState,
+        ) : SessionRequest
         data class CreateWallet(
             override val sessionId: String,
             override val requestSequence: Long,
@@ -68,16 +118,53 @@ internal object CitizenSdkFlutterCodec {
             val indices: List<Int>,
         ) : SessionRequest
         data class RenameWalletAccount(
+            val method: String,
             override val sessionId: String,
             override val requestSequence: Long,
             val accountId: ByteArray,
             val name: String,
+        ) : SessionRequest
+        data class ColdSs58(
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val address: String,
+            val name: String,
+        ) : SessionRequest
+        data class ReorderWalletAccounts(
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val expectedRevision: String,
+            val accountIds: List<ByteArray>,
         ) : SessionRequest
         data class SignWalletPayload(
             override val sessionId: String,
             override val requestSequence: Long,
             val accountId: ByteArray,
             val payload: ByteArray,
+        ) : SessionRequest
+        data class BeginSigning(
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val intent: CitizenSigningIntent,
+        ) : SessionRequest
+        data class ExternalSignature(
+            val method: String,
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val signingSessionId: String,
+            val response: String,
+        ) : SessionRequest
+        data class CancelSigning(
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val signingSessionId: String,
+        ) : SessionRequest
+        data class BeginDefaultAccountChange(
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val expectedRevision: String,
+            val accountIds: List<ByteArray>,
+            val ttlSeconds: Long,
         ) : SessionRequest
         data class VerifySignature(
             val accountId: ByteArray,
@@ -87,19 +174,30 @@ internal object CitizenSdkFlutterCodec {
             override val sessionId: String? = null
             override val requestSequence: Long = 0
         }
-        data class TransferWithRemark(
+        data class PrepareTransaction(
             override val sessionId: String,
             override val requestSequence: Long,
             val sourceAccountId: ByteArray,
-            val destinationAccountId: ByteArray,
-            val amountFen: String,
-            val remark: ByteArray,
+            val callData: ByteArray,
         ) : SessionRequest
-        data class History(
+        data class CancelPreparedTransaction(
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val preparationId: String,
+        ) : SessionRequest
+        data class TransactionExecution(
             val method: String,
             override val sessionId: String,
             override val requestSequence: Long,
-            val accountIds: List<ByteArray>,
+            val executionId: String,
+            val response: String?,
+        ) : SessionRequest
+        data class TransactionHistory(
+            val method: String,
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val beforeExecutionId: String?,
+            val limit: Int,
         ) : SessionRequest
         data class Qr(
             val method: String,
@@ -146,14 +244,70 @@ internal object CitizenSdkFlutterCodec {
         fun length(expected: Int) = requireLength(tuple, expected, sessionId, sequence)
         return try {
             when (method) {
-                "start", "stop", "close", "getCapabilities", "getFinalizedHead", "getGenesisHash",
-                "getFeeSnapshot", "getWalletProfile", "importWallet", "deleteWallet",
+                "start", "stop", "close", "getCapabilities", "getFinalizedHead", "getSyncStatus",
+                "getBestHead", "exportState", "getGenesisHash",
+                "getFeeSnapshot", "getWalletProfile", "getWalletState", "importWallet", "deleteWallet",
                 "reconcileWalletCleanup" -> {
                     length(3)
                     Request.Empty(method, sessionId, sequence)
                 }
+                "getFinalizedBlockAt" -> {
+                    length(4)
+                    Request.BlockNumber(sessionId, sequence, unsigned64Decimal(tuple[3], "number"))
+                }
+                "resolveFinalizedBlock" -> {
+                    length(5)
+                    Request.ResolveBlock(
+                        sessionId, sequence, hash32(tuple[3]), unsigned64Decimal(tuple[4], "number"),
+                    )
+                }
+                "getBlockHeader", "getBlockBody", "getRuntimeContext", "getSystemEvents" -> {
+                    length(4)
+                    val block = blockRef(tuple[3])
+                    if (method == "getSystemEvents" && block.finality != CitizenFinality.FINALIZED) {
+                        badRequest("getSystemEvents requires a finalized block", sessionId, sequence)
+                    }
+                    Request.Block(method, sessionId, sequence, block)
+                }
+                "getStorage" -> {
+                    length(5)
+                    Request.Storage(
+                        sessionId, sequence, blockRef(tuple[3]),
+                        bytes(tuple[4], "storage key", false, MAXIMUM_STORAGE_KEY_BYTES),
+                    )
+                }
+                "getStorageBatch" -> {
+                    length(5)
+                    val rawKeys = tuple[4] as? List<*>
+                        ?: badRequest("storage keys must be a tuple", sessionId, sequence)
+                    if (rawKeys.size !in 1..MAXIMUM_STORAGE_BATCH_KEYS) {
+                        badRequest("storage batch must contain 1..1024 keys", sessionId, sequence)
+                    }
+                    var total = 0
+                    val keys = rawKeys.map {
+                        bytes(it, "storage key", false, MAXIMUM_STORAGE_KEY_BYTES).also { key ->
+                            total += key.size
+                            if (total > MAXIMUM_STORAGE_BATCH_KEY_BYTES) {
+                                badRequest("storage batch keys exceed 1 MiB", sessionId, sequence)
+                            }
+                        }
+                    }
+                    Request.StorageBatch(sessionId, sequence, blockRef(tuple[3]), keys)
+                }
+                "importState" -> {
+                    length(6)
+                    val formatVersion = exactLong(tuple[3], "formatVersion")
+                    val finalized = blockRef(tuple[4])
+                    val database = bytes(tuple[5], "database", false, MAXIMUM_EXPORTED_STATE_BYTES)
+                    if (formatVersion !in 1..0xffff_ffffL || finalized.finality != CitizenFinality.FINALIZED) {
+                        badRequest("importState fields are invalid", sessionId, sequence)
+                    }
+                    Request.ImportState(
+                        sessionId, sequence, CitizenChainState(formatVersion, finalized, database),
+                    )
+                }
                 "getAccountBalance", "getAccountNonce", "setActiveWalletAccount",
-                "deleteWalletAccount", "viewAccountPrivateKey" -> {
+                "deleteWalletAccount", "deleteAccount", "viewAccountPrivateKey" -> {
                     length(4)
                     Request.Account(method, sessionId, sequence, hash32(tuple[3]))
                 }
@@ -190,7 +344,7 @@ internal object CitizenSdkFlutterCodec {
                     ) badRequest("indices must be unique values in 1..1989", sessionId, sequence)
                     Request.AddWalletAccounts(sessionId, sequence, indices)
                 }
-                "renameWalletAccount" -> {
+                "renameWalletAccount", "renameAccount", "importColdAccountId" -> {
                     length(5)
                     val rawName = string(tuple[4], "name", 1, 128)
                     val name = rawName.trim()
@@ -206,7 +360,24 @@ internal object CitizenSdkFlutterCodec {
                             sequence,
                         )
                     }
-                    Request.RenameWalletAccount(sessionId, sequence, hash32(tuple[3]), name)
+                    Request.RenameWalletAccount(method, sessionId, sequence, hash32(tuple[3]), name)
+                }
+                "importColdAccountSs58" -> {
+                    length(5)
+                    val address = utf8Text(tuple[3], "ss58Address", 1, 64)
+                    val rawName = string(tuple[4], "name", 1, 128)
+                    val name = checkedAccountName(rawName, sessionId, sequence)
+                    Request.ColdSs58(sessionId, sequence, address, name)
+                }
+                "reorderWalletAccountsWithoutDefaultChange" -> {
+                    length(5)
+                    val revision = unsigned64Decimal(tuple[3], "expectedRevision")
+                    val values = tuple[4] as? List<*>
+                        ?: badRequest("accountIds must be a tuple", sessionId, sequence)
+                    if (values.size !in 1..MAXIMUM_WALLET_CATALOG_ACCOUNTS) {
+                        badRequest("accountIds must contain 1..3980 accounts", sessionId, sequence)
+                    }
+                    Request.ReorderWalletAccounts(sessionId, sequence, revision, values.map(::hash32))
                 }
                 "signWalletPayload" -> {
                     length(5)
@@ -225,37 +396,114 @@ internal object CitizenSdkFlutterCodec {
                         payload,
                     )
                 }
-                "transferWithRemark" -> {
-                    length(7)
-                    val amount = decimal(tuple[5], "amountFen", true)
-                    val remark = string(tuple[6], "remark", 0, 99)
-                        .toByteArray(StandardCharsets.UTF_8)
-                    if (remark.size > 99) badRequest(
-                        "remark UTF-8 length exceeds 99 bytes",
-                        sessionId,
-                        sequence,
+                "beginSigning" -> {
+                    length(10)
+                    val payload = bytes(tuple[4], "payload", false, MAXIMUM_SIGNING_PAYLOAD_BYTES)
+                    val transform = when (string(tuple[5], "transform", 3, 32)) {
+                        "raw" -> CitizenSigningTransform.RAW
+                        "substrateSigningPayload" -> CitizenSigningTransform.SUBSTRATE_SIGNING_PAYLOAD
+                        "blake2Domain" -> CitizenSigningTransform.BLAKE2_DOMAIN
+                        else -> badRequest("unknown signing transform", sessionId, sequence)
+                    }
+                    val domain = bytes(tuple[6], "domain", true, 32)
+                    if ((transform == CitizenSigningTransform.BLAKE2_DOMAIN && domain.isEmpty()) ||
+                        (transform != CitizenSigningTransform.BLAKE2_DOMAIN && domain.isNotEmpty())
+                    ) badRequest("signing transform/domain combination is invalid", sessionId, sequence)
+                    val transport = when (string(tuple[7], "transport", 4, 8)) {
+                        "none" -> null
+                        "qrV1" -> CitizenExternalSignerTransport.QR_V1
+                        else -> badRequest("unknown external signer transport", sessionId, sequence)
+                    }
+                    val action = exactInt(tuple[8], "opaqueAction")
+                    val ttl = exactLong(tuple[9], "ttlSeconds")
+                    if (action !in 0..0xffff || ttl !in 1..300) {
+                        badRequest("signing action or ttl is invalid", sessionId, sequence)
+                    }
+                    Request.BeginSigning(
+                        sessionId, sequence,
+                        CitizenSigningIntent(hash32(tuple[3]), payload, transform, domain, transport, action, ttl),
                     )
-                    Request.TransferWithRemark(
+                }
+                "consumeExternalSignature", "consumeDefaultAccountChange" -> {
+                    length(5)
+                    Request.ExternalSignature(
+                        method, sessionId, sequence,
+                        string(tuple[3], "signingSessionId", 1, 128),
+                        qrText(tuple[4], "response"),
+                    )
+                }
+                "cancelSigning" -> {
+                    length(4)
+                    Request.CancelSigning(
+                        sessionId, sequence, string(tuple[3], "signingSessionId", 1, 128),
+                    )
+                }
+                "beginDefaultAccountChange" -> {
+                    length(6)
+                    val revision = unsigned64Decimal(tuple[3], "expectedRevision")
+                    val values = tuple[4] as? List<*>
+                        ?: badRequest("accountIds must be a tuple", sessionId, sequence)
+                    if (values.size !in 1..MAXIMUM_DEFAULT_ACCOUNT_CHANGE_ACCOUNTS) {
+                        badRequest("accountIds must contain 1..256 accounts", sessionId, sequence)
+                    }
+                    val ttl = exactLong(tuple[5], "ttlSeconds")
+                    if (ttl !in 1..300) badRequest("ttlSeconds must be 1..300", sessionId, sequence)
+                    Request.BeginDefaultAccountChange(
+                        sessionId, sequence, revision, values.map(::hash32), ttl,
+                    )
+                }
+                "prepareTransaction" -> {
+                    length(5)
+                    Request.PrepareTransaction(
                         sessionId,
                         sequence,
                         hash32(tuple[3]),
-                        hash32(tuple[4]),
-                        amount,
-                        remark,
+                        bytes(
+                            tuple[4],
+                            "callData",
+                            false,
+                            MAXIMUM_TRANSACTION_CALL_DATA_BYTES,
+                        ),
                     )
                 }
-                "initializeFinalizedHistory", "syncFinalizedHistory" -> {
+                "cancelPreparedTransaction" -> {
                     length(4)
-                    val values = tuple[3] as? List<*>
-                        ?: badRequest("accountIds must be a tuple", sessionId, sequence)
-                    if (values.size !in 1..MAXIMUM_HISTORY_ACCOUNTS) {
-                        badRequest("accountIds must contain 1..1990 accounts", sessionId, sequence)
+                    val preparationId = string(tuple[3], "preparationId", 34, 34)
+                    if (!PREPARATION_ID.matches(preparationId)) {
+                        badRequest("preparationId must be 16-byte lowercase hex", sessionId, sequence)
                     }
-                    val accounts = values.map(::hash32)
-                    if (accounts.map(::encodeHash32).toSet().size != accounts.size) {
-                        badRequest("accountIds must be non-empty and unique", sessionId, sequence)
+                    Request.CancelPreparedTransaction(sessionId, sequence, preparationId)
+                }
+                "executePreparedTransaction", "cancelPreparedTransactionExecution" -> {
+                    length(4)
+                    val id = string(tuple[3], "transaction id", 34, 34)
+                    if (!PREPARATION_ID.matches(id)) badRequest("transaction id is invalid", sessionId, sequence)
+                    Request.TransactionExecution(method, sessionId, sequence, id, null)
+                }
+                "consumePreparedTransactionQrResponse" -> {
+                    length(5)
+                    val id = string(tuple[3], "executionId", 34, 34)
+                    if (!PREPARATION_ID.matches(id)) badRequest("executionId is invalid", sessionId, sequence)
+                    Request.TransactionExecution(
+                        method, sessionId, sequence, id, qrText(tuple[4], "QR_V1 response"),
+                    )
+                }
+                "getTransactionHistory" -> {
+                    length(5)
+                    val before = tuple[3]?.let {
+                        string(it, "beforeExecutionId", 34, 34).also { value ->
+                            if (!PREPARATION_ID.matches(value)) {
+                                badRequest("beforeExecutionId is invalid", sessionId, sequence)
+                            }
+                        }
                     }
-                    Request.History(method, sessionId, sequence, accounts)
+                    val limit = exactLong(tuple[4], "limit")
+                    if (limit !in 1..100) badRequest("limit must be 1..100", sessionId, sequence)
+                    Request.TransactionHistory(method, sessionId, sequence, before, limit.toInt())
+                }
+                "syncTransactionHistory" -> {
+                    length(3)
+                    Request.TransactionHistory(method, sessionId, sequence, null, 100)
                 }
                 "qrParse", "qrConsumeSignResponse", "signQrRequest" -> {
                     length(4)
@@ -327,7 +575,7 @@ internal object CitizenSdkFlutterCodec {
 
     /** [1, sessionId, eventSequence, type, type-specific payload tuple]. */
     fun event(sessionId: String, eventSequence: Long, type: String, payload: List<Any?>): List<Any?> {
-        require(type in setOf("lifecycleChanged", "capabilitiesChanged", "transferProgress", "historyChanged"))
+        require(type in setOf("lifecycleChanged", "capabilitiesChanged", "historyChanged"))
         require(type != "historyChanged" || (eventSequence > 0 && payload.isEmpty()))
         return listOf(PROTOCOL_VERSION, sessionId, eventSequence, type, payload)
     }
@@ -382,6 +630,26 @@ internal object CitizenSdkFlutterCodec {
         if (value.finality == CitizenFinality.BEST) "best" else "finalized",
     )
 
+    fun syncStatus(value: CitizenChainSyncStatus): List<Any?> = listOf(
+        value.peerCount, value.isSyncing, value.isUsable, block(value.best), block(value.finalized),
+    )
+
+    fun blockHeader(value: CitizenBlockHeader): List<Any?> = listOf(
+        block(value.block), encodeHash32(value.parentHash()), encodeHash32(value.stateRoot()),
+        encodeHash32(value.extrinsicsRoot()), value.digest(),
+    )
+
+    fun blockBody(value: CitizenBlockBody): List<Any?> =
+        listOf(block(value.block), value.extrinsics())
+
+    fun runtimeContext(value: CitizenRuntimeContext): List<Any?> = listOf(
+        block(value.block), value.specVersion, value.transactionVersion, value.metadata(),
+    )
+
+    fun chainState(value: CitizenChainState): List<Any?> = listOf(
+        value.formatVersion, block(value.finalized), value.database(),
+    )
+
     fun capabilities(value: CitizenSdkCapabilities): List<Any?> = listOf(
         value.revision,
         value.statuses.map(::capabilityStatus),
@@ -411,29 +679,94 @@ internal object CitizenSdkFlutterCodec {
         )
     }
 
+    fun walletState(value: CitizenWalletState): List<Any?> = listOf(
+        value.revision,
+        profile(value.hotProfile),
+        value.accounts.map { account ->
+            listOf(
+                if (account.signMode == CitizenWalletSignMode.HOT) "hot" else "cold",
+                account.walletIndex,
+                account.accountIndex,
+                encodeHash32(account.accountId()),
+                account.ss58Address,
+                account.name,
+                account.createdAtMillis,
+                account.isDefault,
+            )
+        },
+    )
+
     fun signature(value: CitizenSignature): ByteArray = value.bytes().also { check(it.size == 64) }
 
-    fun transfer(value: CitizenWalletTransfer): List<Any?> = listOf(
-        encodeHash32(value.transactionHash()),
-        when (value.resolution) {
-            CitizenTransferResolution.FINALIZED_SUCCESS -> "finalizedSuccess"
-            CitizenTransferResolution.FINALIZED_FAILED -> "finalizedFailed"
-            CitizenTransferResolution.POOL_REJECTED -> "poolRejected"
-        },
-        value.execution?.let(::execution),
-        value.poolRejectionReason,
+    fun signingOutcome(value: CitizenSigningOutcome): List<Any?> = when (value) {
+        is CitizenSigningOutcome.Completed -> listOf(
+            "completed", encodeHash32(value.accountId()), encodeHash32(value.payloadHash()),
+            signature(value.signature), null, null, null,
+        )
+        is CitizenSigningOutcome.ExternalPending -> listOf(
+            "externalPending", encodeHash32(value.accountId()), encodeHash32(value.payloadHash()),
+            null, value.expiresAt, value.sessionId, value.transportRequest,
+        )
+    }
+
+    fun defaultAccountChangeOutcome(value: CitizenDefaultAccountChangeOutcome): List<Any?> = when (value) {
+        is CitizenDefaultAccountChangeOutcome.Completed -> listOf(
+            "completed", encodeHash32(value.currentDefaultAccountId()), encodeHash32(value.payloadHash()),
+            value.committedRevision, null, null, null,
+        )
+        is CitizenDefaultAccountChangeOutcome.ExternalPending -> listOf(
+            "externalPending", encodeHash32(value.currentDefaultAccountId()), encodeHash32(value.payloadHash()),
+            null, value.expiresAt, value.sessionId, value.transportRequest,
+        )
+    }
+
+    fun transactionHistoryPage(value: CitizenTransactionHistoryPage): List<Any?> = listOf(
+        value.revision,
+        value.records.map(::transactionHistoryRecord),
+        value.nextBeforeExecutionId()?.let(::encodeId16),
     )
 
-    fun history(value: CitizenTransactionHistory): List<Any?> = listOf(
-        value.revision,
-        value.cursors.map(::cursor),
-        value.records.map(::record),
-        value.transfers.map(::finalizedTransfer),
+    fun preparedTransaction(value: CitizenPreparedTransaction): List<Any?> = listOf(
+        value.preparationId,
+        encodeHash32(value.sourceAccountId()),
+        encodeHash32(value.callDataHash()),
+        block(value.bestBlock),
+        value.runtimeSpecNumber,
+        value.transactionFormatNumber,
+        value.nonce,
     )
+
+    fun transactionExecution(value: CitizenTransactionExecution): List<Any?> = when (value) {
+        is CitizenTransactionExecution.ExternalSigningPending -> listOf(
+            1, value.executionId, encodeHash32(value.sourceAccountId()), encodeHash32(value.callDataHash()),
+            null, value.expiresAt, value.qrRequest, null, null, null,
+        )
+        is CitizenTransactionExecution.Completed -> listOf(
+            when (value.resolution) {
+                CitizenTransactionResolution.FINALIZED_SUCCESS -> 2
+                CitizenTransactionResolution.FINALIZED_FAILED -> 3
+                CitizenTransactionResolution.POOL_REJECTED -> 4
+            },
+            value.executionId, encodeHash32(value.sourceAccountId()), encodeHash32(value.callDataHash()),
+            encodeHash32(value.transactionHash()), null, null, value.execution?.let(::execution),
+            value.poolRejectionReason, value.replacementHash()?.let(::encodeHash32),
+        )
+    }
 
     fun encodeHash32(bytes: ByteArray): String {
         require(bytes.size == 32)
         return buildString(66) {
+            append("0x")
+            bytes.forEach { byte ->
+                append(HEX[(byte.toInt() ushr 4) and 0xf])
+                append(HEX[byte.toInt() and 0xf])
+            }
+        }
+    }
+
+    fun encodeId16(bytes: ByteArray): String {
+        require(bytes.size == 16)
+        return buildString(34) {
             append("0x")
             bytes.forEach { byte ->
                 append(HEX[(byte.toInt() ushr 4) and 0xf])
@@ -488,37 +821,24 @@ internal object CitizenSdkFlutterCodec {
         )
     }
 
-    private fun cursor(value: CitizenHistoryCursor): List<Any?> = listOf(
-        encodeHash32(value.accountId()), block(value.trackingStartBlock), block(value.lastSyncedBlock),
-    )
-
-    private fun record(value: CitizenHistoryRecord): List<Any?> = listOf(
-        encodeHash32(value.accountId()),
+    private fun transactionHistoryRecord(value: CitizenTransactionHistoryRecord): List<Any?> = listOf(
+        encodeId16(value.executionId()),
+        encodeHash32(value.sourceAccountId()),
+        encodeHash32(value.callDataHash()),
         encodeHash32(value.transactionHash()),
-        value.nonce,
-        encodeHash32(value.destinationAccountId()),
-        value.amountFen.decimal,
         when (value.status) {
-            CitizenHistoryStatus.PENDING -> "pending"
-            CitizenHistoryStatus.IN_BLOCK -> "inBlock"
-            CitizenHistoryStatus.POOL_REJECTED -> "poolRejected"
-            CitizenHistoryStatus.FINALIZED_SUCCESS -> "finalizedSuccess"
-            CitizenHistoryStatus.FINALIZED_FAILED -> "finalizedFailed"
+            CitizenTransactionHistoryStatus.PENDING -> "pending"
+            CitizenTransactionHistoryStatus.IN_BLOCK -> "inBlock"
+            CitizenTransactionHistoryStatus.POOL_REJECTED -> "poolRejected"
+            CitizenTransactionHistoryStatus.FINALIZED_SUCCESS -> "finalizedSuccess"
+            CitizenTransactionHistoryStatus.FINALIZED_FAILED -> "finalizedFailed"
         },
         value.block?.let(::block),
         value.execution?.let(::execution),
+        value.replacementHash()?.let(::encodeHash32),
         value.createdAtMillis,
         value.updatedAtMillis,
-        decodeUtf8(value.remark()),
         value.poolRejectionReason,
-    )
-
-    private fun finalizedTransfer(value: CitizenFinalizedTransfer): List<Any?> = listOf(
-        encodeHash32(value.trackedAccountId()), encodeHash32(value.fromAccountId()),
-        encodeHash32(value.toAccountId()), value.amountFen.decimal, block(value.block),
-        value.eventRecordIndex, value.extrinsicIndex,
-        if (value.direction == CitizenTransferDirection.OUTGOING) "outgoing" else "incoming",
-        value.sourcePallet, value.remarkDisplay, value.remarkBytes(),
     )
 
     private fun hash32(value: Any?): ByteArray {
@@ -526,6 +846,18 @@ internal object CitizenSdkFlutterCodec {
             ?: throw failure(CitizenSdkErrorCode.INVALID_ARGUMENT, "Hash must be a string")
         if (!HASH32.matches(text)) throw failure(CitizenSdkErrorCode.INVALID_ARGUMENT, "Invalid 32-byte hex")
         return ByteArray(32) { index -> text.substring(2 + index * 2, 4 + index * 2).toInt(16).toByte() }
+    }
+
+    private fun blockRef(value: Any?): CitizenBlockRef {
+        val tuple = value as? List<*>
+            ?: throw failure(CitizenSdkErrorCode.INVALID_ARGUMENT, "block must be a tuple")
+        if (tuple.size != 3) throw failure(CitizenSdkErrorCode.INVALID_ARGUMENT, "block tuple length is invalid")
+        val finality = when (tuple[2]) {
+            "best" -> CitizenFinality.BEST
+            "finalized" -> CitizenFinality.FINALIZED
+            else -> throw failure(CitizenSdkErrorCode.INVALID_ARGUMENT, "block finality is invalid")
+        }
+        return CitizenBlockRef(hash32(tuple[0]), unsigned64Decimal(tuple[1], "block number"), finality)
     }
 
     private fun bytes(
@@ -555,6 +887,30 @@ internal object CitizenSdkFlutterCodec {
             throw failure(CitizenSdkErrorCode.INVALID_ARGUMENT, "$label is not canonical")
         }
         return text
+    }
+
+    private fun unsigned64Decimal(value: Any?, label: String): String {
+        val text = value as? String
+            ?: throw failure(CitizenSdkErrorCode.INVALID_ARGUMENT, "$label must be a decimal string")
+        if (!DECIMAL.matches(text) || text.length > 20) {
+            throw failure(CitizenSdkErrorCode.INVALID_ARGUMENT, "$label is not canonical uint64")
+        }
+        try {
+            java.lang.Long.parseUnsignedLong(text)
+        } catch (_: NumberFormatException) {
+            throw failure(CitizenSdkErrorCode.INVALID_ARGUMENT, "$label is not uint64")
+        }
+        return text
+    }
+
+    private fun checkedAccountName(rawName: String, sessionId: String, sequence: Long): String {
+        val name = rawName.trim()
+        if (rawName != name || name.codePointCount(0, name.length) !in 1..30 ||
+            name.any { it.code <= 0x1f || it.code in 0x7f..0x9f }) {
+            badRequest("name must be trimmed, contain 1..30 Unicode scalars, and contain no control characters",
+                sessionId, sequence)
+        }
+        return name
     }
 
     private fun string(value: Any?, label: String, minimum: Int, maximum: Int): String {
@@ -635,6 +991,7 @@ internal object CitizenSdkFlutterCodec {
         )
 
     private val HASH32 = Regex("^0x[0-9a-f]{64}$")
+    private val PREPARATION_ID = Regex("^0x[0-9a-f]{32}$")
     private val DECIMAL = Regex("^(0|[1-9][0-9]{0,38})$")
     private const val MAX_U128_DECIMAL = "340282366920938463463374607431768211455"
     private const val HEX = "0123456789abcdef"

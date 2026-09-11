@@ -4,6 +4,15 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val flutterProductRoot = System.getenv("TATA_CONSOLE_FLUTTER_ROOT")
+    ?.let { file(it) }
+    ?: rootProject.projectDir.parentFile
+val flutterBuildProperties = java.util.Properties().apply {
+    flutterProductRoot.resolve("android/local.properties").inputStream().use { load(it) }
+}
+val productVersionCode = flutterBuildProperties.getProperty("flutter.versionCode", "1").toInt()
+val productVersionName = flutterBuildProperties.getProperty("flutter.versionName", "1.0")
+
 android {
     namespace = "com.crcfrcn.citizenapp"
     compileSdk = 36
@@ -26,8 +35,8 @@ android {
         applicationId = "com.crcfrcn.citizenapp"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
-        versionCode = flutter.versionCode
-        versionName = flutter.versionName
+        versionCode = productVersionCode
+        versionName = productVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             // CitizenApp Android 唯一支持 64 位 ARM；禁止恢复其他 ABI。
@@ -72,5 +81,6 @@ kotlin {
 }
 
 flutter {
-    source = "../.."
+    // 本机任务从缓存Flutter根读取生成状态；普通产品构建仍以本工程根为Flutter根。
+    source = System.getenv("TATA_CONSOLE_FLUTTER_ROOT") ?: "../.."
 }

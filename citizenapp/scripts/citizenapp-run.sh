@@ -11,7 +11,13 @@
 # 调用方可提供独立缓存目录；没有 TataConsole 时使用系统临时目录。
 # 固定使用 smoldot 轻节点连接区块链（无需 RPC 服务器）。
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+  LINK_TARGET="$(readlink "$SCRIPT_PATH")"
+  [[ "$LINK_TARGET" == /* ]] || LINK_TARGET="$(cd "$(dirname "$SCRIPT_PATH")" && pwd -P)/$LINK_TARGET"
+  SCRIPT_PATH="$LINK_TARGET"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd -P)"
 # 消解 scripts/..，确保直接产品源码身份使用唯一真实路径。
 APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -33,21 +39,23 @@ if [[ "$PLATFORM" == ios || "$PLATFORM" == android ]]; then
   cd "$TATA_CONSOLE_FLUTTER_ROOT"
   BUILD_WORK_DIR="${TATA_CONSOLE_BUILD_CACHE_DIR:-$TATA_CONSOLE_CACHE_DIR/build}"
   DEPENDENCY_WORK_DIR="${TATA_CONSOLE_DEPENDENCY_CACHE_DIR:-$TATA_CONSOLE_CACHE_DIR/dependencies}"
-  BUILD_DIR="$BUILD_WORK_DIR/flutter-build"
+  BUILD_DIR="${TATA_CONSOLE_BUILD_DIR:-$BUILD_WORK_DIR/flutter}"
   ARTIFACT_ROOT="$TATA_CONSOLE_CACHE_DIR"
   export TATA_CONSOLE_BUILD_DIR="$BUILD_DIR"
   export TATA_CONSOLE_NATIVE_ANDROID_DIR="$BUILD_WORK_DIR/native/android"
   export TATA_CONSOLE_NATIVE_IOS_DIR="$BUILD_WORK_DIR/native/ios"
-  export CARGO_TARGET_DIR="$BUILD_WORK_DIR/cargo-target"
-  export XDG_CONFIG_HOME="$DEPENDENCY_WORK_DIR/flutter-config"
-  export PUB_CACHE="$DEPENDENCY_WORK_DIR/dart-pub"
+  export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$BUILD_WORK_DIR/cargo}"
+  export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$DEPENDENCY_WORK_DIR/flutter-config}"
+  export PUB_CACHE="${PUB_CACHE:-$DEPENDENCY_WORK_DIR/pub}"
   export GRADLE_USER_HOME="$DEPENDENCY_WORK_DIR/gradle"
   export CP_HOME_DIR="$DEPENDENCY_WORK_DIR/cocoapods"
-  export TMPDIR="$TATA_CONSOLE_CACHE_DIR/"
+  export TMPDIR="${TMPDIR:-$TATA_CONSOLE_CACHE_DIR/tmp/}"
   export FLUTTER_SUPPRESS_ANALYTICS=true COCOAPODS_DISABLE_STATS=true
-  mkdir -p "$XDG_CONFIG_HOME"
-  # 产品按自身 Flutter 与 Gradle 配置构建；调用方只提供可写目录。
-  flutter config --build-dir=cache/flutter-build >/dev/null
+  mkdir -p "$XDG_CONFIG_HOME" "$TMPDIR"
+  # Flutter只接受相对产品根的build-dir配置；把中央绝对目录换算为相对路径，
+  # 不能写死为产品源码下的cache/build，也不能在产品根生成build。
+  FLUTTER_BUILD_RELATIVE="$(python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$BUILD_DIR" "$TATA_CONSOLE_FLUTTER_ROOT")"
+  flutter config --build-dir="$FLUTTER_BUILD_RELATIVE" >/dev/null
 fi
 
 # 仅清理本任务的候选包；退出清理由控制台核对任务身份后执行，不触碰源码或另一端。
@@ -141,6 +149,56 @@ fi
 DART_DEFINES=()
 echo "[Build模式] smoldot轻节点 · 目标平台 $PLATFORM"
 
+# Flutter只负责在当前缓存根生成产品自己的Android配置和插件清单；真正的Gradle
+# 从产品真实android目录启动，所有可写状态仍由既有环境变量指向本任务缓存。
+build_android_release() {
+  local properties flutter_command flutter_sdk android_sdk product_version version_name version_code
+  local flutter_version dart_defines link_target
+  properties="$TATA_CONSOLE_FLUTTER_ROOT/android/local.properties"
+  flutter_command="$(command -v flutter)"
+  while [[ -L "$flutter_command" ]]; do
+    link_target="$(readlink "$flutter_command")"
+    [[ "$link_target" == /* ]] || link_target="$(cd "$(dirname "$flutter_command")" && pwd -P)/$link_target"
+    flutter_command="$link_target"
+  done
+  flutter_sdk="$(cd "$(dirname "$flutter_command")/.." && pwd -P)"
+  android_sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}"
+  product_version="$(sed -n 's/^version:[[:space:]]*//p' "$TATA_CONSOLE_FLUTTER_ROOT/pubspec.yaml" | head -n 1)"
+  version_name="${product_version%%+*}"
+  version_code="${product_version##*+}"
+  printf 'sdk.dir=%s\nflutter.sdk=%s\nflutter.buildMode=release\nflutter.versionName=%s\nflutter.versionCode=%s\n' \
+    "$android_sdk" "$flutter_sdk" "$version_name" "$version_code" >"$properties"
+  flutter_version="$(flutter --version --machine)"
+  dart_defines="$(printf '%s' "$flutter_version" | python3 -c '
+import base64, json, sys
+value = json.load(sys.stdin)
+fields = (
+    ("FLUTTER_VERSION", "frameworkVersion"),
+    ("FLUTTER_CHANNEL", "channel"),
+    ("FLUTTER_GIT_URL", "repositoryUrl"),
+    ("FLUTTER_FRAMEWORK_REVISION", "frameworkRevision"),
+    ("FLUTTER_ENGINE_REVISION", "engineRevision"),
+    ("FLUTTER_DART_VERSION", "dartSdkVersion"),
+)
+print(",".join(base64.b64encode(f"{name}={value[key]}".encode()).decode() for name, key in fields))
+')"
+  (
+    cd "$APP_ROOT/android"
+    TATA_CONSOLE_FLUTTER_GRADLE_ROOT="$flutter_sdk/packages/flutter_tools/gradle" \
+    FLUTTER_ROOT="$flutter_sdk" "$APP_ROOT/android/gradlew" --no-daemon --stacktrace --no-problems-report \
+      --init-script "${TATA_CONSOLE_GRADLE_INIT_SCRIPT:?CitizenApp缺少Gradle缓存初始化脚本}" \
+      --project-cache-dir "$BUILD_WORK_DIR/gradle-project" \
+      -Ptarget-platform=android-arm64 \
+      -Ptarget=lib/main.dart \
+      -Pbase-application-name=android.app.Application \
+      -Pdart-defines="$dart_defines" \
+      -Pdart-obfuscation=false \
+      -Ptrack-widget-creation=true \
+      -Ptree-shake-icons=true \
+      assembleRelease
+  )
+}
+
 # ── chainspec.json 是从链端 plain SSOT + 创世状态包派生的轻节点创世 ──
 # 节点 SSOT = citizenchain/node/citizenchain.json;App 资产只保留
 # genesis.stateRootHash 轻形态。正式创世请先跑 citizenchain/scripts/bake-chainspec.sh
@@ -192,17 +250,7 @@ if [[ "$PLATFORM" == ios ]]; then
   echo "==> Build完成：iOS产物已写入TataConsole中央目录。"
 elif [[ "$PLATFORM" == android ]]; then
   ANDROID_APK="$BUILD_DIR/app/outputs/flutter-apk/app-release.apk"
-  # Flutter 27 的 Android 包定位器仍可能只检查产品默认 build/，即使 Gradle 已按
-  # TATA_CONSOLE_BUILD_DIR 把唯一 Release APK 写入中央目录。只允许用这个准确中央产物
-  # 收口该工具误报；Gradle 未产出时保持失败，禁止搜索猜测或复制回源码目录。
-  if ! flutter build apk --release --target-platform android-arm64 \
-    ${DART_DEFINES[@]+"${DART_DEFINES[@]}"}; then
-    [[ -f "$ANDROID_APK" ]] || {
-      echo "Android Gradle 未产出中央无私钥 APK" >&2
-      exit 1
-    }
-    echo "==> Flutter 未识别中央 APK，已按唯一固定路径接管 Gradle 成功产物。"
-  fi
+  build_android_release
   [[ -f "$ANDROID_APK" ]] || {
     echo "Android 本机无私钥 APK 不存在" >&2
     exit 1

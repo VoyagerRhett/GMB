@@ -33,6 +33,150 @@ internal enum CitizenSDKNativeCodec {
         }
     }
 
+    static func syncStatus(_ result: UInt64) throws -> CitizenChainSyncStatus {
+        try inspect(result, kind: 24) {
+            var value = citizensdk_chain_sync_status_info_t()
+            prepare(&value.struct_size, &value.abi_version, citizensdk_chain_sync_status_info_t.self)
+            try CitizenSDKChecks.requireOK(citizensdk_result_get_sync_status(result, &value),
+                                           "Core sync status is invalid")
+            let best = try block(value.best), finalized = try block(value.finalized)
+            guard best.finality == .best, finalized.finality == .finalized,
+                  finalized.number <= best.number else {
+                throw CitizenSDKError(.integrity, "Core sync anchors are inconsistent")
+            }
+            return CitizenChainSyncStatus(peerCount: value.peer_count,
+                                          isSyncing: try boolean(value.is_syncing),
+                                          isUsable: try boolean(value.is_usable),
+                                          best: best, finalized: finalized)
+        }
+    }
+
+    static func storage(_ result: UInt64) throws -> Data? {
+        try inspect(result, kind: 2) {
+            var present: UInt8 = 0, required: UInt64 = 0
+            try CitizenSDKChecks.requireOK(
+                citizensdk_result_copy_storage(result, &present, nil, 0, &required),
+                "Core storage result size is invalid")
+            guard required <= 64 * 1_024 * 1_024 else {
+                throw CitizenSDKError(.integrity, "Core storage result exceeds 64 MiB")
+            }
+            let output = try copy(required) { pointer, capacity, confirmed in
+                citizensdk_result_copy_storage(result, &present, pointer, capacity, confirmed)
+            }
+            return try boolean(present) ? output : nil
+        }
+    }
+
+    static func storageBatch(_ result: UInt64) throws -> [Data?] {
+        try inspect(result, kind: 3) {
+            var count: UInt32 = 0
+            try CitizenSDKChecks.requireOK(citizensdk_result_get_storage_batch_count(result, &count),
+                                           "Core storage batch count is invalid")
+            guard count <= 1_024 else { throw CitizenSDKError(.integrity, "Core storage batch is too large") }
+            var total: UInt64 = 0
+            return try (0..<count).map { index in
+                var present: UInt8 = 0, required: UInt64 = 0
+                try CitizenSDKChecks.requireOK(
+                    citizensdk_result_copy_storage_batch_item(result, index, &present, nil, 0, &required),
+                    "Core storage batch item size is invalid")
+                guard required <= 64 * 1_024 * 1_024 - total else {
+                    throw CitizenSDKError(.integrity, "Core storage batch exceeds 64 MiB")
+                }
+                total += required
+                let output = try copy(required) { pointer, capacity, confirmed in
+                    citizensdk_result_copy_storage_batch_item(
+                        result, index, &present, pointer, capacity, confirmed)
+                }
+                return try boolean(present) ? output : nil
+            }
+        }
+    }
+
+    static func runtimeContext(_ result: UInt64) throws -> CitizenRuntimeContext {
+        try inspect(result, kind: 4) {
+            var value = citizensdk_runtime_context_info_t(), required: UInt64 = 0
+            prepare(&value.struct_size, &value.abi_version, citizensdk_runtime_context_info_t.self)
+            try CitizenSDKChecks.requireOK(
+                citizensdk_result_get_runtime_context(result, &value, nil, 0, &required),
+                "Core runtime context size is invalid")
+            guard required > 0, required <= 64 * 1_024 * 1_024 else {
+                throw CitizenSDKError(.integrity, "Core runtime metadata is invalid")
+            }
+            let metadata = try copy(required) { pointer, capacity, confirmed in
+                citizensdk_result_get_runtime_context(result, &value, pointer, capacity, confirmed)
+            }
+            return CitizenRuntimeContext(block: try block(value.block), specVersion: value.spec_version,
+                                         transactionVersion: value.transaction_version, metadata: metadata)
+        }
+    }
+
+    static func chainState(_ result: UInt64) throws -> CitizenChainState {
+        try inspect(result, kind: 8) {
+            var value = citizensdk_exported_state_info_t(), required: UInt64 = 0
+            prepare(&value.struct_size, &value.abi_version, citizensdk_exported_state_info_t.self)
+            try CitizenSDKChecks.requireOK(
+                citizensdk_result_get_exported_state(result, &value, nil, 0, &required),
+                "Core chain state size is invalid")
+            guard required > 0, required <= 256 * 1_024 else {
+                throw CitizenSDKError(.integrity, "Core chain state database is invalid")
+            }
+            let database = try copy(required) { pointer, capacity, confirmed in
+                citizensdk_result_get_exported_state(result, &value, pointer, capacity, confirmed)
+            }
+            return try CitizenChainState(formatVersion: value.format_version,
+                                         finalized: block(value.finalized), database: database)
+        }
+    }
+
+    static func blockHeader(_ result: UInt64) throws -> CitizenBlockHeader {
+        try inspect(result, kind: 25) {
+            var value = citizensdk_block_header_info_t(), required: UInt64 = 0
+            prepare(&value.struct_size, &value.abi_version, citizensdk_block_header_info_t.self)
+            try CitizenSDKChecks.requireOK(
+                citizensdk_result_get_block_header(result, &value, nil, 0, &required),
+                "Core block header size is invalid")
+            guard required <= 1_024 * 1_024 else {
+                throw CitizenSDKError(.integrity, "Core block digest exceeds 1 MiB")
+            }
+            let digest = try copy(required) { pointer, capacity, confirmed in
+                citizensdk_result_get_block_header(result, &value, pointer, capacity, confirmed)
+            }
+            return CitizenBlockHeader(block: try block(value.block), parentHash: fixed(value.parent_hash, 32),
+                                      stateRoot: fixed(value.state_root, 32),
+                                      extrinsicsRoot: fixed(value.extrinsics_root, 32), digest: digest)
+        }
+    }
+
+    static func blockBody(_ result: UInt64) throws -> CitizenBlockBody {
+        try inspect(result, kind: 26) {
+            var value = citizensdk_block_body_info_t()
+            prepare(&value.struct_size, &value.abi_version, citizensdk_block_body_info_t.self)
+            try CitizenSDKChecks.requireOK(citizensdk_result_get_block_body_info(result, &value),
+                                           "Core block body info is invalid")
+            guard value.extrinsic_count <= 16_384, value.total_bytes <= 64 * 1_024 * 1_024 else {
+                throw CitizenSDKError(.integrity, "Core block body exceeds its limit")
+            }
+            var total: UInt64 = 0
+            let extrinsics = try (0..<value.extrinsic_count).map { index -> Data in
+                var required: UInt64 = 0
+                try CitizenSDKChecks.requireOK(
+                    citizensdk_result_copy_block_body_extrinsic(result, index, nil, 0, &required),
+                    "Core block extrinsic size is invalid")
+                guard required > 0, required <= value.total_bytes - total else {
+                    throw CitizenSDKError(.integrity, "Core block extrinsic length is invalid")
+                }
+                total += required
+                return try copy(required) { pointer, capacity, confirmed in
+                    citizensdk_result_copy_block_body_extrinsic(result, index, pointer, capacity, confirmed)
+                }
+            }
+            guard total == value.total_bytes else {
+                throw CitizenSDKError(.integrity, "Core block body length is inconsistent")
+            }
+            return CitizenBlockBody(block: try block(value.block), extrinsics: extrinsics)
+        }
+    }
+
     static func balance(_ result: UInt64) throws -> CitizenAccountBalance {
         try inspect(result, kind: 9) {
             var value = citizensdk_account_balance_info_t()
@@ -102,6 +246,96 @@ internal enum CitizenSDKNativeCodec {
         try inspect(result, kind: 12) { try walletProfile(result) }
     }
 
+    static func walletState(_ result: UInt64) throws -> CitizenWalletState {
+        try inspect(result, kind: 21) {
+            var stateInfo = citizensdk_wallet_state_info_t()
+            prepare(&stateInfo.struct_size, &stateInfo.abi_version, citizensdk_wallet_state_info_t.self)
+            try CitizenSDKChecks.requireOK(citizensdk_result_get_wallet_state(result, &stateInfo),
+                                           "Core wallet state is invalid")
+            guard stateInfo.account_count <= 3_980,
+                  stateInfo.has_default_account == 0 || stateInfo.has_default_account == 1,
+                  (stateInfo.account_count == 0) == (stateInfo.has_default_account == 0) else {
+                throw CitizenSDKError(.integrity, "Core wallet state descriptor is inconsistent")
+            }
+            let accounts = try (0..<stateInfo.account_count).map { index -> CitizenWalletStateAccount in
+                var info = citizensdk_wallet_state_account_info_t()
+                prepare(&info.struct_size, &info.abi_version, citizensdk_wallet_state_account_info_t.self)
+                var ss58Required: UInt64 = 0, nameRequired: UInt64 = 0
+                try CitizenSDKChecks.requireOK(
+                    citizensdk_result_get_wallet_state_account(result, index, &info, nil, 0,
+                                                               &ss58Required, nil, 0, &nameRequired),
+                    "Core wallet state account size query failed"
+                )
+                let pair = try copyPair(ss58Required, nameRequired) { ss58, ss58Capacity, ss58Out,
+                                                                       name, nameCapacity, nameOut in
+                    citizensdk_result_get_wallet_state_account(result, index, &info, ss58, ss58Capacity,
+                                                               ss58Out, name, nameCapacity, nameOut)
+                }
+                guard let mode = CitizenWalletSignMode(rawValue: info.sign_mode),
+                      info.has_account_index == 0 || info.has_account_index == 1,
+                      info.is_default == (index == 0 ? 1 : 0),
+                      (mode == .hot) == (info.wallet_index == 0 && info.has_account_index == 1),
+                      (mode == .cold) == (info.wallet_index != 0 && info.has_account_index == 0) else {
+                    throw CitizenSDKError(.integrity, "Core wallet state account is inconsistent")
+                }
+                return CitizenWalletStateAccount(
+                    signMode: mode, walletIndex: info.wallet_index,
+                    accountIndex: info.has_account_index == 1 ? info.account_index : nil,
+                    accountID: fixed(info.account_id.bytes, 32), ss58Address: try text(pair.0),
+                    name: try text(pair.1), createdAtMillis: info.created_at_millis,
+                    isDefault: info.is_default == 1
+                )
+            }
+            let coldWalletIndices = accounts.filter { $0.signMode == .cold }.map(\.walletIndex)
+            let hotAccountIndices = accounts.filter { $0.signMode == .hot }.compactMap(\.accountIndex)
+            guard accounts.allSatisfy({ $0.signMode == .cold || ($0.accountIndex ?? 1_990) <= 1_989 }),
+                  Set(accounts.map(\.accountID)).count == accounts.count,
+                  Set(coldWalletIndices).count == coldWalletIndices.count,
+                  Set(hotAccountIndices).count == hotAccountIndices.count,
+                  stateInfo.has_default_account == 0 || accounts.first?.accountID == fixed(stateInfo.default_account_id.bytes, 32) else {
+                throw CitizenSDKError(.integrity, "Core wallet state order or default is inconsistent")
+            }
+            var profileInfo = citizensdk_wallet_profile_info_t()
+            prepare(&profileInfo.struct_size, &profileInfo.abi_version, citizensdk_wallet_profile_info_t.self)
+            try CitizenSDKChecks.requireOK(citizensdk_result_get_wallet_profile(result, &profileInfo),
+                                           "Core wallet state hot profile is invalid")
+            let hotProfile: CitizenWalletProfile?
+            if profileInfo.present == 0 {
+                hotProfile = nil
+            } else {
+                guard profileInfo.present == 1,
+                      let origin = CitizenWalletOrigin(rawValue: profileInfo.origin) else {
+                    throw CitizenSDKError(.integrity, "Core wallet state profile descriptor is invalid")
+                }
+                let hotAccounts = accounts.filter { $0.signMode == .hot }.map {
+                    CitizenWalletAccount(index: $0.accountIndex!, accountID: $0.accountID,
+                                         ss58Address: $0.ss58Address, name: $0.name,
+                                         createdAtMillis: $0.createdAtMillis,
+                                         active: $0.accountID == fixed(profileInfo.active_account_id.bytes, 32))
+                }
+                let master = fixed(profileInfo.master_account_id.bytes, 32)
+                let active = fixed(profileInfo.active_account_id.bytes, 32)
+                guard profileInfo.wallet_index == 0,
+                      !hotAccounts.isEmpty,
+                      hotAccounts.count == Int(profileInfo.account_count),
+                      hotAccounts.filter(\.active).count == 1,
+                      hotAccounts.contains(where: { $0.active && $0.accountID == active }),
+                      hotAccounts.contains(where: { $0.index == 0 && $0.accountID == master }) else {
+                    throw CitizenSDKError(.integrity, "Core wallet state hot profile closure drifted")
+                }
+                hotProfile = CitizenWalletProfile(origin: origin, walletIndex: profileInfo.wallet_index,
+                                                  createdAtMillis: profileInfo.created_at_millis,
+                                                  masterAccountID: master,
+                                                  activeAccountID: active,
+                                                  accounts: hotAccounts)
+            }
+            guard hotProfile != nil || accounts.allSatisfy({ $0.signMode == .cold }) else {
+                throw CitizenSDKError(.integrity, "Core exposes hot wallet accounts without a profile")
+            }
+            return CitizenWalletState(revision: stateInfo.revision, hotProfile: hotProfile, accounts: accounts)
+        }
+    }
+
     static func accounts(_ result: UInt64) throws -> [CitizenWalletAccount] {
         try inspect(result, kind: 13) { try walletAccounts(result) }
     }
@@ -117,6 +351,99 @@ internal enum CitizenSDKNativeCodec {
         }
     }
 
+    static func signingOutcome(_ result: UInt64) throws -> CitizenSigningOutcome {
+        try inspect(result, kind: 22) {
+            var info = citizensdk_signing_outcome_info_t()
+            prepare(&info.struct_size, &info.abi_version, citizensdk_signing_outcome_info_t.self)
+            var signatureRequired: UInt64 = 0
+            var sessionRequired: UInt64 = 0
+            var requestRequired: UInt64 = 0
+            try CitizenSDKChecks.requireOK(
+                citizensdk_result_get_signing_outcome(
+                    result, &info, nil, 0, &signatureRequired, nil, 0,
+                    &sessionRequired, nil, 0, &requestRequired),
+                "Core signing outcome size query failed"
+            )
+            guard signatureRequired <= 64, sessionRequired <= 128, requestRequired <= 2_331 else {
+                throw CitizenSDKError(.integrity, "Core signing outcome exceeds its limits")
+            }
+            let values = try copyThree(signatureRequired, sessionRequired, requestRequired) {
+                signature, signatureCapacity, signatureOut,
+                session, sessionCapacity, sessionOut,
+                request, requestCapacity, requestOut in
+                citizensdk_result_get_signing_outcome(
+                    result, &info, signature, signatureCapacity, signatureOut,
+                    session, sessionCapacity, sessionOut,
+                    request, requestCapacity, requestOut)
+            }
+            let accountID = fixed(info.account_id.bytes, 32)
+            let payloadHash = fixed(info.payload_hash, 32)
+            switch info.status {
+            case CITIZENSDK_SIGNING_COMPLETED:
+                guard values.0.count == 64, values.1.isEmpty, values.2.isEmpty else {
+                    throw CitizenSDKError(.integrity, "Core completed signing outcome is inconsistent")
+                }
+                return .completed(accountID: accountID, payloadHash: payloadHash,
+                                  signature: try CitizenSignature(values.0))
+            case CITIZENSDK_SIGNING_EXTERNAL_PENDING:
+                guard values.0.isEmpty, (16...128).contains(values.1.count), !values.2.isEmpty,
+                      info.transport == CITIZENSDK_EXTERNAL_SIGNER_QR_V1 else {
+                    throw CitizenSDKError(.integrity, "Core pending signing outcome is inconsistent")
+                }
+                return .externalPending(
+                    accountID: accountID, payloadHash: payloadHash, transport: .qrV1,
+                    expiresAt: info.expires_at, sessionID: try text(values.1),
+                    transportRequest: try text(values.2))
+            default:
+                throw CitizenSDKError(.integrity, "Core returned an unknown signing outcome")
+            }
+        }
+    }
+
+    static func defaultAccountChange(_ result: UInt64) throws -> CitizenDefaultAccountChangeOutcome {
+        try inspect(result, kind: 23) {
+            var info = citizensdk_default_account_change_info_t()
+            prepare(&info.struct_size, &info.abi_version, citizensdk_default_account_change_info_t.self)
+            var sessionRequired: UInt64 = 0
+            var requestRequired: UInt64 = 0
+            try CitizenSDKChecks.requireOK(
+                citizensdk_result_get_default_account_change(
+                    result, &info, nil, 0, &sessionRequired, nil, 0, &requestRequired),
+                "Core default-account change size query failed"
+            )
+            guard sessionRequired <= 128, requestRequired <= 2_331 else {
+                throw CitizenSDKError(.integrity, "Core default-account change exceeds its limits")
+            }
+            let values = try copyPair(sessionRequired, requestRequired) {
+                session, sessionCapacity, sessionOut, request, requestCapacity, requestOut in
+                citizensdk_result_get_default_account_change(
+                    result, &info, session, sessionCapacity, sessionOut,
+                    request, requestCapacity, requestOut)
+            }
+            let current = fixed(info.current_default_account_id.bytes, 32)
+            let payloadHash = fixed(info.payload_hash, 32)
+            switch info.status {
+            case CITIZENSDK_SIGNING_COMPLETED:
+                guard values.0.isEmpty, values.1.isEmpty else {
+                    throw CitizenSDKError(.integrity, "Core completed default-account change is inconsistent")
+                }
+                return .completed(currentDefaultAccountID: current, payloadHash: payloadHash,
+                                  committedRevision: info.committed_revision)
+            case CITIZENSDK_SIGNING_EXTERNAL_PENDING:
+                guard (16...128).contains(values.0.count), !values.1.isEmpty,
+                      info.transport == CITIZENSDK_EXTERNAL_SIGNER_QR_V1 else {
+                    throw CitizenSDKError(.integrity, "Core pending default-account change is inconsistent")
+                }
+                return .externalPending(
+                    currentDefaultAccountID: current, payloadHash: payloadHash, transport: .qrV1,
+                    expiresAt: info.expires_at, sessionID: try text(values.0),
+                    transportRequest: try text(values.1))
+            default:
+                throw CitizenSDKError(.integrity, "Core returned an unknown default-account change outcome")
+            }
+        }
+    }
+
     static func preparedWallet(_ result: UInt64) throws -> UInt64 {
         try inspect(result, kind: 15) {
             var value = citizensdk_prepared_wallet_info_t()
@@ -127,68 +454,122 @@ internal enum CitizenSDKNativeCodec {
         }
     }
 
-    static func transfer(_ result: UInt64) throws -> CitizenWalletTransfer {
-        try inspect(result, kind: 16) {
-            var info = citizensdk_wallet_transfer_info_t()
-            prepare(&info.struct_size, &info.abi_version, citizensdk_wallet_transfer_info_t.self)
-            var required: UInt64 = 0
+    static func preparedTransaction(_ result: UInt64) throws
+        -> (UInt64, CitizenPreparedTransaction) {
+        try inspect(result, kind: 27) {
+            var value = citizensdk_prepared_transaction_info_t()
+            prepare(
+                &value.struct_size,
+                &value.abi_version,
+                citizensdk_prepared_transaction_info_t.self
+            )
             try CitizenSDKChecks.requireOK(
-                citizensdk_result_get_wallet_transfer(result, &info, nil, 0, &required),
-                "Core transfer result is invalid"
+                citizensdk_result_get_prepared_transaction(result, &value),
+                "Core prepared transaction result is invalid"
             )
-            let reason = try copy(required) { pointer, capacity, outRequired in
-                citizensdk_result_get_wallet_transfer(result, &info, pointer, capacity, outRequired)
+            let identifier = fixed(value.preparation_id, 16)
+                .map { String(format: "%02x", $0) }.joined()
+            let best = try block(value.best_block)
+            guard value.prepared_transaction != 0, best.finality == .best else {
+                throw CitizenSDKError(.integrity, "Core prepared transaction ownership is invalid")
             }
-            guard let resolution = CitizenTransferResolution(rawValue: info.resolution) else {
-                throw CitizenSDKError(.integrity, "Core returned an unknown transfer resolution")
-            }
-            return CitizenWalletTransfer(
-                transactionHash: fixed(info.transaction_hash, 32),
-                resolution: resolution,
-                execution: info.has_execution == 0 ? nil : try execution(info.execution),
-                poolRejectionReason: reason.isEmpty ? nil : try text(reason)
+            return (
+                value.prepared_transaction,
+                CitizenPreparedTransaction(
+                    preparationID: "0x" + identifier,
+                    sourceAccountID: fixed(value.source_account_id.bytes, 32),
+                    callDataHash: fixed(value.call_data_hash, 32),
+                    bestBlock: best,
+                    runtimeSpecNumber: value.runtime_spec_number,
+                    transactionFormatNumber: value.transaction_format_number,
+                    nonce: value.nonce
+                )
             )
         }
     }
 
-    static func history(_ result: UInt64) throws -> CitizenTransactionHistory {
+    static func transactionExecution(_ result: UInt64) throws -> CitizenTransactionExecution {
+        try inspect(result, kind: 28) {
+            var info = citizensdk_transaction_execution_info_t()
+            prepare(&info.struct_size, &info.abi_version, citizensdk_transaction_execution_info_t.self)
+            var sessionRequired: UInt64 = 0, requestRequired: UInt64 = 0, reasonRequired: UInt64 = 0
+            try CitizenSDKChecks.requireOK(
+                citizensdk_result_get_transaction_execution(
+                    result, &info, nil, 0, &sessionRequired, nil, 0, &requestRequired,
+                    nil, 0, &reasonRequired),
+                "Core transaction execution size query failed"
+            )
+            guard sessionRequired <= 128, requestRequired <= 2_331, reasonRequired <= 4_096 else {
+                throw CitizenSDKError(.integrity, "Core transaction execution text exceeds limits")
+            }
+            let textValues = try copyThree(sessionRequired, requestRequired, reasonRequired) {
+                session, sessionCapacity, sessionOut, request, requestCapacity, requestOut,
+                reason, reasonCapacity, reasonOut in
+                citizensdk_result_get_transaction_execution(
+                    result, &info, session, sessionCapacity, sessionOut,
+                    request, requestCapacity, requestOut, reason, reasonCapacity, reasonOut)
+            }
+            let id = "0x" + fixed(info.execution_id, 16).map { String(format: "%02x", $0) }.joined()
+            let source = fixed(info.source_account_id.bytes, 32)
+            let callHash = fixed(info.call_data_hash, 32)
+            switch info.status {
+            case CITIZENSDK_TRANSACTION_EXECUTION_EXTERNAL_PENDING:
+                guard info.transport == CITIZENSDK_EXTERNAL_SIGNER_QR_V1,
+                      info.expires_at > 0, !textValues.1.isEmpty else {
+                    throw CitizenSDKError(.integrity, "Core external execution is invalid")
+                }
+                return .externalSigningPending(CitizenTransactionExternalSigningPending(
+                    executionID: id, sourceAccountID: source, callDataHash: callHash,
+                    expiresAt: info.expires_at, qrRequest: try text(textValues.1)))
+            case CITIZENSDK_TRANSACTION_EXECUTION_FINALIZED_SUCCESS,
+                 CITIZENSDK_TRANSACTION_EXECUTION_FINALIZED_FAILED:
+                let status: CitizenExecutionStatus = info.status == CITIZENSDK_TRANSACTION_EXECUTION_FINALIZED_SUCCESS ? .success : .failed
+                let execution = CitizenExecution(
+                    status: status, reasonOrDispatchVariant: info.dispatch_variant,
+                    block: info.has_block == 0 ? nil : try block(info.block),
+                    extrinsicIndex: info.has_extrinsic_index == 0 ? nil : info.extrinsic_index,
+                    palletIndex: info.has_module_failure == 0 ? nil : UInt8(info.pallet_index),
+                    errorIndex: info.has_module_failure == 0 ? nil : UInt8(info.error_index))
+                return .completed(CitizenTransactionExecutionCompleted(
+                    executionID: id, sourceAccountID: source, callDataHash: callHash,
+                    transactionHash: fixed(info.transaction_hash, 32),
+                    resolution: status == .success ? .finalizedSuccess : .finalizedFailed,
+                    execution: execution, poolRejectionReason: nil, replacementHash: nil))
+            case CITIZENSDK_TRANSACTION_EXECUTION_POOL_REJECTED:
+                guard !textValues.2.isEmpty else {
+                    throw CitizenSDKError(.integrity, "Core pool rejection reason is empty")
+                }
+                return .completed(CitizenTransactionExecutionCompleted(
+                    executionID: id, sourceAccountID: source, callDataHash: callHash,
+                    transactionHash: fixed(info.transaction_hash, 32), resolution: .poolRejected,
+                    execution: nil, poolRejectionReason: try text(textValues.2),
+                    replacementHash: info.has_replacement_hash == 0 ? nil : fixed(info.replacement_hash, 32)))
+            default:
+                throw CitizenSDKError(.integrity, "Core transaction execution status is unknown")
+            }
+        }
+    }
+
+    static func transactionHistoryPage(_ result: UInt64) throws -> CitizenTransactionHistoryPage {
         try inspect(result, kind: 17) {
-            var info = citizensdk_history_info_t()
-            prepare(&info.struct_size, &info.abi_version, citizensdk_history_info_t.self)
-            try CitizenSDKChecks.requireOK(citizensdk_result_get_history_info(result, &info), "Core history result is invalid")
-            guard info.cursor_count <= 1_990, info.record_count <= 100_000, info.transfer_count <= 100_000 else {
-                throw CitizenSDKError(.integrity, "Core history result exceeds the public contract")
+            var info = citizensdk_transaction_history_page_info_t()
+            prepare(&info.struct_size, &info.abi_version,
+                    citizensdk_transaction_history_page_info_t.self)
+            try CitizenSDKChecks.requireOK(
+                citizensdk_result_get_transaction_history_page(result, &info),
+                "Core transaction history page is invalid")
+            guard info.record_count <= 100,
+                  info.has_next_before_execution_id == 0 || info.has_next_before_execution_id == 1 else {
+                throw CitizenSDKError(.integrity, "Core transaction history page exceeds the public contract")
             }
-            let cursors = try (0..<info.cursor_count).map { index -> CitizenHistoryCursor in
-                var value = citizensdk_history_cursor_info_t()
-                prepare(&value.struct_size, &value.abi_version, citizensdk_history_cursor_info_t.self)
-                try CitizenSDKChecks.requireOK(citizensdk_result_get_history_cursor(result, index, &value), "Core history cursor is invalid")
-                return CitizenHistoryCursor(accountID: fixed(value.account_id.bytes, 32),
-                                            trackingStartBlock: try block(value.tracking_start_block),
-                                            lastSyncedBlock: try block(value.last_synced_block))
-            }
-            let records = try (0..<info.record_count).map { try historyRecord(result, $0) }
-            let transfers = try (0..<info.transfer_count).map { try finalizedTransfer(result, $0) }
-            return CitizenTransactionHistory(revision: info.revision, cursors: cursors,
-                                             records: records, transfers: transfers)
+            let records = try (0..<info.record_count).map { try transactionHistoryRecord(result, $0) }
+            let next = info.has_next_before_execution_id == 0 ? nil
+                : executionID(info.next_before_execution_id)
+            return CitizenTransactionHistoryPage(
+                revision: info.revision,
+                records: records,
+                nextBeforeExecutionID: next)
         }
-    }
-
-    static func watch(_ result: UInt64, operationID: String, sequence: UInt64) throws -> CitizenTransferProgress {
-        var value = citizensdk_watch_event_info_t()
-        prepare(&value.struct_size, &value.abi_version, citizensdk_watch_event_info_t.self)
-        try CitizenSDKChecks.requireOK(citizensdk_result_get_watch_event(result, &value), "Core watch result is invalid")
-        guard let status = CitizenTransferProgressStatus(rawValue: value.status) else {
-            throw CitizenSDKError(.integrity, "Core returned an unknown watch status")
-        }
-        return CitizenTransferProgress(
-            operationID: operationID,
-            sequence: sequence,
-            status: status,
-            block: value.has_block == 0 ? nil : try block(value.block),
-            replacementHash: value.has_replacement_hash == 0 ? nil : fixed(value.replacement_hash, 32),
-            peerCount: value.peer_count
-        )
     }
 
     static func capabilities(_ snapshot: citizensdk_capability_snapshot_t) throws -> CitizenSDKCapabilities {
@@ -277,55 +658,45 @@ internal enum CitizenSDKNativeCodec {
         }
     }
 
-    private static func historyRecord(_ result: UInt64, _ index: UInt32) throws -> CitizenHistoryRecord {
-        var info = citizensdk_history_record_info_t()
-        prepare(&info.struct_size, &info.abi_version, citizensdk_history_record_info_t.self)
-        var remarkRequired: UInt64 = 0
+    private static func transactionHistoryRecord(_ result: UInt64, _ index: UInt32) throws
+        -> CitizenTransactionHistoryRecord {
+        var info = citizensdk_transaction_history_record_info_t()
+        prepare(&info.struct_size, &info.abi_version,
+                citizensdk_transaction_history_record_info_t.self)
         var reasonRequired: UInt64 = 0
         try CitizenSDKChecks.requireOK(
-            citizensdk_result_get_history_record(result, index, &info, nil, 0, &remarkRequired, nil, 0, &reasonRequired),
-            "Core history record size query failed"
+            citizensdk_result_get_transaction_history_record(
+                result, index, &info, nil, 0, &reasonRequired),
+            "Core transaction history record size query failed"
         )
-        let pair = try copyPair(remarkRequired, reasonRequired) { remark, remarkCapacity, remarkOut, reason, reasonCapacity, reasonOut in
-            citizensdk_result_get_history_record(result, index, &info, remark, remarkCapacity, remarkOut,
-                                                 reason, reasonCapacity, reasonOut)
+        guard reasonRequired <= 4_096 else {
+            throw CitizenSDKError(.integrity, "Core transaction history reason exceeds the public contract")
         }
-        guard let status = CitizenHistoryStatus(rawValue: info.status) else {
+        let reason = try copy(reasonRequired) { pointer, capacity, outRequired in
+            citizensdk_result_get_transaction_history_record(
+                result, index, &info, pointer, capacity, outRequired)
+        }
+        guard let status = CitizenTransactionHistoryStatus(rawValue: info.status),
+              info.has_block == 0 || info.has_block == 1,
+              info.has_execution == 0 || info.has_execution == 1,
+              info.has_replacement_hash == 0 || info.has_replacement_hash == 1 else {
             throw CitizenSDKError(.integrity, "Core history status is invalid")
         }
-        return CitizenHistoryRecord(
-            accountID: fixed(info.account_id.bytes, 32), transactionHash: fixed(info.transaction_hash, 32),
-            nonce: info.nonce, destinationAccountID: fixed(info.destination_account_id.bytes, 32),
-            amountFen: u128(info.amount_fen), status: status,
+        return CitizenTransactionHistoryRecord(
+            executionID: executionID(info.execution_id),
+            sourceAccountID: fixed(info.source_account_id.bytes, 32),
+            callDataHash: fixed(info.call_data_hash, 32),
+            transactionHash: fixed(info.transaction_hash, 32), status: status,
             block: info.has_block == 0 ? nil : try block(info.block),
             execution: info.has_execution == 0 ? nil : try execution(info.execution),
+            replacementHash: info.has_replacement_hash == 0 ? nil : fixed(info.replacement_hash, 32),
             createdAtMillis: info.created_at_millis, updatedAtMillis: info.updated_at_millis,
-            remark: pair.0, poolRejectionReason: pair.1.isEmpty ? nil : try text(pair.1)
+            poolRejectionReason: reason.isEmpty ? nil : try text(reason)
         )
     }
 
-    private static func finalizedTransfer(_ result: UInt64, _ index: UInt32) throws -> CitizenFinalizedTransfer {
-        var info = citizensdk_finalized_transfer_info_t()
-        prepare(&info.struct_size, &info.abi_version, citizensdk_finalized_transfer_info_t.self)
-        var first: UInt64 = 0, second: UInt64 = 0, third: UInt64 = 0
-        try CitizenSDKChecks.requireOK(
-            citizensdk_result_get_finalized_transfer(result, index, &info, nil, 0, &first,
-                                                     nil, 0, &second, nil, 0, &third),
-            "Core finalized transfer size query failed"
-        )
-        let values = try copyThree(first, second, third) { a, ac, ao, b, bc, bo, c, cc, co in
-            citizensdk_result_get_finalized_transfer(result, index, &info, a, ac, ao, b, bc, bo, c, cc, co)
-        }
-        guard let direction = CitizenTransferDirection(rawValue: info.direction) else {
-            throw CitizenSDKError(.integrity, "Core transfer direction is invalid")
-        }
-        return CitizenFinalizedTransfer(
-            trackedAccountID: fixed(info.tracked_account_id.bytes, 32),
-            fromAccountID: fixed(info.from_account_id.bytes, 32), toAccountID: fixed(info.to_account_id.bytes, 32),
-            amountFen: u128(info.amount_fen), block: try block(info.block), eventRecordIndex: info.event_record_index,
-            extrinsicIndex: info.has_extrinsic_index == 0 ? nil : info.extrinsic_index, direction: direction,
-            sourcePallet: try text(values.0), remarkDisplay: try text(values.1), remarkBytes: values.2
-        )
+    private static func executionID(_ value: citizensdk_transaction_execution_id_t) -> String {
+        "0x" + fixed(value.bytes, 16).map { String(format: "%02x", $0) }.joined()
     }
 
     private static func block(_ value: citizensdk_block_ref_t) throws -> CitizenBlockRef {

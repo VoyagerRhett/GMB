@@ -35,6 +35,30 @@ internal object CitizenSdkNativeCodec {
         val result = when (kind) {
             0L -> CitizenSdkNativeResult.Empty
             1L -> CitizenSdkNativeResult.Block(reader.block())
+            2L -> CitizenSdkNativeResult.Storage(if (reader.bool()) reader.bytes(64 * 1024 * 1024) else null)
+            3L -> {
+                var total = 0L
+                CitizenSdkNativeResult.StorageBatch(
+                    List(reader.boundedCount(1024, "storage batch count")) {
+                        if (reader.bool()) reader.bytes(64 * 1024 * 1024).also {
+                            total += it.size
+                            check(total <= 64L * 1024L * 1024L)
+                        } else null
+                    },
+                )
+            }
+            4L -> CitizenSdkNativeResult.RuntimeContext(
+                CitizenRuntimeContext(
+                    reader.block(), reader.u32Long(), reader.u32Long(),
+                    reader.bytes(64 * 1024 * 1024).also { check(it.isNotEmpty()) },
+                ),
+            )
+            8L -> CitizenSdkNativeResult.ChainState(
+                CitizenChainState(
+                    reader.u32Long(), reader.block(),
+                    reader.bytes(256 * 1024).also { check(it.isNotEmpty()) },
+                ),
+            )
             9L -> CitizenSdkNativeResult.Balance(reader.balance())
             10L -> CitizenSdkNativeResult.Nonce(
                 CitizenAccountNonce(reader.block(), reader.fixed(32), reader.u64Text()),
@@ -46,8 +70,7 @@ internal object CitizenSdkNativeCodec {
             13L -> CitizenSdkNativeResult.Accounts(reader.walletAccounts())
             14L -> CitizenSdkNativeResult.Signature(CitizenSignature(reader.fixed(64)))
             15L -> CitizenSdkNativeResult.Prepared(reader.positiveI64("prepared wallet token"))
-            16L -> CitizenSdkNativeResult.Transfer(reader.walletTransfer())
-            17L -> CitizenSdkNativeResult.History(reader.history())
+            17L -> CitizenSdkNativeResult.TransactionHistoryPage(reader.transactionHistoryPage())
             18L -> CitizenSdkNativeResult.Balances(
                 List(reader.boundedCount(1990, "balance result count")) { reader.balance() },
             )
@@ -57,6 +80,40 @@ internal object CitizenSdkNativeCodec {
             20L -> CitizenSdkNativeResult.QrSigned(CitizenQrDocument.parse(reader.text()).also {
                 check(it.kind == 2 && (it.signRequest?.toByteArray(Charsets.UTF_8)?.size ?: 0) in 1..2331)
             })
+            21L -> CitizenSdkNativeResult.WalletState(reader.walletState())
+            22L -> CitizenSdkNativeResult.SigningOutcome(reader.signingOutcome())
+            23L -> CitizenSdkNativeResult.DefaultAccountChange(reader.defaultAccountChange())
+            24L -> CitizenSdkNativeResult.SyncStatus(
+                CitizenChainSyncStatus(
+                    reader.u64Text(), reader.bool(), reader.bool(), reader.block(), reader.block(),
+                ).also {
+                    check(it.best.finality == CitizenFinality.BEST)
+                    check(it.finalized.finality == CitizenFinality.FINALIZED)
+                    check(it.finalized.number.toULong() <= it.best.number.toULong())
+                },
+            )
+            25L -> CitizenSdkNativeResult.BlockHeader(
+                CitizenBlockHeader(
+                    reader.block(), reader.fixed(32), reader.fixed(32), reader.fixed(32),
+                    reader.bytes(1024 * 1024),
+                ),
+            )
+            26L -> CitizenSdkNativeResult.BlockBody(
+                reader.blockBody(),
+            )
+            27L -> CitizenSdkNativeResult.PreparedTransaction(
+                reader.positiveI64("prepared transaction token"),
+                CitizenPreparedTransaction(
+                    preparationId = "0x" + reader.fixed(16).toHex(),
+                    sourceAccountId = reader.fixed(32),
+                    callDataHash = reader.fixed(32),
+                    bestBlock = reader.block().also { check(it.finality == CitizenFinality.BEST) },
+                    runtimeSpecNumber = reader.u32Long(),
+                    transactionFormatNumber = reader.u32Long(),
+                    nonce = reader.u64Text(),
+                ),
+            )
+            28L -> CitizenSdkNativeResult.TransactionExecution(reader.transactionExecution())
             else -> throw CitizenSdkException(
                 CitizenSdkErrorCode.INTEGRITY,
                 "JNI returned unsupported result kind $kind",
@@ -100,24 +157,6 @@ internal object CitizenSdkNativeCodec {
         CitizenSdkCapabilities(revision, statuses)
     }
 
-    fun decodeWatch(bytes: ByteArray): Watch = decodeIntegrity("watch") {
-        val reader = Reader(bytes)
-        check(reader.u32Long() == VERSION.toLong()) { "unsupported watch wire version" }
-        val status = reader.oneBasedEnum(CitizenSdkEvents.TransferStatus.entries, "watch status")
-        val peers = reader.u32Long()
-        val block = if (reader.bool()) reader.block() else null
-        val replacement = if (reader.bool()) reader.fixed(32) else null
-        reader.finish()
-        Watch(status, peers, block, replacement)
-    }
-
-    data class Watch(
-        val status: CitizenSdkEvents.TransferStatus,
-        val peerCount: Long,
-        val block: CitizenBlockRef?,
-        val replacementHash: ByteArray?,
-    )
-
     private inline fun <T> decodeIntegrity(label: String, block: () -> T): T = try {
         block()
     } catch (error: CitizenSdkException) {
@@ -146,9 +185,11 @@ internal object CitizenSdkNativeCodec {
             check(size >= 0 && size <= buffer.remaining()) { "JNI byte field exceeds its envelope" }
             return ByteArray(size).also(buffer::get)
         }
-        fun bytes(): ByteArray {
+        fun bytes(maximum: Int = Int.MAX_VALUE): ByteArray {
             val size = u32Long()
-            check(size <= buffer.remaining().toLong()) { "JNI byte field exceeds its envelope" }
+            check(size <= maximum.toLong() && size <= buffer.remaining().toLong()) {
+                "JNI byte field exceeds its envelope"
+            }
             return fixed(size.toInt())
         }
         fun text(): String {
@@ -168,6 +209,20 @@ internal object CitizenSdkNativeCodec {
 
         fun balance(): CitizenAccountBalance = CitizenAccountBalance(block(), fixed(32), u128(), u128(), u128())
 
+        fun blockBody(): CitizenBlockBody {
+            val block = block()
+            val count = boundedCount(16384, "block body extrinsic count")
+            var total = 0L
+            val extrinsics = List(count) {
+                bytes(64 * 1024 * 1024).also {
+                    check(it.isNotEmpty())
+                    total += it.size
+                    check(total <= 64L * 1024L * 1024L)
+                }
+            }
+            return CitizenBlockBody(block, extrinsics)
+        }
+
         fun walletProfile(): CitizenWalletProfile? {
             if (!bool()) return null
             val origin = oneBasedEnum(CitizenWalletOrigin.entries, "wallet origin")
@@ -178,6 +233,97 @@ internal object CitizenSdkNativeCodec {
             val count = boundedCount(1990, "wallet account count")
             val accounts = walletAccounts(count)
             return CitizenWalletProfile(origin, walletIndex, created, master, active, accounts)
+        }
+
+        fun walletState(): CitizenWalletState {
+            val revision = u64Text()
+            data class ProfileHeader(
+                val origin: CitizenWalletOrigin,
+                val walletIndex: Long,
+                val created: String,
+                val master: ByteArray,
+                val active: ByteArray,
+                val count: Int,
+            )
+            val header = if (bool()) ProfileHeader(
+                oneBasedEnum(CitizenWalletOrigin.entries, "wallet origin"),
+                u32Long(), u64Text(), fixed(32), fixed(32),
+                boundedCount(1990, "hot wallet account count"),
+            ) else null
+            val count = boundedCount(3980, "wallet state account count")
+            val accounts = ArrayList<CitizenWalletStateAccount>(count)
+            repeat(count) { index ->
+                val mode = oneBasedEnum(CitizenWalletSignMode.entries, "wallet sign mode")
+                val walletIndex = u32Long()
+                val accountIndex = if (bool()) boundedU32Long(1989, "wallet account index") else null
+                val accountId = fixed(32)
+                val value = CitizenWalletStateAccount(
+                    mode, walletIndex, accountIndex, accountId, text(), text(), u64Text(), bool(),
+                )
+                check(value.isDefault == (index == 0))
+                check((mode == CitizenWalletSignMode.HOT && walletIndex == 0L && accountIndex != null) ||
+                    (mode == CitizenWalletSignMode.COLD && walletIndex != 0L && accountIndex == null))
+                accounts += value
+            }
+            fun key(bytes: ByteArray): String = bytes.contentToString()
+            check(accounts.map { key(it.accountId()) }.toSet().size == accounts.size)
+            check(accounts.filter { it.signMode == CitizenWalletSignMode.COLD }
+                .map { it.walletIndex }.toSet().size ==
+                accounts.count { it.signMode == CitizenWalletSignMode.COLD })
+            check(accounts.filter { it.signMode == CitizenWalletSignMode.HOT }
+                .map { it.accountIndex }.toSet().size ==
+                accounts.count { it.signMode == CitizenWalletSignMode.HOT })
+            val profile = header?.let { value ->
+                val hot = accounts.filter { it.signMode == CitizenWalletSignMode.HOT }.map {
+                    CitizenWalletAccount(
+                        it.accountIndex!!, it.accountId(), it.ss58Address, it.name,
+                        it.createdAtMillis, it.accountId().contentEquals(value.active),
+                    )
+                }
+                check(value.walletIndex == 0L && hot.size == value.count)
+                check(hot.count { it.active } == 1 && hot.any { it.active && it.accountId().contentEquals(value.active) })
+                check(hot.any { it.index == 0L && it.accountId().contentEquals(value.master) })
+                CitizenWalletProfile(value.origin, value.walletIndex, value.created,
+                    value.master, value.active, hot)
+            }
+            check(profile != null || accounts.none { it.signMode == CitizenWalletSignMode.HOT })
+            return CitizenWalletState(revision, profile, accounts)
+        }
+
+        fun signingOutcome(): CitizenSigningOutcome {
+            val status = u32Long()
+            val account = fixed(32)
+            val hash = fixed(32)
+            return when (status) {
+                1L -> CitizenSigningOutcome.Completed(account, hash, CitizenSignature(fixed(64)))
+                2L -> CitizenSigningOutcome.ExternalPending(
+                    account,
+                    hash,
+                    CitizenExternalSignerTransport.QR_V1,
+                    u64Text(),
+                    text().also { check(it.length in 16..128) },
+                    text().also { check(it.toByteArray(Charsets.UTF_8).size in 1..2331) },
+                )
+                else -> error("unknown signing outcome status")
+            }
+        }
+
+        fun defaultAccountChange(): CitizenDefaultAccountChangeOutcome {
+            val status = u32Long()
+            val account = fixed(32)
+            val hash = fixed(32)
+            return when (status) {
+                1L -> CitizenDefaultAccountChangeOutcome.Completed(account, hash, u64Text())
+                2L -> CitizenDefaultAccountChangeOutcome.ExternalPending(
+                    account,
+                    hash,
+                    CitizenExternalSignerTransport.QR_V1,
+                    u64Text(),
+                    text().also { check(it.length in 16..128) },
+                    text().also { check(it.toByteArray(Charsets.UTF_8).size in 1..2331) },
+                )
+                else -> error("unknown default account change status")
+            }
         }
 
         fun walletAccounts(): List<CitizenWalletAccount> =
@@ -208,42 +354,60 @@ internal object CitizenSdkNativeCodec {
             return CitizenExecution(status, reason, block, index, pallet, error)
         }
 
-        fun walletTransfer(): CitizenWalletTransfer = CitizenWalletTransfer(
-            fixed(32),
-            oneBasedEnum(CitizenTransferResolution.entries, "transfer resolution"),
-            if (bool()) execution() else null,
-            if (bool()) text() else null,
-        )
-
-        fun history(): CitizenTransactionHistory {
-            val revision = u64Text()
-            val cursorCount = boundedCount(1990, "history cursor count")
-            val cursors = ArrayList<CitizenHistoryCursor>(cursorCount)
-            repeat(cursorCount) {
-                cursors += CitizenHistoryCursor(fixed(32), block(), block())
+        fun transactionExecution(): CitizenTransactionExecution {
+            val status = u32Long()
+            val id = "0x" + fixed(16).toHex()
+            val source = fixed(32)
+            val callHash = fixed(32)
+            val transactionHash = fixed(32)
+            val expires = u64Text()
+            val execution = if (bool()) execution() else null
+            val reason = if (bool()) text() else null
+            val replacement = if (bool()) fixed(32) else null
+            val request = if (bool()) text() else null
+            return when (status) {
+                1L -> {
+                    check(transactionHash.all { it == 0.toByte() } && execution == null && reason == null && replacement == null)
+                    CitizenTransactionExecution.ExternalSigningPending(
+                        id, source, callHash, expires,
+                        requireNotNull(request).also { check(it.toByteArray(Charsets.UTF_8).size in 1..65536) },
+                    )
+                }
+                2L, 3L, 4L -> {
+                    check(request == null)
+                    val resolution = when (status) {
+                        2L -> CitizenTransactionResolution.FINALIZED_SUCCESS
+                        3L -> CitizenTransactionResolution.FINALIZED_FAILED
+                        else -> CitizenTransactionResolution.POOL_REJECTED
+                    }
+                    CitizenTransactionExecution.Completed(
+                        id, source, callHash, transactionHash, resolution,
+                        execution, reason, replacement,
+                    )
+                }
+                else -> error("unknown transaction execution status")
             }
-            val recordCount = boundedCount(100_000, "history record count")
-            val records = ArrayList<CitizenHistoryRecord>(recordCount)
+        }
+
+        fun transactionHistoryPage(): CitizenTransactionHistoryPage {
+            val revision = u64Text()
+            val recordCount = boundedCount(100, "transaction history record count")
+            val records = ArrayList<CitizenTransactionHistoryRecord>(recordCount)
             repeat(recordCount) {
-                records += CitizenHistoryRecord(
-                    fixed(32), fixed(32), u64Text(), fixed(32), u128(),
-                    oneBasedEnum(CitizenHistoryStatus.entries, "history status"),
+                records += CitizenTransactionHistoryRecord(
+                    fixed(16), fixed(32), fixed(32), fixed(32),
+                    oneBasedEnum(CitizenTransactionHistoryStatus.entries, "transaction history status"),
                     if (bool()) block() else null,
                     if (bool()) execution() else null,
-                    u64Text(), u64Text(), bytes(), if (bool()) text() else null,
+                    if (bool()) fixed(32) else null,
+                    u64Text(), u64Text(), if (bool()) text() else null,
                 )
             }
-            val transferCount = boundedCount(100_000, "finalized transfer count")
-            val transfers = ArrayList<CitizenFinalizedTransfer>(transferCount)
-            repeat(transferCount) {
-                transfers += CitizenFinalizedTransfer(
-                    fixed(32), fixed(32), fixed(32), u128(), block(), u32Long(),
-                    if (bool()) u32Long() else null,
-                    oneBasedEnum(CitizenTransferDirection.entries, "transfer direction"),
-                    text(), text(), bytes(),
-                )
-            }
-            return CitizenTransactionHistory(revision, cursors, records, transfers)
+            return CitizenTransactionHistoryPage(
+                revision,
+                records,
+                if (bool()) fixed(16) else null,
+            )
         }
 
         fun boundedCount(maximum: Int, label: String): Int {
@@ -274,4 +438,8 @@ internal object CitizenSdkNativeCodec {
     }
 
     private const val VERSION = 1
+}
+
+private fun ByteArray.toHex(): String = joinToString("") { byte ->
+    (byte.toInt() and 0xff).toString(16).padStart(2, '0')
 }

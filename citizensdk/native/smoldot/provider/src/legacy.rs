@@ -159,7 +159,8 @@ impl LegacyRpc {
         })
     }
 
-    /// 在排队订阅前取得广播 receiver，避免首条状态紧随订阅 ID 到达时丢失。
+    /// 在排队订阅前取得广播 receiver，避免上游 transactionWatch_v1
+    /// 首条状态紧随 subscription ID 到达时丢失。
     pub(crate) async fn subscribe_extrinsic(
         &self,
         extrinsic_hex: String,
@@ -167,7 +168,7 @@ impl LegacyRpc {
         let receiver = self.notifications.subscribe();
         let result = self
             .request_with_timeout(
-                "author_submitAndWatchExtrinsic",
+                "transactionWatch_v1_submitAndWatch",
                 json!([extrinsic_hex]),
                 false,
             )
@@ -175,13 +176,13 @@ impl LegacyRpc {
         let subscription = result.as_str().ok_or_else(|| {
             contract_error(
                 ContractErrorCode::Decode,
-                "submitAndWatch 响应不是 subscription id",
+                "transactionWatch_v1 响应不是 subscription id",
             )
         })?;
         if subscription.is_empty() {
             return Err(contract_error(
                 ContractErrorCode::Decode,
-                "submitAndWatch 返回空 subscription id",
+                "transactionWatch_v1 返回空 subscription id",
             ));
         }
         Ok((subscription.to_owned(), receiver))
@@ -189,10 +190,11 @@ impl LegacyRpc {
 
     pub(crate) async fn unwatch_extrinsic(&self, subscription: &str) -> ContractResult<()> {
         let result = self
-            .request_with_timeout("author_unwatchExtrinsic", json!([subscription]), false)
+            .request_with_timeout("transactionWatch_v1_unwatch", json!([subscription]), false)
             .await?;
-        // false 同样证明不存在（终态后上游可能已自动移除），不是清理失败。
-        if !result.is_boolean() {
+        // transactionWatch_v1_unwatch 的成功结果是 JSON null；终态后上游
+        // 已自动移除订阅时仍由该方法返回 unit，不引入 legacy fallback。
+        if !result.is_null() {
             return Err(provider_error("extrinsic unsubscribe was not acknowledged"));
         }
         Ok(())

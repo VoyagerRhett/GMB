@@ -206,10 +206,7 @@ void main() {
     final session = await CitizenSdkFlutterSession.open(platform: platform);
 
     await expectLater(
-      session.invoke(
-        'transferWithRemark',
-        fields: <Object?>[_account(1), _account(2), '0', ''],
-      ),
+      session.invoke('getTransactionHistory', fields: <Object?>[null, 0]),
       throwsA(isA<CitizenSdkException>()),
     );
     await session.invoke('getFinalizedHead');

@@ -14,8 +14,9 @@ pub use encrypted_secret_blob::{
 };
 pub use runtime_cache::RuntimeCacheStore;
 pub use transaction_history::{
-    FinalizedTransferRecord, HistoryTransactionStatus, TransactionHistoryCursor,
+    HistoryTransactionStatus, TransactionExecutionRecord, TransactionHistoryPage,
     TransactionHistoryRecord, TransactionHistoryState, TransactionHistoryStore,
-    MAX_FINALIZED_REMARK_DISPLAY_BYTES,
+    MAX_TRANSACTION_HISTORY_PAGE_SIZE, MAX_TRANSACTION_HISTORY_RECORDS,
+    MAX_TRANSACTION_HISTORY_SYNC_BATCH, MAX_TRANSACTION_POOL_REASON_BYTES,
 };
 pub use wallet_profile::WalletProfileStore;

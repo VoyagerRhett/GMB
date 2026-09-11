@@ -103,6 +103,37 @@ public final class CitizenSdk: @unchecked Sendable {
 
     public func capabilities() throws -> CitizenSDKCapabilities { try native.capabilities() }
     public func finalizedHead() async throws -> CitizenBlockRef { try await native.finalizedHead().value() }
+    public func syncStatus() async throws -> CitizenChainSyncStatus { try await native.syncStatus().value() }
+    public func bestHead() async throws -> CitizenBlockRef { try await native.bestHead().value() }
+    public func finalizedBlock(at number: UInt64) async throws -> CitizenBlockRef {
+        try await native.finalizedBlock(at: number).value()
+    }
+    public func resolveFinalizedBlock(hash: Data, number: UInt64) async throws -> CitizenBlockRef {
+        try await native.resolveFinalizedBlock(hash: hash, number: number).value()
+    }
+    public func blockHeader(_ block: CitizenBlockRef) async throws -> CitizenBlockHeader {
+        try await native.blockHeader(block).value()
+    }
+    public func blockBody(_ block: CitizenBlockRef) async throws -> CitizenBlockBody {
+        try await native.blockBody(block).value()
+    }
+    public func runtimeContext(_ block: CitizenBlockRef) async throws -> CitizenRuntimeContext {
+        try await native.runtimeContext(block).value()
+    }
+    public func storage(_ block: CitizenBlockRef, key: Data) async throws -> Data? {
+        try await native.storage(block, key: CitizenSDKInputLimits.storageKey(key)).value()
+    }
+    public func storageBatch(_ block: CitizenBlockRef, keys: [Data]) async throws -> [Data?] {
+        try await native.storageBatch(block, keys: CitizenSDKInputLimits.storageKeys(keys)).value()
+    }
+    public func systemEvents(_ finalizedBlock: CitizenBlockRef) async throws -> Data? {
+        guard finalizedBlock.finality == .finalized else {
+            throw CitizenSDKError(.invalidArgument, "System.Events requires a finalized block")
+        }
+        return try await native.systemEvents(finalizedBlock).value()
+    }
+    public func exportState() async throws -> CitizenChainState { try await native.exportState().value() }
+    public func importState(_ state: CitizenChainState) async throws { try await native.importState(state).value() }
 
     /// 返回 Core 固定链身份的创世哈希；只要求启用 chain，不要求启动或同步轻节点。
     public func genesisHash() throws -> Data { try native.genesisHash() }
@@ -122,6 +153,81 @@ public final class CitizenSdk: @unchecked Sendable {
 
     public func feeSnapshot() async throws -> CitizenFeeSnapshot { try await native.feeSnapshot().value() }
     public func walletProfile() async throws -> CitizenWalletProfile? { try await native.walletProfile().value() }
+    public func walletState() async throws -> CitizenWalletState { try await native.walletState().value() }
+
+    public func importColdAccount(accountID: Data, name: String) async throws -> CitizenWalletState {
+        let checkedID = try CitizenSDKInputLimits.accountID(accountID)
+        let checkedName = try CitizenSDKInputLimits.accountName(name)
+        return try await CitizenSDKWalletMutationGate.shared.perform {
+            try await native.importColdAccountID(checkedID, name: checkedName).value()
+        }
+    }
+
+    public func importColdAccount(ss58Address: String, name: String) async throws -> CitizenWalletState {
+        guard !ss58Address.isEmpty, ss58Address.utf8.count <= 64 else {
+            throw CitizenSDKError(.invalidArgument, "cold account SS58 is invalid")
+        }
+        let checkedName = try CitizenSDKInputLimits.accountName(name)
+        return try await CitizenSDKWalletMutationGate.shared.perform {
+            try await native.importColdAccountSS58(ss58Address, name: checkedName).value()
+        }
+    }
+
+    public func reorderWalletAccountsWithoutDefaultChange(expectedRevision: UInt64,
+                                                           accountIDs: [Data]) async throws
+        -> CitizenWalletState {
+        guard (1...3_980).contains(accountIDs.count) else {
+            throw CitizenSDKError(.invalidArgument, "wallet catalog must contain 1...3980 accounts")
+        }
+        let checkedIDs = try accountIDs.map { try CitizenSDKInputLimits.accountID($0) }
+        return try await CitizenSDKWalletMutationGate.shared.perform {
+            try await native.reorderWalletAccounts(expectedRevision: expectedRevision,
+                                                   accountIDs: checkedIDs).value()
+        }
+    }
+
+    /// Changes the SDK wallet default only after the old default authorizes the
+    /// exact revision and full account permutation. CitizenWallet stays an
+    /// independent external signer when the old default is cold.
+    public func beginDefaultAccountChange(expectedRevision: UInt64,
+                                          accountIDs: [Data],
+                                          ttlSeconds: UInt64 = 120) async throws
+        -> CitizenDefaultAccountChangeOutcome {
+        guard (1...256).contains(accountIDs.count), (1...300).contains(ttlSeconds) else {
+            throw CitizenSDKError(.invalidArgument, "default-account change input is invalid")
+        }
+        let checked = try accountIDs.map { try CitizenSDKInputLimits.accountID($0) }
+        return try await CitizenSDKWalletMutationGate.shared.perform {
+            try await native.beginDefaultAccountChange(
+                expectedRevision: expectedRevision, accountIDs: checked,
+                ttlSeconds: ttlSeconds).value()
+        }
+    }
+
+    public func consumeDefaultAccountChange(sessionID: String,
+                                            response: String) async throws
+        -> CitizenDefaultAccountChangeOutcome {
+        try CitizenSigning.validateExternal(sessionID: sessionID, response: response)
+        return try await CitizenSDKWalletMutationGate.shared.perform {
+            try await native.consumeDefaultAccountChange(
+                sessionID: sessionID, response: response).value()
+        }
+    }
+
+    public func renameAccount(accountID: Data, name: String) async throws -> CitizenWalletState {
+        let checkedID = try CitizenSDKInputLimits.accountID(accountID)
+        let checkedName = try CitizenSDKInputLimits.accountName(name)
+        return try await CitizenSDKWalletMutationGate.shared.perform {
+            try await native.renameAnyAccount(checkedID, name: checkedName).value()
+        }
+    }
+
+    public func deleteAccount(accountID: Data) async throws -> CitizenWalletState {
+        let checkedID = try CitizenSDKInputLimits.accountID(accountID)
+        return try await CitizenSDKWalletMutationGate.shared.perform {
+            try await native.deleteAnyAccount(checkedID).value()
+        }
+    }
 
     public func setActiveWalletAccount(accountID: Data) async throws -> CitizenWalletProfile {
         try await CitizenSDKWalletMutationGate.shared.perform {
@@ -225,28 +331,65 @@ public final class CitizenSdk: @unchecked Sendable {
     internal func isPrivateKeyAuthenticationActive(_ operationID: UInt64) -> Bool { native.isPrivateKeyAuthenticationActive(operationID) }
     internal func cancelPrivateKeyAuthentication(_ operationID: UInt64) { native.cancelPrivateKeyAuthentication(operationID) }
 
-    public func transferWithRemark(sourceAccountID: Data, destinationAccountID: Data,
-                                   amountFen: CitizenU128, remark: Data,
-                                   progress: @escaping (CitizenTransferProgress) -> Void) throws
-        -> CitizenSDKOperation<CitizenWalletTransfer> {
-        guard amountFen.low != 0 || amountFen.high != 0 else {
-            throw CitizenSDKError(.invalidArgument, "transfer amount must be positive")
+    /// Binds one application-encoded opaque RuntimeCall to exact chain state without signing.
+    public func prepareTransaction(sourceAccountID: Data,
+                                   callData: Data) async throws -> CitizenPreparedTransaction {
+        guard (1...1_024 * 1_024).contains(callData.count) else {
+            throw CitizenSDKError(.invalidArgument, "callData must contain 1...1 MiB bytes")
         }
-        return try native.transfer(
+        return try await native.prepareTransaction(
             source: CitizenSDKInputLimits.accountID(sourceAccountID, label: "sourceAccountID"),
-            destination: CitizenSDKInputLimits.accountID(destinationAccountID, label: "destinationAccountID"),
-            amount: amountFen,
-            remark: CitizenSDKInputLimits.transferRemark(remark),
-            progress: progress
-        )
+            callData: callData
+        ).value()
     }
 
-    public func initializeFinalizedHistory(accountIDs: [Data]) async throws -> CitizenTransactionHistory {
-        try await native.initializeHistory(CitizenSDKInputLimits.accountIDs(accountIDs)).value()
+    public func cancelPreparedTransaction(preparationID: String) throws {
+        guard preparationID.range(
+            of: #"^0x[0-9a-f]{32}$"#,
+            options: .regularExpression
+        ) != nil else {
+            throw CitizenSDKError(.invalidArgument, "preparationID is invalid")
+        }
+        try native.cancelPreparedTransaction(preparationID)
     }
 
-    public func syncFinalizedHistory(accountIDs: [Data]) async throws -> CitizenTransactionHistory {
-        try await native.syncHistory(CitizenSDKInputLimits.accountIDs(accountIDs)).value()
+    public func executePreparedTransaction(preparationID: String) async throws
+        -> CitizenTransactionExecution {
+        try await native.executePreparedTransaction(preparationID).value()
+    }
+
+    public func consumePreparedTransactionQrResponse(executionID: String, response: String)
+        async throws -> CitizenTransactionExecutionCompleted {
+        guard (1...2_331).contains(response.utf8.count) else {
+            throw CitizenSDKError(.invalidArgument, "response must contain 1...2331 UTF-8 bytes")
+        }
+        let value = try await native
+            .consumePreparedTransactionQrResponse(executionID, response: response).value()
+        guard case let .completed(completed) = value else {
+            throw CitizenSDKError(.integrity, "Core did not return a terminal transaction execution")
+        }
+        return completed
+    }
+
+    public func cancelPreparedTransactionExecution(executionID: String) throws {
+        try native.cancelPreparedTransactionExecution(executionID)
+    }
+
+    /// Reads the local execution-only history. No account or business filtering is inferred.
+    public func getTransactionHistory(beforeExecutionID: String? = nil, limit: UInt32 = 100)
+        async throws -> CitizenTransactionHistoryPage {
+        guard (1...100).contains(limit) else {
+            throw CitizenSDKError(.invalidArgument, "limit must be in 1...100")
+        }
+        return try await native.getTransactionHistory(
+            beforeExecutionID: beforeExecutionID,
+            limit: limit
+        ).value()
+    }
+
+    /// Advances a bounded batch of non-terminal SDK-submitted transactions.
+    public func syncTransactionHistory() async throws -> CitizenTransactionHistoryPage {
+        try await native.syncTransactionHistory().value()
     }
 
     /// Destroys only checkpoint-safe Core state. A running instance must first
@@ -403,6 +546,31 @@ public struct CitizenSigning: Sendable {
     public func sign(accountID: Data, message: Data) async throws -> CitizenSignature {
         try await native.sign(accountID: CitizenSDKInputLimits.accountID(accountID),
                               message: CitizenSDKInputLimits.signingPayload(message)).value()
+    }
+
+    public func begin(_ intent: CitizenSigningIntent) async throws -> CitizenSigningOutcome {
+        try await native.beginSigning(intent).value()
+    }
+
+    public func consumeExternalSignature(sessionID: String,
+                                         response: String) async throws -> CitizenSigningOutcome {
+        try Self.validateExternal(sessionID: sessionID, response: response)
+        return try await native.consumeExternalSignature(
+            sessionID: sessionID, response: response).value()
+    }
+
+    public func cancel(sessionID: String) throws -> Bool {
+        guard (1...128).contains(sessionID.utf8.count) else {
+            throw CitizenSDKError(.invalidArgument, "external signing sessionID is invalid")
+        }
+        return try native.cancelSigningSession(sessionID)
+    }
+
+    internal static func validateExternal(sessionID: String, response: String) throws {
+        guard (1...128).contains(sessionID.utf8.count),
+              (1...2_331).contains(response.utf8.count) else {
+            throw CitizenSDKError(.invalidArgument, "external signing response is invalid")
+        }
     }
 
     public static func verify(accountID: Data, signature: Data, message: Data) throws -> Bool {

@@ -4,8 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:citizenapp/rpc/chain_event_subscription.dart';
 import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/rpc/chain_tx_monitor.dart';
-import 'package:citizenapp/transaction/shared/local_tx_store.dart';
+import 'package:citizenapp/transaction/history/chain/wallet_transaction_history_sync.dart';
+import 'package:citizenapp/transaction/history/data/local_tx_store.dart';
 
 import '../support/isar_test_env.dart';
 

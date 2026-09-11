@@ -4,7 +4,9 @@ use std::{
 };
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use citizen_sdk_contracts::{ChainSigner, Sr25519PublicKey, Sr25519Signature};
+use citizen_sdk_contracts::{
+    apply_signing_transform, ChainSigner, SigningTransform, Sr25519PublicKey, Sr25519Signature,
+};
 
 use crate::{QrError, QrErrorCode, SignRequest, SignResponse};
 
@@ -27,6 +29,7 @@ impl QrClock for SystemQrClock {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QrSession {
     request: SignRequest,
+    transform: SigningTransform,
     consumed: bool,
 }
 
@@ -37,6 +40,11 @@ impl QrSession {
 
     pub const fn is_consumed(&self) -> bool {
         self.consumed
+    }
+
+    /// The transform is local session state and is never inferred from opaque QR action values.
+    pub const fn transform(&self) -> &SigningTransform {
+        &self.transform
     }
 }
 
@@ -60,6 +68,25 @@ impl<C: QrClock> QrSessionStore<C> {
         review_payload: Vec<u8>,
         ttl_seconds: u64,
     ) -> Result<SignRequest, QrError> {
+        self.create_with_transform(
+            action,
+            signer_public_key,
+            review_payload,
+            SigningTransform::SubstrateSigningPayload,
+            ttl_seconds,
+        )
+    }
+
+    /// Creates one transport session whose cryptographic transform is fixed by the caller's
+    /// generic signing intent. `action` remains opaque transport metadata.
+    pub fn create_with_transform(
+        &mut self,
+        action: u16,
+        signer_public_key: Sr25519PublicKey,
+        review_payload: Vec<u8>,
+        transform: SigningTransform,
+        ttl_seconds: u64,
+    ) -> Result<SignRequest, QrError> {
         if ttl_seconds == 0 || ttl_seconds > 300 {
             return Err(QrError::new(
                 QrErrorCode::InvalidField,
@@ -68,7 +95,45 @@ impl<C: QrClock> QrSessionStore<C> {
         }
         let now = self.clock.now_epoch_seconds();
         if now == 0 {
-            return Err(QrError::new(QrErrorCode::ClockUnavailable, "系统时钟不可用"));
+            return Err(QrError::new(
+                QrErrorCode::ClockUnavailable,
+                "系统时钟不可用",
+            ));
+        }
+        let expires_at = now
+            .checked_add(ttl_seconds)
+            .ok_or_else(|| QrError::new(QrErrorCode::InvalidField, "二维码期限溢出"))?;
+        self.create_with_transform_until(
+            action,
+            signer_public_key,
+            review_payload,
+            transform,
+            expires_at,
+        )
+    }
+
+    /// Creates a session ending at an already frozen Unix timestamp. SDK wallet mutations use
+    /// this so their signed expiry and transport expiry are exactly the same bytes.
+    pub fn create_with_transform_until(
+        &mut self,
+        action: u16,
+        signer_public_key: Sr25519PublicKey,
+        review_payload: Vec<u8>,
+        transform: SigningTransform,
+        expires_at: u64,
+    ) -> Result<SignRequest, QrError> {
+        let now = self.clock.now_epoch_seconds();
+        if now == 0 {
+            return Err(QrError::new(
+                QrErrorCode::ClockUnavailable,
+                "系统时钟不可用",
+            ));
+        }
+        if expires_at <= now || expires_at.saturating_sub(now) > 300 {
+            return Err(QrError::new(
+                QrErrorCode::InvalidField,
+                "二维码签名期限必须位于当前时间之后 1 到 300 秒",
+            ));
         }
         self.sessions
             .retain(|_, session| session.request.expires_at > now);
@@ -86,9 +151,6 @@ impl<C: QrClock> QrSessionStore<C> {
             )
         })?;
         let request_id = URL_SAFE_NO_PAD.encode(entropy);
-        let expires_at = now
-            .checked_add(ttl_seconds)
-            .ok_or_else(|| QrError::new(QrErrorCode::InvalidField, "二维码期限溢出"))?;
         let request = SignRequest {
             request_id: request_id.clone(),
             expires_at,
@@ -96,11 +158,15 @@ impl<C: QrClock> QrSessionStore<C> {
             signer_public_key,
             review_payload,
         };
+        transform
+            .validate()
+            .map_err(|_| QrError::new(QrErrorCode::InvalidField, "签名 transform 无效"))?;
         request.encode()?;
         self.sessions.insert(
             request_id,
             QrSession {
                 request: request.clone(),
+                transform,
                 consumed: false,
             },
         );
@@ -136,7 +202,8 @@ impl<C: QrClock> QrSessionStore<C> {
             ));
         }
         let request = session.request.clone();
-        let message = request.signing_message()?;
+        let message = apply_signing_transform(&request.review_payload, &session.transform)
+            .map_err(|_| QrError::new(QrErrorCode::InvalidField, "签名 transform 或载荷无效"))?;
         let verified = signer
             .verify(response.signer_public_key, message, response.signature)
             .await
@@ -338,9 +405,21 @@ mod tests {
     fn creation_keeps_expiry_in_the_cross_platform_signed_integer_domain() {
         let public = Sr25519PublicKey::from_bytes([2; 32]);
         let mut at_edge = QrSessionStore::new(FixedClock(i64::MAX as u64 - 1));
-        assert_eq!(at_edge.create(0x0400, public, vec![4, 0], 1).unwrap().expires_at, i64::MAX as u64);
+        assert_eq!(
+            at_edge
+                .create(0x0400, public, vec![4, 0], 1)
+                .unwrap()
+                .expires_at,
+            i64::MAX as u64
+        );
         let mut overflow = QrSessionStore::new(FixedClock(i64::MAX as u64));
-        assert_eq!(overflow.create(0x0400, public, vec![4, 0], 1).unwrap_err().code(), QrErrorCode::InvalidField);
+        assert_eq!(
+            overflow
+                .create(0x0400, public, vec![4, 0], 1)
+                .unwrap_err()
+                .code(),
+            QrErrorCode::InvalidField
+        );
         assert!(overflow.sessions.is_empty(), "拒绝的跨端溢出不得留下会话");
     }
 }

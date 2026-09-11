@@ -12,6 +12,14 @@ pub const CITIZENCHAIN_CHAIN_ID: &str = "citizenchain";
 pub const CITIZENCHAIN_PROTOCOL_ID: &str = "citizenchain";
 /// 单次 finalized ancestry/history 请求允许的最大连续块数；Engine 与 provider 共用本常量。
 pub const MAX_FINALIZED_BLOCKS_PER_BATCH: u64 = 120;
+/// Public exact-block reads are bounded before provider allocation or host projection.
+pub const MAX_STORAGE_KEY_BYTES: usize = 4 * 1024;
+pub const MAX_STORAGE_BATCH_KEYS: usize = 1024;
+pub const MAX_STORAGE_BATCH_KEY_BYTES: usize = 1024 * 1024;
+pub const MAX_HEADER_DIGEST_BYTES: usize = 1024 * 1024;
+pub const MAX_RUNTIME_METADATA_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_BLOCK_BODY_EXTRINSICS: usize = 16 * 1024;
+pub const MAX_BLOCK_BODY_BYTES: usize = 64 * 1024 * 1024;
 pub const CITIZENCHAIN_GENESIS_HASH: Hash32 = Hash32::from_bytes([
     0x18, 0x84, 0x7a, 0x5d, 0xfd, 0x26, 0x32, 0x72, 0xf2, 0xe7, 0x72, 0x78, 0x36, 0xfe, 0x65, 0x82,
     0xf8, 0xc4, 0x46, 0x3f, 0xf4, 0x86, 0x09, 0xdf, 0x7b, 0x96, 0xd5, 0xe4, 0xd9, 0xdd, 0x24, 0xdd,
@@ -192,6 +200,172 @@ impl From<FinalizedBlockRef> for VerifiedBlockRef {
     }
 }
 
+/// One typed snapshot from the same running light-client instance.
+///
+/// Peer and progress facts never manufacture finality: both block references were already
+/// verified by the provider, and callers must use `is_usable` rather than infer readiness from
+/// peer count or height movement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChainSyncStatus {
+    peer_count: u64,
+    is_syncing: bool,
+    is_usable: bool,
+    best: VerifiedBlockRef,
+    finalized: FinalizedBlockRef,
+}
+
+impl ChainSyncStatus {
+    pub fn try_new(
+        peer_count: u64,
+        is_syncing: bool,
+        is_usable: bool,
+        best: VerifiedBlockRef,
+        finalized: FinalizedBlockRef,
+    ) -> ContractResult<Self> {
+        if best.finality() != BlockFinality::Best {
+            return Err(ContractError::new(
+                ContractErrorCode::Integrity,
+                "同步状态的 best 块必须具有 best finality",
+            ));
+        }
+        if finalized.number() > best.number() {
+            return Err(ContractError::new(
+                ContractErrorCode::Integrity,
+                "同步状态的 finalized 高度不能超过 best 高度",
+            ));
+        }
+        Ok(Self {
+            peer_count,
+            is_syncing,
+            is_usable,
+            best,
+            finalized,
+        })
+    }
+
+    pub const fn peer_count(self) -> u64 {
+        self.peer_count
+    }
+
+    pub const fn is_syncing(self) -> bool {
+        self.is_syncing
+    }
+
+    pub const fn is_usable(self) -> bool {
+        self.is_usable
+    }
+
+    pub const fn best(self) -> VerifiedBlockRef {
+        self.best
+    }
+
+    pub const fn finalized(self) -> FinalizedBlockRef {
+        self.finalized
+    }
+}
+
+/// Header fields decoded from one exact provider-verified block.
+///
+/// `digest` is the complete SCALE encoding of the header Digest (compact log count followed by
+/// the encoded DigestItems). It remains a chain-level opaque value and is never interpreted as an
+/// application event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedBlockHeader {
+    block: VerifiedBlockRef,
+    parent_hash: Hash32,
+    state_root: Hash32,
+    extrinsics_root: Hash32,
+    digest: Vec<u8>,
+}
+
+impl VerifiedBlockHeader {
+    pub fn try_new(
+        block: VerifiedBlockRef,
+        parent_hash: Hash32,
+        state_root: Hash32,
+        extrinsics_root: Hash32,
+        digest: Vec<u8>,
+    ) -> ContractResult<Self> {
+        if digest.len() > MAX_HEADER_DIGEST_BYTES {
+            return Err(ContractError::new(
+                ContractErrorCode::InvalidArgument,
+                "block header digest 超过 1 MiB",
+            ));
+        }
+        Ok(Self {
+            block,
+            parent_hash,
+            state_root,
+            extrinsics_root,
+            digest,
+        })
+    }
+
+    pub const fn block(&self) -> VerifiedBlockRef {
+        self.block
+    }
+
+    pub const fn parent_hash(&self) -> Hash32 {
+        self.parent_hash
+    }
+
+    pub const fn state_root(&self) -> Hash32 {
+        self.state_root
+    }
+
+    pub const fn extrinsics_root(&self) -> Hash32 {
+        self.extrinsics_root
+    }
+
+    pub fn digest(&self) -> &[u8] {
+        &self.digest
+    }
+}
+
+/// Opaque ordered extrinsics from one exact provider-verified block.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedBlockBody {
+    block: VerifiedBlockRef,
+    extrinsics: Vec<Vec<u8>>,
+}
+
+impl VerifiedBlockBody {
+    pub fn try_new(block: VerifiedBlockRef, extrinsics: Vec<Vec<u8>>) -> ContractResult<Self> {
+        if extrinsics.len() > MAX_BLOCK_BODY_EXTRINSICS {
+            return Err(ContractError::new(
+                ContractErrorCode::Integrity,
+                "block body extrinsic 数量超过 16384",
+            ));
+        }
+        let total = extrinsics.iter().try_fold(0_usize, |total, value| {
+            if value.is_empty() {
+                return Err(ContractError::new(
+                    ContractErrorCode::Integrity,
+                    "block body 包含空 extrinsic",
+                ));
+            }
+            total.checked_add(value.len()).ok_or_else(|| {
+                ContractError::new(ContractErrorCode::Integrity, "block body 长度溢出")
+            })
+        })?;
+        if total > MAX_BLOCK_BODY_BYTES {
+            return Err(ContractError::new(
+                ContractErrorCode::Integrity,
+                "block body 超过 64 MiB",
+            ));
+        }
+        Ok(Self { block, extrinsics })
+    }
+
+    pub const fn block(&self) -> VerifiedBlockRef {
+        self.block
+    }
+
+    pub fn extrinsics(&self) -> &[Vec<u8>] {
+        &self.extrinsics
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeVersion {
     spec_version: u32,
@@ -233,6 +407,12 @@ impl RuntimeContext {
             return Err(ContractError::new(
                 ContractErrorCode::InvalidArgument,
                 "runtime metadata 不能为空",
+            ));
+        }
+        if metadata.len() > MAX_RUNTIME_METADATA_BYTES {
+            return Err(ContractError::new(
+                ContractErrorCode::InvalidArgument,
+                "runtime metadata 超过 64 MiB",
             ));
         }
         Ok(Self {
@@ -381,6 +561,16 @@ pub trait VerifiedChainClient: Send + Sync {
 
     fn get_finalized_head(&self) -> ContractFuture<'_, FinalizedBlockRef>;
 
+    /// Return one internally consistent status snapshot from the running verified provider.
+    fn get_sync_status(&self) -> ContractFuture<'_, ChainSyncStatus> {
+        Box::pin(async {
+            Err(ContractError::new(
+                ContractErrorCode::Unsupported,
+                "provider does not expose typed sync status",
+            ))
+        })
+    }
+
     /// 通知只表示 provider 已验证的 finalized 快照变化；不得把未验证 RPC 头当作证明。
     /// 未提供订阅的组合明确失败一次后结束，不以轮询伪装订阅。
     fn subscribe_finalized_heads(&self) -> ContractStream<'_, FinalizedBlockRef> {
@@ -516,6 +706,20 @@ pub trait VerifiedChainClient: Send + Sync {
     fn get_runtime_context_at(&self, block: VerifiedBlockRef)
         -> ContractFuture<'_, RuntimeContext>;
 
+    /// Return header fields for the exact requested block. Providers must revalidate the block
+    /// identity and must not answer from an unrelated moving head.
+    fn get_block_header_at(
+        &self,
+        _block: VerifiedBlockRef,
+    ) -> ContractFuture<'_, VerifiedBlockHeader> {
+        Box::pin(async {
+            Err(ContractError::new(
+                ContractErrorCode::Unsupported,
+                "provider does not expose verified block headers",
+            ))
+        })
+    }
+
     fn get_finalized_runtime_context_at(
         &self,
         block: FinalizedBlockRef,
@@ -525,6 +729,13 @@ pub trait VerifiedChainClient: Send + Sync {
 
     /// 读取目标块完整 extrinsic 字节，供 Engine 按完整哈希定位准确 index。
     fn get_block_extrinsics_at(&self, block: VerifiedBlockRef) -> ContractFuture<'_, Vec<Vec<u8>>>;
+
+    fn get_block_body_at(&self, block: VerifiedBlockRef) -> ContractFuture<'_, VerifiedBlockBody> {
+        Box::pin(async move {
+            let extrinsics = self.get_block_extrinsics_at(block).await?;
+            VerifiedBlockBody::try_new(block, extrinsics)
+        })
+    }
 
     fn get_finalized_block_extrinsics_at(
         &self,

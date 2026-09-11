@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:citizenapp/transaction/shared/local_tx_store.dart';
+import 'package:citizenapp/transaction/history/data/local_tx_store.dart';
 
 import '../support/isar_test_env.dart';
 

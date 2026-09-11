@@ -6,13 +6,13 @@ use std::{
 };
 
 use citizen_sdk_contracts::{
-    citizen_ss58_address, AccountId32, ChainDatabaseSnapshot, ChainDatabaseStore, ContractFuture,
-    ContractResult, EncryptedSecretBlobSnapshot, EncryptedSecretBlobState,
-    EncryptedSecretBlobStore, EncryptedSecretEnvelope, FinalizedBlockRef, FinalizedTransferRecord,
-    Hash32, Hash32Bytes, RuntimeCacheStore, RuntimeContext, RuntimeVersion, SecretOwner, SecretRef,
-    TransactionHistoryState, TransactionHistoryStore, VaultGeneration, VerifiedBlockRef,
-    WalletAccount, WalletCleanupPlan, WalletOrigin, WalletProfile, WalletProfileStore,
-    WalletProvisioningPlan, WalletState,
+    citizen_ss58_address, parse_citizen_ss58_address, AccountId32, ChainDatabaseSnapshot,
+    ChainDatabaseStore, ColdWalletAccount, ContractFuture, ContractResult,
+    EncryptedSecretBlobSnapshot, EncryptedSecretBlobState, EncryptedSecretBlobStore,
+    EncryptedSecretEnvelope, Hash32, Hash32Bytes, RuntimeCacheStore, RuntimeContext,
+    RuntimeVersion, SecretOwner, SecretRef, TransactionHistoryState, TransactionHistoryStore,
+    VaultGeneration, VerifiedBlockRef, WalletAccount, WalletCleanupPlan, WalletOrigin,
+    WalletProfile, WalletProfileStore, WalletProvisioningPlan, WalletSignMode, WalletState,
 };
 
 fn block_on<F: Future>(future: F) -> F::Output {
@@ -86,7 +86,7 @@ struct MemoryHistory;
 
 impl TransactionHistoryStore for MemoryHistory {
     fn load(&self) -> ContractFuture<'_, TransactionHistoryState> {
-        Box::pin(async { TransactionHistoryState::try_new(0, Vec::new(), Vec::new(), Vec::new()) })
+        Box::pin(async { TransactionHistoryState::try_new(0, Vec::new()) })
     }
 
     fn compare_and_swap(
@@ -254,6 +254,98 @@ fn citizen_ss58_profile_address_matches_the_existing_wallet_golden_vector() {
         account_id,
     );
     assert!(WalletAccount::try_new(0, account_id, secret_ref, "wrong", "", 0).is_err());
+
+    let encoded = citizen_ss58_address(account_id);
+    assert_eq!(
+        value_or_panic(parse_citizen_ss58_address(&encoded)),
+        account_id
+    );
+    assert!(parse_citizen_ss58_address(&format!("{encoded}1")).is_err());
+    assert!(
+        parse_citizen_ss58_address("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXQaE4iAqYvFfu").is_err()
+    );
+}
+
+#[test]
+fn unified_wallet_catalog_requires_exact_unique_hot_and_cold_order() {
+    let hot = wallet_profile(vec![wallet_account(0, 3, 4)]);
+    let hot_id = hot.master_account_id();
+    let cold_id = AccountId32::from_bytes([9; 32]);
+    let cold = value_or_panic(ColdWalletAccount::try_new(
+        1,
+        cold_id,
+        citizen_ss58_address(cold_id),
+        " 冷账户 ",
+        200,
+    ));
+    let state = value_or_panic(WalletState::try_from_catalog_parts(
+        7,
+        Some(hot.clone()),
+        vec![cold.clone()],
+        vec![cold_id, hot_id],
+        2,
+        None,
+        None,
+        Vec::new(),
+    ));
+    assert_eq!(state.default_account_id(), Some(cold_id));
+    assert_eq!(state.account_sign_mode(hot_id), Some(WalletSignMode::Hot));
+    assert_eq!(state.account_sign_mode(cold_id), Some(WalletSignMode::Cold));
+    assert_eq!(state.cold_account_by_index(1), Some(&cold));
+    assert_eq!(cold.name(), "冷账户");
+
+    for invalid_order in [
+        vec![hot_id],
+        vec![cold_id, cold_id],
+        vec![cold_id, hot_id, AccountId32::from_bytes([8; 32])],
+    ] {
+        assert!(WalletState::try_from_catalog_parts(
+            7,
+            Some(hot.clone()),
+            vec![cold.clone()],
+            invalid_order,
+            2,
+            None,
+            None,
+            Vec::new(),
+        )
+        .is_err());
+    }
+
+    let duplicates_hot = value_or_panic(ColdWalletAccount::try_new(
+        1,
+        hot_id,
+        citizen_ss58_address(hot_id),
+        "重复",
+        200,
+    ));
+    assert!(WalletState::try_from_catalog_parts(
+        7,
+        Some(hot),
+        vec![duplicates_hot],
+        vec![hot_id],
+        2,
+        None,
+        None,
+        Vec::new(),
+    )
+    .is_err());
+
+    assert!(WalletState::try_from_catalog_parts(
+        7,
+        None,
+        vec![cold.clone()],
+        vec![cold_id],
+        1,
+        None,
+        None,
+        Vec::new(),
+    )
+    .is_err());
+    assert!(
+        ColdWalletAccount::try_new(0, cold_id, citizen_ss58_address(cold_id), "非法", 200,)
+            .is_err()
+    );
 }
 
 #[test]
@@ -662,51 +754,6 @@ fn runtime_cache_value_carries_its_exact_block_identity() {
     ));
     assert_eq!(context.block(), block);
     assert_eq!(context.version().spec_version(), 17);
-}
-
-#[test]
-fn finalized_transfer_history_rejects_zero_self_and_duplicate_event_identity() {
-    let block = FinalizedBlockRef::from_parts(Hash32::from_bytes([7; 32]), 55);
-    assert!(FinalizedTransferRecord::try_new(
-        AccountId32::from_bytes([1; 32]),
-        AccountId32::from_bytes([2; 32]),
-        0,
-        block,
-        3,
-        Some(0),
-        "Balances",
-        None,
-    )
-    .is_err());
-    assert!(FinalizedTransferRecord::try_new(
-        AccountId32::from_bytes([1; 32]),
-        AccountId32::from_bytes([1; 32]),
-        1,
-        block,
-        4,
-        Some(1),
-        "Balances",
-        None,
-    )
-    .is_err());
-
-    let transfer = value_or_panic(FinalizedTransferRecord::try_new(
-        AccountId32::from_bytes([1; 32]),
-        AccountId32::from_bytes([2; 32]),
-        100,
-        block,
-        3,
-        Some(0),
-        "Balances",
-        None,
-    ));
-    assert!(TransactionHistoryState::try_new(
-        1,
-        Vec::new(),
-        Vec::new(),
-        vec![transfer.clone(), transfer],
-    )
-    .is_err());
 }
 
 #[test]

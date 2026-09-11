@@ -59,23 +59,37 @@ FlValuePtr decode_call(FlMethodCodec *codec, GBytes *bytes, std::string *method)
 void test_method_closure_and_requests() {
   constexpr Method all[] = {
       Method::open, Method::start, Method::stop, Method::close,
-      Method::get_capabilities, Method::get_finalized_head, Method::get_genesis_hash,
+      Method::get_capabilities, Method::get_finalized_head, Method::get_sync_status,
+      Method::get_best_head, Method::get_finalized_block_at,
+      Method::resolve_finalized_block, Method::get_block_header, Method::get_block_body,
+      Method::get_runtime_context, Method::get_storage, Method::get_storage_batch,
+      Method::get_system_events, Method::export_state, Method::import_state,
+      Method::get_genesis_hash,
       Method::get_account_balance, Method::get_account_balances, Method::get_account_nonce,
-      Method::get_fee_snapshot, Method::get_wallet_profile, Method::view_account_private_key,
+      Method::get_fee_snapshot, Method::get_wallet_profile, Method::get_wallet_state,
+      Method::import_cold_account_id, Method::import_cold_account_ss58,
+      Method::reorder_wallet_accounts_without_default_change, Method::rename_account,
+      Method::delete_account, Method::view_account_private_key,
       Method::create_wallet, Method::import_wallet, Method::add_wallet_accounts,
       Method::set_active_wallet_account, Method::rename_wallet_account,
       Method::delete_wallet_account, Method::delete_wallet,
-      Method::reconcile_wallet_cleanup, Method::sign_wallet_payload, Method::verify_signature,
-      Method::transfer_with_remark, Method::initialize_finalized_history,
-      Method::sync_finalized_history, Method::qr_parse, Method::qr_create_sign_request,
+      Method::reconcile_wallet_cleanup, Method::sign_wallet_payload, Method::begin_signing,
+      Method::consume_external_signature, Method::cancel_signing,
+      Method::begin_default_account_change, Method::consume_default_account_change,
+      Method::verify_signature, Method::prepare_transaction,
+      Method::cancel_prepared_transaction, Method::execute_prepared_transaction,
+      Method::consume_prepared_transaction_qr_response,
+      Method::cancel_prepared_transaction_execution,
+      Method::get_transaction_history, Method::sync_transaction_history,
+      Method::qr_parse, Method::qr_create_sign_request,
       Method::qr_consume_sign_response, Method::qr_cancel_sign_request,
       Method::qr_encode_account_id, Method::qr_encode_user_transfer,
       Method::qr_decode_luminance, Method::qr_encode, Method::qr_scan, Method::sign_qr_request,
   };
   std::set<std::string> names;
   for (Method method : all) names.insert(citizen_sdk::flutter::method_name(method));
-  assert(names.size() == 36 && names.count("open") == 1 &&
-         names.count("transferWithRemark") == 1);
+  assert(names.size() == 63 && names.count("open") == 1 &&
+         names.count("getTransactionHistory") == 1);
 
   assert(decode("open", list({Value::integer(1), Value::integer(63)})).modules == 63);
   assert(decode("open", list({Value::integer(1), Value::integer(2)})).modules == 2);
@@ -86,14 +100,31 @@ void test_method_closure_and_requests() {
                    CITIZENSDK_ERROR_INVALID_ARGUMENT);
   }
   for (const char *method : {"start", "stop", "close", "getCapabilities",
-       "getFinalizedHead", "getGenesisHash", "getFeeSnapshot", "getWalletProfile", "importWallet",
+       "getFinalizedHead", "getSyncStatus", "getBestHead", "exportState",
+       "getGenesisHash", "getFeeSnapshot", "getWalletProfile", "getWalletState", "importWallet",
        "deleteWallet", "reconcileWalletCleanup"}) {
     auto value = decode(method, list({Value::integer(1), Value::string("s"),
                                       Value::integer(1)}));
     assert(value.session == "s" && value.sequence == 1);
   }
+  const auto finalized = list({Value::string(account('1')), Value::string("1"),
+                               Value::string("finalized")});
+  assert(decode("getFinalizedBlockAt", list({Value::integer(1), Value::string("s"),
+      Value::integer(1), Value::string("1")})).block_number == 1);
+  assert(decode("resolveFinalizedBlock", list({Value::integer(1), Value::string("s"),
+      Value::integer(1), Value::string(account('1')), Value::string("1")})).block_number == 1);
+  for (const char *method : {"getBlockHeader", "getBlockBody", "getRuntimeContext",
+                             "getSystemEvents"})
+    assert(decode(method, list({Value::integer(1), Value::string("s"),
+        Value::integer(1), finalized})).block.finality == CITIZENSDK_FINALITY_FINALIZED);
+  assert(decode("getStorage", list({Value::integer(1), Value::string("s"), Value::integer(1),
+      finalized, Value::bytes({1})})).payload.size() == 1);
+  assert(decode("getStorageBatch", list({Value::integer(1), Value::string("s"), Value::integer(1),
+      finalized, list({Value::bytes({1}), Value::bytes({2})})})).storage_keys.size() == 2);
+  assert(decode("importState", list({Value::integer(1), Value::string("s"), Value::integer(1),
+      Value::integer(1), finalized, Value::bytes({1})})).state_database.size() == 1);
   for (const char *method : {"getAccountBalance", "getAccountNonce",
-       "setActiveWalletAccount", "deleteWalletAccount", "viewAccountPrivateKey"}) {
+       "setActiveWalletAccount", "deleteWalletAccount", "deleteAccount", "viewAccountPrivateKey"}) {
     assert(decode(method, list({Value::integer(1), Value::string("s"),
         Value::integer(1), Value::string(account('0'))})).account_id.bytes[0] == 0);
   }
@@ -113,12 +144,53 @@ void test_method_closure_and_requests() {
       std::vector<uint32_t>{1, 1989}));
   assert(decode("renameWalletAccount", list({Value::integer(1), Value::string("s"),
       Value::integer(1), Value::string(account('1')), Value::string("账户") })).name == "账户");
+  assert(decode("renameAccount", list({Value::integer(1), Value::string("s"),
+      Value::integer(1), Value::string(account('1')), Value::string("冷账户") })).name == "冷账户");
+  assert(decode("importColdAccountId", list({Value::integer(1), Value::string("s"),
+      Value::integer(1), Value::string(account('1')), Value::string("冷账户") })).name == "冷账户");
+  assert(decode("importColdAccountSs58", list({Value::integer(1), Value::string("s"),
+      Value::integer(1), Value::string("w5CZACAABUbK4jspzPB5be9trhtSgRCRZFafGe7kvFPvxq8M2"),
+      Value::string("冷账户") })).name == "冷账户");
+  const auto reordered = decode("reorderWalletAccountsWithoutDefaultChange", list({
+      Value::integer(1), Value::string("s"), Value::integer(1), Value::string("7"),
+      list({Value::string(account('1')), Value::string(account('2'))})}));
+  assert(reordered.wallet_revision == 7 && reordered.account_ids.size() == 2);
   assert(decode("signWalletPayload", list({Value::integer(1), Value::string("s"),
       Value::integer(1), Value::string(account('2')), Value::bytes({1, 2})})).payload.size() == 2);
+  const auto signing = decode("beginSigning", list({Value::integer(1), Value::string("s"),
+      Value::integer(1), Value::string(account('2')), Value::bytes({1, 2}), Value::string("raw"),
+      Value::bytes({}), Value::string("none"), Value::integer(0), Value::integer(120)}));
+  assert(signing.signing_transform == CITIZENSDK_SIGNING_TRANSFORM_RAW &&
+         signing.external_signer_transport == CITIZENSDK_EXTERNAL_SIGNER_NONE);
+  assert(decode("consumeExternalSignature", list({Value::integer(1), Value::string("s"),
+      Value::integer(1), Value::string("signing-session"), Value::string("{}")})).signing_response == "{}");
+  assert(decode("cancelSigning", list({Value::integer(1), Value::string("s"),
+      Value::integer(1), Value::string("signing-session")})).signing_session_id == "signing-session");
+  const auto default_change = decode("beginDefaultAccountChange", list({Value::integer(1),
+      Value::string("s"), Value::integer(1), Value::string("7"),
+      list({Value::string(account('2')), Value::string(account('1'))}), Value::integer(120)}));
+  assert(default_change.wallet_revision == 7 && default_change.account_ids.size() == 2);
+  assert(decode("consumeDefaultAccountChange", list({Value::integer(1), Value::string("s"),
+      Value::integer(1), Value::string("signing-session"), Value::string("{}")})).signing_response == "{}");
   const auto verification = decode("verifySignature", list({Value::integer(1),
       Value::string(account('2')), Value::bytes(Value::Bytes(64)), Value::bytes({})}));
   assert(verification.signature.size() == 64 && verification.session.empty() &&
          verification.sequence == 0);
+  const auto prepared = decode("prepareTransaction", list({Value::integer(1),
+      Value::string("s"), Value::integer(1), Value::string(account('2')),
+      Value::bytes({1, 2})}));
+  assert(prepared.account_id.bytes[0] == 0x22 && prepared.payload.size() == 2);
+  assert(decode("cancelPreparedTransaction", list({Value::integer(1), Value::string("s"),
+      Value::integer(1), Value::string("0x00112233445566778899aabbccddeeff")})).preparation_id ==
+      "0x00112233445566778899aabbccddeeff");
+  assert(decode("executePreparedTransaction", list({Value::integer(1), Value::string("s"),
+      Value::integer(1), Value::string("0x00112233445566778899aabbccddeeff")})).preparation_id ==
+      "0x00112233445566778899aabbccddeeff");
+  assert(decode("consumePreparedTransactionQrResponse", list({Value::integer(1), Value::string("s"),
+      Value::integer(1), Value::string("0x112233445566778899aabbccddeeff00"),
+      Value::string("QR_V1")})).signing_response == "QR_V1");
+  assert(decode("cancelPreparedTransactionExecution", list({Value::integer(1), Value::string("s"),
+      Value::integer(1), Value::string("0x112233445566778899aabbccddeeff00")})).execution_id.bytes[0] == 0x11);
 
   assert(decode("qrScan", list({Value::integer(1), Value::string("s"),
       Value::integer(1)})).method == Method::qr_scan);
@@ -185,16 +257,15 @@ void test_method_closure_and_requests() {
       list({Value::string(account('3')), Value::string("10"), Value::string("finalized")});
   expect_failure([&] { citizen_sdk::flutter::validate_account_balances(
       request, list({list({balance, wrong_block})})); }, CITIZENSDK_ERROR_INTEGRITY);
-  const std::string nul_remark("a\0b", 3);
-  const auto transfer = decode("transferWithRemark", list({Value::integer(1), Value::string("s"),
-      Value::integer(1), Value::string(account('3')), Value::string(account('4')),
-      Value::string("340282366920938463463374607431768211455"), Value::string(nul_remark)}));
-  assert(transfer.amount.low == UINT64_MAX && transfer.amount.high == UINT64_MAX &&
-         transfer.remark == std::vector<uint8_t>({'a', 0, 'b'}));
-  for (const char *method : {"initializeFinalizedHistory", "syncFinalizedHistory"}) {
-    assert(decode(method, list({Value::integer(1), Value::string("s"), Value::integer(1),
-        list({Value::string(account('5'))})})).account_ids.size() == 1);
-  }
+  const auto history = decode("getTransactionHistory", list({Value::integer(1),
+      Value::string("s"), Value::integer(1), Value::null(), Value::integer(100)}));
+  assert(!history.before_execution_id.has_value() && history.history_limit == 100);
+  const auto paged = decode("getTransactionHistory", list({Value::integer(1),
+      Value::string("s"), Value::integer(2),
+      Value::string("0x00112233445566778899aabbccddeeff"), Value::integer(25)}));
+  assert(paged.before_execution_id.has_value() && paged.history_limit == 25);
+  assert(decode("syncTransactionHistory", list({Value::integer(1), Value::string("s"),
+      Value::integer(3)})).method == Method::sync_transaction_history);
 }
 
 void test_strict_failures() {
@@ -209,9 +280,8 @@ void test_strict_failures() {
   expect_failure([&] { (void)decode("addWalletAccounts", list({Value::integer(1), Value::string("s"),
       Value::integer(1), list({Value::integer(1), Value::integer(1)})})); },
       CITIZENSDK_ERROR_INVALID_ARGUMENT);
-  expect_failure([&] { (void)decode("transferWithRemark", list({Value::integer(1), Value::string("s"),
-      Value::integer(1), Value::string(account('0')), Value::string(account('1')),
-      Value::string("340282366920938463463374607431768211456"), Value::string("")})); },
+  expect_failure([&] { (void)decode("getTransactionHistory", list({Value::integer(1),
+      Value::string("s"), Value::integer(1), Value::null(), Value::integer(101)})); },
       CITIZENSDK_ERROR_INVALID_ARGUMENT);
 
   Value nested = Value::integer(1);
@@ -242,14 +312,13 @@ void test_standard_wire_preserves_nul_and_unicode() {
   assert(codec != nullptr);
   const std::string exact("途\0遇", 7);
   auto arguments = fl(list({Value::integer(1), Value::string("session"), Value::integer(8),
-      Value::string(account('a')), Value::string(account('b')), Value::string("1"),
       Value::string(exact)}));
-  auto wire = encode_call(FL_METHOD_CODEC(codec.get()), "transferWithRemark", arguments.get());
+  auto wire = encode_call(FL_METHOD_CODEC(codec.get()), "qrParse", arguments.get());
   std::string method;
   auto decoded = decode_call(FL_METHOD_CODEC(codec.get()), wire.get(), &method);
   const auto request = citizen_sdk::flutter::decode_request(method, decoded.get());
-  assert(request.remark.size() == exact.size() &&
-         std::memcmp(request.remark.data(), exact.data(), exact.size()) == 0);
+  assert(request.qr_text.size() == exact.size() &&
+         std::memcmp(request.qr_text.data(), exact.data(), exact.size()) == 0);
 
   // The same codec must write its internal custom representation back to the
   // ordinary StandardMessageCodec string tag rather than a protocol extension.
@@ -289,10 +358,6 @@ Value execution_fixture(bool success = true) {
   return list({Value::string(success ? "success" : "failed"), block_fixture(),
       Value::integer(0), success ? Value::null() : Value::integer(0), Value::null(), Value::null()});
 }
-Value transfer_fixture() {
-  return list({Value::string(account('3')), Value::string("finalizedSuccess"),
-      execution_fixture(), Value::null()});
-}
 Value profile_fixture() {
   // Public AccountId/SS58 golden pair from citizenchain-wallet-derivation-v1;
   // no mnemonic, child seed or password is copied into this fixture.
@@ -304,17 +369,11 @@ Value profile_fixture() {
       Value::string(id), Value::string(id), list({std::move(item)})});
 }
 Value history_fixture() {
-  auto cursor = list({Value::string(account('1')), block_fixture(), block_fixture()});
-  auto record = list({Value::string(account('1')), Value::string(account('3')),
-      Value::string("0"), Value::string(account('2')), Value::string("1"),
-      Value::string("pending"), Value::null(), Value::null(), Value::string("0"),
-      Value::string("0"), Value::string(""), Value::null()});
-  auto transfer = list({Value::string(account('1')), Value::string(account('1')),
-      Value::string(account('2')), Value::string("1"), block_fixture(),
-      Value::integer(0), Value::null(), Value::string("outgoing"),
-      Value::string("Balances"), Value::string(""), Value::bytes({})});
-  return list({Value::string("0"), list({std::move(cursor)}),
-      list({std::move(record)}), list({std::move(transfer)})});
+  const auto id = Value::string("0x00112233445566778899aabbccddeeff");
+  auto record = list({id, Value::string(account('1')), Value::string(account('2')),
+      Value::string(account('3')), Value::string("pending"), Value::null(),
+      Value::null(), Value::null(), Value::string("1"), Value::string("1"), Value::null()});
+  return list({Value::string("1"), list({std::move(record)}), id});
 }
 
 void test_profile_semantics() {
@@ -338,82 +397,24 @@ void test_profile_semantics() {
   }
 }
 
-void test_transfer_and_watch_semantics() {
-  using citizen_sdk::flutter::validate_public_value;
-  using citizen_sdk::flutter::validate_watch_value;
-  const auto good = transfer_fixture();
-  validate_public_value(Method::transfer_with_remark, list({good}));
-  for (unsigned kind = 0; kind < 5; ++kind) {
-    auto bad = good; auto &fields = mutable_list(bad);
-    if (kind == 0) fields[1] = Value::string("finalizedFailed");
-    if (kind == 1) fields[3] = Value::string("unexpected");
-    if (kind == 2) mutable_list(fields[2])[1] = block_fixture('1', "7", false);
-    if (kind == 3) {
-      fields[1] = Value::string("poolRejected"); fields[2] = Value::null();
-      fields[3] = Value::string(" \xc2\xa0\xe3\x80\x80");
-    }
-    if (kind == 4) {
-      fields[1] = Value::string("finalizedFailed"); fields[2] = execution_fixture(false);
-      mutable_list(fields[2])[3] = Value::integer(3); // Module requires both pallet/error.
-    }
-    expect_failure([&] { validate_public_value(Method::transfer_with_remark, list({bad})); },
-                   CITIZENSDK_ERROR_INTEGRITY);
-  }
-  for (const char *status : {"ready", "future", "dropped", "invalid", "broadcast", "finalityTimeout"}) {
-    auto value = list({Value::integer(1), Value::string(status), Value::null(), Value::null(), Value::integer(0)});
-    validate_watch_value(value);
-    mutable_list(value)[3] = Value::string(account('3'));
-    expect_failure([&] { validate_watch_value(value); }, CITIZENSDK_ERROR_INTEGRITY);
-  }
-  auto finalized = list({Value::integer(1), Value::string("finalized"), block_fixture(),
-      Value::null(), Value::integer(0)});
-  validate_watch_value(finalized);
-  mutable_list(finalized)[2] = block_fixture('1', "7", false);
-  expect_failure([&] { validate_watch_value(finalized); }, CITIZENSDK_ERROR_INTEGRITY);
-  auto usurped = list({Value::integer(1), Value::string("usurped"), Value::null(),
-      Value::string(account('3')), Value::integer(0)});
-  validate_watch_value(usurped);
-}
-
 void test_history_semantics() {
   using citizen_sdk::flutter::validate_public_value;
   const auto good = history_fixture();
-  validate_public_value(Method::sync_finalized_history, list({good}));
-  for (unsigned kind = 0; kind < 13; ++kind) {
+  validate_public_value(Method::sync_transaction_history, list({good}));
+  for (unsigned kind = 0; kind < 6; ++kind) {
     auto bad = good; auto &history = mutable_list(bad);
-    auto &cursors = mutable_list(history[1]);
-    auto &records = mutable_list(history[2]); auto &transfers = mutable_list(history[3]);
+    auto &records = mutable_list(history[1]);
     switch (kind) {
-      case 0: cursors.push_back(cursors[0]); break;
-      case 1: mutable_list(cursors[0])[2] = block_fixture('2'); break;
-      case 2: records.push_back(records[0]); break;
-      case 3: mutable_list(records[0])[5] = Value::string("finalizedSuccess"); break;
-      case 4: mutable_list(records[0])[4] = Value::string("0"); break;
-      case 5: transfers.push_back(transfers[0]); break;
-      case 6: mutable_list(transfers[0])[7] = Value::string("incoming"); break;
-      case 7: mutable_list(transfers[0])[8] = Value::string("unknown"); break;
-      case 8: mutable_list(transfers[0])[9] = Value::string("not the bytes"); break;
-      case 9: mutable_list(cursors[0])[2] = block_fixture('1', "6"); break;
-      case 10: mutable_list(records[0])[8] = Value::string("1"); break;
-      case 11: mutable_list(transfers[0])[2] = Value::string(account('1')); break;
-      case 12: {
-        auto &record = mutable_list(records[0]);
-        record[5] = Value::string("finalizedSuccess");
-        record[6] = block_fixture('2'); record[7] = execution_fixture(); break;
-      }
+      case 0: records.push_back(records[0]); break;
+      case 1: mutable_list(records[0])[4] = Value::string("finalizedSuccess"); break;
+      case 2: mutable_list(records[0])[9] = Value::string("0"); break;
+      case 3: history[2] = Value::string("0xffffffffffffffffffffffffffffffff"); break;
+      case 4: mutable_list(records[0])[3] = Value::string("invalid"); break;
+      case 5: mutable_list(records[0])[0] = Value::string("invalid"); break;
     }
-    expect_failure([&] { validate_public_value(Method::sync_finalized_history, list({bad})); },
+    expect_failure([&] { validate_public_value(Method::sync_transaction_history, list({bad})); },
                    CITIZENSDK_ERROR_INTEGRITY);
   }
-  auto lossy = good;
-  auto &transfer = mutable_list(mutable_list(mutable_list(lossy)[3])[0]);
-  transfer[6] = Value::integer(0); transfer[8] = Value::string("OnchainTransaction");
-  transfer[9] = Value::string("\xef\xbf\xbd"); transfer[10] = Value::bytes({0xe2, 0x82});
-  validate_public_value(Method::sync_finalized_history, list({lossy}));
-  transfer[9] = Value::string(std::string("a\0b", 3)); transfer[10] = Value::bytes({'a', 0, 'b'});
-  validate_public_value(Method::sync_finalized_history, list({lossy}));
-  transfer[9] = Value::string("x"); transfer[10] = Value::bytes({0xef, 0xbb, 0xbf, 'x'});
-  validate_public_value(Method::sync_finalized_history, list({lossy}));
 }
 
 void test_balance_nonce_fee_semantics() {
@@ -459,7 +460,6 @@ int main() {
   test_standard_wire_preserves_nul_and_unicode();
   test_envelopes_and_decimal();
   test_profile_semantics();
-  test_transfer_and_watch_semantics();
   test_history_semantics();
   test_balance_nonce_fee_semantics();
   return 0;

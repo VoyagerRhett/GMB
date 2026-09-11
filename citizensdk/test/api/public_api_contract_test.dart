@@ -14,10 +14,13 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   test('公开账户地址投影与原生派生共用同一冻结测试向量', () {
-    final golden = jsonDecode(
-      File('test/wallet/citizenchain-wallet-derivation-v1.json')
-          .readAsStringSync(),
-    ) as Map<String, dynamic>;
+    final golden =
+        jsonDecode(
+              File(
+                'test/wallet/citizenchain-wallet-derivation-v1.json',
+              ).readAsStringSync(),
+            )
+            as Map<String, dynamic>;
     for (final entry in golden['cases'] as List) {
       for (final account in (entry as Map)['accounts'] as List) {
         final map = account as Map;
@@ -52,9 +55,9 @@ void main() {
         .where((file) => file.path.endsWith('.dart'));
     expect(
       dart.any(
-        (file) =>
-            RegExp(r'class\s+CitizenSdkClient\b')
-                .hasMatch(file.readAsStringSync()),
+        (file) => RegExp(
+          r'class\s+CitizenSdkClient\b',
+        ).hasMatch(file.readAsStringSync()),
       ),
       isFalse,
     );
@@ -69,6 +72,7 @@ void main() {
     expect(CitizenSdkModules.qr, 32);
     expect(isA<CitizenTransactions>(), isNotNull);
     expect(isA<CitizenHistory>(), isNotNull);
+    expect(isA<CitizenPreparedTransaction>(), isNotNull);
     expect(CitizenSdkErrorCode.values, hasLength(22));
     expect(CitizenCapabilityName.values, hasLength(10));
     expect(
@@ -80,7 +84,9 @@ void main() {
   test('Flutter五种平台注册共用channel、固定方法及无任意RPC/裸extrinsic闭集', () {
     expect(FlutterCitizenSdkPlatform.methodChannelName, 'citizen/sdk/core/v1');
     expect(FlutterCitizenSdkPlatform.eventChannelName, 'citizen/sdk/events/v1');
-    expect(CitizenSdkFlutterCodec.methods, hasLength(36));
+    expect(CitizenSdkFlutterCodec.methods, hasLength(63));
+    expect(isA<CitizenWalletState>(), isNotNull);
+    expect(isA<CitizenWalletStateAccount>(), isNotNull);
     expect(isA<CitizenQr>(), isNotNull);
     expect(isA<CitizenQrDocument>(), isNotNull);
     expect(isA<CitizenQrSigned>(), isNotNull);

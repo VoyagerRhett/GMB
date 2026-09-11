@@ -1556,9 +1556,7 @@ mod citizenapp_warp_policy_tests {
     /// 整个 App SIGABRT 闪退（`internal error: entered unreachable code`）。
     #[test]
     fn build_steps_after_state_reset_return_recoverable_error_not_panic() {
-        use super::{
-            BuildChainInformationError, BuildRuntimeError, CallProof, RuntimeDownload,
-        };
+        use super::{BuildChainInformationError, BuildRuntimeError, CallProof, RuntimeDownload};
 
         // 重置后的状态：runtime_download 回到 NotStarted、call proof 回到未下载。
         let reset_runtime_download = RuntimeDownload::NotStarted {

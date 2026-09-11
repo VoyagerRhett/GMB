@@ -216,14 +216,26 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
             case "getFinalizedHead": run(session, request, result) {
                 [CitizenSdkFlutterCodec.block(try await session.sdk.finalizedHead())]
             }
+            case "getSyncStatus": run(session, request, result) {
+                [CitizenSdkFlutterCodec.syncStatus(try await session.sdk.syncStatus())]
+            }
+            case "getBestHead": run(session, request, result) {
+                [CitizenSdkFlutterCodec.block(try await session.sdk.bestHead())]
+            }
+            case "exportState": run(session, request, result) {
+                [CitizenSdkFlutterCodec.chainState(try await session.sdk.exportState())]
+            }
             case "getGenesisHash":
-                do { success(result, request, [Self.hex(try session.sdk.genesisHash())]) }
+                do { success(result, request, [CitizenSdkFlutterCodec.hex(try session.sdk.genesisHash())]) }
                 catch { fail(result, error, request) }
             case "getFeeSnapshot": run(session, request, result) {
                 [CitizenSdkFlutterCodec.fee(try await session.sdk.feeSnapshot())]
             }
             case "getWalletProfile": run(session, request, result) {
                 [CitizenSdkFlutterCodec.profile(try await session.sdk.walletProfile())]
+            }
+            case "getWalletState": run(session, request, result) {
+                [CitizenSdkFlutterCodec.walletState(try await session.sdk.walletState())]
             }
             case "importWallet": wallet(session, request, result)
             case "deleteWallet": run(session, request, result) {
@@ -253,42 +265,122 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
             case "deleteWalletAccount": run(session, request, result) {
                 [CitizenSdkFlutterCodec.profile(try await session.sdk.deleteWalletAccount(accountID: accountID))]
             }
+            case "deleteAccount": run(session, request, result) {
+                [CitizenSdkFlutterCodec.walletState(try await session.sdk.deleteAccount(accountID: accountID))]
+            }
             default: fail(result, .unsupported, "Unsupported method", request)
             }
         case let .balances(_, _, accountIDs): run(session, request, result) {
             [try await session.sdk.accountBalances(accountIDs: accountIDs).map(CitizenSdkFlutterCodec.balance)]
         }
+        case let .blockNumber(_, _, number): run(session, request, result) {
+            [CitizenSdkFlutterCodec.block(try await session.sdk.finalizedBlock(at: number))]
+        }
+        case let .resolveBlock(_, _, hash, number): run(session, request, result) {
+            [CitizenSdkFlutterCodec.block(try await session.sdk.resolveFinalizedBlock(hash: hash, number: number))]
+        }
+        case let .block(method, _, _, block):
+            switch method {
+            case "getBlockHeader": run(session, request, result) {
+                [CitizenSdkFlutterCodec.blockHeader(try await session.sdk.blockHeader(block))]
+            }
+            case "getBlockBody": run(session, request, result) {
+                [CitizenSdkFlutterCodec.blockBody(try await session.sdk.blockBody(block))]
+            }
+            case "getRuntimeContext": run(session, request, result) {
+                [CitizenSdkFlutterCodec.runtimeContext(try await session.sdk.runtimeContext(block))]
+            }
+            case "getSystemEvents": run(session, request, result) {
+                [CitizenSdkFlutterCodec.optionalBytes(try await session.sdk.systemEvents(block))]
+            }
+            default: fail(result, .unsupported, "Unsupported block method", request)
+            }
+        case let .storage(_, _, block, key): run(session, request, result) {
+            [CitizenSdkFlutterCodec.optionalBytes(try await session.sdk.storage(block, key: key))]
+        }
+        case let .storageBatch(_, _, block, keys): run(session, request, result) {
+            [try await session.sdk.storageBatch(block, keys: keys).map(CitizenSdkFlutterCodec.optionalBytes)]
+        }
+        case let .importState(_, _, state): run(session, request, result) {
+            try await session.sdk.importState(state); return []
+        }
         case .create, .addAccounts: wallet(session, request, result)
-        case let .rename(_, _, accountID, name): run(session, request, result) {
-            [CitizenSdkFlutterCodec.profile(try await session.sdk.renameWalletAccount(accountID: accountID, name: name))]
+        case let .rename(method, _, _, accountID, name): run(session, request, result) {
+            if method == "renameWalletAccount" {
+                return [CitizenSdkFlutterCodec.profile(try await session.sdk.renameWalletAccount(accountID: accountID, name: name))]
+            }
+            if method == "importColdAccountId" {
+                return [CitizenSdkFlutterCodec.walletState(try await session.sdk.importColdAccount(accountID: accountID, name: name))]
+            }
+            return [CitizenSdkFlutterCodec.walletState(try await session.sdk.renameAccount(accountID: accountID, name: name))]
+        }
+        case let .coldSS58(_, _, address, name): run(session, request, result) {
+            [CitizenSdkFlutterCodec.walletState(try await session.sdk.importColdAccount(ss58Address: address, name: name))]
+        }
+        case let .reorder(_, _, revision, accountIDs): run(session, request, result) {
+            [CitizenSdkFlutterCodec.walletState(try await session.sdk.reorderWalletAccountsWithoutDefaultChange(
+                expectedRevision: revision, accountIDs: accountIDs))]
         }
         case let .sign(_, _, accountID, payload): run(session, request, result) {
             [CitizenSdkFlutterCodec.signature(try await session.sdk.signing.sign(accountID: accountID, message: payload))]
         }
-        case let .transfer(_, sequence, source, destination, amount, remark):
-            do {
-                let operation = try session.sdk.transferWithRemark(
-                    sourceAccountID: source, destinationAccountID: destination, amountFen: amount, remark: remark
-                ) { [weak self, weak session] progress in
-                    let generation = self?.subscriptionEpoch.snapshot()
-                    Task { @MainActor in
-                        guard let self, let session, let generation else { return }
-                        self.emit(session, type: "transferProgress", payload: [
-                            sequence, Self.progressStatus(progress.status), progress.block.map(CitizenSdkFlutterCodec.block),
-                            progress.replacementHash.map(Self.hex), Int64(progress.peerCount),
-                        ], expectedGeneration: generation)
-                    }
-                }
-                run(session, request, result, cancel: { _ = try? operation.cancel() }) {
-                    [try CitizenSdkFlutterCodec.transfer(await operation.value())]
-                }
-            } catch { fail(result, error, request) }
-        case let .history(method, _, _, accountIDs): run(session, request, result) {
-            let history = method == "initializeFinalizedHistory"
-                ? try await session.sdk.initializeFinalizedHistory(accountIDs: accountIDs)
-                : try await session.sdk.syncFinalizedHistory(accountIDs: accountIDs)
-            return [try CitizenSdkFlutterCodec.history(history)]
+        case let .beginSigning(_, _, intent): run(session, request, result) {
+            [CitizenSdkFlutterCodec.signingOutcome(try await session.sdk.signing.begin(intent))]
         }
+        case let .externalSignature(method, _, _, signingSessionID, response): run(session, request, result) {
+            if method == "consumeExternalSignature" {
+                return [CitizenSdkFlutterCodec.signingOutcome(
+                    try await session.sdk.signing.consumeExternalSignature(
+                        sessionID: signingSessionID, response: response))]
+            }
+            return [CitizenSdkFlutterCodec.defaultAccountChangeOutcome(
+                try await session.sdk.consumeDefaultAccountChange(
+                    sessionID: signingSessionID, response: response))]
+        }
+        case let .cancelSigning(_, _, signingSessionID):
+            do { success(result, request, [try session.sdk.signing.cancel(sessionID: signingSessionID)]) }
+            catch { fail(result, error, request) }
+        case let .beginDefaultChange(_, _, revision, accountIDs, ttl): run(session, request, result) {
+            [CitizenSdkFlutterCodec.defaultAccountChangeOutcome(
+                try await session.sdk.beginDefaultAccountChange(
+                    expectedRevision: revision, accountIDs: accountIDs, ttlSeconds: ttl))]
+        }
+        case let .prepareTransaction(_, _, source, callData): run(session, request, result) {
+            [CitizenSdkFlutterCodec.preparedTransaction(
+                try await session.sdk.prepareTransaction(
+                    sourceAccountID: source, callData: callData))]
+        }
+        case let .cancelPreparedTransaction(_, _, preparationID):
+            do {
+                try session.sdk.cancelPreparedTransaction(preparationID: preparationID)
+                success(result, request, [nil])
+            } catch { fail(result, error, request) }
+        case let .transactionExecution(method, _, _, executionID, response):
+            if method == "cancelPreparedTransactionExecution" {
+                do {
+                    try session.sdk.cancelPreparedTransactionExecution(executionID: executionID)
+                    success(result, request, [nil])
+                } catch { fail(result, error, request) }
+            } else {
+                run(session, request, result) {
+                    let value: CitizenTransactionExecution
+                    if method == "executePreparedTransaction" {
+                        value = try await session.sdk.executePreparedTransaction(preparationID: executionID)
+                    } else {
+                        value = .completed(try await session.sdk.consumePreparedTransactionQrResponse(
+                            executionID: executionID, response: response!))
+                    }
+                    return [try CitizenSdkFlutterCodec.transactionExecution(value)]
+                }
+            }
+        case let .transactionHistory(method, _, _, beforeExecutionID, limit):
+            run(session, request, result) {
+                let page = method == "getTransactionHistory"
+                    ? try await session.sdk.getTransactionHistory(
+                        beforeExecutionID: beforeExecutionID, limit: limit)
+                    : try await session.sdk.syncTransactionHistory()
+                return [try CitizenSdkFlutterCodec.transactionHistoryPage(page)]
+            }
         case let .qr(method, _, _, fields): run(session, request, result,
             cancel: { [walletFlow] in walletFlow.cancelSession(session.sdk.sessionID) }) {
             switch method {
@@ -463,17 +555,6 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
                             details: CitizenSdkFlutterCodec.error(code, message,
                                 session: session ?? request.sessionID, sequence: sequence ?? request.sequence)))
     }
-
-    private static func progressStatus(_ value: CitizenTransferProgressStatus) -> String {
-        switch value {
-        case .ready: return "ready"; case .broadcast: return "broadcast"; case .future: return "future"
-        case .inBlock: return "inBlock"; case .finalized: return "finalized"; case .retracted: return "retracted"
-        case .finalityTimeout: return "finalityTimeout"; case .dropped: return "dropped"
-        case .invalid: return "invalid"; case .usurped: return "usurped"
-        @unknown default: return "unknown"
-        }
-    }
-    private static func hex(_ value: Data) -> String { "0x" + value.map { String(format: "%02x", $0) }.joined() }
 
     internal static func exactProtocolVersion(_ raw: Any?) -> Bool {
         guard let number = raw as? NSNumber,

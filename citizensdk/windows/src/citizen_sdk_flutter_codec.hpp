@@ -41,12 +41,22 @@ struct Value final {
 };
 
 enum class Method {
-  open, start, stop, close, get_capabilities, get_finalized_head, get_genesis_hash,
+  open, start, stop, close, get_capabilities, get_finalized_head,
+  get_sync_status, get_best_head, get_finalized_block_at,
+  resolve_finalized_block, get_block_header, get_block_body,
+  get_runtime_context, get_storage, get_storage_batch, get_system_events,
+  export_state, import_state, get_genesis_hash,
   get_account_balance, get_account_balances, get_account_nonce, get_fee_snapshot, get_wallet_profile, view_account_private_key,
+  get_wallet_state, import_cold_account_id, import_cold_account_ss58,
+  reorder_wallet_accounts_without_default_change, rename_account, delete_account,
   create_wallet, import_wallet, add_wallet_accounts, set_active_wallet_account,
   rename_wallet_account, delete_wallet_account, delete_wallet,
-  reconcile_wallet_cleanup, sign_wallet_payload, verify_signature, transfer_with_remark,
-  initialize_finalized_history, sync_finalized_history,
+  reconcile_wallet_cleanup, sign_wallet_payload, begin_signing,
+  consume_external_signature, cancel_signing, begin_default_account_change,
+  consume_default_account_change, verify_signature, prepare_transaction,
+  cancel_prepared_transaction, execute_prepared_transaction,
+  consume_prepared_transaction_qr_response, cancel_prepared_transaction_execution,
+  get_transaction_history, sync_transaction_history,
   qr_parse, qr_create_sign_request,
   qr_consume_sign_response, qr_cancel_sign_request, qr_encode_account_id,
   qr_encode_user_transfer, qr_decode_luminance, qr_encode, qr_scan, sign_qr_request,
@@ -55,23 +65,37 @@ enum class Method {
 const char *method_name(Method method) noexcept;
 
 // Fields are copied from a validated fixed-position tuple. Signing payload and
-// transfer remark are public messages, never secret material. Unused fields
+// payload bytes are public messages, never secret material. Unused fields
 // remain empty; method is the closed discriminant used by sessions.
 struct DecodedRequest final {
   Method method{Method::open};
   std::string session;
   int64_t sequence{};
   uint32_t modules{CITIZENSDK_MODULE_FULL};
+  citizensdk_block_ref_t block{};
+  uint64_t block_number{};
+  uint32_t state_format_version{};
+  std::vector<std::vector<uint8_t>> storage_keys;
+  std::vector<uint8_t> state_database;
   citizensdk_account_id_t account_id{};
-  citizensdk_account_id_t destination{};
   uint32_t word_count{};
   std::vector<uint32_t> indices;
   std::string name;
   std::vector<uint8_t> payload;
   std::vector<uint8_t> signature;
-  std::vector<uint8_t> remark;
-  citizensdk_u128_t amount{};
+  citizensdk_signing_transform_t signing_transform{};
+  citizensdk_external_signer_transport_t external_signer_transport{};
+  std::vector<uint8_t> signing_domain;
+  uint16_t signing_action{};
+  uint64_t signing_ttl{};
+  std::string signing_session_id;
+  std::string signing_response;
+  std::string preparation_id;
+  citizensdk_transaction_execution_id_t execution_id{};
+  std::optional<citizensdk_transaction_execution_id_t> before_execution_id;
+  uint32_t history_limit{100};
   std::vector<citizensdk_account_id_t> account_ids;
+  uint64_t wallet_revision{};
   uint16_t qr_action{};
   uint64_t qr_expires_at{};
   uint64_t qr_ttl{};
@@ -127,8 +151,6 @@ Value capabilities(const citizensdk_capability_snapshot_t &value);
 // 创世身份同步读取，不借用异步 result，也不启动链或访问金库。
 Value copy_genesis_hash(citizensdk_handle_t sdk);
 Value copy_public_result(Method method, citizensdk_result_handle_t result);
-Value watch_payload(citizensdk_result_handle_t result,
-                    int64_t request_sequence);
 
 // 生产复制路径先运行语义后置校验，再交付 Dart；测试仅注入公开夹具，不伪造 Core 句柄。
 // Production result projections invoke these semantic validators before a
@@ -138,7 +160,6 @@ Value watch_payload(citizensdk_result_handle_t result,
 void validate_public_value(Method method, const Value &value);
 // 批量余额必须完整回显输入数量、顺序与重复项，不能返回部分或错配事实。
 void validate_account_balances(const DecodedRequest &request, const Value &value);
-void validate_watch_value(const Value &value);
 
 // Decimal strings preserve u64/u128 exactly across Dart/StandardMessageCodec.
 // Parsing rejects signs, leading zeroes, whitespace and arithmetic overflow.

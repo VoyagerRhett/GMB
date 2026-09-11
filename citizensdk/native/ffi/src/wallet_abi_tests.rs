@@ -4,51 +4,176 @@
 use super::{
     claim_prepared_wallet, copy_pair, lock_prepared_wallets, next_prepared_wallet_handle,
     require_prepared_owner, secret_utf8, u128_from_abi, u128_to_abi, wallet_profile_to_abi,
-    wallet_transfer_or_cancellation, wallet_transfer_watch_event, wallet_word_count,
-    PreparedWalletSlot,
+    wallet_word_count, PreparedWalletSlot,
 };
 use crate::abi::{
-    CitizenSdkBytesView, CitizenSdkErrorCode, CitizenSdkU128, CitizenSdkWalletWordCount,
+    CitizenSdkBytesView, CitizenSdkDefaultAccountChangeInfo, CitizenSdkErrorCode,
+    CitizenSdkExternalSignerTransport, CitizenSdkSigningOutcomeInfo,
+    CitizenSdkSigningOutcomeStatus, CitizenSdkU128, CitizenSdkWalletSignMode,
+    CitizenSdkWalletStateAccountInfo, CitizenSdkWalletStateInfo, CitizenSdkWalletWordCount,
 };
-use citizen_sdk_contracts::{ExecutionConclusion, ExtrinsicWatchEvent, Hash32, VerifiedBlockRef};
-use citizen_sdk_engine::{
-    EngineError, WalletTransferCancellation, WalletTransferWatchResult, WalletTransferWatchStage,
+use citizen_sdk_contracts::{
+    citizen_ss58_address, AccountId32, ColdWalletAccount, Hash32, SigningCompletion,
+    Sr25519Signature, WalletState,
 };
-use futures_util::FutureExt;
-use std::{
-    future::Future,
-    pin::Pin,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    task::{Context, Poll},
-};
+use std::sync::Arc;
 
-struct PendingWalletTransfer {
-    dropped: Arc<AtomicBool>,
-    release: futures_channel::oneshot::Receiver<()>,
-    completed: Arc<AtomicBool>,
-}
+#[test]
+fn signing_and_default_change_results_preflight_and_project_each_variant_exactly() {
+    use crate::ownership::{
+        DefaultAccountChangePayload, ExternalSigningPending, OwnedResult, ResultPayload,
+        SigningOutcomePayload,
+    };
 
-impl Future for PendingWalletTransfer {
-    type Output = Result<WalletTransferWatchResult, EngineError>;
-
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        match Pin::new(&mut self.release).poll(context) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(_) => {
-                self.completed.store(true, Ordering::SeqCst);
-                Poll::Ready(Err(EngineError::StatePoisoned))
-            }
-        }
+    let account = AccountId32::from_bytes([0x31; 32]);
+    let payload_hash = Hash32::from_bytes([0x32; 32]);
+    let signature = Sr25519Signature::from_bytes([0x33; 64]);
+    let completed =
+        crate::ownership::insert(OwnedResult::success(
+            91,
+            ResultPayload::SigningOutcome(SigningOutcomePayload::Completed(
+                SigningCompletion::new(account, payload_hash, signature),
+            )),
+        ))
+        .unwrap();
+    let mut info = CitizenSdkSigningOutcomeInfo::default();
+    let mut signature_output = [0_u8; 64];
+    let mut signature_required = 0;
+    let mut session_required = 99;
+    let mut request_required = 99;
+    unsafe {
+        assert_eq!(
+            super::citizensdk_result_get_signing_outcome(
+                completed,
+                &mut info,
+                signature_output.as_mut_ptr(),
+                signature_output.len() as u64,
+                &mut signature_required,
+                std::ptr::null_mut(),
+                0,
+                &mut session_required,
+                std::ptr::null_mut(),
+                0,
+                &mut request_required,
+            ),
+            CitizenSdkErrorCode::Ok.as_i32()
+        );
     }
-}
+    assert_eq!(
+        info.status,
+        CitizenSdkSigningOutcomeStatus::Completed as u32
+    );
+    assert_eq!(
+        info.transport,
+        CitizenSdkExternalSignerTransport::None as u32
+    );
+    assert_eq!(info.account_id.bytes, account.into_bytes());
+    assert_eq!(info.payload_hash, payload_hash.into_bytes());
+    assert_eq!(signature_output, [0x33; 64]);
+    assert_eq!(
+        (signature_required, session_required, request_required),
+        (64, 0, 0)
+    );
+    crate::ownership::release(completed).unwrap();
 
-impl Drop for PendingWalletTransfer {
-    fn drop(&mut self) {
-        self.dropped.store(true, Ordering::SeqCst);
+    let pending_payload = ExternalSigningPending {
+        account_id: account,
+        payload_hash,
+        expires_at: 123,
+        session_id: "external-session".to_owned(),
+        transport_request: "QR_V1:opaque".to_owned(),
+    };
+    let pending = crate::ownership::insert(OwnedResult::success(
+        92,
+        ResultPayload::DefaultAccountChange(DefaultAccountChangePayload::ExternalPending(
+            pending_payload,
+        )),
+    ))
+    .unwrap();
+    let mut default_info = CitizenSdkDefaultAccountChangeInfo::default();
+    let mut short_session = [0xa5_u8; 2];
+    let mut request = [0xa5_u8; 12];
+    let mut required_session = 0;
+    let mut required_request = 0;
+    unsafe {
+        assert_eq!(
+            super::citizensdk_result_get_default_account_change(
+                pending,
+                &mut default_info,
+                short_session.as_mut_ptr(),
+                short_session.len() as u64,
+                &mut required_session,
+                request.as_mut_ptr(),
+                request.len() as u64,
+                &mut required_request,
+            ),
+            CitizenSdkErrorCode::InvalidArgument.as_i32()
+        );
     }
+    assert_eq!(short_session, [0xa5; 2]);
+    assert_eq!(request, [0xa5; 12]);
+    assert_eq!((required_session, required_request), (0, 0));
+
+    let mut session = vec![0_u8; "external-session".len()];
+    let mut request = vec![0_u8; "QR_V1:opaque".len()];
+    unsafe {
+        assert_eq!(
+            super::citizensdk_result_get_default_account_change(
+                pending,
+                &mut default_info,
+                session.as_mut_ptr(),
+                session.len() as u64,
+                &mut required_session,
+                request.as_mut_ptr(),
+                request.len() as u64,
+                &mut required_request,
+            ),
+            CitizenSdkErrorCode::Ok.as_i32()
+        );
+    }
+    assert_eq!(
+        default_info.status,
+        CitizenSdkSigningOutcomeStatus::ExternalPending as u32
+    );
+    assert_eq!(
+        default_info.transport,
+        CitizenSdkExternalSignerTransport::QrV1 as u32
+    );
+    assert_eq!(default_info.expires_at, 123);
+    assert_eq!(session, b"external-session");
+    assert_eq!(request, b"QR_V1:opaque");
+    crate::ownership::release(pending).unwrap();
+
+    let completed_default = crate::ownership::insert(OwnedResult::success(
+        93,
+        ResultPayload::DefaultAccountChange(DefaultAccountChangePayload::Completed {
+            current_default_account_id: account,
+            payload_hash,
+            committed_revision: 77,
+        }),
+    ))
+    .unwrap();
+    unsafe {
+        assert_eq!(
+            super::citizensdk_result_get_default_account_change(
+                completed_default,
+                &mut default_info,
+                std::ptr::null_mut(),
+                0,
+                &mut required_session,
+                std::ptr::null_mut(),
+                0,
+                &mut required_request,
+            ),
+            CitizenSdkErrorCode::Ok.as_i32()
+        );
+    }
+    assert_eq!(
+        default_info.status,
+        CitizenSdkSigningOutcomeStatus::Completed as u32
+    );
+    assert_eq!(default_info.committed_revision, 77);
+    crate::ownership::release(completed_default).unwrap();
 }
 
 fn chain_query_runtime() -> Arc<crate::runtime::NativeRuntime> {
@@ -543,6 +668,110 @@ fn absent_wallet_profile_is_a_successful_zeroed_projection() {
 }
 
 #[test]
+fn wallet_state_projection_is_globally_ordered_and_multi_buffer_copy_is_atomic() {
+    use crate::ownership::{self, OwnedResult, ResultPayload};
+
+    let account_id = AccountId32::from_bytes([0xc1; 32]);
+    let ss58 = citizen_ss58_address(account_id);
+    let cold =
+        ColdWalletAccount::try_new(1, account_id, ss58.clone(), "离线签名", 17).expect("冷账户");
+    let state = WalletState::try_from_catalog_parts(
+        3,
+        None,
+        vec![cold],
+        vec![account_id],
+        2,
+        None,
+        None,
+        Vec::new(),
+    )
+    .expect("统一钱包状态");
+    let result = ownership::insert(OwnedResult::success(0, ResultPayload::WalletState(state)))
+        .expect("钱包状态 result");
+
+    let mut state_info = CitizenSdkWalletStateInfo::default();
+    let mut account_info = CitizenSdkWalletStateAccountInfo::default();
+    let mut ss58_required = 0;
+    let mut name_required = 0;
+    unsafe {
+        assert_eq!(
+            super::citizensdk_result_get_wallet_state(result, &mut state_info),
+            0
+        );
+        assert_eq!(state_info.revision, 3);
+        assert_eq!(state_info.account_count, 1);
+        assert_eq!(state_info.has_default_account, 1);
+        assert_eq!(state_info.default_account_id.bytes, *account_id.as_bytes());
+
+        assert_eq!(
+            super::citizensdk_result_get_wallet_state_account(
+                result,
+                0,
+                &mut account_info,
+                std::ptr::null_mut(),
+                0,
+                &mut ss58_required,
+                std::ptr::null_mut(),
+                0,
+                &mut name_required,
+            ),
+            0
+        );
+        assert_eq!(
+            account_info.sign_mode,
+            CitizenSdkWalletSignMode::Cold as u32
+        );
+        assert_eq!(account_info.wallet_index, 1);
+        assert_eq!(account_info.has_account_index, 0);
+        assert_eq!(account_info.is_default, 1);
+        assert_eq!(ss58_required, ss58.len() as u64);
+        assert_eq!(name_required, "离线签名".len() as u64);
+
+        let unchanged = account_info;
+        let mut ss58_output = vec![0xaa; ss58.len()];
+        let mut short_name = [0xbb; 1];
+        ss58_required = u64::MAX;
+        name_required = u64::MAX;
+        assert_eq!(
+            super::citizensdk_result_get_wallet_state_account(
+                result,
+                0,
+                &mut account_info,
+                ss58_output.as_mut_ptr(),
+                ss58_output.len() as u64,
+                &mut ss58_required,
+                short_name.as_mut_ptr(),
+                short_name.len() as u64,
+                &mut name_required,
+            ),
+            CitizenSdkErrorCode::InvalidArgument.as_i32()
+        );
+        assert_eq!(account_info, unchanged);
+        assert!(ss58_output.iter().all(|byte| *byte == 0xaa));
+        assert_eq!(short_name, [0xbb]);
+        assert_eq!(ss58_required, u64::MAX);
+        assert_eq!(name_required, u64::MAX);
+
+        assert_eq!(
+            super::citizensdk_result_get_wallet_state_account(
+                result,
+                1,
+                &mut account_info,
+                std::ptr::null_mut(),
+                0,
+                &mut ss58_required,
+                std::ptr::null_mut(),
+                0,
+                &mut name_required,
+            ),
+            CitizenSdkErrorCode::InvalidArgument.as_i32()
+        );
+        assert_eq!(account_info, unchanged);
+    }
+    ownership::release(result).expect("release wallet state result");
+}
+
+#[test]
 fn prepared_wallet_handles_are_nonzero_monotonic_and_never_reused() {
     let first = next_prepared_wallet_handle()
         .unwrap_or_else(|error| panic!("first prepared handle failed: {error:?}"));
@@ -575,229 +804,4 @@ fn prepared_wallet_owner_is_checked_even_while_the_handle_is_claimed() {
     lock_prepared_wallets()
         .unwrap_or_else(|error| panic!("prepared registry cleanup failed: {error:?}"))
         .remove(&handle);
-}
-
-#[test]
-fn wallet_transfer_cancellation_drains_before_returning_or_releasing_the_future() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .expect("timer runtime");
-    let _entered = runtime.enter();
-    let dropped = Arc::new(AtomicBool::new(false));
-    let completed = Arc::new(AtomicBool::new(false));
-    let (release, receiver) = futures_channel::oneshot::channel();
-    let transfer = PendingWalletTransfer {
-        dropped: Arc::clone(&dropped),
-        completed: Arc::clone(&completed),
-        release: receiver,
-    };
-    let token = WalletTransferCancellation::default();
-    let (cancel, cancellation) = futures_channel::oneshot::channel();
-    let mut operation = Box::pin(wallet_transfer_or_cancellation(
-        transfer,
-        cancellation,
-        token.clone(),
-    ));
-    assert!(operation.as_mut().now_or_never().is_none());
-    cancel
-        .send(())
-        .unwrap_or_else(|_| panic!("cancellation receiver disappeared before selection"));
-    assert!(operation.as_mut().now_or_never().is_none());
-    assert!(token.is_cancelled());
-    assert!(!completed.load(Ordering::SeqCst));
-    assert!(
-        !dropped.load(Ordering::SeqCst),
-        "host CAS 未返回前不能释放 Engine lease"
-    );
-    release
-        .send(())
-        .unwrap_or_else(|_| panic!("CAS receiver was dropped by cancellation"));
-    let error = futures_executor::block_on(operation)
-        .err()
-        .unwrap_or_else(|| panic!("cancellation must not return a wallet transfer result"));
-    assert_eq!(error.code, CitizenSdkErrorCode::Cancelled);
-    assert!(error.message.contains("durable pending/in-block history"));
-    assert!(dropped.load(Ordering::SeqCst));
-    assert!(completed.load(Ordering::SeqCst));
-}
-
-#[test]
-fn cancellation_before_first_poll_reaches_engine_before_side_effects() {
-    let token = WalletTransferCancellation::default();
-    let transfer_token = token.clone();
-    let transfer = async move {
-        assert!(
-            transfer_token.is_cancelled(),
-            "首 poll 前先通知 Engine，不能启动广播前写入"
-        );
-        Err(EngineError::StatePoisoned)
-    };
-    let (send, receiver) = futures_channel::oneshot::channel();
-    assert!(send.send(()).is_ok());
-    let result =
-        futures_executor::block_on(wallet_transfer_or_cancellation(transfer, receiver, token));
-    assert_eq!(
-        result
-            .err()
-            .unwrap_or_else(|| panic!("预取消必须失败"))
-            .code,
-        CitizenSdkErrorCode::Cancelled
-    );
-}
-
-#[test]
-fn timeout_drains_an_entered_store_and_preserves_pending_without_cancelling_other_requests() {
-    let dropped = Arc::new(AtomicBool::new(false));
-    let completed = Arc::new(AtomicBool::new(false));
-    let (release, receiver) = futures_channel::oneshot::channel();
-    let transfer = PendingWalletTransfer {
-        dropped: dropped.clone(),
-        completed: completed.clone(),
-        release: receiver,
-    };
-    let token = WalletTransferCancellation::default();
-    let other = WalletTransferCancellation::default();
-    let (_cancel, cancellation) = futures_channel::oneshot::channel();
-    let (expire, deadline) = futures_channel::oneshot::channel();
-    let mut operation = Box::pin(super::wallet_transfer_or_cancellation_and_budget(
-        transfer,
-        cancellation,
-        token.clone(),
-        async {
-            let _ = deadline.await;
-        },
-    ));
-    assert!(operation.as_mut().now_or_never().is_none());
-    assert!(expire.send(()).is_ok());
-    assert!(operation.as_mut().now_or_never().is_none());
-    assert!(token.is_cancelled());
-    assert!(!other.is_cancelled());
-    assert!(!dropped.load(Ordering::SeqCst));
-    assert!(!completed.load(Ordering::SeqCst));
-    assert!(release.send(()).is_ok());
-    let error = futures_executor::block_on(operation)
-        .expect_err("expired budget must not imply execution success");
-    assert_eq!(error.code, CitizenSdkErrorCode::Timeout);
-    assert!(error.message.contains("unverified"));
-    assert!(error.message.contains("retained"));
-    assert!(dropped.load(Ordering::SeqCst));
-    assert!(completed.load(Ordering::SeqCst));
-}
-
-#[test]
-fn cancellation_of_idle_watch_is_cooperative_and_does_not_wait_for_a_block() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .expect("timer runtime");
-    let _entered = runtime.enter();
-    let token = WalletTransferCancellation::default();
-    let transfer_token = token.clone();
-    let transfer = std::future::poll_fn(move |_| {
-        if transfer_token.is_cancelled() {
-            Poll::Ready(Err(EngineError::StatePoisoned))
-        } else {
-            Poll::Pending
-        }
-    });
-    let (send, receiver) = futures_channel::oneshot::channel();
-    let mut operation = Box::pin(wallet_transfer_or_cancellation(transfer, receiver, token));
-    assert!(operation.as_mut().now_or_never().is_none());
-    assert!(send.send(()).is_ok());
-    assert_eq!(
-        futures_executor::block_on(operation)
-            .err()
-            .unwrap_or_else(|| panic!("观察取消必须失败"))
-            .code,
-        CitizenSdkErrorCode::Cancelled
-    );
-}
-
-#[test]
-fn uncancelled_transfer_preserves_the_engine_result_without_setting_the_token() {
-    let token = WalletTransferCancellation::default();
-    let (_send, receiver) = futures_channel::oneshot::channel();
-    let result = futures_executor::block_on(wallet_transfer_or_cancellation(
-        async { Err(EngineError::StatePoisoned) },
-        receiver,
-        token.clone(),
-    ));
-    assert_eq!(
-        result
-            .err()
-            .unwrap_or_else(|| panic!("必须保留 Engine 失败"))
-            .code,
-        crate::error::FfiError::from(EngineError::StatePoisoned).code
-    );
-    assert!(!token.is_cancelled());
-}
-
-#[test]
-fn wallet_transfer_is_dispatched_only_to_the_dedicated_watch_pool() {
-    let source = include_str!("wallet_abi.rs");
-    let function = source
-        .split("pub unsafe extern \"C\" fn citizensdk_transfer_with_remark")
-        .nth(1)
-        .and_then(|tail| tail.split("#[no_mangle]").next())
-        .unwrap_or_else(|| panic!("wallet transfer ABI function must remain present"));
-    assert!(function.contains("accept_and_write_watch("));
-    assert!(!function.contains("accept_and_write(runtime"));
-    assert!(function.contains("wallet_transfer_or_cancellation("));
-    assert!(function.contains("transfer_with_remark_and_watch("));
-    assert!(!function.contains(".transfer_with_remark(source"));
-}
-
-#[test]
-fn high_level_wallet_progress_uses_only_truthful_existing_watch_states() {
-    let best = VerifiedBlockRef::best(Hash32::from_bytes([7; 32]), 42);
-    let finalized = VerifiedBlockRef::finalized(Hash32::from_bytes([8; 32]), 43);
-
-    assert_eq!(
-        wallet_transfer_watch_event(&WalletTransferWatchStage::Pending),
-        None
-    );
-    assert_eq!(
-        wallet_transfer_watch_event(&WalletTransferWatchStage::Interrupted {
-            reason: "network".to_owned(),
-        }),
-        None,
-    );
-    assert_eq!(
-        wallet_transfer_watch_event(&WalletTransferWatchStage::Broadcast { peer_count: 3 }),
-        Some(ExtrinsicWatchEvent::Broadcast { peer_count: 3 }),
-    );
-    assert_eq!(
-        wallet_transfer_watch_event(&WalletTransferWatchStage::InBlock { block: best }),
-        Some(ExtrinsicWatchEvent::InBlock { block: best }),
-    );
-    assert_eq!(
-        wallet_transfer_watch_event(&WalletTransferWatchStage::Finalized {
-            conclusion: ExecutionConclusion::Success {
-                block: finalized,
-                extrinsic_index: 5,
-            },
-        }),
-        Some(ExtrinsicWatchEvent::Finalized {
-            block: finalized
-                .try_into()
-                .unwrap_or_else(|error| panic!("finalized conversion failed: {error:?}")),
-        }),
-    );
-    assert_eq!(
-        wallet_transfer_watch_event(&WalletTransferWatchStage::PoolRejected {
-            reason: "invalid".to_owned(),
-            replacement_hash: None,
-        }),
-        Some(ExtrinsicWatchEvent::Invalid),
-    );
-    assert_eq!(
-        wallet_transfer_watch_event(&WalletTransferWatchStage::PoolRejected {
-            reason: "usurped".to_owned(),
-            replacement_hash: Some(Hash32::from_bytes([9; 32])),
-        }),
-        Some(ExtrinsicWatchEvent::Usurped {
-            replacement_hash: Hash32::from_bytes([9; 32]),
-        }),
-    );
 }

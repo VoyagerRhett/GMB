@@ -32,22 +32,40 @@ MethodChannel  citizen/sdk/core/v1
 EventChannel   citizen/sdk/events/v1
 ```
 
-Linux adapter 源码也只使用这两个 channel 和相同 36 方法 tuple；无会话验签是五端共享方法，
+Linux adapter 源码也只使用这两个 channel 和相同 63 方法 tuple；无会话验签是五端共享方法，
 不增加 Map 旁路或 Linux 专用 Dart API。第 7.4 步公开入口使用同版已安装 Host/Core；跨平台实测仍
 由后续统一 GitHub CI 增量缓存、Release 全量构建承担，保持同一产品版本与 ABI。
 
-Windows adapter 源码也复用这两个 channel 和全部 36 方法；五份绑定各自的权威常量/方法表
+Windows adapter 源码也复用这两个 channel 和全部 63 方法；五份绑定各自的权威常量/方法表
 独立对拍同一金标。Windows 不带入 GLib 实现，也不增加移动端参数或业务功能；其本地身份、
 路径和 HWND 只在原生环境层取得。第 8.4 步注册官方 Windows 插件，不增加新的协议或
 产品业务；注册源码不代表已在 Hosted 发布。
 
-协议共 36 个方法。新增的 10 个 QR 方法在五端名称、字段位置、上限和错误映射完全相同。
+协议共 63 个方法。第 1.6 步新增准备执行、QR_V1 响应消费和 execution 取消三个方法；第 1.5 步新增
+通用交易准备和显式取消两个方法；第 1.4 步新增 12 个通用安全链读取方法；此前新增的 5 个通用签名/默认账户
+授权方法、6 个统一钱包方法与既有 10 个 QR
+方法在五端名称、字段位置、上限和错误映射完全相同。平台层只投影 Core，不解释 opaque payload/action。
 请求、响应、事件、错误和嵌套公开值都是固定长度、固定位置的 `List`
 tuple；没有 `Map` 兼容旁路。request sequence 在接纳时严格连续，但并发响应可乱序并精确回显
 自己的序号；event sequence 独立递增。cancel/relisten 使用订阅代际和 sink identity，旧队列事件
 不能进入新 sink。Android 同笔交易的 bind 前后进度统一进入单派发者 FIFO，较晚事件不能
 越过尚在 drain 的早期事件；Apple Flutter 字节参数只接受 `FlutterStandardTypedData.uint8`，
 Int32/Int64/浮点 typed data 即使底层长度合适也会失败关闭。
+
+通用链读取方法为 `getSyncStatus`、`getBestHead`、`getFinalizedBlockAt`、
+`resolveFinalizedBlock`、`getBlockHeader`、`getBlockBody`、`getRuntimeContext`、`getStorage`、
+`getStorageBatch`、`getSystemEvents`、`exportState`、`importState`。五端只投影 Core 的准确块、
+opaque bytes 和不可变模型；不自行联网、不缓存第二份链状态，也不解释任何 App 业务 SCALE。
+`getSystemEvents` 只接受 finalized block；`importState` 验证 Core 返回的 finalized 回执与输入锚
+完全一致后才向 Flutter 返回空完成 tuple。
+
+统一钱包快照响应固定为
+`[revisionDecimal, hotProfileOrNull, accounts]`；每个账户固定为
+`[signMode, walletIndex, accountIndexOrNull, accountId, ss58, name, createdAtMillis, isDefault]`。
+五端都复核规范 SS58、热/冷 index 形状、账户与冷 wallet index 唯一性、热 profile 闭集以及
+`isDefault == (index == 0)`。新增请求分别为 `getWalletState`、`importColdAccountId`、
+`importColdAccountSs58`、`reorderWalletAccountsWithoutDefaultChange`、`renameAccount` 和
+`deleteAccount`；没有 `setDefaultAccount` 方法。冷账户请求不进入平台钱包 UI 或设备 Vault。
 
 ## 统一扫码与签名路径
 

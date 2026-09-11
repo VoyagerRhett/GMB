@@ -16,11 +16,22 @@ pub const CITIZEN_WALLET_INDEX: u32 = 0;
 pub const CITIZEN_SS58_PREFIX: u16 = 2027;
 /// 本机账户名称最多包含 30 个 Unicode scalar，与现有 Dart `runes.length` 一致。
 pub const MAX_WALLET_ACCOUNT_NAME_SCALARS: usize = 30;
+/// 冷账户是独立导入的公开身份；上限只用于约束宿主持久化分配，不代表可派生范围。
+pub const MAX_COLD_WALLET_ACCOUNTS: usize = MAX_WALLET_ACCOUNT_INDEX as usize + 1;
+/// `0` 永久保留给唯一热钱包；冷账户使用单调且不复用的本机 wallet index。
+pub const FIRST_COLD_WALLET_INDEX: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WalletOrigin {
     Created,
     Imported,
+}
+
+/// 一个账户由本机秘密直接签名，或由独立公民钱包通过二维码完成离线签名。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WalletSignMode {
+    Hot,
+    Cold,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -43,8 +54,7 @@ impl WalletAccount {
         created_at_millis: u64,
     ) -> ContractResult<Self> {
         let ss58_address = ss58_address.into();
-        let name = name.into();
-        let normalized_name = name.trim();
+        let name = normalize_wallet_account_name(name.into())?;
         if secret_ref.account_id() != account_id || ss58_address != citizen_ss58_address(account_id)
         {
             return Err(ContractError::new(
@@ -52,23 +62,12 @@ impl WalletAccount {
                 "钱包账户、秘密引用和 SS58 展示地址不一致",
             ));
         }
-        if normalized_name.is_empty()
-            || normalized_name.chars().count() > MAX_WALLET_ACCOUNT_NAME_SCALARS
-            || normalized_name.chars().any(|character| {
-                character <= '\u{001f}' || ('\u{007f}'..='\u{009f}').contains(&character)
-            })
-        {
-            return Err(ContractError::new(
-                ContractErrorCode::InvalidArgument,
-                "账户名称修剪后必须包含 1..30 个 Unicode scalar 且不得含控制字符",
-            ));
-        }
         Ok(Self {
             index,
             account_id,
             secret_ref,
             ss58_address,
-            name: normalized_name.to_owned(),
+            name,
             created_at_millis,
         })
     }
@@ -110,6 +109,73 @@ impl WalletAccount {
     }
 }
 
+/// 仅公钥冷账户。它没有派生账户、`SecretRef`、generation 或任何设备秘密生命周期。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ColdWalletAccount {
+    wallet_index: u32,
+    account_id: AccountId32,
+    ss58_address: String,
+    name: String,
+    created_at_millis: u64,
+}
+
+impl ColdWalletAccount {
+    pub fn try_new(
+        wallet_index: u32,
+        account_id: AccountId32,
+        ss58_address: impl Into<String>,
+        name: impl Into<String>,
+        created_at_millis: u64,
+    ) -> ContractResult<Self> {
+        let ss58_address = ss58_address.into();
+        if wallet_index < FIRST_COLD_WALLET_INDEX
+            || ss58_address != citizen_ss58_address(account_id)
+        {
+            return Err(ContractError::new(
+                ContractErrorCode::InvalidArgument,
+                "冷账户必须使用非零 wallet index 且 AccountId 与规范 SS58 地址一致",
+            ));
+        }
+        Ok(Self {
+            wallet_index,
+            account_id,
+            ss58_address,
+            name: normalize_wallet_account_name(name.into())?,
+            created_at_millis,
+        })
+    }
+
+    pub const fn wallet_index(&self) -> u32 {
+        self.wallet_index
+    }
+
+    pub const fn account_id(&self) -> AccountId32 {
+        self.account_id
+    }
+
+    pub fn ss58_address(&self) -> &str {
+        &self.ss58_address
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub const fn created_at_millis(&self) -> u64 {
+        self.created_at_millis
+    }
+
+    pub fn try_with_name(&self, name: impl Into<String>) -> ContractResult<Self> {
+        Self::try_new(
+            self.wallet_index,
+            self.account_id,
+            self.ss58_address.clone(),
+            name,
+            self.created_at_millis,
+        )
+    }
+}
+
 /// 由 AccountId32 生成唯一规范的 CitizenChain SS58 展示地址。
 pub fn citizen_ss58_address(account_id: AccountId32) -> String {
     let prefix = CITIZEN_SS58_PREFIX;
@@ -124,6 +190,71 @@ pub fn citizen_ss58_address(account_id: AccountId32) -> String {
     let checksum = hasher.finalize();
     payload.extend_from_slice(&checksum[..2]);
     bs58::encode(payload).into_string()
+}
+
+/// 严格解析 CitizenChain AccountId32 地址，并拒绝其它网络、坏校验和及非规范 Base58。
+pub fn parse_citizen_ss58_address(address: &str) -> ContractResult<AccountId32> {
+    // AccountId32 的双字节 prefix SS58 地址当前为 49 字符；先设小的硬上限再进入 Base58。
+    if address.is_empty() || address.len() > 64 {
+        return Err(invalid_ss58());
+    }
+    let decoded = bs58::decode(address)
+        .into_vec()
+        .map_err(|_| invalid_ss58())?;
+    if decoded.len() != 36 {
+        return Err(invalid_ss58());
+    }
+    let expected_prefix = ss58_prefix_bytes(CITIZEN_SS58_PREFIX);
+    if decoded[..2] != expected_prefix {
+        return Err(invalid_ss58());
+    }
+
+    let payload = &decoded[..34];
+    let mut hasher = Blake2b512::new();
+    hasher.update(b"SS58PRE");
+    hasher.update(payload);
+    let checksum = hasher.finalize();
+    if decoded[34..] != checksum[..2] {
+        return Err(invalid_ss58());
+    }
+
+    let mut account_id = [0_u8; 32];
+    account_id.copy_from_slice(&decoded[2..34]);
+    let account_id = AccountId32::from_bytes(account_id);
+    if citizen_ss58_address(account_id) != address {
+        return Err(invalid_ss58());
+    }
+    Ok(account_id)
+}
+
+fn ss58_prefix_bytes(prefix: u16) -> [u8; 2] {
+    [
+        ((prefix & 0b0000_0000_1111_1100) as u8) >> 2 | 0b0100_0000,
+        ((prefix >> 8) as u8) | ((prefix & 0b11) as u8) << 6,
+    ]
+}
+
+fn invalid_ss58() -> ContractError {
+    ContractError::new(
+        ContractErrorCode::InvalidArgument,
+        "必须提供 prefix 2027、校验和正确的规范 CitizenChain SS58 地址",
+    )
+}
+
+fn normalize_wallet_account_name(name: String) -> ContractResult<String> {
+    let normalized = name.trim();
+    if normalized.is_empty()
+        || normalized.chars().count() > MAX_WALLET_ACCOUNT_NAME_SCALARS
+        || normalized.chars().any(|character| {
+            character <= '\u{001f}' || ('\u{007f}'..='\u{009f}').contains(&character)
+        })
+    {
+        return Err(ContractError::new(
+            ContractErrorCode::InvalidArgument,
+            "账户名称修剪后必须包含 1..30 个 Unicode scalar 且不得含控制字符",
+        ));
+    }
+    Ok(normalized.to_owned())
 }
 
 /// 单只无根热钱包的公开资料。
@@ -471,6 +602,9 @@ impl WalletCleanupPlan {
 pub struct WalletState {
     revision: u64,
     profile: Option<WalletProfile>,
+    cold_accounts: Vec<ColdWalletAccount>,
+    ordered_account_ids: Vec<AccountId32>,
+    next_cold_wallet_index: u32,
     provisioning: Option<WalletProvisioningPlan>,
     cleanup: Option<WalletCleanupPlan>,
     cleanup_queue: Vec<WalletCleanupPlan>,
@@ -481,6 +615,9 @@ impl WalletState {
         Self {
             revision: 0,
             profile: None,
+            cold_accounts: Vec::new(),
+            ordered_account_ids: Vec::new(),
+            next_cold_wallet_index: FIRST_COLD_WALLET_INDEX,
             provisioning: None,
             cleanup: None,
             cleanup_queue: Vec::new(),
@@ -494,6 +631,46 @@ impl WalletState {
         cleanup: Option<WalletCleanupPlan>,
         cleanup_queue: Vec<WalletCleanupPlan>,
     ) -> ContractResult<Self> {
+        let ordered_account_ids = profile
+            .as_ref()
+            .map(|profile| {
+                profile
+                    .accounts()
+                    .iter()
+                    .map(WalletAccount::account_id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self::try_from_catalog_parts(
+            revision,
+            profile,
+            Vec::new(),
+            ordered_account_ids,
+            FIRST_COLD_WALLET_INDEX,
+            provisioning,
+            cleanup,
+            cleanup_queue,
+        )
+    }
+
+    /// 重建完整钱包事实。该入口是宿主持久化解码和 Engine CAS 的唯一完整状态构造器。
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_catalog_parts(
+        revision: u64,
+        profile: Option<WalletProfile>,
+        cold_accounts: Vec<ColdWalletAccount>,
+        ordered_account_ids: Vec<AccountId32>,
+        next_cold_wallet_index: u32,
+        provisioning: Option<WalletProvisioningPlan>,
+        cleanup: Option<WalletCleanupPlan>,
+        cleanup_queue: Vec<WalletCleanupPlan>,
+    ) -> ContractResult<Self> {
+        validate_account_catalog(
+            profile.as_ref(),
+            &cold_accounts,
+            &ordered_account_ids,
+            next_cold_wallet_index,
+        )?;
         if cleanup_queue.len() > 64 {
             return Err(ContractError::new(
                 ContractErrorCode::InvalidArgument,
@@ -645,6 +822,9 @@ impl WalletState {
         Ok(Self {
             revision,
             profile,
+            cold_accounts,
+            ordered_account_ids,
+            next_cold_wallet_index,
             provisioning,
             cleanup,
             cleanup_queue,
@@ -659,6 +839,49 @@ impl WalletState {
         self.profile.as_ref()
     }
 
+    pub fn cold_accounts(&self) -> &[ColdWalletAccount] {
+        &self.cold_accounts
+    }
+
+    /// 热、冷账户共享的稳定顺序；第一项是全局默认账户。
+    pub fn ordered_account_ids(&self) -> &[AccountId32] {
+        &self.ordered_account_ids
+    }
+
+    pub const fn next_cold_wallet_index(&self) -> u32 {
+        self.next_cold_wallet_index
+    }
+
+    pub fn default_account_id(&self) -> Option<AccountId32> {
+        self.ordered_account_ids.first().copied()
+    }
+
+    pub fn cold_account_by_id(&self, account_id: AccountId32) -> Option<&ColdWalletAccount> {
+        self.cold_accounts
+            .iter()
+            .find(|account| account.account_id() == account_id)
+    }
+
+    pub fn cold_account_by_index(&self, wallet_index: u32) -> Option<&ColdWalletAccount> {
+        self.cold_accounts
+            .iter()
+            .find(|account| account.wallet_index() == wallet_index)
+    }
+
+    pub fn account_sign_mode(&self, account_id: AccountId32) -> Option<WalletSignMode> {
+        if self
+            .profile
+            .as_ref()
+            .is_some_and(|profile| profile.account_by_id(account_id).is_some())
+        {
+            Some(WalletSignMode::Hot)
+        } else if self.cold_account_by_id(account_id).is_some() {
+            Some(WalletSignMode::Cold)
+        } else {
+            None
+        }
+    }
+
     pub fn provisioning(&self) -> Option<&WalletProvisioningPlan> {
         self.provisioning.as_ref()
     }
@@ -670,6 +893,69 @@ impl WalletState {
     pub fn cleanup_queue(&self) -> &[WalletCleanupPlan] {
         &self.cleanup_queue
     }
+}
+
+fn validate_account_catalog(
+    profile: Option<&WalletProfile>,
+    cold_accounts: &[ColdWalletAccount],
+    ordered_account_ids: &[AccountId32],
+    next_cold_wallet_index: u32,
+) -> ContractResult<()> {
+    if cold_accounts.len() > MAX_COLD_WALLET_ACCOUNTS
+        || next_cold_wallet_index < FIRST_COLD_WALLET_INDEX
+    {
+        return Err(ContractError::new(
+            ContractErrorCode::InvalidArgument,
+            "冷账户数量或下一个 wallet index 超出合同边界",
+        ));
+    }
+
+    let cold_indices: BTreeSet<_> = cold_accounts
+        .iter()
+        .map(ColdWalletAccount::wallet_index)
+        .collect();
+    let cold_ids: BTreeSet<_> = cold_accounts
+        .iter()
+        .map(ColdWalletAccount::account_id)
+        .collect();
+    if cold_indices.len() != cold_accounts.len()
+        || cold_ids.len() != cold_accounts.len()
+        || cold_accounts.iter().any(|account| {
+            account.wallet_index() < FIRST_COLD_WALLET_INDEX
+                || account.wallet_index() >= next_cold_wallet_index
+        })
+    {
+        return Err(ContractError::new(
+            ContractErrorCode::InvalidArgument,
+            "冷账户 wallet index 与 AccountId 必须唯一，且已分配 index 必须小于单调计数器",
+        ));
+    }
+
+    let mut all_ids: BTreeSet<AccountId32> = profile
+        .into_iter()
+        .flat_map(WalletProfile::accounts)
+        .map(WalletAccount::account_id)
+        .collect();
+    let hot_count = all_ids.len();
+    all_ids.extend(cold_ids);
+    if all_ids.len() != hot_count + cold_accounts.len() {
+        return Err(ContractError::new(
+            ContractErrorCode::InvalidArgument,
+            "同一 AccountId 不得同时或重复存在于热钱包与冷账户",
+        ));
+    }
+
+    let ordered_set: BTreeSet<_> = ordered_account_ids.iter().copied().collect();
+    if ordered_set.len() != ordered_account_ids.len()
+        || ordered_account_ids.len() != all_ids.len()
+        || ordered_set != all_ids
+    {
+        return Err(ContractError::new(
+            ContractErrorCode::InvalidArgument,
+            "orderedAccountIds 必须是全部热、冷账户 AccountId 的无重复精确排列",
+        ));
+    }
+    Ok(())
 }
 
 /// 与已验证 Dart 钱包一致：追加账户只能在列表尾部扩展，既有 profile 字段与账户逐项不变。

@@ -10,6 +10,18 @@ Rust 先验证模块，chain/history 才创建 public store，wallet/signing 才
 `QR_V1` 协议与扫码签名会话由同一 Rust QR 模块实现，不设兼容或回退识别器。
 本次第 2 步仅更新源码、注释、合同和测试，尚未执行新的真实构建、平台测试或硬件验收；下文旧分步运行记录保留为历史证据，不代表本次变更已验证。
 
+第 1.2 步在 C++/Flutter session 中新增统一钱包状态、冷公钥导入、revision 重排和统一改名/删除。
+它们只投影 Core 的公开账户事实；冷账户路径不弹出 GTK 认证、不调用 TPM Vault，且不提供
+无授权 default setter、旧 App 钱包迁移或兼容读取。
+
+第 1.4 步把 12 个通用安全链读取方法投影到同一 Host/Core 会话。Linux codec 只执行固定 tuple、
+准确 finality、optional bytes、两段/逐项结果复制与资源上限校验；不自行访问网络、不解码 App
+业务 SCALE，也不保存第二份轻节点状态。
+
+第 1.5/1.6 步加入 opaque callData 准备与冷热交易执行投影。C++ session 只保管 preparation
+token 并在同步 admission 失败时恢复；`QR_V1` response 固定 1..2331 UTF-8 bytes，executionId
+只用于继续或取消同一 Core execution。Linux 不构造 payload/extrinsic，不解释业务 RuntimeCall。
+
 This directory is the official Linux projection of the platform-independent
 CitizenSDK Core. It adds typed host storage, TPM 2.0 KEK protection, an
 SDK-owned GTK wallet flow, and C/C++ packaging. It never implements chain,
@@ -21,7 +33,7 @@ directory remains lowercase `linux` and is not a third product identity.
 
 ## Runtime boundary
 
-- `libcitizensdk.so` is the single Rust Core and owns the current 88-function
+- `libcitizensdk.so` is the single Rust Core and owns the current 117-function
   C ABI, smoldot, wallet envelopes, sr25519 signing, and transactions.
 - `libcitizensdk_host.so` owns the Linux host-services vtables, typed stores,
   TPM objects, user authentication, and native wallet flow.
@@ -29,7 +41,7 @@ directory remains lowercase `linux` and is not a third product identity.
   The C++ API is header-only so the stable binary contract remains C.
 - `libcitizen_sdk_plugin.so` is the Step 7.2 Flutter adapter source target. It
   links the exact same-version installed Host/Core pair and maps only the fixed
-  36-method tuple protocol; it neither rebuilds Core/Host nor accepts an
+  64-method tuple protocol; it neither rebuilds Core/Host nor accepts an
   arbitrary RPC method.
 - Secrets never cross a Flutter method or event channel. SDK-owned create,
   import and add-account screens remain in the existing native GTK flow; only

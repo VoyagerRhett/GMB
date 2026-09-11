@@ -26,7 +26,7 @@ CI/Release 验证，当前源码注册不是正式发布或这些平台运行通
 iOS 模拟器变体可运行产品 ABI 与公开链能力，但没有 Secure Enclave；硬件金库、钱包和
 依赖它们的签名/交易能力必须通过 capability snapshot 报告不可用。
 
-共享 `citizen/sdk/core/v1` 的 36 方法 tuple 从未定义 mnemonic、password、DEK、child secret、
+共享 `citizen/sdk/core/v1` 的 63 方法 tuple 从未定义 mnemonic、password、DEK、child secret、
 private key、prepared/result/native handle 或 signed-extrinsic 位置。Android、Darwin、Linux
 以及第 8.2 步 Windows adapter 源码都遵守同一秘密不跨 Flutter 的合同。Linux 使用长度保持的标准消息 codec，线上仍是
 标准 string tag；内嵌 NUL 的合法备注不得被 GLib 的 NUL 结尾字符串表示截断。
@@ -49,7 +49,7 @@ Windows adapter 使用官方 StandardMethodCodec 的长度保持字符串。默�
 `lib/citizen_sdk.dart` 根入口移除，Android、iOS、macOS、Linux 和 Windows 公开绑定均不可达，也不是新宿主的
 公开 API。
 
-Hosted Package 的 Dart 运行时闭包精确为 18 个文件：
+Hosted Package 的 Dart 运行时闭包精确为 19 个文件：
 
 ```text
 lib/citizen_sdk.dart
@@ -64,6 +64,7 @@ lib/src/crypto/account_codec.dart
 lib/src/models/citizen_account.dart
 lib/src/models/citizen_capability.dart
 lib/src/models/citizen_chain_state.dart
+lib/src/models/citizen_signing.dart
 lib/src/models/citizen_transaction.dart
 lib/src/models/citizen_wallet.dart
 lib/src/platform/citizen_sdk_flutter_codec.dart
@@ -76,7 +77,7 @@ lib/src/platform/flutter_citizen_sdk_platform.dart
 dev dependencies，且相应源码由 `.pubignore` 排除，不会成为宿主的运行时闭包。
 
 此前第 6 步本机对当时的 17 文件 Hosted 闭包执行分析为 0 问题；完整 Dart 套件使用
-`flutter test --timeout=2m` 执行 316/316。这是历史本地闭集验证，不代表第 7.1 步公开门面
+`scripts/test.sh flutter --timeout=2m` 执行 316/316。这是历史本地闭集验证，不代表第 7.1 步公开门面
 命名统一后重新运行过 Dart 测试，也不代表 Hosted 已上传或 TataConsole 远程 CI 已运行。
 
 真实 Flutter consumer 已从本公开入口完成 Android release APK（ABI `arm64-v8a`）、iOS device Release
@@ -86,6 +87,28 @@ Flutter 对插件 Swift Package Manager 目录的识别警告与 Android built-i
 留到第 9 步 Hosted/Flutter 集成统一处理。
 
 ## 会话与生命周期
+
+通用签名不要求调用方声明业务类型。调用方自行编码业务 payload，再显式选择通用变换；SDK
+只按钱包目录中的真实冷热模式路由：
+
+```dart
+final outcome = await sdk.signing.begin(CitizenSigningIntent(
+  accountId: accountId,
+  payload: opaqueBusinessBytes,
+  transform: CitizenSigningTransform.substrateSigningPayload(),
+  externalSignerTransport: CitizenExternalSignerTransport.qrV1,
+  opaqueAction: appOwnedAction,
+));
+```
+
+热账户直接返回 `CitizenSigningCompleted`；冷账户返回带一次性 `sessionId`、过期时间和
+`transportRequest` 的 `CitizenExternalSigningPending`，应用展示/传递二维码后调用
+`consumeExternalSignature`。`opaqueAction` 只是应用拥有的 QR 传输字段，SDK 不注册或解析
+Square、Vote、CID、旅行、订单等业务语义。`cancel(sessionId)` 只取消本实例尚未完成的签名。
+
+默认账户变化使用 `sdk.wallet.beginDefaultAccountChange`。SDK 固定要求原默认账户签完整目标
+排列：热账户直接完成，冷账户返回与独立 CitizenWallet 现有 action 12 互操作的 pending；
+`consumeDefaultAccountChange` 成功后才返回提交 revision。普通 reorder API 仍禁止改变首项。
 
 `await sdk.wallet.viewAccountPrivateKey(accountId)`启动SDK自有原生安全查看，只需钱包模块。
 用户确认后通过现有设备认证；公开结果只有完成、取消或错误，不返回私钥字符串、字节或内部句柄。
@@ -116,7 +139,23 @@ await sdk.close();
 
 ```dart
 final genesisHash = await sdk.chain.getGenesisHash();
+final sync = await sdk.chain.getSyncStatus();
+final best = await sdk.chain.getBestHead();
 final finalized = await sdk.chain.getFinalizedHead();
+final canonical = await sdk.chain.getFinalizedBlockAt(BigInt.from(100));
+final proven = await sdk.chain.resolveFinalizedBlock(
+  canonical.hash,
+  canonical.number,
+);
+final header = await sdk.chain.getBlockHeader(proven);
+final body = await sdk.chain.getBlockBody(proven);
+final runtime = await sdk.chain.getRuntimeContext(proven);
+final value = await sdk.chain.getStorage(proven, applicationOwnedStorageKey);
+final values = await sdk.chain.getStorageBatch(
+  proven,
+  applicationOwnedStorageKeys,
+);
+final events = await sdk.chain.getSystemEvents(proven);
 final balance = await sdk.chain.getAccountBalance(accountId);
 final balances = await sdk.chain.getAccountBalances(accountIds);
 final nonce = await sdk.chain.getAccountNonce(accountId);
@@ -129,7 +168,58 @@ final fee = await sdk.chain.getFeeSnapshot();
 - 批量查询不依赖钱包、签名或历史，不返回部分成功；有限读取完成前不能通过取消提前释放原生资源。
 - nonce 锚定同一准确 best runtime snapshot，不是交易池 nonce 租约。
 - fee snapshot 来自同一 best 块的 runtime context。
+- sync status 的 best/finalized 来自同一个 typed smoldot 快照；调用方使用 `isUsable` 判断是否
+  可读取，不从 peer count 或高度变化自行制造可信状态。
+- `getFinalizedBlockAt` 与 `resolveFinalizedBlock` 只返回 provider 已证明的 canonical finalized
+  块；调用方传入的 hash/height/finality 不构成证明。
+- Header 会由 Core 重建完整 SCALE Header 并核对 Blake2-256；Body 保留 opaque extrinsic 的
+  原顺序；runtime context 只提供准确块的版本与完整 SCALE metadata。
+- storage key 由 App 自己根据业务协议生成。SDK 仅执行准确块读取、optional 值与资源边界校验，
+  不知道广场、投票、立法、提案、治理、旅行、商家或其它业务含义。
+- `getSystemEvents` 只接受 finalized block，并只返回 `System.Events` opaque SCALE bytes；业务
+  事件解码属于各 App。`exportState`/`importState` 只运输显式 smoldot 状态，不读取旧 App 数据，
+  不承担迁移或兼容。
 - 公开 API 没有 `rpc(method, params)`、RPC URL 或预签名 extrinsic 通道。
+
+## 统一钱包目录与冷账户
+
+`sdk.wallet.getState()` 是热账户与仅公钥冷账户的统一只读快照。`accounts` 已按全局顺序排列，
+第一项就是 `defaultAccount`；每项包含规范 AccountId、Citizen SS58、名称、创建时间、
+`CitizenWalletSignMode.hot/cold`、wallet index，以及仅热账户才有的派生 account index。
+`hotProfile` 是同一快照内可选的热钱包投影，不代表全部钱包状态。
+
+```dart
+final state = await sdk.wallet.getState();
+final imported = await sdk.wallet.importColdAccount(
+  ss58Address: scannedPublicAddress,
+  name: '离线账户',
+);
+final reordered = await sdk.wallet.reorderAccountsWithoutDefaultChange(
+  expectedRevision: imported.revision,
+  accountIds: imported.accounts.map((account) => account.accountId).toList(),
+);
+final renamed = await sdk.wallet.renameAccount(
+  accountId: reordered.accounts.last.accountId,
+  name: '长期储备',
+);
+final afterDelete = await sdk.wallet.deleteAccount(
+  renamed.accounts.last.accountId,
+);
+```
+
+冷账户导入的 `accountId` 与 `ss58Address` 必须且只能提供一个。AccountId 导入由 Core 生成
+prefix 2027 的规范地址；SS58 导入由 Core 严格校验 prefix、校验和与规范回编码。冷账户操作
+只处理公开数据，不打开认证界面、不调用 Vault，也不创建 SecretRef、generation 或 cleanup。
+重复热/冷 AccountId 返回 conflict。
+
+重排必须提交完整、无重复的账户排列和当前 `revision`；旧 revision 返回 conflict，且第一项
+必须保持不变，因此该接口不能改默认账户。SDK 不公开无授权 default setter；默认账户变化
+必须使用原默认账户签名授权入口。此限制不改变热 profile 内既有
+`setActiveAccount` 语义，两者不是同一个字段。
+
+CitizenSDK 不读取或迁移 CitizenApp 的旧钱包。用户重新输入助记词建立热钱包，或重新导入
+公钥建立冷账户。CitizenWallet 是独立产品，源码与功能不在本步骤修改范围；后续冷签继续使用
+双方既有 `QR_V1` 协议。
 
 ## 热钱包
 
@@ -150,17 +240,19 @@ handle、native handle、result handle 或 signed extrinsic 参数/返回槽位�
 native session 仍拥有 handle，后续 `close` 会在 destroy 前重试并在仍失败时关闭失败，不能直接
 销毁或把该 handle 遗忘在 Core 外。
 
-其它钱包操作：
+其它热钱包与统一账户操作：
 
 ```dart
 await sdk.wallet.setActiveAccount(accountId);
-await sdk.wallet.renameAccount(accountId: accountId, name: '旅行钱包');
-await sdk.wallet.deleteAccount(accountId);
+final state = await sdk.wallet.renameAccount(accountId: accountId, name: '旅行钱包');
+final nextState = await sdk.wallet.deleteAccount(accountId);
 await sdk.wallet.delete();
 await sdk.wallet.reconcileCleanup();
 ```
 
-账户名在 Dart 端先修剪，再以 1..30 个 Unicode scalar 的规范形式编码。全钱包删除
+`renameAccount`/`deleteAccount` 同时接受热、冷账户并返回新的统一状态；
+`setActiveAccount` 只改变热 profile 的 active 账户，不改变全局默认账户。账户名在 Dart 端
+先修剪，再以 1..30 个 Unicode scalar 的规范形式编码。全热钱包删除
 必须同时完成密文墓碑与 generation 永久退役；物理清理未完时由
 `reconcileCleanup` 重放，不得把空槽视为已安全删除。
 
@@ -188,49 +280,78 @@ payload 长度允许 `0..16 MiB`，空载荷是有效的明确消息。签名 co
 签名把宿主应用视为受信任调用方；TUYU 等业务协议的 domain、challenge、序列化
 和服务端授权记录仍由业务协议负责，不是 CitizenSDK 交易协议。
 
-## 链上转账与历史
+## 通用交易准备
 
 ```dart
-final terminal = await sdk.transactions.transferWithRemark(
-  sourceAccountId: source,
-  destinationAccountId: destination,
-  amountFen: BigInt.from(1250),
-  remark: '公开备注',
+final prepared = await sdk.transactions.prepareTransaction(source, callData);
+await sdk.transactions.cancelPreparedTransaction(prepared.preparationId);
+```
+
+`callData` 必须是调用方依据准确 runtime metadata 编码的 1..1 MiB opaque SCALE RuntimeCall。
+SDK 只做协议类型、完整 EOF、canonical 编码、链身份、准确 best block、runtime 与 source nonce
+校验，不解释广场、投票、治理、旅行、订单等业务。公开方法只有上述两个位置参数，不接受交易
+选项、caller nonce、era、tip 或版本字段；当前构造固定为 SDK 自动 nonce、immortal era、tip=0。
+
+返回的 `CitizenPreparedTransaction` 只包含一次性 `preparationId`、source、callData hash、准确
+best block、链上运行时规格号、链上交易格式号与 nonce 摘要。待签消息、payload hash、unsigned/
+signed extrinsic 和原生 handle 始终留在 Core。准备对象不持久化，按 Engine/generation 隔离，同一
+source 同时最多一个；stop/close 会使其失效。本步骤不签名、不广播、不观察、不写交易历史。
+
+## 通用交易执行
+
+```dart
+final started = await sdk.transactions.executePreparedTransaction(
+  prepared.preparationId,
 );
+if (started case CitizenTransactionExternalSigningPending pending) {
+  // App 负责展示/扫描交互；response 必须来自既有 QR_V1 外部签名器。
+  final completed = await sdk.transactions.consumePreparedTransactionQrResponse(
+    pending.executionId,
+    response,
+  );
+}
+await sdk.transactions.cancelPreparedTransactionExecution(executionId);
 ```
 
-这是唯一高层钱包交易入口。Core 在 Rust 内完成 nonce/runtime 读取、V4
-extrinsic 构造、sr25519 签名、本地 hash、pending-before-broadcast、submit-and-watch
-和 finalized 执行核验。Future 只返回下列明确终态：
+`executePreparedTransaction` 只接收一次性 preparationId。Core 从统一 WalletState 判定 hot/cold；
+热账户完成强认证和本地签名后返回 `CitizenTransactionExecutionCompleted`，冷账户返回
+`CitizenTransactionExternalSigningPending`，只含 executionId、source、callData hash、`QR_V1`
+request 和 expiry。三个方法不接受 nonce、签名、signed extrinsic、交易选项或业务对象。
 
-- `finalizedSuccess`：精确 extrinsic index 存在 `System.ExtrinsicSuccess`。
-- `finalizedFailed`：同 index 存在 `System.ExtrinsicFailed`。
-- `poolRejected`：交易池明确 `Invalid` 或 `Usurped`。
+`CitizenTransactionExecutionCompleted` 只表示 `finalizedSuccess`、`finalizedFailed` 或
+`poolRejected`。所有 `Uint8List` 字段均防御复制并只读；finalized execution 包含准确块、extrinsic
+index 和原始 dispatch 索引，pool rejection 可包含 Usurped replacement hash。取消在广播前阻止广播；
+广播或持久化后只停止本次观察，不删除真实 Pending/InBlock。断网、Dropped、Retracted、timeout
+不会伪装成链上失败。重启恢复只重发 Core 内持久化的原签名字节，不要求 App 提供或保存它们。
 
-txHash、`Ready`、`Broadcast`、`InBlock` 或 provider `Finalized` 都不等于链上执行成功。
-`sdk.events` 还会返回与 Dart request sequence 精确关联的进度和终态事件；
-`Usurped` 保留替代交易哈希。取消、断网、dropped/retracted 或 timeout 不会删除
-已持久的 Pending/InBlock 事实。
-
-同账户有未决记录时，以相同 destination、amount 和 remark 再次调用此入口恢复原交易，
-不读取新 nonce、不再次解锁或签名。Core 先同步 finalized 历史；原交易已经执行则返回
-核验终态，否则仅恢复已持久化的完整授权字节。不同参数返回 Conflict。取消观察不撤销
-链上交易；未决交易收敛后，相同参数可以表示另一笔新交易。恢复字节不会返回 Dart。
-
-finalized 历史使用：
+## 通用交易历史
 
 ```dart
-final initial = await sdk.history.initializeFinalizedHistory(accountIds);
-final next = await sdk.history.syncFinalizedHistory(accountIds);
+final firstPage = await sdk.history.getTransactionHistory(limit: 100);
+final refreshed = await sdk.history.syncTransactionHistory();
+final nextPage = firstPage.nextBeforeExecutionId == null
+    ? null
+    : await sdk.history.getTransactionHistory(
+        beforeExecutionId: firstPage.nextBeforeExecutionId,
+        limit: 100,
+      );
 ```
 
-`accountIds` 必须包含 1..1990 个规范 AccountId，且整份列表不得重复。Dart 在建立 session 请求前
-拒绝空列表、超限和重复项；Android Kotlin facade 与 Darwin Swift adapter 在产品 ABI 前独立
-执行同一合同，不能依赖下层集合去重后猜测调用方意图。
+历史只包含这个 SDK 实例实际提交过的 opaque RuntimeCall。`getTransactionHistory` 只读本地
+durable store，按 `createdAtMillis, executionId` 确定性倒序分页；limit 为 1..100，游标必须来自
+当前快照。`syncTransactionHistory` 一次最多协调 32 条未终态记录，并直接返回同步后的第一页。
+两者都不接受账户列表、业务筛选器、区块范围或 pallet/call 参数。
 
-历史包含逐账户游标、本机 pending/终态记录和经 Runtime metadata 解码的 finalized
-转账流水。调用方只获得公开事实，不获得秘密、签名 payload 内部状态或原始
-signed extrinsic。
+`CitizenTransactionHistoryRecord` 只含 execution/source/call/transaction hash、状态、时间、可选
+verified block、同 index System 执行结论、replacement hash 和受限 pool rejection reason。
+它不含 nonce、callData、SigningPayload、签名、signed extrinsic、destination、amount、remark、
+direction、业务 pallet/event 或业务文案。
+
+txHash、`Ready`、`Broadcast`、`InBlock` 或 provider `Finalized` 都不等于链上执行成功。只有精确
+canonical finalized body 中唯一命中的完整 extrinsic 与同 index
+`System.ExtrinsicSuccess/Failed` 才形成最终执行结论；`Invalid/Usurped` 才形成 poolRejected。
+取消、断网、dropped/retracted 或 timeout 不删除 Pending/InBlock。目的账户、金额、备注、方向、
+转账/投票/治理等业务历史由各消费 App 根据自己的 callData 和业务事件维护。
 
 ## Flutter 传输协议
 
@@ -241,7 +362,7 @@ MethodChannel  citizen/sdk/core/v1
 EventChannel   citizen/sdk/events/v1
 ```
 
-36 个方法的请求、响应、事件、错误及所有嵌套值都是固定长度、固定位置的
+63 个方法的请求、响应、事件、错误及所有嵌套值都是固定长度、固定位置的
 `List` tuple。任意层级的 `Map`、未知枚举、额外字段、跨 session 响应、request/event
 序号缺口或乱序都失败关闭，没有兼容旁路。该协议是 binding 内部实现细节，
 不是业务应用应直接调用的公共 API。
@@ -257,6 +378,12 @@ session/sequence 为 null。它直接调用同一 Rust 纯验签，不创建 ses
 新增的 `getGenesisHash` 使用空 fields 请求，返回一个规范 hash；`getAccountBalances`
 接收一项账户列表，返回一项既有余额 tuple 列表。五端绑定共同验证数量、逐项账户及同块约束，
 不另行查询、合并或计算余额。
+
+第 1.4 步新增的 12 个链方法与上面的 Dart facade 一一对应。块 tuple 固定为
+`[hash, numberDecimal, finality]`；同步状态、Header、Body、Runtime 和导出状态都使用各自的
+固定位置 tuple。storage key 必须为 1..4 KiB，batch 必须为 1..1024 项且 key 总量不超过
+1 MiB；Header digest 上限 1 MiB，Body/metadata 与 storage batch 响应聚合上限 64 MiB，
+状态 database 上限 256 KiB。任何层级类型、长度、顺序、finality 或 import 回执不一致均失败关闭。
 
 需要 session 的调用中，每个 Flutter engine 只有一个 EventChannel router；它在发出 native `open` 前先订阅，
 按 session 隔离有界暂存早到事件。`open` 响应携带该 session 的准确 event baseline，Dart

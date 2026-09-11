@@ -35,6 +35,23 @@ const assetFields = ['asset_name', 'asset_sha256', 'platform'];
 // 这不是兼容读取、回退路径或生产 manifest 字段。
 const deprecatedVersionTagField = ['release', 'tag'].join('_');
 
+test('Android从真实源码根启动Gradle并读取缓存Flutter配置', () => {
+  const settings = readFileSync(new URL('../android/settings.gradle.kts', import.meta.url), 'utf8');
+  const application = readFileSync(new URL('../android/app/build.gradle.kts', import.meta.url), 'utf8');
+  const runner = readFileSync(new URL('../scripts/citizenapp-run.sh', import.meta.url), 'utf8');
+  assert.match(settings, /System\.getenv\("TATA_CONSOLE_FLUTTER_ROOT"\)/u);
+  assert.match(settings, /settingsDir\.parentFile/u);
+  assert.match(settings, /resolve\("android\/local\.properties"\)/u);
+  assert.match(settings, /\.flutter-plugins-dependencies/u);
+  assert.doesNotMatch(settings, /dev\.flutter\.flutter-plugin-loader|System\.getProperty\("user\.dir"\)/u);
+  assert.match(application, /source = System\.getenv\("TATA_CONSOLE_FLUTTER_ROOT"\) \?: "\.\.\/\.\."/u);
+  assert.match(runner, /cd "\$APP_ROOT\/android"/u);
+  assert.match(runner, /--no-problems-report/u);
+  assert.match(runner, /--init-script "\$\{TATA_CONSOLE_GRADLE_INIT_SCRIPT/u);
+  assert.match(runner, /TATA_CONSOLE_FLUTTER_GRADLE_ROOT="\$flutter_sdk\/packages\/flutter_tools\/gradle"/u);
+  assert.match(runner, /"\$APP_ROOT\/android\/gradlew"[\s\S]*--project-cache-dir "\$BUILD_WORK_DIR\/gradle-project"/u);
+});
+
 function actionStep(name) {
   const marker = `      name: ${name}\n`;
   const start = actionSource.indexOf(marker);

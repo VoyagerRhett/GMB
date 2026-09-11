@@ -31,14 +31,13 @@ checkpoint。持久化失败不会执行后续 stop 副作用；destroy 不替�
 原共享 admission。
 
 第 4.1/4.2 步已经在 `engine`/`contracts`/`signer` 源码实现并组合 finalized 账户余额、同块链上
-费用、准确 best `AccountNonceApi_account_nonce`、完整钱包生命周期、准确 signed extrinsic V4
-`transfer_with_remark`、广播前 pending 和 finalized 同 index System 终态。创建钱包是
+费用、准确 best `AccountNonceApi_account_nonce`、完整钱包生命周期、opaque RuntimeCall 的准确
+signed extrinsic V4、广播前 pending 和 finalized 同 index System 终态。创建钱包是
 prepare 零持久写入→用户确认备份→commit；删除后的 SecretRef 保留永久 tombstone，整代
 Vault generation 被持久退休。钱包秘密只在 Rust `SecretBuffer` 中解锁并交给唯一
-`ChainSigner`，没有私钥导出路径。钱包交易只公开不可拆分的 `transfer_with_remark`；
-pending CAS 成功后才进入 provider，provider 哈希不一致时失败并保留本地 pending。
-finalized 流水拒绝自转，对业务/Balances 双事件精确一对一去重，并由已核验 pending
-认领发送方 outgoing；同一原始块重放不能恢复已消费 pending。底层 watch 是
+`ChainSigner`，没有私钥导出路径。钱包交易只公开一次性通用准备/执行闭环；pending CAS
+成功后才进入 provider，provider 哈希不一致时失败并保留本地 pending。公共历史只记录 SDK
+自身提交的通用 execution，不解释 destination、amount、remark、direction 或业务事件。底层 watch 是
 submit-and-watch，组合钱包组件后会在 provider 前关闭 raw 入口。终态 metadata 直接从
 provider 的准确 finalized 块取得，持久 runtime cache 只用于性能，不能充当执行证据。第 4.2 步
 新增的 Rust 内部 `ProductComposition` 仍固定唯一 provider、准确 Runtime nonce 与 sr25519 实现。
@@ -52,10 +51,10 @@ import/add 的恢复词是用户显式输入。Rust 以随机 DEK/nonce 和完�
 AES-256-GCM，宿主只 wrap/unwrap DEK，unwrap 直接写 Rust-owned 32 字节缓冲区；private key
 与 child secret 永不导出。
 
-finalized 历史只按一次 verified finalized 锚进行 parent-header ancestry 证明，每批最多 120 块；
-有界 proof-derived cache 只优化回溯长度，不参与安全结论。Engine 的历史操作租约覆盖全部
-provider/store await 和最终 CAS，stop/dispose 不能穿越提交窗口。同账户 Pending/InBlock 的持久
-single-flight 防止准确 Runtime nonce 在并发构造中被再次使用。
+通用 execution 同步每次最多处理 32 条未终态记录；它复用 verified finalized block/body/events
+证明和原字节有限重发，不扫描账户业务流水。Engine 的历史操作租约覆盖全部 provider/store await
+和最终 CAS，stop/dispose 不能穿越提交窗口。同账户 Pending/InBlock 的持久 single-flight 防止准确
+Runtime nonce 在并发构造中被再次使用。
 
 `smoldot/ffi` 只继续服务归档 Dart/smoldot 差分验证；它的 `smoldot_*` 与四个
 `citizen_sr25519_*` 是 legacy macOS `arm64` 宿主测试库的真实导出，但不属于产品 `citizensdk_*` ABI，
@@ -63,12 +62,12 @@ single-flight 防止准确 Runtime nonce 在并发构造中被再次使用。
 不能把保留源码误写成当前公开运行路径。
 
 Engine 的 `sign_wallet_payload` 是受信任宿主的通用 sr25519 账户签名能力，不是交易专用签名器；
-宿主可把返回签名用于 SDK 高层交易路径之外。因此 pending-before-broadcast 只保证 SDK 的
-高层钱包交易入口。产品 C ABI 已以 `citizensdk_sign_wallet_payload` 投影该方法，后续绑定
+宿主可把返回签名用于 SDK 交易闭环之外。因此 pending-before-broadcast 只保证 SDK 自身执行的
+prepared transaction。产品 C ABI 已以 `citizensdk_sign_wallet_payload` 投影该方法，后续绑定
 必须如实保留这条信任边界。
 
-高层 `citizensdk_transfer_with_remark` 在独立四线程长观察池中等待完整 Engine terminal
-future，不占用短操作池。只有 canonical finalized body、准确块 metadata 与同 index
+通用 `citizensdk_execute_prepared_transaction` 在独立四线程长观察池中等待完整 Engine
+terminal future，不占用短操作池。只有 canonical finalized body、准确块 metadata 与同 index
 `System.Events` 形成终态；取消或中断只结束本次观察，durable Pending/InBlock 门保持。
 
 原生轻节点源码闭包、FFI、Dart smoldot 包、来源测试与锁文件已经迁入；当前不存在通过

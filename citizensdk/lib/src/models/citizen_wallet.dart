@@ -4,6 +4,9 @@ import 'citizen_account.dart';
 
 enum CitizenWalletOrigin { created, imported }
 
+/// 账户由本机热钱包签名，或由独立公民钱包通过二维码完成冷签名。
+enum CitizenWalletSignMode { hot, cold }
+
 /// SDK 安全界面可选的 BIP39 词数；数值直接作为原生合同，不使用枚举序号。
 enum CitizenWalletWordCount {
   words12(12),
@@ -39,6 +42,46 @@ final class CitizenWalletProfile {
     }
     return null;
   }
+}
+
+/// 统一钱包目录中的一个公开账户，不包含秘密引用或设备密钥状态。
+final class CitizenWalletStateAccount {
+  CitizenWalletStateAccount({
+    required this.signMode,
+    required this.walletIndex,
+    required this.accountIndex,
+    required this.accountId,
+    required this.ss58Address,
+    required this.name,
+    required this.createdAtMillis,
+    required this.isDefault,
+  });
+
+  final CitizenWalletSignMode signMode;
+  final int walletIndex;
+  final int? accountIndex;
+  final String accountId;
+  final String ss58Address;
+  final String name;
+  final BigInt createdAtMillis;
+  final bool isDefault;
+}
+
+/// 热钱包和仅公钥冷账户的一次稳定、全局有序公开快照。
+final class CitizenWalletState {
+  CitizenWalletState({
+    required this.revision,
+    required this.hotProfile,
+    required List<CitizenWalletStateAccount> accounts,
+  }) : accounts = List<CitizenWalletStateAccount>.unmodifiable(accounts);
+
+  final BigInt revision;
+  final CitizenWalletProfile? hotProfile;
+  final List<CitizenWalletStateAccount> accounts;
+
+  /// 默认账户只能从全局顺序第一项读取；第 1.2 步不提供无授权写入口。
+  CitizenWalletStateAccount? get defaultAccount =>
+      accounts.isEmpty ? null : accounts.first;
 }
 
 /// sr25519 的公开签名结果；消息及私钥生命周期不进入该模型。

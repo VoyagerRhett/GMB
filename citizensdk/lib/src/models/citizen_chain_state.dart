@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 /// CitizenSDK 实例的稳定生命周期。
 enum CitizenSdkLifecycle {
   created,
@@ -22,6 +24,81 @@ final class CitizenBlockRef {
   final String hash;
   final BigInt number;
   final CitizenBlockFinality finality;
+}
+
+/// 同一个轻节点快照中的同步、可用性和链头事实。
+final class CitizenChainSyncStatus {
+  const CitizenChainSyncStatus({
+    required this.peerCount,
+    required this.isSyncing,
+    required this.isUsable,
+    required this.best,
+    required this.finalized,
+  });
+
+  final BigInt peerCount;
+  final bool isSyncing;
+  final bool isUsable;
+  final CitizenBlockRef best;
+  final CitizenBlockRef finalized;
+}
+
+/// 一个准确块的已验证 Header；digest 是完整 SCALE Digest，不承载应用业务语义。
+final class CitizenBlockHeader {
+  CitizenBlockHeader({
+    required this.block,
+    required this.parentHash,
+    required this.stateRoot,
+    required this.extrinsicsRoot,
+    required Uint8List digest,
+  }) : digest = Uint8List.fromList(digest).asUnmodifiableView();
+
+  final CitizenBlockRef block;
+  final String parentHash;
+  final String stateRoot;
+  final String extrinsicsRoot;
+  final Uint8List digest;
+}
+
+/// 一个准确块中保持顺序的 opaque SCALE extrinsic 字节。
+final class CitizenBlockBody {
+  CitizenBlockBody({required this.block, required List<Uint8List> extrinsics})
+    : extrinsics = List<Uint8List>.unmodifiable(
+        extrinsics.map(
+          (value) => Uint8List.fromList(value).asUnmodifiableView(),
+        ),
+      );
+
+  final CitizenBlockRef block;
+  final List<Uint8List> extrinsics;
+}
+
+/// 同一准确块上的 Runtime 版本与完整 SCALE metadata。
+final class CitizenRuntimeContext {
+  CitizenRuntimeContext({
+    required this.block,
+    required this.specVersion,
+    required this.transactionVersion,
+    required Uint8List metadata,
+  }) : metadata = Uint8List.fromList(metadata).asUnmodifiableView();
+
+  final CitizenBlockRef block;
+  final int specVersion;
+  final int transactionVersion;
+  final Uint8List metadata;
+}
+
+/// 可显式导入/导出的 smoldot finalized database；不是旧 App 钱包迁移格式。
+final class CitizenChainState {
+  CitizenChainState({
+    required this.formatVersion,
+    required this.finalized,
+    required Uint8List database,
+  }) : database = Uint8List.fromList(database).asUnmodifiableView();
+
+  final int formatVersion;
+  final CitizenBlockRef finalized;
+  final Uint8List database;
 }
 
 /// finalized 块上的账户余额，单位均为整数分。

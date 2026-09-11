@@ -14,7 +14,13 @@
 #   ./scripts/build-signer-native.sh macos      # 仅 macOS（flutter test 用）
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+  LINK_TARGET="$(readlink "$SCRIPT_PATH")"
+  [[ "$LINK_TARGET" == /* ]] || LINK_TARGET="$(cd "$(dirname "$SCRIPT_PATH")" && pwd -P)/$LINK_TARGET"
+  SCRIPT_PATH="$LINK_TARGET"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd -P)"
 WALLET_DIR="$(dirname "$SCRIPT_DIR")"
 RUST_DIR="$WALLET_DIR/rust"
 LIB_NAME="libcitizenwallet_signer"

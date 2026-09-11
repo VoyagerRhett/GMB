@@ -24,50 +24,6 @@ internal class CitizenSdkFlutterSequenceGate {
     }
 }
 
-/** 线性化绑定前后的进度；同一时刻只有一个锁外派发者。 */
-internal class CitizenSdkOrderedTransferBuffer<T>(
-    private val deliver: (String, T) -> Unit,
-) {
-    private val gate = Any()
-    private val pending = ArrayDeque<T>()
-    private var operationId: String? = null
-    private var draining = false
-
-    fun bind(value: String) {
-        synchronized(gate) {
-            check(operationId == null)
-            operationId = value
-            if (draining || pending.isEmpty()) return
-            draining = true
-        }
-        drain(value, deliver)
-    }
-
-    fun accept(value: T) {
-        val bound = synchronized(gate) {
-            pending.addLast(value)
-            val current = operationId
-            if (current == null || draining) return
-            draining = true
-            current
-        }
-        drain(bound, deliver)
-    }
-
-    private fun drain(bound: String, deliver: (String, T) -> Unit) {
-        while (true) {
-            val value = synchronized(gate) {
-                if (pending.isEmpty()) {
-                    draining = false
-                    return
-                }
-                pending.removeFirst()
-            }
-            deliver(bound, value)
-        }
-    }
-}
-
 internal enum class CitizenSdkFlutterCloseAction { STOP_THEN_CLOSE, CLOSE, REJECT_UNSTABLE }
 
 internal fun citizenSdkFlutterCloseAction(lifecycle: CitizenSdkLifecycle): CitizenSdkFlutterCloseAction =
@@ -447,6 +403,15 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
                 "getFinalizedHead" -> complete(session, request, result, sdk.getFinalizedHead()) {
                     listOf(CitizenSdkFlutterCodec.block(it))
                 }
+                "getSyncStatus" -> complete(session, request, result, sdk.getSyncStatus()) {
+                    listOf(CitizenSdkFlutterCodec.syncStatus(it))
+                }
+                "getBestHead" -> complete(session, request, result, sdk.getBestHead()) {
+                    listOf(CitizenSdkFlutterCodec.block(it))
+                }
+                "exportState" -> complete(session, request, result, sdk.exportState()) {
+                    listOf(CitizenSdkFlutterCodec.chainState(it))
+                }
                 "getGenesisHash" -> success(result, request.sessionId, request.requestSequence,
                     listOf(CitizenSdkFlutterCodec.encodeHash32(sdk.getGenesisHash())))
                 "getFeeSnapshot" -> complete(session, request, result, sdk.getFeeSnapshot()) {
@@ -454,6 +419,9 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
                 }
                 "getWalletProfile" -> complete(session, request, result, sdk.getWalletProfile()) {
                     listOf(CitizenSdkFlutterCodec.profile(it))
+                }
+                "getWalletState" -> complete(session, request, result, sdk.getWalletState()) {
+                    listOf(CitizenSdkFlutterCodec.walletState(it))
                 }
                 "importWallet" -> walletFlow(session, request, result)
                 "deleteWallet" -> complete(session, request, result, sdk.deleteWallet()) {
@@ -498,34 +466,140 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
                     result,
                     sdk.deleteWalletAccount(request.accountId),
                 ) { listOf(CitizenSdkFlutterCodec.profile(it)) }
+                "deleteAccount" -> complete(
+                    session, request, result, sdk.deleteAccount(request.accountId),
+                ) { listOf(CitizenSdkFlutterCodec.walletState(it)) }
                 else -> throw CitizenSdkException(CitizenSdkErrorCode.UNSUPPORTED, "Unsupported method")
             }
             is CitizenSdkFlutterCodec.Request.Balances -> complete(
                 session, request, result, sdk.getAccountBalances(request.accountIds),
             ) { values -> listOf(values.map(CitizenSdkFlutterCodec::balance)) }
+            is CitizenSdkFlutterCodec.Request.BlockNumber -> complete(
+                session, request, result, sdk.getFinalizedBlockAt(request.number),
+            ) { listOf(CitizenSdkFlutterCodec.block(it)) }
+            is CitizenSdkFlutterCodec.Request.ResolveBlock -> complete(
+                session, request, result,
+                sdk.resolveFinalizedBlock(request.hash, request.number),
+            ) { listOf(CitizenSdkFlutterCodec.block(it)) }
+            is CitizenSdkFlutterCodec.Request.Block -> {
+                when (request.method) {
+                    "getBlockHeader" -> complete(
+                        session, request, result, sdk.getBlockHeader(request.block),
+                    ) { listOf(CitizenSdkFlutterCodec.blockHeader(it)) }
+                    "getBlockBody" -> complete(
+                        session, request, result, sdk.getBlockBody(request.block),
+                    ) { listOf(CitizenSdkFlutterCodec.blockBody(it)) }
+                    "getRuntimeContext" -> complete(
+                        session, request, result, sdk.getRuntimeContext(request.block),
+                    ) { listOf(CitizenSdkFlutterCodec.runtimeContext(it)) }
+                    "getSystemEvents" -> complete(
+                        session, request, result, sdk.getSystemEvents(request.block),
+                    ) { listOf(it) }
+                    else -> throw CitizenSdkException(CitizenSdkErrorCode.UNSUPPORTED, "Unsupported block method")
+                }
+            }
+            is CitizenSdkFlutterCodec.Request.Storage -> complete(
+                session, request, result, sdk.getStorage(request.block, request.key),
+            ) { listOf(it) }
+            is CitizenSdkFlutterCodec.Request.StorageBatch -> complete(
+                session, request, result, sdk.getStorageBatch(request.block, request.keys),
+            ) { listOf(it) }
+            is CitizenSdkFlutterCodec.Request.ImportState -> complete(
+                session, request, result, sdk.importState(request.state),
+            ) { emptyList() }
             is CitizenSdkFlutterCodec.Request.CreateWallet -> walletFlow(session, request, result)
             is CitizenSdkFlutterCodec.Request.AddWalletAccounts -> walletFlow(session, request, result)
             // 与 setActiveWalletAccount 相同，直接投影 Core 返回的原子 profile。
-            is CitizenSdkFlutterCodec.Request.RenameWalletAccount -> complete(
-                session,
-                request,
-                result,
-                sdk.renameWalletAccount(request.accountId, request.name),
-            ) { listOf(CitizenSdkFlutterCodec.profile(it)) }
+            is CitizenSdkFlutterCodec.Request.RenameWalletAccount -> {
+                val future = when (request.method) {
+                    "renameWalletAccount" -> sdk.renameWalletAccount(request.accountId, request.name)
+                        .thenApply<Any> { it }
+                    "importColdAccountId" -> sdk.importColdAccount(request.accountId, request.name)
+                        .thenApply<Any> { it }
+                    else -> sdk.renameAccount(request.accountId, request.name).thenApply<Any> { it }
+                }
+                complete(session, request, result, future) { value ->
+                    listOf(if (value is CitizenWalletProfile) CitizenSdkFlutterCodec.profile(value)
+                    else CitizenSdkFlutterCodec.walletState(value as CitizenWalletState))
+                }
+            }
+            is CitizenSdkFlutterCodec.Request.ColdSs58 -> complete(
+                session, request, result, sdk.importColdAccount(request.address, request.name),
+            ) { listOf(CitizenSdkFlutterCodec.walletState(it)) }
+            is CitizenSdkFlutterCodec.Request.ReorderWalletAccounts -> complete(
+                session, request, result,
+                sdk.reorderWalletAccountsWithoutDefaultChange(request.expectedRevision, request.accountIds),
+            ) { listOf(CitizenSdkFlutterCodec.walletState(it)) }
             is CitizenSdkFlutterCodec.Request.SignWalletPayload -> complete(
                 session,
                 request,
                 result,
                 sdk.signing.sign(request.accountId, request.payload),
             ) { listOf(CitizenSdkFlutterCodec.signature(it)) }
-            is CitizenSdkFlutterCodec.Request.TransferWithRemark -> transfer(session, request, result)
-            is CitizenSdkFlutterCodec.Request.History -> {
-                val future = if (request.method == "initializeFinalizedHistory") {
-                    sdk.initializeFinalizedHistory(request.accountIds)
+            is CitizenSdkFlutterCodec.Request.BeginSigning -> complete(
+                session, request, result, sdk.signing.begin(request.intent),
+            ) { listOf(CitizenSdkFlutterCodec.signingOutcome(it)) }
+            is CitizenSdkFlutterCodec.Request.ExternalSignature -> {
+                if (request.method == "consumeExternalSignature") {
+                    complete(
+                        session, request, result,
+                        sdk.signing.consumeExternalSignature(request.signingSessionId, request.response),
+                    ) { listOf(CitizenSdkFlutterCodec.signingOutcome(it)) }
                 } else {
-                    sdk.syncFinalizedHistory(request.accountIds)
+                    complete(
+                        session, request, result,
+                        sdk.consumeDefaultAccountChange(request.signingSessionId, request.response),
+                    ) { listOf(CitizenSdkFlutterCodec.defaultAccountChangeOutcome(it)) }
                 }
-                complete(session, request, result, future) { listOf(CitizenSdkFlutterCodec.history(it)) }
+            }
+            is CitizenSdkFlutterCodec.Request.CancelSigning -> success(
+                result, request.sessionId, request.requestSequence,
+                listOf(sdk.signing.cancel(request.signingSessionId)),
+            )
+            is CitizenSdkFlutterCodec.Request.BeginDefaultAccountChange -> complete(
+                session, request, result,
+                sdk.beginDefaultAccountChange(
+                    request.expectedRevision, request.accountIds, request.ttlSeconds,
+                ),
+            ) { listOf(CitizenSdkFlutterCodec.defaultAccountChangeOutcome(it)) }
+            is CitizenSdkFlutterCodec.Request.PrepareTransaction -> complete(
+                session,
+                request,
+                result,
+                sdk.prepareTransaction(request.sourceAccountId, request.callData),
+            ) { listOf(CitizenSdkFlutterCodec.preparedTransaction(it)) }
+            is CitizenSdkFlutterCodec.Request.CancelPreparedTransaction -> {
+                sdk.cancelPreparedTransaction(request.preparationId)
+                success(
+                    result,
+                    request.sessionId,
+                    request.requestSequence,
+                    listOf(null),
+                )
+            }
+            is CitizenSdkFlutterCodec.Request.TransactionExecution -> when (request.method) {
+                "executePreparedTransaction" -> complete(
+                    session, request, result,
+                    sdk.executePreparedTransaction(request.executionId),
+                ) { listOf(CitizenSdkFlutterCodec.transactionExecution(it)) }
+                "consumePreparedTransactionQrResponse" -> complete(
+                    session, request, result,
+                    sdk.consumePreparedTransactionQrResponse(request.executionId, request.response!!),
+                ) { listOf(CitizenSdkFlutterCodec.transactionExecution(it)) }
+                else -> {
+                    sdk.cancelPreparedTransactionExecution(request.executionId)
+                    success(result, request.sessionId, request.requestSequence, listOf(null))
+                }
+            }
+            is CitizenSdkFlutterCodec.Request.TransactionHistory -> {
+                val future = if (request.method == "getTransactionHistory") {
+                    sdk.getTransactionHistory(request.beforeExecutionId, request.limit)
+                } else {
+                    sdk.syncTransactionHistory()
+                }
+                complete(session, request, result, future) {
+                    listOf(CitizenSdkFlutterCodec.transactionHistoryPage(it))
+                }
             }
             is CitizenSdkFlutterCodec.Request.Qr -> {
                 if (request.method == "qrScan" || request.method == "signQrRequest") {
@@ -571,69 +645,6 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
         result: MethodChannel.Result,
     ) = complete(session, request, result, walletFlow.launch(session.sdk, activity, request)) {
         listOf(CitizenSdkFlutterCodec.profile(it))
-    }
-
-    private fun transfer(
-        session: Session,
-        request: CitizenSdkFlutterCodec.Request.TransferWithRemark,
-        result: MethodChannel.Result,
-    ) {
-        val correlation = TransferCorrelation(session, request.requestSequence)
-        val operation = session.sdk.transferWithRemarkOperation(
-            request.sourceAccountId,
-            request.destinationAccountId,
-            CitizenU128(request.amountFen),
-            request.remark,
-            correlation::accept,
-        )
-        correlation.bind(operation.operationId)
-        complete(session, request, result, operation.future, cancel = {
-            operation.cancel()
-            Unit
-        }) {
-            listOf(CitizenSdkFlutterCodec.transfer(it))
-        }
-    }
-
-    private inner class TransferCorrelation(
-        private val session: Session,
-        private val requestSequence: Long,
-    ) {
-        private val ordered = CitizenSdkOrderedTransferBuffer<CitizenSdkEvents.Event.TransferProgress>(::forward)
-
-        fun bind(value: String) {
-            ordered.bind(value)
-        }
-
-        fun accept(progress: CitizenSdkEvents.Event.TransferProgress) {
-            ordered.accept(progress)
-        }
-
-        private fun forward(bound: String, progress: CitizenSdkEvents.Event.TransferProgress) {
-            if (progress.operationId != bound) return
-            emit(
-                session,
-                "transferProgress",
-                listOf(
-                    requestSequence,
-                    when (progress.status) {
-                        CitizenSdkEvents.TransferStatus.READY -> "ready"
-                        CitizenSdkEvents.TransferStatus.BROADCAST -> "broadcast"
-                        CitizenSdkEvents.TransferStatus.FUTURE -> "future"
-                        CitizenSdkEvents.TransferStatus.IN_BLOCK -> "inBlock"
-                        CitizenSdkEvents.TransferStatus.FINALIZED -> "finalized"
-                        CitizenSdkEvents.TransferStatus.RETRACTED -> "retracted"
-                        CitizenSdkEvents.TransferStatus.FINALITY_TIMEOUT -> "finalityTimeout"
-                        CitizenSdkEvents.TransferStatus.DROPPED -> "dropped"
-                        CitizenSdkEvents.TransferStatus.INVALID -> "invalid"
-                        CitizenSdkEvents.TransferStatus.USURPED -> "usurped"
-                    },
-                    progress.block?.let(CitizenSdkFlutterCodec::block),
-                    progress.replacementHash()?.let(CitizenSdkFlutterCodec::encodeHash32),
-                    progress.peerCount,
-                ),
-            )
-        }
     }
 
     private fun close(
@@ -707,9 +718,6 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
                 "capabilitiesChanged",
                 listOf(CitizenSdkFlutterCodec.capabilities(event.capabilities)),
             )
-            // Progress is forwarded only by the per-operation listener, which
-            // has an exact Flutter requestSequence correlation.
-            is CitizenSdkEvents.Event.TransferProgress -> Unit
         }
     }
 

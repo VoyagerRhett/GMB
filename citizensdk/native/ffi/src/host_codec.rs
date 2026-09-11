@@ -13,13 +13,13 @@ use sha2::{Digest, Sha256};
 
 use crate::abi::CitizenSdkErrorCode;
 use citizen_sdk_contracts::{
-    AccountId32, BlockFinality, ChainDatabaseSnapshot, ChainIdentity, DispatchFailure,
-    EncryptedSecretBlobSnapshot, EncryptedSecretBlobState, EncryptedSecretEnvelope,
-    ExecutionConclusion, ExportedChainState, FinalizedBlockRef, FinalizedTransferRecord, Hash32,
+    AccountId32, BlockFinality, ChainDatabaseSnapshot, ChainIdentity, ColdWalletAccount,
+    DispatchFailure, EncryptedSecretBlobSnapshot, EncryptedSecretBlobState,
+    EncryptedSecretEnvelope, ExecutionConclusion, ExportedChainState, FinalizedBlockRef, Hash32,
     Hash32Bytes, HistoryTransactionStatus, ModuleDispatchFailure, RuntimeContext, RuntimeVersion,
-    SecretKind, SecretOwner, SecretRef, TransactionHistoryCursor, TransactionHistoryRecord,
-    TransactionHistoryState, VaultGeneration, VerifiedBlockRef, WalletAccount, WalletCleanupPlan,
-    WalletOrigin, WalletProfile, WalletProvisioningPlan, WalletState, MAX_WALLET_ACCOUNT_INDEX,
+    SecretKind, SecretOwner, SecretRef, TransactionHistoryState, VaultGeneration, VerifiedBlockRef,
+    WalletAccount, WalletCleanupPlan, WalletOrigin, WalletProfile, WalletProvisioningPlan,
+    WalletState, MAX_COLD_WALLET_ACCOUNTS, MAX_WALLET_ACCOUNT_INDEX,
 };
 
 const HOST_RECORD_MAGIC: [u8; 4] = *b"CSHR";
@@ -30,13 +30,15 @@ const HOST_RECORD_DIGEST_OFFSET: usize = 24;
 const HOST_RECORD_DIGEST_LEN: usize = 32;
 const HOST_RECORD_DIGEST_DOMAIN: &[u8] = b"CitizenSDK host record\0";
 const TYPED_PAYLOAD_VERSION: u16 = 1;
+/// 钱包目录加入仅公钥冷账户和统一顺序后直接使用新格式；不读取 v1 热钱包记录。
+const WALLET_TYPED_PAYLOAD_VERSION: u16 = 2;
 const MAX_CHAIN_ID_BYTES: usize = 128;
 const MAX_RUNTIME_METADATA_BYTES: usize = 8 * 1024 * 1024;
 const MAX_WALLET_ACCOUNTS: usize = MAX_WALLET_ACCOUNT_INDEX as usize + 1;
+const MAX_ORDERED_WALLET_ACCOUNTS: usize = MAX_WALLET_ACCOUNTS + MAX_COLD_WALLET_ACCOUNTS;
 const MAX_WALLET_NAME_BYTES: usize = 120;
 const MAX_SS58_BYTES: usize = 128;
 const MAX_CLEANUP_QUEUE: usize = 64;
-const MAX_HISTORY_ITEMS: usize = 100_000;
 const MAX_POOL_REASON_BYTES: usize = 1024;
 const MAX_PALLET_NAME_BYTES: usize = 128;
 const MAX_ENCRYPTED_ENVELOPE_BYTES: usize = 64 * 1024;
@@ -65,8 +67,8 @@ impl HostRecordDomain {
             // Runtime metadata is public but may be materially larger than a
             // single storage value.
             Self::RuntimeCache => 8 * 1024 * 1024,
-            // 1,990 public account descriptors plus lifecycle plans remain
-            // bounded independently of history growth.
+            // Hot and public-only cold account descriptors plus lifecycle
+            // plans remain bounded independently of history growth.
             Self::WalletProfile => 1024 * 1024,
             // History is the largest durable record and still has a hard
             // allocation ceiling for hostile/corrupt host responses.
@@ -412,33 +414,99 @@ pub fn decode_runtime_context(encoded: &[u8]) -> Result<RuntimeContext, HostCode
 }
 
 pub fn encode_wallet_state(state: &WalletState) -> Result<Vec<u8>, HostCodecError> {
-    encode_typed(HostRecordDomain::WalletProfile, |writer| {
-        writer.u64(state.revision());
-        encode_optional(writer, state.profile(), encode_wallet_profile)?;
-        encode_optional(writer, state.provisioning(), encode_provisioning_plan)?;
-        encode_optional(writer, state.cleanup(), encode_cleanup_plan)?;
-        writer.count(state.cleanup_queue().len(), MAX_CLEANUP_QUEUE)?;
-        for cleanup in state.cleanup_queue() {
-            encode_cleanup_plan(writer, cleanup)?;
-        }
-        Ok(())
-    })
+    encode_typed_version(
+        HostRecordDomain::WalletProfile,
+        WALLET_TYPED_PAYLOAD_VERSION,
+        |writer| {
+            writer.u64(state.revision());
+            encode_optional(writer, state.profile(), encode_wallet_profile)?;
+            writer.count(state.cold_accounts().len(), MAX_COLD_WALLET_ACCOUNTS)?;
+            for account in state.cold_accounts() {
+                encode_cold_wallet_account(writer, account)?;
+            }
+            writer.count(
+                state.ordered_account_ids().len(),
+                MAX_ORDERED_WALLET_ACCOUNTS,
+            )?;
+            for account_id in state.ordered_account_ids() {
+                writer.fixed(account_id.as_bytes());
+            }
+            writer.u32(state.next_cold_wallet_index());
+            encode_optional(writer, state.provisioning(), encode_provisioning_plan)?;
+            encode_optional(writer, state.cleanup(), encode_cleanup_plan)?;
+            writer.count(state.cleanup_queue().len(), MAX_CLEANUP_QUEUE)?;
+            for cleanup in state.cleanup_queue() {
+                encode_cleanup_plan(writer, cleanup)?;
+            }
+            Ok(())
+        },
+    )
 }
 
 pub fn decode_wallet_state(encoded: &[u8]) -> Result<WalletState, HostCodecError> {
-    decode_typed(HostRecordDomain::WalletProfile, encoded, |reader| {
-        let revision = reader.u64()?;
-        let profile = decode_optional(reader, decode_wallet_profile)?;
-        let provisioning = decode_optional(reader, decode_provisioning_plan)?;
-        let cleanup = decode_optional(reader, decode_cleanup_plan)?;
-        let cleanup_count = reader.count(MAX_CLEANUP_QUEUE)?;
-        let mut cleanup_queue = Vec::with_capacity(cleanup_count);
-        for _ in 0..cleanup_count {
-            cleanup_queue.push(decode_cleanup_plan(reader)?);
-        }
-        WalletState::try_from_parts(revision, profile, provisioning, cleanup, cleanup_queue)
+    decode_typed_version(
+        HostRecordDomain::WalletProfile,
+        WALLET_TYPED_PAYLOAD_VERSION,
+        encoded,
+        |reader| {
+            let revision = reader.u64()?;
+            let profile = decode_optional(reader, decode_wallet_profile)?;
+            let cold_count = reader.count(MAX_COLD_WALLET_ACCOUNTS)?;
+            let mut cold_accounts = Vec::with_capacity(cold_count);
+            for _ in 0..cold_count {
+                cold_accounts.push(decode_cold_wallet_account(reader)?);
+            }
+            let ordered_count = reader.count(MAX_ORDERED_WALLET_ACCOUNTS)?;
+            let mut ordered_account_ids = Vec::with_capacity(ordered_count);
+            for _ in 0..ordered_count {
+                ordered_account_ids.push(AccountId32::from_bytes(reader.fixed()?));
+            }
+            let next_cold_wallet_index = reader.u32()?;
+            let provisioning = decode_optional(reader, decode_provisioning_plan)?;
+            let cleanup = decode_optional(reader, decode_cleanup_plan)?;
+            let cleanup_count = reader.count(MAX_CLEANUP_QUEUE)?;
+            let mut cleanup_queue = Vec::with_capacity(cleanup_count);
+            for _ in 0..cleanup_count {
+                cleanup_queue.push(decode_cleanup_plan(reader)?);
+            }
+            WalletState::try_from_catalog_parts(
+                revision,
+                profile,
+                cold_accounts,
+                ordered_account_ids,
+                next_cold_wallet_index,
+                provisioning,
+                cleanup,
+                cleanup_queue,
+            )
             .map_err(|_| model_integrity("persisted wallet state is invalid"))
-    })
+        },
+    )
+}
+
+fn encode_cold_wallet_account(
+    writer: &mut TypedWriter,
+    account: &ColdWalletAccount,
+) -> Result<(), HostCodecError> {
+    writer.u32(account.wallet_index());
+    writer.fixed(account.account_id().as_bytes());
+    writer.string(account.ss58_address(), MAX_SS58_BYTES)?;
+    writer.string(account.name(), MAX_WALLET_NAME_BYTES)?;
+    writer.u64(account.created_at_millis());
+    Ok(())
+}
+
+fn decode_cold_wallet_account(
+    reader: &mut TypedReader<'_>,
+) -> Result<ColdWalletAccount, HostCodecError> {
+    ColdWalletAccount::try_new(
+        reader.u32()?,
+        AccountId32::from_bytes(reader.fixed()?),
+        reader.string(MAX_SS58_BYTES)?,
+        reader.string(MAX_WALLET_NAME_BYTES)?,
+        reader.u64()?,
+    )
+    .map_err(|_| model_integrity("persisted cold wallet account is invalid"))
 }
 
 fn encode_wallet_profile(
@@ -647,20 +715,14 @@ pub fn encode_transaction_history_state(
     state: &TransactionHistoryState,
 ) -> Result<Vec<u8>, HostCodecError> {
     encode_typed(HostRecordDomain::TransactionHistory, |writer| {
+        writer.fixed(b"TXH1");
         writer.u64(state.revision());
-        writer.count(state.cursors().len(), MAX_HISTORY_ITEMS)?;
-        for cursor in state.cursors() {
-            writer.fixed(cursor.account_id().as_bytes());
-            encode_finalized_block(writer, cursor.tracking_start_block());
-            encode_finalized_block(writer, cursor.last_synced_block());
-        }
-        writer.count(state.records().len(), MAX_HISTORY_ITEMS)?;
-        for record in state.records() {
-            encode_history_record(writer, record)?;
-        }
-        writer.count(state.transfers().len(), MAX_HISTORY_ITEMS)?;
-        for transfer in state.transfers() {
-            encode_finalized_transfer(writer, transfer)?;
+        writer.count(
+            state.executions().len(),
+            citizen_sdk_contracts::MAX_TRANSACTION_HISTORY_RECORDS,
+        )?;
+        for execution in state.executions() {
+            encode_transaction_execution_record(writer, execution)?;
         }
         Ok(())
     })
@@ -670,78 +732,86 @@ pub fn decode_transaction_history_state(
     encoded: &[u8],
 ) -> Result<TransactionHistoryState, HostCodecError> {
     decode_typed(HostRecordDomain::TransactionHistory, encoded, |reader| {
+        if reader.fixed::<4>()? != *b"TXH1" {
+            return Err(model_integrity(
+                "persisted transaction history is not the execution-only schema",
+            ));
+        }
         let revision = reader.u64()?;
-        let cursor_count = reader.count(MAX_HISTORY_ITEMS)?;
-        let mut cursors = Vec::with_capacity(cursor_count);
-        for _ in 0..cursor_count {
-            cursors.push(
-                TransactionHistoryCursor::try_new(
-                    AccountId32::from_bytes(reader.fixed()?),
-                    decode_finalized_block(reader)?,
-                    decode_finalized_block(reader)?,
-                )
-                .map_err(|_| model_integrity("persisted history cursor is invalid"))?,
-            );
+        let execution_count =
+            reader.count(citizen_sdk_contracts::MAX_TRANSACTION_HISTORY_RECORDS)?;
+        let mut executions = Vec::with_capacity(execution_count);
+        for _ in 0..execution_count {
+            executions.push(decode_transaction_execution_record(reader)?);
         }
-        let record_count = reader.count(MAX_HISTORY_ITEMS)?;
-        let mut records = Vec::with_capacity(record_count);
-        for _ in 0..record_count {
-            records.push(decode_history_record(reader)?);
-        }
-        let transfer_count = reader.count(MAX_HISTORY_ITEMS)?;
-        let mut transfers = Vec::with_capacity(transfer_count);
-        for _ in 0..transfer_count {
-            transfers.push(decode_finalized_transfer(reader)?);
-        }
-        TransactionHistoryState::try_new(revision, cursors, records, transfers)
+        TransactionHistoryState::try_new(revision, executions)
             .map_err(|_| model_integrity("persisted transaction history is invalid"))
     })
 }
 
-fn encode_history_record(
+fn encode_transaction_execution_record(
     writer: &mut TypedWriter,
-    record: &TransactionHistoryRecord,
+    record: &citizen_sdk_contracts::TransactionExecutionRecord,
 ) -> Result<(), HostCodecError> {
+    writer.fixed(record.execution_id().as_bytes());
     writer.fixed(record.account_id().as_bytes());
-    writer.fixed(record.transaction_hash().as_bytes());
-    writer.u64(record.nonce());
-    writer.fixed(record.destination_account_id().as_bytes());
-    writer.u128(record.amount_fen());
-    writer.string(
-        record.remark(),
-        citizen_sdk_contracts::MAX_TRANSFER_REMARK_BYTES,
+    writer.fixed(record.call_data_hash().as_bytes());
+    writer.bytes(
+        record.call_data(),
+        citizen_sdk_contracts::MAX_TRANSACTION_CALL_DATA_BYTES,
     )?;
-    encode_history_status(writer, record.status())?;
-    writer.u64(record.created_at_millis());
-    writer.u64(record.updated_at_millis());
-    writer.bytes(record.signed_extrinsic().as_bytes(), 1024)?;
+    writer.fixed(record.transaction_hash().as_bytes());
+    writer.bytes(
+        record.signed_extrinsic().as_bytes(),
+        citizen_sdk_contracts::MAX_TRANSACTION_SIGNED_EXTRINSIC_BYTES,
+    )?;
     encode_block(writer, record.block());
     writer.u32(record.runtime_version().spec_version());
     writer.u32(record.runtime_version().transaction_version());
     writer.fixed(record.genesis_hash().as_bytes());
+    writer.u64(record.nonce());
+    encode_history_status(writer, record.status())?;
+    writer.u64(record.created_at_millis());
+    writer.u64(record.updated_at_millis());
     Ok(())
 }
 
-fn decode_history_record(
+fn decode_transaction_execution_record(
     reader: &mut TypedReader<'_>,
-) -> Result<TransactionHistoryRecord, HostCodecError> {
-    TransactionHistoryRecord::try_new(
-        AccountId32::from_bytes(reader.fixed()?),
-        Hash32::from_bytes(reader.fixed()?),
-        reader.u64()?,
-        AccountId32::from_bytes(reader.fixed()?),
-        reader.u128()?,
-        reader.string(citizen_sdk_contracts::MAX_TRANSFER_REMARK_BYTES)?,
-        decode_history_status(reader)?,
-        reader.u64()?,
-        reader.u64()?,
-        citizen_sdk_contracts::SignedExtrinsic::try_new(reader.bytes(1024)?)
-            .map_err(|_| model_integrity("persisted signed extrinsic is invalid"))?,
-        decode_block(reader)?,
-        RuntimeVersion::new(reader.u32()?, reader.u32()?),
-        Hash32::from_bytes(reader.fixed()?),
+) -> Result<citizen_sdk_contracts::TransactionExecutionRecord, HostCodecError> {
+    let execution_id = citizen_sdk_contracts::TransactionExecutionId::try_new(reader.fixed()?)
+        .map_err(|_| model_integrity("persisted execution id is invalid"))?;
+    let account_id = AccountId32::from_bytes(reader.fixed()?);
+    let call_data_hash = Hash32::from_bytes(reader.fixed()?);
+    let call_data = reader.bytes(citizen_sdk_contracts::MAX_TRANSACTION_CALL_DATA_BYTES)?;
+    let transaction_hash = Hash32::from_bytes(reader.fixed()?);
+    let signed_extrinsic = citizen_sdk_contracts::SignedExtrinsic::try_new(
+        reader.bytes(citizen_sdk_contracts::MAX_TRANSACTION_SIGNED_EXTRINSIC_BYTES)?,
     )
-    .map_err(|_| model_integrity("persisted transaction record is invalid"))
+    .map_err(|_| model_integrity("persisted generic signed extrinsic is invalid"))?;
+    let block = decode_block(reader)?;
+    let runtime_version = RuntimeVersion::new(reader.u32()?, reader.u32()?);
+    let genesis_hash = Hash32::from_bytes(reader.fixed()?);
+    let nonce = reader.u64()?;
+    let status = decode_history_status(reader)?;
+    let created = reader.u64()?;
+    let updated = reader.u64()?;
+    citizen_sdk_contracts::TransactionExecutionRecord::try_new(
+        execution_id,
+        account_id,
+        call_data_hash,
+        call_data,
+        transaction_hash,
+        signed_extrinsic,
+        block,
+        runtime_version,
+        genesis_hash,
+        nonce,
+        status,
+        created,
+        updated,
+    )
+    .map_err(|_| model_integrity("persisted generic transaction execution is invalid"))
 }
 
 fn encode_history_status(
@@ -754,9 +824,16 @@ fn encode_history_status(
             writer.u8(2);
             encode_block(writer, *block);
         }
-        HistoryTransactionStatus::PoolRejected { reason } => {
+        HistoryTransactionStatus::PoolRejected {
+            reason,
+            replacement_hash,
+        } => {
             writer.u8(3);
             writer.string(reason, MAX_POOL_REASON_BYTES)?;
+            writer.bool(replacement_hash.is_some());
+            if let Some(hash) = replacement_hash {
+                writer.fixed(hash.as_bytes());
+            }
         }
         HistoryTransactionStatus::Execution(ExecutionConclusion::Success {
             block,
@@ -793,8 +870,16 @@ fn decode_history_status(
         2 => Ok(HistoryTransactionStatus::InBlock {
             block: decode_block(reader)?,
         }),
-        3 => HistoryTransactionStatus::try_pool_rejected(reader.string(MAX_POOL_REASON_BYTES)?)
-            .map_err(|_| model_integrity("persisted pool rejection is invalid")),
+        3 => {
+            let reason = reader.string(MAX_POOL_REASON_BYTES)?;
+            let replacement_hash = if reader.bool()? {
+                Some(Hash32::from_bytes(reader.fixed()?))
+            } else {
+                None
+            };
+            HistoryTransactionStatus::try_pool_rejected_with_replacement(reason, replacement_hash)
+                .map_err(|_| model_integrity("persisted pool rejection is invalid"))
+        }
         4 => Ok(HistoryTransactionStatus::Execution(
             ExecutionConclusion::Success {
                 block: decode_block(reader)?,
@@ -844,65 +929,6 @@ fn decode_dispatch_failure(
         None
     };
     Ok(DispatchFailure::new(variant, module))
-}
-
-fn encode_finalized_transfer(
-    writer: &mut TypedWriter,
-    transfer: &FinalizedTransferRecord,
-) -> Result<(), HostCodecError> {
-    writer.fixed(transfer.tracked_account_id().as_bytes());
-    writer.fixed(transfer.from_account_id().as_bytes());
-    writer.fixed(transfer.to_account_id().as_bytes());
-    writer.u128(transfer.amount_fen());
-    encode_finalized_block(writer, transfer.block());
-    writer.u32(transfer.event_record_index());
-    writer.bool(transfer.extrinsic_index().is_some());
-    if let Some(index) = transfer.extrinsic_index() {
-        writer.u32(index);
-    }
-    writer.string(transfer.source_pallet(), MAX_PALLET_NAME_BYTES)?;
-    writer.bool(transfer.remark_bytes().is_some());
-    if let Some(remark_bytes) = transfer.remark_bytes() {
-        writer.bytes(
-            remark_bytes,
-            citizen_sdk_contracts::MAX_TRANSFER_REMARK_BYTES,
-        )?;
-    }
-    Ok(())
-}
-
-fn decode_finalized_transfer(
-    reader: &mut TypedReader<'_>,
-) -> Result<FinalizedTransferRecord, HostCodecError> {
-    let tracked_account_id = AccountId32::from_bytes(reader.fixed()?);
-    let from_account_id = AccountId32::from_bytes(reader.fixed()?);
-    let to_account_id = AccountId32::from_bytes(reader.fixed()?);
-    let amount_fen = reader.u128()?;
-    let block = decode_finalized_block(reader)?;
-    let event_record_index = reader.u32()?;
-    let extrinsic_index = if reader.bool()? {
-        Some(reader.u32()?)
-    } else {
-        None
-    };
-    let source_pallet = reader.string(MAX_PALLET_NAME_BYTES)?;
-    let remark_bytes = if reader.bool()? {
-        Some(reader.bytes(citizen_sdk_contracts::MAX_TRANSFER_REMARK_BYTES)?)
-    } else {
-        None
-    };
-    FinalizedTransferRecord::try_for_tracked_account_from_runtime_event(
-        tracked_account_id,
-        from_account_id,
-        to_account_id,
-        amount_fen,
-        block,
-        event_record_index,
-        extrinsic_index,
-        source_pallet,
-        remark_bytes.as_deref(),
-    )
-    .map_err(|_| model_integrity("persisted finalized transfer is invalid"))
 }
 
 pub fn encode_encrypted_secret_blob_snapshot(
@@ -975,8 +1001,16 @@ fn encode_typed(
     domain: HostRecordDomain,
     encode: impl FnOnce(&mut TypedWriter) -> Result<(), HostCodecError>,
 ) -> Result<Vec<u8>, HostCodecError> {
+    encode_typed_version(domain, TYPED_PAYLOAD_VERSION, encode)
+}
+
+fn encode_typed_version(
+    domain: HostRecordDomain,
+    version: u16,
+    encode: impl FnOnce(&mut TypedWriter) -> Result<(), HostCodecError>,
+) -> Result<Vec<u8>, HostCodecError> {
     let mut writer = TypedWriter::new();
-    writer.u16(TYPED_PAYLOAD_VERSION);
+    writer.u16(version);
     encode(&mut writer)?;
     encode_host_record(domain, &writer.bytes)
 }
@@ -986,9 +1020,18 @@ fn decode_typed<T>(
     encoded: &[u8],
     decode: impl FnOnce(&mut TypedReader<'_>) -> Result<T, HostCodecError>,
 ) -> Result<T, HostCodecError> {
+    decode_typed_version(domain, TYPED_PAYLOAD_VERSION, encoded, decode)
+}
+
+fn decode_typed_version<T>(
+    domain: HostRecordDomain,
+    version: u16,
+    encoded: &[u8],
+    decode: impl FnOnce(&mut TypedReader<'_>) -> Result<T, HostCodecError>,
+) -> Result<T, HostCodecError> {
     let record = decode_host_record(domain, encoded)?;
     let mut reader = TypedReader::new(record.payload());
-    if reader.u16()? != TYPED_PAYLOAD_VERSION {
+    if reader.u16()? != version {
         return Err(HostCodecError::new(
             HostCodecErrorKind::UnsupportedVersion,
             "typed host payload version is unsupported",
@@ -1071,10 +1114,6 @@ impl TypedWriter {
     }
 
     fn u64(&mut self, value: u64) {
-        self.bytes.extend_from_slice(&value.to_le_bytes());
-    }
-
-    fn u128(&mut self, value: u128) {
         self.bytes.extend_from_slice(&value.to_le_bytes());
     }
 
@@ -1161,10 +1200,6 @@ impl<'a> TypedReader<'a> {
 
     fn u64(&mut self) -> Result<u64, HostCodecError> {
         Ok(u64::from_le_bytes(self.fixed()?))
-    }
-
-    fn u128(&mut self) -> Result<u128, HostCodecError> {
-        Ok(u128::from_le_bytes(self.fixed()?))
     }
 
     fn bool(&mut self) -> Result<bool, HostCodecError> {

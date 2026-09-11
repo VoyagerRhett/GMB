@@ -15,6 +15,15 @@ Dart 分别使用 `sdk.wallet`、`sdk.signing`、`sdk.chain`、`sdk.transactions
 `sdk.chain.getGenesisHash()` 读取 Core 固定链身份，不要求启动或联网；
 `sdk.chain.getAccountBalances(accountIds)` 复用同一 finalized 批量读取，保留输入顺序和重复项。
 两项查询均要求选择 chain 模块，不依赖钱包或签名。
+通用链读取还公开同一轻节点快照的同步状态、best/finalized 链头、finalized canonical 块解析、
+准确块 Header/Body/Runtime、opaque storage 单项/批量读取、finalized `System.Events` 原始字节和
+显式 smoldot 状态导入导出。SDK 只验证链锚与资源边界，不内置任何 App 的业务 key、业务 DTO
+或业务 SCALE 解码；每个接入 App 负责自己的业务协议。
+`sdk.transactions.prepareTransaction(sourceAccountId, callData)` 接收业务 App 已编码好的 opaque
+SCALE RuntimeCall。Core 在同一准确 best block 上校验 metadata 类型并读取 runtime、genesis 与
+nonce，固定使用 immortal era 和 tip=0，内部保留 signer message 与 extrinsic 模板；公开层只得到
+preparationId、callData hash、准确块和链上运行时摘要。调用方可显式取消准备对象，但不能取得
+nonce 选项、待签字节、raw extrinsic 或原生句柄。本步骤不签名、不广播、不写历史。
 `sdk.wallet.viewAccountPrivateKey(accountId)` 只启动 SDK 原生安全查看，返回完成、取消或错误；
 不把账户秘密交给宿主、Flutter 或可替换显示回调。它属于钱包模块，不要求链或签名模块。
 
@@ -37,8 +46,8 @@ SDK 原生后台监控复用 smoldot 现有 finalized 订阅；完整钱包组�
 `historyChanged` 事件只表示历史应刷新，接收方使用已有历史查询；不携带秘密或账户快照。
 停止会取消旧代际并排空已进入的存储写入和订阅资源。本地钱包输入不要求启动网络。
 
-当前未发布版本已补充未决交易原授权恢复、有界完成事件预留、Android 关闭/认证边界、
-Apple 宿主数据隔离及 Linux SHM 恢复。恢复沿用同一个高层转账入口，不新增业务 API。
+当前未发布版本已补充通用 opaque RuntimeCall 的未决交易原授权恢复、通用执行历史、
+Android 关闭/认证边界、Apple 宿主数据隔离及 Linux SHM 恢复，不包含 App 业务 API。
 本机测试不等于跨平台硬件或正式发布验收，准确结果与未完成项以任务卡为准。
 
 SDK 钱包安全界面统一选择 12／18／24 词，默认 12；“钱包密码（选填）”默认空，非空只
@@ -55,11 +64,12 @@ CitizenSDK 是 GMB 根目录下的独立公民链客户端产品，向宿主应�
 Swift 与 Flutter 投影，已经统一通过产品 C ABI 调用 Rust Core，由 Core 实现轻节点生命周期、
 finalized 数据库、多账户热钱包、硬件金库、任意协议载荷
 签名、钱包完整可用性核验、账户改名、finalized 单/批余额、链上手续费估算，以及
-`transfer_with_remark` 的构造、签名、pending-before-broadcast、观察和执行结果核验。
+任意经 metadata 严格验证的 opaque RuntimeCall 准备、签名、pending-before-broadcast、观察、
+执行结果核验和 SDK 自身提交记录的通用历史。
 SDK 自有旧 Dart 钱包、交易、轻节点协调及私钥导出已删除；相关行为与测试由正式 Rust
 Core 承接。受保护的 smoldot Dart/FFI 来源快照仅供上游审计测试，不是第二套 SDK。
-CitizenApp 现有功能和
-依赖保持不变；只有在 SDK 稳定后，才会另行设计 CitizenApp 的切换步骤。
+CitizenApp 的目的账户、金额、备注、方向、业务 pallet/event 解码与页面历史继续由 App
+拥有；当前只完成目录归位和 SDK-neutral 端口，尚未切换为 CitizenSDK 运行时。
 
 Flutter 消费者只从根库打开唯一公开门面：
 
@@ -91,7 +101,10 @@ Rust 路径已经建立 `native/contracts`、`native/engine`、真实
 `native/smoldot/provider` 和产品级唯一 `native/ffi`。根 `include/citizensdk.h` 只公开
 `citizensdk_*`。ABI v1 既有 73 个符号、结构布局、数值与默认构造行为不变，
 新增模块验证、显式模块构造和无实例验签三个入口，再补充创世哈希、批量余额及两个批量结果读取入口，
-QR 公开合同统一为 9 个协议、审阅、签名及结果入口，当前总计 89 个。
+QR 公开合同统一为 9 个协议、审阅、签名及结果入口；统一钱包、通用冷热签名与安全链读取加入后
+第 1.5 步加入通用交易准备三项入口，第 1.6 步再加入准备执行、冷签响应消费、execution 取消与
+安全执行结果读取四项入口；第 1.7 步以四个通用历史入口替换八个业务转账/历史入口，当前总计
+117 个。五端 Flutter 方法闭集同步为 63 个。
 原待签字节获取和外部签名拼装入口已删除，不保留兼容接口。图像层另以 3 个稳定 C 函数包装 ZXing-C++。
 `citizensdk_create_with_modules` 是官方绑定的模块构造入口；既有构造也进入同一私有装配逻辑，
 不建立第二套状态机。链、钱包管理、签名、交易和历史按选择提供，宿主仅补齐所选功能必需的
@@ -107,6 +120,12 @@ Engine 固定 `VerifiedChainClient`、`ChainSigner`、`SecretVault`、五类状�
 的 Blake2-256，节点返回不一致即失败关闭。链身份、生命周期和 capability revision 均由
 Engine 持有；`CHAIN_READ`、提交和核验只有在 Engine 为 `Running` 且 smoldot 自身报告
 `is_usable` 时才 ready，不能用 peer 数、高度或等待时间猜测。
+
+通用交易执行只原子消费一次准备对象，并从统一 WalletState 决定热签或冷签。热账户在 Rust
+安全边界内强认证、签名和自验；冷账户只使用既有 `QR_V1` 单次会话，CitizenWallet 仍是独立产品。
+Core 在任何 provider 广播前 CAS 持久化完整授权事实，只有准确 canonical body 与同 index
+`System.Events` 才形成 finalized success/failed；重启仅重发同一 signed extrinsic 原字节，绝不迁移
+旧 App 数据、重新签名或解释业务 RuntimeCall。
 
 状态导入触及 Provider 后若失败，同一 Engine/Provider 组合保持不可复用的 `StartFailed`；
 导入前还会读取 revisioned `ChainDatabaseStore` 的 finalized 锚，拒绝高度回退和同高度哈希
@@ -135,12 +154,12 @@ active cleanup 与最多 64 项 queue 均不得命中当前 profile 的 exact se
 请求账户和 best 块的 `AccountNonceApi_account_nonce` 准确 Runtime nonce；English BIP-39
 12／18／24 词、可选 NFKD password、
 `//0..//1989`；钱包创建、导入、追加、可用性核验、改名、切换、删除与清理重放；以及准确
-CitizenChain signed extrinsic V4 的 `transfer_with_remark` 构造。创建采用
+CitizenChain signed extrinsic V4 的通用 opaque RuntimeCall 构造。创建采用
 `prepare_wallet_creation -> 用户确认备份 -> commit_wallet_creation_after_backup` 两阶段合同：
 准备阶段对 profile、密文和硬件 KEK 零写入，因而用户看到唯一恢复词前崩溃不会留下不可恢复
-钱包。构造固定 pallet `4` / call
-`0`、正分金额、最多 99 UTF-8 字节备注、immortal era、tip `0`、正式 genesis 与同块
-runtime/transaction version，并采用 Subxt 的长载荷签名规则。source AccountId 必须等于从
+钱包。交易准备以实际 metadata 的 outer RuntimeCall 类型完整解码并 canonical 回编码，固定
+immortal era、tip `0`、正式 genesis 与同块 runtime/transaction version，并采用 Subxt 的长载荷
+签名规则。source AccountId 必须等于从
 金库秘密取得的 sr25519 公钥，生成的签名还会用同一公钥立即复核。
 
 钱包公开事实、产品无关 sr25519 密钥/金库与业务账户协议是三层不同边界。公民链账户及交易
@@ -249,32 +268,37 @@ light sync state 摘要；任何不一致都失败关闭，远端启动清单只
 - 宿主进程属于受信任边界；公开接口不提供明文 child 注入或导出通道，SDK 不把同进程
   内存隔离描述为能抵御恶意宿主。
 
-Rust 钱包交易只公开一个 `transfer_with_remark` 高级入口：内部构造对象不可从 Engine 取出，必须先
-以本地完整 extrinsic hash 持久化 source/destination/amount/remark/nonce，再向 provider
-广播。纯链客户端保留的预签名 raw submit 是无钱包组合的高级迁移入口；一旦注入任一钱包交易
-组件，它也必须命中内部 pending，否则广播前失败关闭。底层 watch 实际执行 submit-and-watch；
-组合钱包组件后该 raw 入口同样在 provider 前关闭。`inBlock`、`finalized` 或返回 txHash
-均不是执行成功；历史只接受由完整 hash/body/event 核验器产生的内部终态令牌，令牌把 txHash
-与同一 extrinsic index 的 `System.ExtrinsicSuccess/Failed` 绑定，不能由绑定层伪造或误配。
+Rust 钱包交易公开一次性 `prepareTransaction` 与 `executePreparedTransaction` 闭环：调用方只
+提供 source AccountId 和 opaque callData，Core 在广播前持久化完整 extrinsic hash、source、
+callData hash、nonce 及恢复所需的私有授权字节。公共历史只投影通用 hash、状态、块和 System
+执行结论，不公开 callData、nonce、签名或已签 extrinsic。纯链客户端保留的预签名 raw submit
+只供无钱包组合；一旦注入交易组件就必须命中内部 pending。底层 watch 实际执行
+submit-and-watch。`inBlock`、`finalized` 或返回 txHash 均不是执行成功；历史只接受由完整
+hash/body/event 核验器产生的内部终态令牌，令牌把 txHash 与同一 extrinsic index 的
+`System.ExtrinsicSuccess/Failed` 绑定，不能由绑定层伪造或误配。
 宿主给出的 finality 位同样不是证明；Engine 先让轻节点把 hash/height 解析到 verified finalized
 canonical 链，再直接从 provider 取得该块 runtime context；持久 runtime cache 不是执行证据。
-finalized 流水拒绝自转并对业务/Balances 双事件严格一对一配对，本地 pending 认领发送方
-outgoing、保留接收方 incoming，同一原始块重放不能恢复已消费 pending。
-高层转账的完整 terminal future 使用独立四线程长观察池，不占用短操作 worker；只有经
+历史不扫描或解释 transfer、投票、治理等业务事件；这些业务投影由消费 App 自己维护。
+通用交易的完整 terminal future 使用独立四线程长观察池，不占用短操作 worker；只有经
 canonical finalized body、该块准确 metadata 与同 index `System.Events` 核验后才返回终态。
 取消、dropped/retracted、timeout、provider 错误或流中断会结束本次观察，但不会清除 durable
 Pending/InBlock single-flight 门，后续只能经历史协调继续收敛。
-取消使用单笔 `WalletTransferCancellation` 通知 Engine，不取消其它交易或监控；FFI
-继续驱动同一 future，直到已进入的存储／金库操作真实返回后才完成请求。取消不是撤回，
+取消按 executionId 通知 Engine，不取消其它交易或监控；FFI 继续驱动同一 future，直到已进入的
+存储／金库操作真实返回后才完成请求。取消不是撤回，
 不能抹去期间实际写入的 Pending、InBlock 或准确执行结果，也不保证已广播交易不会执行。
 
 `sign_wallet_payload` 仍是受信任宿主可调用的产品无关账户签名能力，可承载 TUYU 等明确协议。
-因为它返回通用 sr25519 签名，宿主技术上可以在 SDK 高层交易路径之外使用该结果；上述 pending
-保证只覆盖 SDK 自己的高层钱包交易入口。产品 C ABI 已通过
+因为它返回通用 sr25519 签名，宿主技术上可以在 SDK 交易闭环之外使用该结果；上述 pending
+保证只覆盖 SDK 自己执行的 prepared transaction。产品 C ABI 已通过
 `citizensdk_sign_wallet_payload` 投影该方法；后续语言绑定必须保留这条信任边界，不能宣称
 SDK 在密码学上限制了宿主的所有签名用途。
 
 ## 构建与分发
+
+本地测试统一通过 `scripts/test.sh` 执行。`scripts/test.sh cargo ...` 和
+`scripts/test.sh flutter ...` 分别传递 Cargo 与 Flutter 测试参数，所有测试生成物固定写入
+`/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk/test`；禁止在产品源码根直接运行裸
+`cargo test` 或 `flutter test`。`.dart_tool` 不在此目录规则范围内。
 
 根 Rust workspace 现在统一包含 `native/contracts`、`native/engine`、`native/ffi`、
 `native/signer` 与 `native/smoldot/provider`；收编的 PoW/light-base 继续使用已验证的嵌套
@@ -437,7 +461,7 @@ Linux 环境才完成当前开发步骤。根包源码注册不代表已正式�
 实际编译/运行；第 8.4 步登记默认 Flutter 入口、DLL 候选投影和真实公开消费者，尚未正式分发，
 详见 [Windows 平台合同](docs/WINDOWS_PLATFORM.md)。
 
-Windows Flutter 只使用统一双通道和 36 方法，连接同版已安装 Host/Core/QR 图像层。宿主需一次声明
+Windows Flutter 只使用统一双通道和 63 方法，连接同版已安装 Host/Core/QR 图像层。宿主需一次声明
 `CITIZENSDK_APPLICATION_ID`，原样作为稳定应用数据命名空间，不是业务账户或 Windows
 身份认证；无默认值，不从文件名或展示名推导。公开类型仍只有 `CitizenSdk`，Windows
 使用默认平台和官方自动注册；缺少同版插件立即失败，不注入替代实现。宿主仍需这一项

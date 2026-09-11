@@ -4,6 +4,15 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val flutterProductRoot = System.getenv("TATA_CONSOLE_FLUTTER_ROOT")
+    ?.let { file(it) }
+    ?: rootProject.projectDir.parentFile
+val flutterBuildProperties = java.util.Properties().apply {
+    flutterProductRoot.resolve("android/local.properties").inputStream().use { load(it) }
+}
+val productVersionCode = flutterBuildProperties.getProperty("flutter.versionCode", "1").toInt()
+val productVersionName = flutterBuildProperties.getProperty("flutter.versionName", "1.0")
+
 android {
     // 钱包所有资源统一归属 resources；Android 只读取其中的平台资源。
     sourceSets.getByName("main").res.setSrcDirs(listOf("../../resources/android"))
@@ -28,8 +37,8 @@ android {
         // local_auth 3.x 与新 SecureStorage 加固配置统一要求 API ≥ 24。
         minSdk = maxOf(24, flutter.minSdkVersion)
         targetSdk = flutter.targetSdkVersion
-        versionCode = flutter.versionCode
-        versionName = flutter.versionName
+        versionCode = productVersionCode
+        versionName = productVersionName
         ndk {
             // CitizenWallet Android 唯一支持 64 位 ARM；禁止恢复其他 ABI。
             abiFilters.add("arm64-v8a")
@@ -65,7 +74,8 @@ kotlin {
 }
 
 flutter {
-    source = "../.."
+    // Gradle根保持在产品源码，Flutter输入根按当前产品执行环境选择。
+    source = System.getenv("TATA_CONSOLE_FLUTTER_ROOT") ?: "../.."
 }
 
 // 钱包内置硬件金库直接使用宿主依赖。

@@ -1,6 +1,5 @@
 package org.citizen.sdk
 
-import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
@@ -150,12 +149,21 @@ class CitizenSdkFlutterCodecTest {
         assertEquals(
             linkedSetOf(
                 "open", "start", "stop", "close", "getCapabilities",
-                "getFinalizedHead", "getGenesisHash", "getAccountBalance", "getAccountBalances", "getAccountNonce",
-                "getFeeSnapshot", "getWalletProfile", "viewAccountPrivateKey", "createWallet", "importWallet",
+                "getFinalizedHead", "getSyncStatus", "getBestHead", "getFinalizedBlockAt",
+                "resolveFinalizedBlock", "getBlockHeader", "getBlockBody", "getRuntimeContext",
+                "getStorage", "getStorageBatch", "getSystemEvents", "exportState", "importState",
+                "getGenesisHash", "getAccountBalance", "getAccountBalances", "getAccountNonce",
+                "getFeeSnapshot", "getWalletProfile", "getWalletState", "importColdAccountId",
+                "importColdAccountSs58", "reorderWalletAccountsWithoutDefaultChange",
+                "renameAccount", "deleteAccount", "viewAccountPrivateKey", "createWallet", "importWallet",
                 "addWalletAccounts", "setActiveWalletAccount", "renameWalletAccount",
                 "deleteWalletAccount", "deleteWallet", "reconcileWalletCleanup",
-                "signWalletPayload", "verifySignature", "transferWithRemark", "initializeFinalizedHistory",
-                "syncFinalizedHistory", "qrParse", "qrCreateSignRequest", "qrConsumeSignResponse", "qrCancelSignRequest",
+                "signWalletPayload", "beginSigning", "consumeExternalSignature", "cancelSigning",
+                "beginDefaultAccountChange", "consumeDefaultAccountChange", "verifySignature",
+                "prepareTransaction", "cancelPreparedTransaction", "executePreparedTransaction",
+                "consumePreparedTransactionQrResponse", "cancelPreparedTransactionExecution",
+                "getTransactionHistory", "syncTransactionHistory", "qrParse", "qrCreateSignRequest",
+                "qrConsumeSignResponse", "qrCancelSignRequest",
                 "qrEncodeAccountId", "qrEncodeUserTransfer", "qrDecodeLuminance", "qrEncode", "qrScan", "signQrRequest",
             ),
             CitizenSdkFlutterCodec.methods,
@@ -186,24 +194,58 @@ class CitizenSdkFlutterCodecTest {
         val requests = linkedMapOf<String, List<Any?>>()
         requests["open"] = listOf(1, 63)
         for (method in listOf(
-            "start", "stop", "close", "getCapabilities", "getFinalizedHead", "getGenesisHash",
-            "getFeeSnapshot", "getWalletProfile", "importWallet", "deleteWallet",
+            "start", "stop", "close", "getCapabilities", "getFinalizedHead", "getSyncStatus",
+            "getBestHead", "exportState", "getGenesisHash",
+            "getFeeSnapshot", "getWalletProfile", "getWalletState", "importWallet", "deleteWallet",
             "reconcileWalletCleanup",
         )) requests[method] = listOf(1, "session-1", 1L)
+        val finalizedBlock = listOf(account, "1", "finalized")
+        requests["getFinalizedBlockAt"] = listOf(1, "session-1", 1L, "1")
+        requests["resolveFinalizedBlock"] = listOf(1, "session-1", 1L, account, "1")
+        for (method in listOf("getBlockHeader", "getBlockBody", "getRuntimeContext", "getSystemEvents")) {
+            requests[method] = listOf(1, "session-1", 1L, finalizedBlock)
+        }
+        requests["getStorage"] = listOf(1, "session-1", 1L, finalizedBlock, byteArrayOf(1))
+        requests["getStorageBatch"] = listOf(
+            1, "session-1", 1L, finalizedBlock, listOf(byteArrayOf(1), byteArrayOf(2)),
+        )
+        requests["importState"] = listOf(1, "session-1", 1L, 1, finalizedBlock, byteArrayOf(1))
         for (method in listOf(
             "getAccountBalance", "getAccountNonce", "viewAccountPrivateKey", "setActiveWalletAccount",
-            "deleteWalletAccount",
+            "deleteWalletAccount", "deleteAccount",
         )) requests[method] = listOf(1, "session-1", 1L, account)
         requests["getAccountBalances"] = listOf(1, "session-1", 1L, listOf(account, account))
         requests["createWallet"] = listOf(1, "session-1", 1L, 24)
         requests["addWalletAccounts"] = listOf(1, "session-1", 1L, listOf(1, 7))
         requests["renameWalletAccount"] = listOf(1, "session-1", 1L, account, "main")
+        requests["renameAccount"] = listOf(1, "session-1", 1L, account, "main")
+        requests["importColdAccountId"] = listOf(1, "session-1", 1L, account, "cold")
+        requests["importColdAccountSs58"] = listOf(
+            1, "session-1", 1L, "w5CZACAABUbK4jspzPB5be9trhtSgRCRZFafGe7kvFPvxq8M2", "cold",
+        )
+        requests["reorderWalletAccountsWithoutDefaultChange"] =
+            listOf(1, "session-1", 1L, "7", listOf(account, destination))
         requests["signWalletPayload"] = listOf(1, "session-1", 1L, account, byteArrayOf(1))
+        requests["beginSigning"] = listOf(
+            1, "session-1", 1L, account, byteArrayOf(1), "raw", byteArrayOf(), "none", 0, 120L,
+        )
+        requests["consumeExternalSignature"] = listOf(1, "session-1", 1L, "signing-session", "{}")
+        requests["cancelSigning"] = listOf(1, "session-1", 1L, "signing-session")
+        requests["beginDefaultAccountChange"] =
+            listOf(1, "session-1", 1L, "7", listOf(destination, account), 120L)
+        requests["consumeDefaultAccountChange"] = listOf(1, "session-1", 1L, "signing-session", "{}")
         requests["verifySignature"] = listOf(1, account, ByteArray(64), byteArrayOf())
-        requests["transferWithRemark"] =
-            listOf(1, "session-1", 1L, account, destination, "1", "remark")
-        requests["initializeFinalizedHistory"] = listOf(1, "session-1", 1L, listOf(account))
-        requests["syncFinalizedHistory"] = listOf(1, "session-1", 1L, listOf(account))
+        requests["prepareTransaction"] = listOf(1, "session-1", 1L, account, byteArrayOf(1, 2))
+        requests["cancelPreparedTransaction"] =
+            listOf(1, "session-1", 1L, "0x00112233445566778899aabbccddeeff")
+        requests["executePreparedTransaction"] =
+            listOf(1, "session-1", 1L, "0x00112233445566778899aabbccddeeff")
+        requests["consumePreparedTransactionQrResponse"] =
+            listOf(1, "session-1", 1L, "0x112233445566778899aabbccddeeff00", "QR_V1")
+        requests["cancelPreparedTransactionExecution"] =
+            listOf(1, "session-1", 1L, "0x112233445566778899aabbccddeeff00")
+        requests["getTransactionHistory"] = listOf(1, "session-1", 1L, null, 100L)
+        requests["syncTransactionHistory"] = listOf(1, "session-1", 1L)
         requests["qrParse"] = listOf(1, "session-1", 1L, "{}")
         requests["qrCreateSignRequest"] = listOf(1, "session-1", 1L, 0x0400, account, byteArrayOf(4, 0), 120L)
         requests["qrScan"] = listOf(1, "session-1", 1L)
@@ -226,28 +268,49 @@ class CitizenSdkFlutterCodecTest {
     }
 
     @Test
-    fun `account bytes decimal amount and utf8 remark are canonical`() {
-        val account = "0x" + "ab".repeat(32)
-        val request = CitizenSdkFlutterCodec.decode(
-            "transferWithRemark",
-            listOf(1, "session-1", 7L, account, "0x" + "cd".repeat(32), "100", "citizen"),
-        ) as CitizenSdkFlutterCodec.Request.TransferWithRemark
-        assertArrayEquals(ByteArray(32) { 0xab.toByte() }, request.sourceAccountId)
-        assertEquals(account, CitizenSdkFlutterCodec.encodeHash32(request.sourceAccountId))
-        assertEquals("100", request.amountFen)
+    fun `wallet state projection keeps global order cold mode and default first`() {
+        val cold = CitizenWalletStateAccount(
+            CitizenWalletSignMode.COLD,
+            1,
+            null,
+            ByteArray(32) { 0x22.toByte() },
+            "w5CZACAABUbK4jspzPB5be9trhtSgRCRZFafGe7kvFPvxq8M2",
+            "cold",
+            "2",
+            true,
+        )
+        val tuple = CitizenSdkFlutterCodec.walletState(CitizenWalletState("7", null, listOf(cold)))
+        assertEquals("7", tuple[0])
+        assertNull(tuple[1])
+        val account = (tuple[2] as List<*>).single() as List<*>
+        assertEquals("cold", account[0])
+        assertEquals(1L, account[1])
+        assertNull(account[2])
+        assertEquals(true, account[7])
+    }
 
-        for (amount in listOf("", "00", "+1", "-1", "0")) {
+    @Test
+    fun `transaction history cursor and limit are canonical`() {
+        val cursor = "0x00112233445566778899aabbccddeeff"
+        val request = CitizenSdkFlutterCodec.decode(
+            "getTransactionHistory",
+            listOf(1, "session-1", 7L, cursor, 25L),
+        ) as CitizenSdkFlutterCodec.Request.TransactionHistory
+        assertEquals(cursor, request.beforeExecutionId)
+        assertEquals(25, request.limit)
+
+        for (limit in listOf(0L, 101L)) {
             assertThrows(CitizenSdkFlutterCodec.ContractFailure::class.java) {
                 CitizenSdkFlutterCodec.decode(
-                    "transferWithRemark",
-                    listOf(1, "session-1", 8L, account, account, amount, ""),
+                    "getTransactionHistory",
+                    listOf(1, "session-1", 8L, null, limit),
                 )
             }
         }
         assertThrows(CitizenSdkFlutterCodec.ContractFailure::class.java) {
             CitizenSdkFlutterCodec.decode(
-                "transferWithRemark",
-                listOf(1, "session-1", 9L, account, account, "1", "旅".repeat(34)),
+                "getTransactionHistory",
+                listOf(1, "session-1", 9L, "0X00112233445566778899aabbccddeeff", 1L),
             )
         }
     }
@@ -299,13 +362,10 @@ class CitizenSdkFlutterCodecTest {
             )
         }
 
-        val tooManyAccounts = List(CitizenSdkFlutterCodec.MAXIMUM_HISTORY_ACCOUNTS + 1) {
-            account
-        }
         assertThrows(CitizenSdkFlutterCodec.ContractFailure::class.java) {
             CitizenSdkFlutterCodec.decode(
-                "syncFinalizedHistory",
-                listOf(1, "session-1", 15L, tooManyAccounts),
+                "getTransactionHistory",
+                listOf(1, "session-1", 15L, null, 101L),
             )
         }
 
@@ -317,23 +377,6 @@ class CitizenSdkFlutterCodecTest {
                 "addWalletAccounts",
                 listOf(1, "session-1", 16L, tooManyIndices),
             )
-        }
-        for (request in listOf(
-            listOf(1, "session-1", 17L, account, account, "1", "x".repeat(100)),
-            listOf(
-                1,
-                "session-1",
-                18L,
-                account,
-                account,
-                "340282366920938463463374607431768211456",
-                "",
-            ),
-        )) {
-            val failure = assertThrows(CitizenSdkFlutterCodec.ContractFailure::class.java) {
-                CitizenSdkFlutterCodec.decode("transferWithRemark", request)
-            }
-            assertEquals("invalidArgument", failure.stableName)
         }
     }
 

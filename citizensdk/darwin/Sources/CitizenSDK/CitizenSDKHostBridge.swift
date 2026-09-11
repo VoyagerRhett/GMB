@@ -458,7 +458,7 @@ private func citizenSDKVaultWrap(_ context: UnsafeMutableRawPointer?, _ operatio
         result.abi_version = 1
         result.host_operation_id = operationID
         result.error_code = 0
-        result.kind = citizenSDKHostBytesWrappedDEK
+        result.kind = CITIZENSDK_HOST_BYTES_WRAPPED_DEK
         wrapped.withUnsafeBytes { bytes in
             result.bytes.data = bytes.bindMemory(to: UInt8.self).baseAddress
             result.bytes.len = UInt64(bytes.count)
@@ -467,11 +467,6 @@ private func citizenSDKVaultWrap(_ context: UnsafeMutableRawPointer?, _ operatio
         return 0
     } catch { return citizenSDKCode(error) }
 }
-
-/// Exact Swift projection of C ABI macro
-/// `CITIZENSDK_HOST_BYTES_WRAPPED_DEK UINT32_C(1)`. The macro expression is
-/// not importable by Swift, so tests pin this typed value to the frozen header.
-internal let citizenSDKHostBytesWrappedDEK: UInt32 = 1
 
 private func citizenSDKVaultUnwrap(_ context: UnsafeMutableRawPointer?, _ operationID: UInt64,
                                    _ wallet: citizensdk_host_wallet_key_ref_v1_t,

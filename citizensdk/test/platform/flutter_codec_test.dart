@@ -2,7 +2,11 @@ import 'dart:convert';
 
 import 'package:citizen_sdk/src/api/citizen_sdk_error.dart';
 import 'package:citizen_sdk/src/api/citizen_sdk_events.dart';
+import 'package:citizen_sdk/src/crypto/account_codec.dart';
 import 'package:citizen_sdk/src/models/citizen_capability.dart';
+import 'package:citizen_sdk/src/models/citizen_chain_state.dart';
+import 'package:citizen_sdk/src/models/citizen_transaction.dart';
+import 'package:citizen_sdk/src/models/citizen_wallet.dart';
 import 'package:citizen_sdk/src/platform/citizen_sdk_flutter_codec.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -95,12 +99,30 @@ void main() {
       'close',
       'getCapabilities',
       'getFinalizedHead',
+      'getSyncStatus',
+      'getBestHead',
+      'getFinalizedBlockAt',
+      'resolveFinalizedBlock',
+      'getBlockHeader',
+      'getBlockBody',
+      'getRuntimeContext',
+      'getStorage',
+      'getStorageBatch',
+      'getSystemEvents',
+      'exportState',
+      'importState',
       'getGenesisHash',
       'getAccountBalance',
       'getAccountBalances',
       'getAccountNonce',
       'getFeeSnapshot',
       'getWalletProfile',
+      'getWalletState',
+      'importColdAccountId',
+      'importColdAccountSs58',
+      'reorderWalletAccountsWithoutDefaultChange',
+      'renameAccount',
+      'deleteAccount',
       'viewAccountPrivateKey',
       'createWallet',
       'importWallet',
@@ -111,10 +133,19 @@ void main() {
       'deleteWallet',
       'reconcileWalletCleanup',
       'signWalletPayload',
+      'beginSigning',
+      'consumeExternalSignature',
+      'cancelSigning',
+      'beginDefaultAccountChange',
+      'consumeDefaultAccountChange',
       'verifySignature',
-      'transferWithRemark',
-      'initializeFinalizedHistory',
-      'syncFinalizedHistory',
+      'prepareTransaction',
+      'cancelPreparedTransaction',
+      'executePreparedTransaction',
+      'consumePreparedTransactionQrResponse',
+      'cancelPreparedTransactionExecution',
+      'getTransactionHistory',
+      'syncTransactionHistory',
       'qrParse',
       'qrCreateSignRequest',
       'qrConsumeSignResponse',
@@ -137,6 +168,7 @@ void main() {
     }
 
     final account = _account(1);
+    final finalizedBlock = <Object?>[account, '1', 'finalized'];
     final requestFields = <String, List<Object?>>{
       for (final method in <String>[
         'start',
@@ -144,20 +176,47 @@ void main() {
         'close',
         'getCapabilities',
         'getFinalizedHead',
+        'getSyncStatus',
+        'getBestHead',
+        'exportState',
         'getGenesisHash',
         'getFeeSnapshot',
         'getWalletProfile',
+        'getWalletState',
         'importWallet',
         'deleteWallet',
         'reconcileWalletCleanup',
       ])
         method: const <Object?>[],
+      'getFinalizedBlockAt': const <Object?>['1'],
+      'resolveFinalizedBlock': <Object?>[account, '1'],
+      'getBlockHeader': <Object?>[finalizedBlock],
+      'getBlockBody': <Object?>[finalizedBlock],
+      'getRuntimeContext': <Object?>[finalizedBlock],
+      'getStorage': <Object?>[
+        finalizedBlock,
+        Uint8List.fromList(<int>[1]),
+      ],
+      'getStorageBatch': <Object?>[
+        finalizedBlock,
+        <Uint8List>[
+          Uint8List.fromList(<int>[1]),
+          Uint8List.fromList(<int>[2]),
+        ],
+      ],
+      'getSystemEvents': <Object?>[finalizedBlock],
+      'importState': <Object?>[
+        1,
+        finalizedBlock,
+        Uint8List.fromList(<int>[1]),
+      ],
       for (final method in <String>[
         'getAccountBalance',
         'getAccountNonce',
         'viewAccountPrivateKey',
         'setActiveWalletAccount',
         'deleteWalletAccount',
+        'deleteAccount',
       ])
         method: <Object?>[account],
       'getAccountBalances': <Object?>[
@@ -168,17 +227,56 @@ void main() {
         <int>[1, 7],
       ],
       'renameWalletAccount': <Object?>[account, 'main'],
+      'renameAccount': <Object?>[account, 'main'],
+      'importColdAccountId': <Object?>[_account(2), 'cold'],
+      'importColdAccountSs58': <Object?>[
+        citizenSs58FromAccountId(_account(2)),
+        'cold',
+      ],
+      'reorderWalletAccountsWithoutDefaultChange': <Object?>[
+        '7',
+        <String>[account, _account(2)],
+      ],
       'signWalletPayload': <Object?>[
         account,
         Uint8List.fromList(<int>[1]),
       ],
-      'transferWithRemark': <Object?>[account, _account(2), '1', 'remark'],
-      'initializeFinalizedHistory': <Object?>[
-        <String>[account],
+      'beginSigning': <Object?>[
+        account,
+        Uint8List.fromList(<int>[1]),
+        'raw',
+        Uint8List(0),
+        'none',
+        0,
+        120,
       ],
-      'syncFinalizedHistory': <Object?>[
-        <String>[account],
+      'consumeExternalSignature': const <Object?>['signing-session', '{}'],
+      'cancelSigning': const <Object?>['signing-session'],
+      'beginDefaultAccountChange': <Object?>[
+        '7',
+        <String>[_account(2), account],
+        120,
       ],
+      'consumeDefaultAccountChange': const <Object?>['signing-session', '{}'],
+      'prepareTransaction': <Object?>[
+        account,
+        Uint8List.fromList(<int>[1, 2, 3]),
+      ],
+      'cancelPreparedTransaction': const <Object?>[
+        '0x01010101010101010101010101010101',
+      ],
+      'executePreparedTransaction': const <Object?>[
+        '0x01010101010101010101010101010101',
+      ],
+      'consumePreparedTransactionQrResponse': const <Object?>[
+        '0x02020202020202020202020202020202',
+        'QR_V1',
+      ],
+      'cancelPreparedTransactionExecution': const <Object?>[
+        '0x02020202020202020202020202020202',
+      ],
+      'getTransactionHistory': const <Object?>[null, 100],
+      'syncTransactionHistory': const <Object?>[],
       'qrParse': <Object?>['{}'],
       'qrCreateSignRequest': <Object?>[
         0x0400,
@@ -280,6 +378,221 @@ void main() {
         expectedSessionId: 'session-a',
         expectedRequestSequence: 1,
       ),
+      throwsA(isA<CitizenSdkException>()),
+    );
+  });
+
+  test('通用交易准备摘要严格解码且取消只接受一次性标识', () {
+    final source = _account(1);
+    final prepared = codec.decodePreparedTransaction(<Object?>[
+      '0x01010101010101010101010101010101',
+      source,
+      _account(2),
+      <Object?>[_account(3), '8', 'best'],
+      7,
+      9,
+      '11',
+    ]);
+    expect(prepared.sourceAccountId, citizenAccountIdBytes(source));
+    expect(prepared.callDataHash, citizenAccountIdBytes(_account(2)));
+    expect(prepared.bestBlock.finality, CitizenBlockFinality.best);
+    expect(prepared.nonce, BigInt.from(11));
+    expect(
+      () => codec.decodePreparedTransaction(<Object?>[
+        '0x01010101010101010101010101010101',
+        source,
+        _account(2),
+        <Object?>[_account(3), '8', 'finalized'],
+        7,
+        9,
+        '11',
+      ]),
+      throwsA(isA<CitizenSdkException>()),
+    );
+  });
+
+  test('通用交易执行严格解码QR_V1待签名与三种终态', () {
+    final source = _account(1);
+    final callHash = _account(2);
+    final transactionHash = _account(3);
+    const executionId = '0x02020202020202020202020202020202';
+    final block = <Object?>[_account(4), '9', 'finalized'];
+    final pending = codec.decodeTransactionExecution(<Object?>[
+      1,
+      executionId,
+      source,
+      callHash,
+      null,
+      '2000000000',
+      'QR_V1',
+      null,
+      null,
+      null,
+    ]);
+    expect(pending, isA<CitizenTransactionExternalSigningPending>());
+    expect(
+      (pending as CitizenTransactionExternalSigningPending).qrRequest,
+      'QR_V1',
+    );
+
+    final success = codec.decodeTransactionExecution(<Object?>[
+      2,
+      executionId,
+      source,
+      callHash,
+      transactionHash,
+      null,
+      null,
+      <Object?>['success', block, 1, null, null, null],
+      null,
+      null,
+    ]);
+    expect(
+      (success as CitizenTransactionExecutionCompleted).resolution,
+      CitizenTransactionResolution.finalizedSuccess,
+    );
+    final failure = codec.decodeTransactionExecution(<Object?>[
+      3,
+      executionId,
+      source,
+      callHash,
+      transactionHash,
+      null,
+      null,
+      <Object?>['failed', block, 1, 3, 3, 4],
+      null,
+      null,
+    ]);
+    expect(
+      (failure as CitizenTransactionExecutionCompleted).resolution,
+      CitizenTransactionResolution.finalizedFailed,
+    );
+    final pool = codec.decodeTransactionExecution(<Object?>[
+      4,
+      executionId,
+      source,
+      callHash,
+      transactionHash,
+      null,
+      null,
+      null,
+      'usurped',
+      _account(5),
+    ]);
+    expect(
+      (pool as CitizenTransactionExecutionCompleted).replacementHash,
+      citizenAccountIdBytes(_account(5)),
+    );
+
+    for (final malformed in <List<Object?>>[
+      <Object?>[
+        1,
+        executionId,
+        source,
+        callHash,
+        transactionHash,
+        '2000000000',
+        'QR_V1',
+        null,
+        null,
+        null,
+      ],
+      <Object?>[
+        1,
+        executionId,
+        source,
+        callHash,
+        null,
+        '2000000000',
+        'x' * 2332,
+        null,
+        null,
+        null,
+      ],
+      <Object?>[
+        2,
+        executionId,
+        source,
+        callHash,
+        transactionHash,
+        null,
+        'QR_V1',
+        <Object?>['success', block, 1, null, null, null],
+        null,
+        null,
+      ],
+      <Object?>[
+        4,
+        executionId,
+        source,
+        callHash,
+        transactionHash,
+        null,
+        null,
+        null,
+        null,
+        null,
+      ],
+    ]) {
+      expect(
+        () => codec.decodeTransactionExecution(malformed),
+        throwsA(isA<CitizenSdkException>()),
+      );
+    }
+  });
+
+  test('统一钱包状态严格校验冷热投影、全局顺序与默认首项', () {
+    final hot = _account(1);
+    final cold = _account(2);
+    final state = <Object?>[
+      '9',
+      <Object?>[
+        0,
+        'created',
+        '1',
+        hot,
+        hot,
+        <Object?>[
+          <Object?>[0, hot, citizenSs58FromAccountId(hot), 'hot', '1', true],
+        ],
+      ],
+      <Object?>[
+        <Object?>[
+          'hot',
+          0,
+          0,
+          hot,
+          citizenSs58FromAccountId(hot),
+          'hot',
+          '1',
+          true,
+        ],
+        <Object?>[
+          'cold',
+          1,
+          null,
+          cold,
+          citizenSs58FromAccountId(cold),
+          'cold',
+          '2',
+          false,
+        ],
+      ],
+    ];
+    final decoded = codec.decodeWalletState(state);
+    expect(decoded.revision, BigInt.from(9));
+    expect(decoded.defaultAccount?.accountId, hot);
+    expect(decoded.accounts.last.signMode, CitizenWalletSignMode.cold);
+    final invalidCold = List<Object?>.from(
+      ((state[2]! as List<Object?>)[1]! as List<Object?>),
+    );
+    invalidCold[7] = true;
+    expect(
+      () => codec.decodeWalletState(<Object?>[
+        state[0],
+        state[1],
+        <Object?>[(state[2]! as List<Object?>)[0], invalidCold],
+      ]),
       throwsA(isA<CitizenSdkException>()),
     );
   });
@@ -565,39 +878,24 @@ void main() {
     expect(lifecycle.sessionId, 'session-a');
     expect(lifecycle.eventSequence, 1);
 
-    final finalized = codec.decodeEvent(<Object?>[
+    final history = codec.decodeEvent(<Object?>[
       1,
       'session-a',
       2,
-      'transferProgress',
-      <Object?>[9, 'finalized', _block(10), null, 0],
+      'historyChanged',
+      const <Object?>[],
     ]);
-    expect(finalized.eventSequence, 2);
+    expect(history.event, isA<CitizenSdkHistoryChanged>());
+
     expect(
-      (finalized.event as CitizenSdkTransferProgress).status,
-      CitizenTransferProgressStatus.finalized,
-    );
-    final invalid = codec.decodeEvent(<Object?>[
-      1,
-      'session-a',
-      3,
-      'transferProgress',
-      const <Object?>[9, 'invalid', null, null, 0],
-    ]);
-    expect(
-      (invalid.event as CitizenSdkTransferProgress).status,
-      CitizenTransferProgressStatus.invalid,
-    );
-    final usurped = codec.decodeEvent(<Object?>[
-      1,
-      'session-a',
-      4,
-      'transferProgress',
-      <Object?>[9, 'usurped', null, _account(8), 0],
-    ]);
-    expect(
-      (usurped.event as CitizenSdkTransferProgress).status,
-      CitizenTransferProgressStatus.usurped,
+      () => codec.decodeEvent(<Object?>[
+        1,
+        'session-a',
+        3,
+        'transferProgress',
+        const <Object?>[9, 'invalid', null, null, 0],
+      ]),
+      throwsA(isA<CitizenSdkException>()),
     );
 
     expect(
@@ -697,25 +995,19 @@ void main() {
     );
   });
 
-  test('history 在复制 accountId 前拒绝超过 1990 个账户', () {
+  test('history 在平台调用前拒绝超限分页', () {
     expect(
       () => codec.encodeRequest(
-        method: 'syncFinalizedHistory',
+        method: 'getTransactionHistory',
         sessionId: 'session-a',
         requestSequence: 1,
-        fields: <Object?>[
-          List<Object?>.filled(
-            CitizenSdkFlutterCodec.maximumHistoryAccounts + 1,
-            _account(1),
-            growable: false,
-          ),
-        ],
+        fields: const <Object?>[null, 101],
       ),
       throwsA(isA<CitizenSdkException>()),
     );
   });
 
-  test('add与十进制在逐项转换前执行固定资源上限', () {
+  test('add与分页标识在逐项转换前执行固定资源上限', () {
     expect(
       () => codec.encodeRequest(
         method: 'addWalletAccounts',
@@ -733,15 +1025,10 @@ void main() {
     );
     expect(
       () => codec.encodeRequest(
-        method: 'transferWithRemark',
+        method: 'getTransactionHistory',
         sessionId: 'session-a',
         requestSequence: 2,
-        fields: <Object?>[
-          _account(1),
-          _account(2),
-          List<String>.filled(40, '1').join(),
-          '',
-        ],
+        fields: const <Object?>['0xAB', 100],
       ),
       throwsA(isA<CitizenSdkException>()),
     );
@@ -852,41 +1139,43 @@ void main() {
     );
   });
 
-  test('history严格校验游标、记录、finalized转账和复合键', () {
-    expect(codec.decodeHistory(_history()).records, hasLength(1));
-
-    final regressedCursor = _history();
-    final cursors = regressedCursor[1]! as List<Object?>;
-    final cursor = cursors.single! as List<Object?>;
-    cursor[2] = _block(0);
+  test('history严格校验execution记录、状态、游标和唯一键', () {
     expect(
-      () => codec.decodeHistory(regressedCursor),
+      codec.decodeTransactionHistoryPage(_history()).records,
+      hasLength(1),
+    );
+
+    final wrongCursor = _history();
+    wrongCursor[2] = _executionId(2);
+    expect(
+      () => codec.decodeTransactionHistoryPage(wrongCursor),
       throwsA(isA<CitizenSdkException>()),
     );
 
     final invalidRecord = _history();
-    final records = invalidRecord[2]! as List<Object?>;
+    final records = invalidRecord[1]! as List<Object?>;
     final record = records.single! as List<Object?>;
-    record[4] = '0';
+    record[4] = 'finalizedSuccess';
     expect(
-      () => codec.decodeHistory(invalidRecord),
+      () => codec.decodeTransactionHistoryPage(invalidRecord),
       throwsA(isA<CitizenSdkException>()),
     );
 
-    final invalidTransfer = _history();
-    final transfers = invalidTransfer[3]! as List<Object?>;
-    final transfer = transfers.single! as List<Object?>;
-    transfer[7] = 'incoming';
+    final invalidTime = _history();
+    final timedRecord =
+        (invalidTime[1]! as List<Object?>).single! as List<Object?>;
+    timedRecord[9] = '0';
     expect(
-      () => codec.decodeHistory(invalidTransfer),
+      () => codec.decodeTransactionHistoryPage(invalidTime),
       throwsA(isA<CitizenSdkException>()),
     );
 
     final duplicate = _history();
-    final duplicateCursors = duplicate[1]! as List<Object?>;
-    duplicateCursors.add(List<Object?>.from(duplicateCursors.single! as List));
+    final duplicateRecords = duplicate[1]! as List<Object?>;
+    duplicateRecords.add(List<Object?>.from(duplicateRecords.single! as List));
+    duplicate[2] = null;
     expect(
-      () => codec.decodeHistory(duplicate),
+      () => codec.decodeTransactionHistoryPage(duplicate),
       throwsA(isA<CitizenSdkException>()),
     );
   });
@@ -912,37 +1201,22 @@ List<Object?> _capabilities() => <Object?>[
 List<Object?> _history() => <Object?>[
   '1',
   <Object?>[
-    <Object?>[_account(1), _block(1), _block(2)],
-  ],
-  <Object?>[
     <Object?>[
+      _executionId(1),
       _account(1),
-      _account(9),
-      '0',
       _account(2),
-      '1',
+      _account(9),
       'pending',
       null,
       null,
+      null,
       '1',
       '1',
-      '',
       null,
     ],
   ],
-  <Object?>[
-    <Object?>[
-      _account(1),
-      _account(1),
-      _account(2),
-      '1',
-      _block(2),
-      0,
-      0,
-      'outgoing',
-      'OnchainTransaction',
-      '',
-      Uint8List(0),
-    ],
-  ],
+  _executionId(1),
 ];
+
+String _executionId(int byte) =>
+    '0x${List<String>.filled(16, byte.toRadixString(16).padLeft(2, '0')).join()}';

@@ -393,7 +393,7 @@ impl TransactionHistoryStore for FakeHistoryStore {
                     "fake history storage failure",
                 ))
             } else {
-                TransactionHistoryState::try_new(0, vec![], vec![], vec![])
+                TransactionHistoryState::try_new(0, vec![])
             }
         })
     }

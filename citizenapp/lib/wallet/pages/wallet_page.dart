@@ -14,8 +14,8 @@ import 'package:citizenapp/qr/scan_dispatch_flow.dart';
 import 'package:citizenapp/signer/qr_signer.dart';
 import 'package:citizenapp/rpc/chain_rpc.dart';
 import 'package:citizenapp/rpc/smoldot_client.dart';
-import 'package:citizenapp/transaction/shared/local_tx_store.dart';
-import 'package:citizenapp/transaction/shared/tx_auto_refresh_mixin.dart';
+import 'package:citizenapp/transaction/history/data/local_tx_store.dart';
+import 'package:citizenapp/transaction/history/presentation/tx_auto_refresh_mixin.dart';
 import 'package:citizenapp/transaction/offchain-transaction/services/clearing_bank_prefs.dart';
 import 'package:citizenapp/isar/wallet_isar.dart';
 import 'package:citizenapp/ui/widgets/shimmer_loading.dart';
@@ -31,8 +31,8 @@ import 'package:citizenapp/wallet/widgets/add_account_sheet.dart';
 import 'package:citizenapp/wallet/widgets/wallet_action_card.dart';
 import 'package:citizenapp/wallet/widgets/wallet_identity_card.dart';
 import 'package:citizenapp/wallet/widgets/wallet_onchain_balance_card.dart';
-import 'package:citizenapp/wallet/pages/transaction_history_page.dart';
-import 'package:citizenapp/rpc/chain_tx_monitor.dart';
+import 'package:citizenapp/transaction/history/presentation/transaction_history_page.dart';
+import 'package:citizenapp/transaction/history/chain/wallet_transaction_history_sync.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
 class WalletTab extends StatefulWidget {
@@ -259,7 +259,6 @@ String? extractColdWalletImportAddress(String raw) {
       return null;
   }
 }
-
 /// 钱包列表页（单列横向卡片）：
 /// - 正常态：唯一热钱包的 `//index` 账户行 + 冷钱包行并列，点账户行进账户详情，
 ///   点冷钱包行进冷钱包详情；

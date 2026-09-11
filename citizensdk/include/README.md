@@ -1,6 +1,6 @@
 # CitizenSDK C/C++ headers
 
-当前公共 Core 为 89 个函数；新增模块验证、显式模块构造、无实例验签、四个链查询/结果入口及九个 QR 入口，既有 ABI v1
+当前公共 Core 为 117 个函数；统一钱包状态、通用冷热签名、默认账户授权、安全链读取、通用交易准备与冷热执行闭环已加入，既有 ABI v1
 结构和数值保持。当前模块化与新增链查询仅完成源码、注释、合同和测试用例更新，尚未完成真实构建、平台测试或硬件验收；下文旧分步运行记录仅为历史证据。
 
 `citizensdk.h` is the only product header. It includes
@@ -101,21 +101,19 @@ consumes the handle exactly once; a synchronous acceptance failure restores it.
 Copy, release and commit all require the owning `citizensdk_handle_t`; another
 live instance cannot guess, read, release or consume the recovery phrase.
 
-`citizensdk_transfer_with_remark` is the wallet transaction path: it constructs
-against one exact Runtime, signs inside Rust, atomically records pending before
-broadcast, submits, watches and returns only a proven finalized execution or an
-explicit pool rejection. A dropped/retracted/timed-out/interrupted watch leaves
-durable pending/in-block history intact and completes with a retryable error; it
-is never projected as a successful result. Its complete terminal watch runs on
-the dedicated four-thread watch pool rather than the short-operation pool.
-Cancellation completes with `CITIZENSDK_ERROR_CANCELLED`; dropping the active
-future does not clear an already durable pending/in-block record.
+`citizensdk_prepare_transaction` accepts an application-encoded opaque
+RuntimeCall and returns only safe preparation facts. Execution consumes that
+preparation once, signs in Rust or completes the existing `QR_V1` cold-signing
+exchange, atomically persists the exact recovery authorization before provider
+access, then submits and watches. Cancellation does not erase durable state or
+withdraw an already broadcast transaction.
 
-History initialization anchors new account cursors to current finality. Batch
-sync advances no more than the Core's fixed 120-block limit. Result getters
-expose cursor, local submission and finalized transfer collections separately;
-finalized remarks include both the lossy UTF-8 display and the original Runtime
-bytes so non-UTF-8 chain facts round-trip without corruption.
+`citizensdk_get_transaction_history` reads deterministic newest-first pages of
+SDK-submitted generic executions. `citizensdk_sync_transaction_history`
+reconciles at most 32 non-terminal records and returns the resulting page.
+Getters expose only hashes, protocol status, verified block/System outcome and
+timestamps; callData, nonce, signature and signed extrinsic remain private.
+Destination, amount, remark, direction and business events belong to the App.
 
 The callback runs on a CitizenSDK dispatch thread. Do not destroy the instance
 from inside that callback; the call returns `CITIZENSDK_ERROR_BUSY` without
@@ -198,5 +196,5 @@ being installed remains lossless beyond 64 events and under concurrency.
 ## Windows 平台 Host 头
 
 `../windows/include/citizen_sdk/citizensdk_host.h` 提供 14 项资源装配 API，并不替代
-本目录 89 项 Core ABI。C++ Host 为 header-only 所有权包装，不导出 STL ABI。HWND
+本目录 121 项 Core ABI。C++ Host 为 header-only 所有权包装，不导出 STL ABI。HWND
 仅作 UI owner 配置，设备口令、CNG 句柄及秘密不进入公开头。Windows 运行验收尚未执行。

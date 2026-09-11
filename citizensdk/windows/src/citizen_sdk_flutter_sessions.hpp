@@ -35,10 +35,20 @@ class NativeTransport {
   // Result is borrowed for Observer's dynamic extent. Transport owns and
   // releases it exactly once, including decoder exceptions/unknown routes.
   virtual Value copy_result(Method method, citizensdk_result_handle_t result) = 0;
-  virtual Value copy_progress(citizensdk_result_handle_t result, int64_t sequence) = 0;
   virtual citizensdk_lifecycle_t lifecycle_state() = 0;
   virtual Value capability_snapshot() = 0;
   virtual Value genesis_hash() = 0;
+  virtual Value cancel_signing(const DecodedRequest &) {
+    throw ContractFailure(CITIZENSDK_ERROR_UNSUPPORTED, "Signing cancellation is unavailable");
+  }
+  virtual Value cancel_prepared_transaction(const DecodedRequest &) {
+    throw ContractFailure(CITIZENSDK_ERROR_UNSUPPORTED,
+                          "Prepared transaction cancellation is unavailable");
+  }
+  virtual Value cancel_transaction_execution(const DecodedRequest &) {
+    throw ContractFailure(CITIZENSDK_ERROR_UNSUPPORTED,
+                          "Transaction execution cancellation is unavailable");
+  }
   virtual Value qr(const DecodedRequest &) {
     throw ContractFailure(CITIZENSDK_ERROR_UNSUPPORTED, "QR transport is unavailable");
   }

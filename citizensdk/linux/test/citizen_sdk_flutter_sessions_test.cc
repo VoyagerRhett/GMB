@@ -37,7 +37,7 @@ class FakeTransport final : public csf::NativeTransport {
     if (native_method == csf::Method::start) lifecycle = CITIZENSDK_LIFECYCLE_RUNNING;
     if (native_method == csf::Method::stop) lifecycle = CITIZENSDK_LIFECYCLE_STOPPED;
     const auto id = next_id++;
-    if ((defer_transfer && native_method == csf::Method::transfer_with_remark) ||
+    if ((defer_history && native_method == csf::Method::get_transaction_history) ||
         (defer_profile && native_method == csf::Method::get_wallet_profile)) {
       deferred_id = id; *out = id; return CITIZENSDK_OK;
     }
@@ -63,15 +63,16 @@ class FakeTransport final : public csf::NativeTransport {
       }
       return csf::Value::list({csf::Value::list(std::move(balances))});
     }
+    if (method == csf::Method::get_transaction_history ||
+        method == csf::Method::sync_transaction_history)
+      return csf::Value::list({csf::Value::list({csf::Value::string("0"),
+          csf::Value::list({}), csf::Value::null()})});
     if (method == csf::Method::start || method == csf::Method::stop ||
         method == csf::Method::delete_wallet_account ||
         method == csf::Method::delete_wallet ||
         method == csf::Method::reconcile_wallet_cleanup)
       return csf::Value::list({}); // canonical Core EMPTY, not a fake profile
     return csf::Value::list({csf::Value::string(csf::method_name(method))});
-  }
-  csf::Value copy_progress(citizensdk_result_handle_t, int64_t sequence) override {
-    return csf::Value::list({csf::Value::integer(sequence), csf::Value::string("broadcast")});
   }
   citizensdk_lifecycle_t lifecycle_state() override { return lifecycle; }
   csf::Value genesis_hash() override {
@@ -136,7 +137,7 @@ class FakeTransport final : public csf::NativeTransport {
   int wallet_cancelled{};
   int closed{};
   int retired{};
-  bool defer_transfer{};
+  bool defer_history{};
   bool fail_close{};
   bool fail_accept{};
   bool defer_profile{};
@@ -348,7 +349,7 @@ int main() {
       csf::Method::set_active_wallet_account, csf::Method::rename_wallet_account,
       csf::Method::delete_wallet_account, csf::Method::delete_wallet,
       csf::Method::reconcile_wallet_cleanup, csf::Method::sign_wallet_payload,
-      csf::Method::initialize_finalized_history, csf::Method::sync_finalized_history,
+      csf::Method::get_transaction_history, csf::Method::sync_transaction_history,
   };
   int64_t sequence = 1;
   int replies = 0;
@@ -375,18 +376,18 @@ int main() {
   drain_tasks(queue);
   assert(event_count == after_relisten);
 
-  // Close cancels an accepted transfer, waits for its terminal result, then
+  // Close cancels an accepted history request, waits for its terminal result, then
   // checkpoints a running Core and destroys Host. It does not claim rollback
   // of durable history.
-  native->defer_transfer = true;
+  native->defer_history = true;
   native->lifecycle = CITIZENSDK_LIFECYCLE_RUNNING;
-  auto transfer = request(csf::Method::transfer_with_remark, session, sequence++);
-  csf::Reply transfer_reply;
-  sessions->dispatch(transfer, [&](csf::Reply value) { transfer_reply = std::move(value); });
+  auto history = request(csf::Method::get_transaction_history, session, sequence++);
+  csf::Reply history_reply;
+  sessions->dispatch(history, [&](csf::Reply value) { history_reply = std::move(value); });
   bool close_replied = false;
   sessions->dispatch(request(csf::Method::close, session, sequence++),
                      [&](csf::Reply value) { close_replied = value.success; });
-  assert(transfer_reply.success && native->cancelled == 1);
+  assert(history_reply.success && native->cancelled == 1);
   assert(close_replied && native->closed == 1 && sessions->session_count() == 0);
   assert(native->accepted.back() == csf::Method::stop);
 
@@ -427,7 +428,7 @@ int main() {
   // Engine detach revokes a pending response and transfers the still-live
   // Host graph exactly once; it never invents a successful native completion.
   auto orphan_native = std::make_shared<FakeTransport>();
-  orphan_native->defer_transfer = true;
+  orphan_native->defer_history = true;
   auto orphan = csf::Sessions::create(
       [](uint32_t) { return csf::OpenEnvironment{}; },
       [&](std::function<void()> work) { queue.push_back(std::move(work)); },
@@ -436,7 +437,7 @@ int main() {
   orphan->dispatch(open, [&](csf::Reply value) { orphan_open = std::move(value); });
   const std::string orphan_id = text(items(orphan_open.value)[1]);
   bool orphan_replied = false;
-  orphan->dispatch(request(csf::Method::transfer_with_remark, orphan_id, 1),
+  orphan->dispatch(request(csf::Method::get_transaction_history, orphan_id, 1),
                    [&](csf::Reply) { orphan_replied = true; });
   orphan->detach();
   orphan->detach();

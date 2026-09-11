@@ -539,7 +539,6 @@ name = "citizen-sdk-qr"
 version = "1.0.0"
 dependencies = [
  "base64",
- "blake2",
  "citizen-sdk-contracts",
  "futures-executor",
  "getrandom 0.2.17",

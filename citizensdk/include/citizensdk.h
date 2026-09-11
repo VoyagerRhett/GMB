@@ -152,10 +152,10 @@ citizensdk_unsubscribe_capability_changes(citizensdk_handle_t handle);
  * first. Acceptance pre-reserves its event capacity and unique nonzero result
  * handle; monotonic-space exhaustion fails before a request ID is returned.
  * Every completion event.result must be inspected and released once. Raw
- * extrinsic watch and high-level wallet transfer watch are cancellable after
+ * extrinsic watch and prepared-transaction execution are cancellable after
  * acceptance; cancel on other state-mutating or atomic requests returns
- * UNSUPPORTED, so it never falsely promises rollback. Wallet transfer
- * cancellation is cooperative: REQUEST_COMPLETED waits for any already-entered
+ * UNSUPPORTED, so it never falsely promises rollback. Execution cancellation
+ * is cooperative: REQUEST_COMPLETED waits for any already-entered
  * host store/CAS or vault operation to return. Cancellation is not withdrawal
  * and never clears a durable Pending/InBlock or proven execution record. */
 /* For instances with persistent host chain storage, start restores the database
@@ -180,6 +180,26 @@ CITIZENSDK_API citizensdk_error_code_t citizensdk_get_best_head(
     citizensdk_handle_t handle, citizensdk_request_id_t *out_request_id);
 CITIZENSDK_API citizensdk_error_code_t citizensdk_get_finalized_head(
     citizensdk_handle_t handle, citizensdk_request_id_t *out_request_id);
+/* One typed smoldot snapshot; is_usable is authoritative. */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_get_sync_status(
+    citizensdk_handle_t handle, citizensdk_request_id_t *out_request_id);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_get_finalized_block_at(
+    citizensdk_handle_t handle, uint64_t number,
+    citizensdk_request_id_t *out_request_id);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_resolve_finalized_block(
+    citizensdk_handle_t handle, const uint8_t *hash_32, uint64_t number,
+    citizensdk_request_id_t *out_request_id);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_get_block_header_at(
+    citizensdk_handle_t handle, const citizensdk_block_ref_t *block,
+    citizensdk_request_id_t *out_request_id);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_get_block_body_at(
+    citizensdk_handle_t handle, const citizensdk_block_ref_t *block,
+    citizensdk_request_id_t *out_request_id);
+/* Protocol-level raw System.Events; finalized blocks only. Event interpretation
+ * and product semantics remain the integrating application's responsibility. */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_get_system_events_at(
+    citizensdk_handle_t handle, const citizensdk_block_ref_t *block,
+    citizensdk_request_id_t *out_request_id);
 CITIZENSDK_API citizensdk_error_code_t citizensdk_get_storage_at(
     citizensdk_handle_t handle, const citizensdk_block_ref_t *block,
     citizensdk_bytes_view_t key, citizensdk_request_id_t *out_request_id);
@@ -236,6 +256,62 @@ CITIZENSDK_API citizensdk_error_code_t citizensdk_wallet_word_suggestions(
  * returned. */
 CITIZENSDK_API citizensdk_error_code_t citizensdk_get_wallet_profile(
     citizensdk_handle_t handle, citizensdk_request_id_t *out_request_id);
+/* Unified secret-free hot/cold catalog. Accounts use one global order and its
+ * first item is the default account. This version deliberately exposes no
+ * unauthorised default-account mutation. */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_get_wallet_state(
+    citizensdk_handle_t handle, citizensdk_request_id_t *out_request_id);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_import_cold_account_id(
+    citizensdk_handle_t handle, const citizensdk_account_id_t *account_id,
+    citizensdk_bytes_view_t name, citizensdk_request_id_t *out_request_id);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_import_cold_account_ss58(
+    citizensdk_handle_t handle, citizensdk_bytes_view_t ss58_address,
+    citizensdk_bytes_view_t name, citizensdk_request_id_t *out_request_id);
+/* Optimistic concurrency and the unchanged-first-item rule close the ordinary
+ * reorder path against stale writes and default-account changes. */
+CITIZENSDK_API citizensdk_error_code_t
+citizensdk_reorder_wallet_accounts_without_default_change(
+    citizensdk_handle_t handle, uint64_t expected_revision,
+    const citizensdk_account_id_t *account_ids, uint32_t account_count,
+    citizensdk_request_id_t *out_request_id);
+/* Product-independent signing. payload/domain are opaque bytes; action is
+ * carried only by QR_V1 and is never interpreted or allowlisted by Core. The
+ * persisted wallet catalog selects hot Vault signing or a cold external
+ * session. TTL is 1..300 seconds. */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_begin_signing(
+    citizensdk_handle_t handle, const citizensdk_account_id_t *account_id,
+    citizensdk_bytes_view_t payload, citizensdk_signing_transform_t transform,
+    citizensdk_bytes_view_t domain,
+    citizensdk_external_signer_transport_t external_signer_transport,
+    uint16_t opaque_action, uint64_t ttl_seconds,
+    citizensdk_request_id_t *out_request_id);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_consume_external_signature(
+    citizensdk_handle_t handle, citizensdk_bytes_view_t session_id,
+    citizensdk_bytes_view_t response,
+    citizensdk_request_id_t *out_request_id);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_cancel_signing_session(
+    citizensdk_handle_t handle, citizensdk_bytes_view_t session_id,
+    uint8_t *out_cancelled);
+/* Default-account changes are SDK wallet mutations. The old default signs the
+ * full permutation; callers cannot inject the signer, action, payload or a raw
+ * default setter. Cold mode uses the existing independent CitizenWallet's
+ * QR_V1 action 12 adapter. */
+CITIZENSDK_API citizensdk_error_code_t
+citizensdk_begin_default_account_change(
+    citizensdk_handle_t handle, uint64_t expected_revision,
+    const citizensdk_account_id_t *account_ids, uint32_t account_count,
+    uint64_t ttl_seconds, citizensdk_request_id_t *out_request_id);
+CITIZENSDK_API citizensdk_error_code_t
+citizensdk_consume_default_account_change(
+    citizensdk_handle_t handle, citizensdk_bytes_view_t session_id,
+    citizensdk_bytes_view_t response,
+    citizensdk_request_id_t *out_request_id);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_rename_account(
+    citizensdk_handle_t handle, const citizensdk_account_id_t *account_id,
+    citizensdk_bytes_view_t name, citizensdk_request_id_t *out_request_id);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_delete_account(
+    citizensdk_handle_t handle, const citizensdk_account_id_t *account_id,
+    citizensdk_request_id_t *out_request_id);
 CITIZENSDK_API citizensdk_error_code_t citizensdk_prepare_wallet_creation(
     citizensdk_handle_t handle, citizensdk_wallet_word_count_t word_count,
     citizensdk_bytes_view_t password,
@@ -279,26 +355,41 @@ CITIZENSDK_API citizensdk_error_code_t citizensdk_sign_wallet_payload(
     citizensdk_bytes_view_t message,
     citizensdk_request_id_t *out_request_id);
 
-/* One high-level wallet transaction owns build, sr25519 signing,
- * pending-before-broadcast, submission, watch and finalized execution proof.
- * It never returns signed-extrinsic bytes. The terminal watch runs on the
- * dedicated long-lived pool. Cancellation completes with CANCELLED and drops
- * the active future without clearing durable pending/in-block history. */
-CITIZENSDK_API citizensdk_error_code_t citizensdk_transfer_with_remark(
+/* Product-independent transaction preparation. call_data is one complete canonical opaque SCALE
+ * RuntimeCall of 1..1MiB. Core reads the exact best runtime and source nonce; callers cannot
+ * provide nonce, era, tip, signer bytes, an options object, or an application action. */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_prepare_transaction(
     citizensdk_handle_t handle,
     const citizensdk_account_id_t *source_account_id,
-    const citizensdk_account_id_t *destination_account_id,
-    citizensdk_u128_t amount_fen, citizensdk_bytes_view_t remark,
+    citizensdk_bytes_view_t call_data,
     citizensdk_request_id_t *out_request_id);
+CITIZENSDK_API citizensdk_error_code_t
+citizensdk_prepared_transaction_release(
+    citizensdk_handle_t handle,
+    citizensdk_prepared_transaction_handle_t prepared_transaction);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_execute_prepared_transaction(
+    citizensdk_handle_t handle,
+    citizensdk_prepared_transaction_handle_t prepared_transaction,
+    citizensdk_request_id_t *out_request_id);
+CITIZENSDK_API citizensdk_error_code_t
+citizensdk_transaction_execution_consume_qr_response(
+    citizensdk_handle_t handle,
+    const citizensdk_transaction_execution_id_t *execution_id,
+    citizensdk_bytes_view_t response,
+    citizensdk_request_id_t *out_request_id);
+CITIZENSDK_API citizensdk_error_code_t
+citizensdk_transaction_execution_cancel(
+    citizensdk_handle_t handle,
+    const citizensdk_transaction_execution_id_t *execution_id);
 
-CITIZENSDK_API citizensdk_error_code_t
-citizensdk_initialize_finalized_history(
-    citizensdk_handle_t handle, const citizensdk_account_id_t *account_ids,
-    uint32_t account_count, citizensdk_request_id_t *out_request_id);
-CITIZENSDK_API citizensdk_error_code_t
-citizensdk_sync_finalized_history_batch(
-    citizensdk_handle_t handle, const citizensdk_account_id_t *account_ids,
-    uint32_t account_count, citizensdk_request_id_t *out_request_id);
+/* Reads only SDK-submitted generic transaction facts. Applications keep
+ * destination, amount, remark, direction and pallet/event projections. */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_get_transaction_history(
+    citizensdk_handle_t handle,
+    const citizensdk_transaction_execution_id_t *before_execution_id,
+    uint32_t limit, citizensdk_request_id_t *out_request_id);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_sync_transaction_history(
+    citizensdk_handle_t handle, citizensdk_request_id_t *out_request_id);
 
 CITIZENSDK_API citizensdk_error_code_t citizensdk_submit_extrinsic(
     citizensdk_handle_t handle, citizensdk_bytes_view_t signed_extrinsic,
@@ -329,6 +420,19 @@ citizensdk_result_copy_error_message(citizensdk_result_handle_t result,
                                      uint64_t *out_required);
 CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_block_ref(
     citizensdk_result_handle_t result, citizensdk_block_ref_t *out_block);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_sync_status(
+    citizensdk_result_handle_t result,
+    citizensdk_chain_sync_status_info_t *out_info);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_block_header(
+    citizensdk_result_handle_t result, citizensdk_block_header_info_t *out_info,
+    uint8_t *digest_buffer, uint64_t digest_capacity,
+    uint64_t *out_required);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_block_body_info(
+    citizensdk_result_handle_t result, citizensdk_block_body_info_t *out_info);
+CITIZENSDK_API citizensdk_error_code_t
+citizensdk_result_copy_block_body_extrinsic(
+    citizensdk_result_handle_t result, uint32_t index, uint8_t *buffer,
+    uint64_t capacity, uint64_t *out_required);
 CITIZENSDK_API citizensdk_error_code_t citizensdk_result_copy_storage(
     citizensdk_result_handle_t result, uint8_t *out_present, uint8_t *buffer,
     uint64_t capacity, uint64_t *out_required);
@@ -379,6 +483,35 @@ CITIZENSDK_API citizensdk_error_code_t citizensdk_result_estimate_fee(
 CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_wallet_profile(
     citizensdk_result_handle_t result,
     citizensdk_wallet_profile_info_t *out_info);
+/* The profile getter also accepts WALLET_STATE and projects its optional hot
+ * profile; state-account getters preserve the global hot/cold order. */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_wallet_state(
+    citizensdk_result_handle_t result,
+    citizensdk_wallet_state_info_t *out_info);
+CITIZENSDK_API citizensdk_error_code_t
+citizensdk_result_get_wallet_state_account(
+    citizensdk_result_handle_t result, uint32_t index,
+    citizensdk_wallet_state_account_info_t *out_info, uint8_t *ss58_buffer,
+    uint64_t ss58_capacity, uint64_t *out_ss58_required,
+    uint8_t *name_buffer, uint64_t name_capacity,
+    uint64_t *out_name_required);
+CITIZENSDK_API citizensdk_error_code_t
+citizensdk_result_get_signing_outcome(
+    citizensdk_result_handle_t result,
+    citizensdk_signing_outcome_info_t *out_info, uint8_t *signature_buffer,
+    uint64_t signature_capacity, uint64_t *out_signature_required,
+    uint8_t *session_id_buffer, uint64_t session_id_capacity,
+    uint64_t *out_session_id_required, uint8_t *transport_request_buffer,
+    uint64_t transport_request_capacity,
+    uint64_t *out_transport_request_required);
+CITIZENSDK_API citizensdk_error_code_t
+citizensdk_result_get_default_account_change(
+    citizensdk_result_handle_t result,
+    citizensdk_default_account_change_info_t *out_info,
+    uint8_t *session_id_buffer, uint64_t session_id_capacity,
+    uint64_t *out_session_id_required, uint8_t *transport_request_buffer,
+    uint64_t transport_request_capacity,
+    uint64_t *out_transport_request_required);
 CITIZENSDK_API citizensdk_error_code_t
 citizensdk_result_get_wallet_account_count(citizensdk_result_handle_t result,
                                            uint32_t *out_count);
@@ -393,30 +526,29 @@ CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_signature(
 CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_prepared_wallet(
     citizensdk_result_handle_t result,
     citizensdk_prepared_wallet_info_t *out_info);
-CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_wallet_transfer(
+CITIZENSDK_API citizensdk_error_code_t
+citizensdk_result_get_prepared_transaction(
     citizensdk_result_handle_t result,
-    citizensdk_wallet_transfer_info_t *out_info, uint8_t *reason_buffer,
+    citizensdk_prepared_transaction_info_t *out_info);
+CITIZENSDK_API citizensdk_error_code_t
+citizensdk_result_get_transaction_execution(
+    citizensdk_result_handle_t result,
+    citizensdk_transaction_execution_info_t *out_info,
+    uint8_t *session_id_buffer, uint64_t session_id_capacity,
+    uint64_t *out_session_id_required, uint8_t *transport_request_buffer,
+    uint64_t transport_request_capacity,
+    uint64_t *out_transport_request_required, uint8_t *reason_buffer,
     uint64_t reason_capacity, uint64_t *out_reason_required);
-CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_history_info(
-    citizensdk_result_handle_t result, citizensdk_history_info_t *out_info);
-CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_history_cursor(
+CITIZENSDK_API citizensdk_error_code_t
+citizensdk_result_get_transaction_history_page(
+    citizensdk_result_handle_t result,
+    citizensdk_transaction_history_page_info_t *out_info);
+CITIZENSDK_API citizensdk_error_code_t
+citizensdk_result_get_transaction_history_record(
     citizensdk_result_handle_t result, uint32_t index,
-    citizensdk_history_cursor_info_t *out_info);
-CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_history_record(
-    citizensdk_result_handle_t result, uint32_t index,
-    citizensdk_history_record_info_t *out_info, uint8_t *remark_buffer,
-    uint64_t remark_capacity, uint64_t *out_remark_required,
+    citizensdk_transaction_history_record_info_t *out_info,
     uint8_t *reason_buffer, uint64_t reason_capacity,
     uint64_t *out_reason_required);
-CITIZENSDK_API citizensdk_error_code_t
-citizensdk_result_get_finalized_transfer(
-    citizensdk_result_handle_t result, uint32_t index,
-    citizensdk_finalized_transfer_info_t *out_info,
-    uint8_t *source_pallet_buffer, uint64_t source_pallet_capacity,
-    uint64_t *out_source_pallet_required, uint8_t *remark_display_buffer,
-    uint64_t remark_display_capacity, uint64_t *out_remark_display_required,
-    uint8_t *remark_bytes_buffer, uint64_t remark_bytes_capacity,
-    uint64_t *out_remark_bytes_required);
 
 /* Double release is a stable INVALID_HANDLE error, not undefined behavior. */
 CITIZENSDK_API citizensdk_error_code_t

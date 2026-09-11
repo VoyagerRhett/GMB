@@ -238,13 +238,27 @@ fn failed_start_is_one_way_and_fallback_requires_a_fresh_provider() {
 }
 
 #[test]
-fn source_keeps_dropped_and_finality_timeout_non_terminal() {
-    let source = include_str!("../src/verified_chain_client.rs");
-    assert!(source.contains("\"dropped\" => ExtrinsicWatchEvent::Dropped"));
-    assert!(source
-        .contains("\"finalityTimeout\" => ExtrinsicWatchEvent::FinalityTimeout { block: None }"));
-    assert!(source.contains("ExtrinsicWatchEvent::FinalityTimeout { block }, false"));
-    assert!(source.contains("ExtrinsicWatchEvent::Invalid | ExtrinsicWatchEvent::Usurped { .. }"));
+fn transaction_watch_uses_the_upstream_v1_surface_without_legacy_fallback() {
+    let legacy = include_str!("../src/legacy.rs");
+    assert!(legacy.contains("\"transactionWatch_v1_submitAndWatch\""));
+    assert!(legacy.contains("\"transactionWatch_v1_unwatch\""));
+    assert!(!legacy.contains("author_submitAndWatchExtrinsic"));
+    assert!(!legacy.contains("author_unwatchExtrinsic"));
+
+    let parser = include_str!("../src/verified_chain_client.rs");
+    for event in [
+        "validated",
+        "broadcasted",
+        "bestChainBlockIncluded",
+        "finalized",
+        "invalid",
+        "dropped",
+        "error",
+    ] {
+        assert!(parser.contains(&format!("\"{event}\"")), "missing {event}");
+    }
+    assert!(parser.contains("map.get(\"numPeers\")"));
+    assert!(parser.contains("map.get(\"broadcasted\")"));
 }
 
 #[test]

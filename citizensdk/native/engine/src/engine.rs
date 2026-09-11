@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -10,17 +11,16 @@ use citizen_sdk_contracts::{
         TransactionHistoryState, TransactionHistoryStore, WalletProfileStore,
     },
     AccountId32, AccountNonce, AccountNonceSource, CapabilityName, CapabilityReason,
-    CapabilitySnapshot, ChainSigner, ContractErrorCode, ExecutionConclusion, ExportedChainState,
+    CapabilitySnapshot, ChainSigner, ChainSyncStatus, ContractErrorCode,
+    DefaultAccountChangeAuthorization, ExecutionConclusion, ExportedChainState,
     ExtrinsicWatchEvent, FinalizedAccountBalance, FinalizedBlockRef, Hash32, Modules,
-    RuntimeContext, SecretBuffer, SecretVault, SignedExtrinsic, Sr25519Signature,
-    StateImportReceipt, SubmittedExtrinsic, UnverifiedReason, VerifiedBlockRef,
-    VerifiedChainClient, WalletProfile,
+    OpaqueTransactionCall, PreparedTransactionSummary, RuntimeContext, SecretBuffer, SecretVault,
+    SignedExtrinsic, SigningCompletion, SigningIntent, Sr25519PublicKey, Sr25519Signature,
+    StateImportReceipt, SubmittedExtrinsic, TransactionExecutionCompleted, TransactionExecutionId,
+    TransactionPreparationId, UnverifiedReason, VerifiedBlockBody, VerifiedBlockHeader,
+    VerifiedBlockRef, VerifiedChainClient, WalletProfile, WalletSignMode, WalletState,
 };
 use zeroize::Zeroizing;
-
-#[cfg(all(test, feature = "chain"))]
-#[path = "chain_monitor_tests.rs"]
-mod chain_monitor_tests;
 
 use crate::{
     capabilities::{CapabilityProbe, CapabilityTracker},
@@ -35,20 +35,20 @@ use crate::{
         PreparedWalletCreation, SigningService, SystemWalletClock, WalletPrivateKeyView,
         WalletService,
     },
-    wallet_transfer_watch::{
-        NoopWalletTransferObserver, WalletTransferCancellation, WalletTransferObserver,
-        WalletTransferWatchResult,
-    },
 };
 
 #[cfg(feature = "chain")]
 use crate::{
     account_state::{AccountStateService, BestFeeSnapshot},
-    finalized_events::SYSTEM_EVENTS_STORAGE_KEY,
     finalized_history_runtime::{FinalizedHistoryRunGuard, FinalizedHistoryRuntime},
+    system_events::SYSTEM_EVENTS_STORAGE_KEY,
+    transaction_execution::{persist_submit_and_verify_exact, TransactionExecutionCancellation},
     transaction_history::TransactionHistoryService,
     transaction_outcome::{verify_transaction_outcome, TransactionEvidence},
-    wallet_transfer_watch::watch_recorded_transfer,
+    transaction_prepare::{
+        build_prepared_transaction, revalidate_prepared_transaction, PreparedTransaction,
+        PreparedTransactionRegistry,
+    },
 };
 
 /// Engine async return type; the embedding layer chooses the executor.
@@ -208,12 +208,7 @@ impl EngineComponents {
                 CapabilityName::TransactionBuild => (
                     cfg!(feature = "transactions"),
                     self.modules.contains(Modules::TRANSACTIONS),
-                    self.chain_client.is_some()
-                        && self.account_nonce_source.is_some()
-                        && self.signer.is_some()
-                        && self.secret_vault.is_some()
-                        && self.wallet_profiles.is_some()
-                        && self.encrypted_secrets.is_some(),
+                    self.chain_client.is_some() && self.account_nonce_source.is_some(),
                 ),
                 CapabilityName::TransactionSubmit | CapabilityName::TransactionVerify => (
                     cfg!(feature = "transactions"),
@@ -248,6 +243,32 @@ pub struct CitizenEngine {
     capabilities: Mutex<EngineCapabilityState>,
     state: Arc<Mutex<EngineState>>,
     chain_monitor: Mutex<crate::chain_monitor::ChainMonitorState>,
+    /// Non-persistent, instance-scoped transaction preparations. Entries contain no wallet secret.
+    #[cfg(feature = "chain")]
+    prepared_transactions: Mutex<PreparedTransactionRegistry>,
+    /// Claimed cold-sign executions; each value is the sole owner of its frozen signer material.
+    #[cfg(feature = "chain")]
+    transaction_executions: Mutex<HashMap<TransactionExecutionId, ClaimedTransactionExecution>>,
+}
+
+#[cfg(feature = "chain")]
+struct ClaimedTransactionExecution {
+    preparation_id: TransactionPreparationId,
+    prepared: PreparedTransaction,
+}
+
+/// Engine completion of `execute`: hot accounts are terminal, cold accounts expose only an
+/// adapter-ready intent which the FFI immediately binds to the existing QR_V1 session store.
+#[derive(Clone, Debug)]
+pub enum TransactionExecutionStart {
+    Completed(TransactionExecutionCompleted),
+    ExternalSigning {
+        execution_id: TransactionExecutionId,
+        source_account_id: AccountId32,
+        call_data_hash: Hash32,
+        action: u16,
+        intent: SigningIntent,
+    },
 }
 
 #[derive(Default)]
@@ -345,6 +366,10 @@ impl CitizenEngine {
             capabilities: Mutex::new(EngineCapabilityState::default()),
             state: Arc::new(Mutex::new(EngineState::default())),
             chain_monitor: Mutex::new(crate::chain_monitor::ChainMonitorState::default()),
+            #[cfg(feature = "chain")]
+            prepared_transactions: Mutex::new(PreparedTransactionRegistry::default()),
+            #[cfg(feature = "chain")]
+            transaction_executions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -465,6 +490,74 @@ impl CitizenEngine {
         })
     }
 
+    /// Return one coherent typed snapshot from the running light client. Applications consume
+    /// `is_usable` directly; they must not invent a second readiness algorithm from heights.
+    pub fn chain_sync_status(&self) -> EngineFuture<'_, ChainSyncStatus> {
+        Box::pin(async move {
+            self.require_capabilities(&[CapabilityName::ChainRead])?;
+            self.components
+                .chain_client()?
+                .get_sync_status()
+                .await
+                .map_err(EngineError::from)
+        })
+    }
+
+    /// Resolve one height through the provider's verified finalized ancestry.
+    pub fn finalized_block_at(&self, number: u64) -> EngineFuture<'_, FinalizedBlockRef> {
+        Box::pin(async move {
+            self.require_capabilities(&[CapabilityName::ChainRead])?;
+            self.components
+                .chain_client()?
+                .get_finalized_block_at(number)
+                .await
+                .map_err(EngineError::from)
+        })
+    }
+
+    /// Prove that a caller-supplied hash/height pair is the finalized canonical block.
+    pub fn resolve_finalized_block(
+        &self,
+        hash: Hash32,
+        number: u64,
+    ) -> EngineFuture<'_, FinalizedBlockRef> {
+        Box::pin(async move {
+            self.require_capabilities(&[CapabilityName::ChainRead])?;
+            self.components
+                .chain_client()?
+                .resolve_finalized_block(hash, number)
+                .await
+                .map_err(EngineError::from)
+        })
+    }
+
+    /// Read and cryptographically bind the decoded header to one exact verified block.
+    pub fn block_header_at(
+        &self,
+        block: VerifiedBlockRef,
+    ) -> EngineFuture<'_, VerifiedBlockHeader> {
+        Box::pin(async move {
+            self.require_capabilities(&[CapabilityName::ChainRead])?;
+            self.components
+                .chain_client()?
+                .get_block_header_at(block)
+                .await
+                .map_err(EngineError::from)
+        })
+    }
+
+    /// Read the ordered opaque extrinsics of one exact verified block.
+    pub fn block_body_at(&self, block: VerifiedBlockRef) -> EngineFuture<'_, VerifiedBlockBody> {
+        Box::pin(async move {
+            self.require_capabilities(&[CapabilityName::ChainRead])?;
+            self.components
+                .chain_client()?
+                .get_block_body_at(block)
+                .await
+                .map_err(EngineError::from)
+        })
+    }
+
     /// Read one storage key at one exact, provider-verified block.
     pub fn storage_at(
         &self,
@@ -493,6 +586,23 @@ impl CitizenEngine {
             self.components
                 .chain_client()?
                 .get_storage_batch_at(block, keys)
+                .await
+                .map_err(EngineError::from)
+        })
+    }
+
+    /// Return raw finalized `System.Events` bytes. Event decoding and all product semantics stay
+    /// in the integrating application; the SDK only fixes the protocol storage key and anchor.
+    #[cfg(feature = "chain")]
+    pub fn finalized_system_events_at(
+        &self,
+        block: FinalizedBlockRef,
+    ) -> EngineFuture<'_, Option<Vec<u8>>> {
+        Box::pin(async move {
+            self.require_capabilities(&[CapabilityName::ChainRead])?;
+            self.components
+                .chain_client()?
+                .get_finalized_storage_at(block, SYSTEM_EVENTS_STORAGE_KEY.to_vec())
                 .await
                 .map_err(EngineError::from)
         })
@@ -553,6 +663,352 @@ impl CitizenEngine {
         })
     }
 
+    /// Prepare one application-owned opaque RuntimeCall without reading or using any wallet key.
+    ///
+    /// The preparation is non-persistent, instance-bound and single-use. One source account may
+    /// have only one in-flight or prepared entry; unrelated source accounts remain concurrent.
+    #[cfg(feature = "chain")]
+    pub fn prepare_transaction(
+        &self,
+        source_account_id: AccountId32,
+        call_data: Vec<u8>,
+    ) -> EngineFuture<'_, PreparedTransactionSummary> {
+        let preparation = (|| {
+            self.require_capabilities(&[
+                CapabilityName::ChainRead,
+                CapabilityName::TransactionBuild,
+            ])?;
+            let call = OpaqueTransactionCall::try_new(call_data)?;
+            let generation = {
+                let state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+                if state.lifecycle != EngineLifecycle::Running {
+                    return Err(lifecycle_error(
+                        "transaction preparation requires a running Engine generation",
+                    ));
+                }
+                state.generation
+            };
+            let preparation_id = self
+                .prepared_transactions
+                .lock()
+                .map_err(|_| EngineError::StatePoisoned)?
+                .reserve(source_account_id)?;
+            Ok((
+                call,
+                generation,
+                preparation_id,
+                Arc::clone(self.components.chain_client()?),
+                Arc::clone(self.components.account_nonce_source().ok_or_else(|| {
+                    EngineError::CapabilityUnavailable("account_nonce_source_missing".to_owned())
+                })?),
+            ))
+        })();
+        Box::pin(async move {
+            let (call, generation, preparation_id, chain_client, nonce_source) = preparation?;
+            let built = build_prepared_transaction(
+                chain_client.as_ref(),
+                nonce_source.as_ref(),
+                preparation_id,
+                generation,
+                source_account_id,
+                call,
+            )
+            .await;
+            let prepared = match built {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.prepared_transactions
+                        .lock()
+                        .map_err(|_| EngineError::StatePoisoned)?
+                        .release_reservation(source_account_id, preparation_id);
+                    return Err(error);
+                }
+            };
+            let current = {
+                let state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+                state.lifecycle == EngineLifecycle::Running
+                    && state.generation == generation
+                    && prepared.generation() == generation
+            };
+            if !current {
+                self.prepared_transactions
+                    .lock()
+                    .map_err(|_| EngineError::StatePoisoned)?
+                    .release_reservation(source_account_id, preparation_id);
+                return Err(EngineError::contract(
+                    ContractErrorCode::Conflict,
+                    "transaction preparation outlived its Engine generation",
+                ));
+            }
+            let mut registry = self
+                .prepared_transactions
+                .lock()
+                .map_err(|_| EngineError::StatePoisoned)?;
+            let result = registry.commit(source_account_id, preparation_id, prepared);
+            if result.is_err() {
+                registry.release_reservation(source_account_id, preparation_id);
+            }
+            result
+        })
+    }
+
+    /// Cancel one instance-owned preparation. Unknown or already-consumed identities fail closed.
+    #[cfg(feature = "chain")]
+    pub fn cancel_prepared_transaction(
+        &self,
+        preparation_id: TransactionPreparationId,
+    ) -> Result<(), EngineError> {
+        #[cfg(feature = "chain")]
+        self.prepared_transactions
+            .lock()
+            .map_err(|_| EngineError::StatePoisoned)?
+            .cancel(preparation_id)
+            .map(|_| ())
+            .ok_or_else(|| {
+                EngineError::contract(
+                    ContractErrorCode::NotFound,
+                    "transaction preparation 不存在、已取消或已失效",
+                )
+            })
+    }
+
+    /// Atomically consume one preparation and run the generic hot/cold execution closure.
+    #[cfg(feature = "chain")]
+    pub fn execute_prepared_transaction(
+        &self,
+        preparation_id: TransactionPreparationId,
+    ) -> EngineFuture<'_, TransactionExecutionStart> {
+        let claimed = (|| {
+            self.require_capabilities(&[
+                CapabilityName::ChainRead,
+                CapabilityName::TransactionBuild,
+                CapabilityName::TransactionSubmit,
+                CapabilityName::TransactionVerify,
+                CapabilityName::History,
+                CapabilityName::WalletProfile,
+            ])?;
+            let state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+            if state.lifecycle != EngineLifecycle::Running {
+                return Err(lifecycle_error(
+                    "transaction execution requires a running Engine generation",
+                ));
+            }
+            let generation = state.generation;
+            drop(state);
+            let prepared = self
+                .prepared_transactions
+                .lock()
+                .map_err(|_| EngineError::StatePoisoned)?
+                .claim(preparation_id)
+                .ok_or_else(|| {
+                    EngineError::contract(
+                        ContractErrorCode::NotFound,
+                        "transaction preparation 不存在或已经消费",
+                    )
+                })?;
+            Ok((generation, prepared))
+        })();
+        Box::pin(async move {
+            let (generation, prepared) = claimed?;
+            let summary = prepared.summary();
+            let source = summary.source_account_id();
+            let result = async {
+                revalidate_prepared_transaction(
+                    &prepared,
+                    self.components.chain_client()?.as_ref(),
+                    self.components
+                        .account_nonce_source()
+                        .ok_or_else(|| component_missing("account_nonce_source"))?
+                        .as_ref(),
+                )
+                .await?;
+                let execution_is_current = {
+                    let state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+                    state.lifecycle == EngineLifecycle::Running && state.generation == generation
+                };
+                if !execution_is_current {
+                    return Err(EngineError::contract(
+                        ContractErrorCode::Conflict,
+                        "transaction execution outlived its Engine generation",
+                    ));
+                }
+                let execution_id = next_transaction_execution_id(&self.transaction_executions)?;
+                let intent = prepared.signing_intent()?;
+                match self.wallet_account_sign_mode(source).await? {
+                    Some(WalletSignMode::Hot) => {
+                        let completion = self.sign_wallet_intent(intent).await?;
+                        if completion.account_id() != source
+                            || completion.payload_hash()
+                                != prepared.signing_intent()?.payload_hash()?
+                        {
+                            return Err(EngineError::contract(
+                                ContractErrorCode::Integrity,
+                                "热签完成值与冻结交易不一致",
+                            ));
+                        }
+                        let completed = self
+                            .complete_claimed_transaction(
+                                execution_id,
+                                preparation_id,
+                                prepared,
+                                completion.signature(),
+                                None,
+                            )
+                            .await?;
+                        Ok(TransactionExecutionStart::Completed(completed))
+                    }
+                    Some(WalletSignMode::Cold) => {
+                        let action = prepared.external_action()?;
+                        self.transaction_executions
+                            .lock()
+                            .map_err(|_| EngineError::StatePoisoned)?
+                            .insert(
+                                execution_id,
+                                ClaimedTransactionExecution {
+                                    preparation_id,
+                                    prepared,
+                                },
+                            );
+                        Ok(TransactionExecutionStart::ExternalSigning {
+                            execution_id,
+                            source_account_id: source,
+                            call_data_hash: summary.call_data_hash(),
+                            action,
+                            intent,
+                        })
+                    }
+                    None => Err(EngineError::contract(
+                        ContractErrorCode::NotFound,
+                        "transaction source 不存在于 WalletState",
+                    )),
+                }
+            }
+            .await;
+            if result.is_err() {
+                self.prepared_transactions
+                    .lock()
+                    .map_err(|_| EngineError::StatePoisoned)?
+                    .finish(source, preparation_id);
+            }
+            result
+        })
+    }
+
+    /// Continue one claimed cold execution after the QR_V1 adapter verified its exact response.
+    #[cfg(feature = "chain")]
+    pub fn complete_external_transaction_execution(
+        &self,
+        execution_id: TransactionExecutionId,
+        signature: Sr25519Signature,
+        cancellation: TransactionExecutionCancellation,
+    ) -> EngineFuture<'_, TransactionExecutionCompleted> {
+        let claimed = self
+            .transaction_executions
+            .lock()
+            .map_err(|_| EngineError::StatePoisoned)
+            .and_then(|mut executions| {
+                executions.remove(&execution_id).ok_or_else(|| {
+                    EngineError::contract(
+                        ContractErrorCode::NotFound,
+                        "transaction execution 不存在或已经消费",
+                    )
+                })
+            });
+        Box::pin(async move {
+            let claimed = claimed?;
+            let source = claimed.prepared.summary().source_account_id();
+            let preparation_id = claimed.preparation_id;
+            let result = self
+                .complete_claimed_transaction(
+                    execution_id,
+                    preparation_id,
+                    claimed.prepared,
+                    signature,
+                    Some(&cancellation),
+                )
+                .await;
+            if result.is_err() {
+                self.prepared_transactions
+                    .lock()
+                    .map_err(|_| EngineError::StatePoisoned)?
+                    .finish(source, preparation_id);
+            }
+            result
+        })
+    }
+
+    /// Cancel only a not-yet-persisted cold execution. Durable/broadcast facts are never removed.
+    #[cfg(feature = "chain")]
+    pub fn cancel_transaction_execution(
+        &self,
+        execution_id: TransactionExecutionId,
+    ) -> Result<(), EngineError> {
+        let claimed = self
+            .transaction_executions
+            .lock()
+            .map_err(|_| EngineError::StatePoisoned)?
+            .remove(&execution_id)
+            .ok_or_else(|| {
+                EngineError::contract(
+                    ContractErrorCode::NotFound,
+                    "transaction execution 不存在、已消费或已广播",
+                )
+            })?;
+        self.prepared_transactions
+            .lock()
+            .map_err(|_| EngineError::StatePoisoned)?
+            .finish(
+                claimed.prepared.summary().source_account_id(),
+                claimed.preparation_id,
+            );
+        Ok(())
+    }
+
+    #[cfg(feature = "chain")]
+    async fn complete_claimed_transaction(
+        &self,
+        execution_id: TransactionExecutionId,
+        preparation_id: TransactionPreparationId,
+        prepared: PreparedTransaction,
+        signature: Sr25519Signature,
+        cancellation: Option<&TransactionExecutionCancellation>,
+    ) -> Result<TransactionExecutionCompleted, EngineError> {
+        let summary = prepared.summary();
+        let source = summary.source_account_id();
+        let call_data = prepared.call_data().to_vec();
+        let runtime = prepared.runtime_context().clone();
+        let genesis_hash = prepared.identity().genesis_hash();
+        let nonce = prepared.nonce().value();
+        let signer = self
+            .components
+            .signer()
+            .cloned()
+            .ok_or_else(|| component_missing("chain_signer"))?;
+        let build = prepared
+            .complete_with_signature(signer.as_ref(), signature)
+            .await?;
+        let result = persist_submit_and_verify_exact(
+            self.components.chain_client()?.as_ref(),
+            &self.history_service_from_components()?,
+            execution_id,
+            source,
+            summary.call_data_hash(),
+            call_data,
+            summary.best_block(),
+            runtime,
+            genesis_hash,
+            nonce,
+            build.extrinsic().clone(),
+            cancellation,
+        )
+        .await;
+        self.prepared_transactions
+            .lock()
+            .map_err(|_| EngineError::StatePoisoned)?
+            .finish(source, preparation_id);
+        result
+    }
+
     /// 从同一准确 best Runtime metadata 解码费率、最低费和存在性存款。
     #[cfg(feature = "chain")]
     pub fn best_fee_snapshot(&self) -> EngineFuture<'_, BestFeeSnapshot> {
@@ -573,6 +1029,115 @@ impl CitizenEngine {
     pub fn wallet_profile(&self) -> EngineFuture<'_, Option<WalletProfile>> {
         let service = self.local_wallet_service(&[CapabilityName::WalletProfile]);
         Box::pin(async move { service?.profile().await })
+    }
+
+    /// Rust 内部稳定目录入口；C ABI 与五端公开投影由后续步骤单独冻结。
+    pub fn wallet_state(&self) -> EngineFuture<'_, WalletState> {
+        let service = self.local_wallet_service(&[CapabilityName::WalletProfile]);
+        Box::pin(async move { service?.state().await })
+    }
+
+    pub fn import_cold_wallet_account(
+        &self,
+        account_id: AccountId32,
+        name: String,
+    ) -> EngineFuture<'_, citizen_sdk_contracts::ColdWalletAccount> {
+        let service = self.local_wallet_service(&[CapabilityName::WalletProfile]);
+        Box::pin(async move { service?.import_cold_account(account_id, &name).await })
+    }
+
+    pub fn import_cold_wallet_ss58(
+        &self,
+        ss58_address: String,
+        name: String,
+    ) -> EngineFuture<'_, citizen_sdk_contracts::ColdWalletAccount> {
+        let service = self.local_wallet_service(&[CapabilityName::WalletProfile]);
+        Box::pin(async move {
+            service?
+                .import_cold_ss58_account(&ss58_address, &name)
+                .await
+        })
+    }
+
+    /// 面向公开绑定的唯一普通重排入口：revision 必须匹配，且第一项保持不变。
+    pub fn reorder_wallet_accounts_without_default_change(
+        &self,
+        expected_revision: u64,
+        ordered_account_ids: Vec<AccountId32>,
+    ) -> EngineFuture<'_, WalletState> {
+        let service = self.local_wallet_service(&[CapabilityName::WalletProfile]);
+        Box::pin(async move {
+            service?
+                .reorder_accounts_without_default_change(expected_revision, ordered_account_ids)
+                .await
+        })
+    }
+
+    pub fn rename_cold_wallet_account(
+        &self,
+        account_id: AccountId32,
+        name: String,
+    ) -> EngineFuture<'_, citizen_sdk_contracts::ColdWalletAccount> {
+        let service = self.local_wallet_service(&[CapabilityName::WalletProfile]);
+        Box::pin(async move { service?.rename_cold_account(account_id, &name).await })
+    }
+
+    pub fn delete_cold_wallet_account(&self, account_id: AccountId32) -> EngineFuture<'_, ()> {
+        let service = self.local_wallet_service(&[CapabilityName::WalletProfile]);
+        Box::pin(async move { service?.delete_cold_account(account_id).await })
+    }
+
+    /// 统一账户改名；账户类型只决定底层公开事实所在位置，不改变业务调用形状。
+    pub fn rename_wallet_account_any(
+        &self,
+        account_id: AccountId32,
+        name: String,
+    ) -> EngineFuture<'_, WalletState> {
+        Box::pin(async move {
+            match self.wallet_account_sign_mode(account_id).await? {
+                Some(WalletSignMode::Hot) => {
+                    self.rename_wallet_account(account_id, name).await?;
+                }
+                Some(WalletSignMode::Cold) => {
+                    self.rename_cold_wallet_account(account_id, name).await?;
+                }
+                None => {
+                    return Err(EngineError::contract(
+                        ContractErrorCode::NotFound,
+                        "钱包账户不存在",
+                    ));
+                }
+            }
+            self.wallet_state().await
+        })
+    }
+
+    /// 统一账户删除；冷账户路径不要求硬件金库，热账户仍执行原有精确清理。
+    pub fn delete_wallet_account_any(
+        &self,
+        account_id: AccountId32,
+    ) -> EngineFuture<'_, WalletState> {
+        Box::pin(async move {
+            match self.wallet_account_sign_mode(account_id).await? {
+                Some(WalletSignMode::Hot) => self.delete_wallet_account(account_id).await?,
+                Some(WalletSignMode::Cold) => self.delete_cold_wallet_account(account_id).await?,
+                None => {
+                    return Err(EngineError::contract(
+                        ContractErrorCode::NotFound,
+                        "钱包账户不存在",
+                    ));
+                }
+            }
+            self.wallet_state().await
+        })
+    }
+
+    pub fn wallet_account_sign_mode(
+        &self,
+        account_id: AccountId32,
+    ) -> EngineFuture<'_, Option<WalletSignMode>> {
+        let service = self.local_wallet_service(&[CapabilityName::WalletProfile]);
+        Box::pin(async move { service?.account_sign_mode(account_id).await })
     }
 
     /// 对硬件密钥、全部密文和 child 公钥做一次完整核验。
@@ -699,12 +1264,132 @@ impl CitizenEngine {
         })
     }
 
+    /// Product-independent hot signing path for a validated opaque intent.
+    ///
+    /// WalletState is authoritative for routing. Cold accounts are never allowed to fall through
+    /// to Vault, and the returned signature is verified against the frozen transform before it
+    /// crosses the Engine boundary.
+    pub fn sign_wallet_intent(&self, intent: SigningIntent) -> EngineFuture<'_, SigningCompletion> {
+        Box::pin(async move {
+            match self.wallet_account_sign_mode(intent.account_id()).await? {
+                Some(WalletSignMode::Hot) => {}
+                Some(WalletSignMode::Cold) => {
+                    return Err(EngineError::contract(
+                        ContractErrorCode::Unsupported,
+                        "冷账户必须通过 external signer transport 完成签名",
+                    ));
+                }
+                None => {
+                    return Err(EngineError::contract(
+                        ContractErrorCode::NotFound,
+                        "签名账户不存在",
+                    ));
+                }
+            }
+            self.require_local_capabilities(&[
+                CapabilityName::LocalSigning,
+                CapabilityName::HardwareVault,
+                CapabilityName::UserAuthentication,
+            ])?;
+            let service = SigningService::new(
+                self.components
+                    .signer()
+                    .cloned()
+                    .ok_or_else(|| component_missing("chain_signer"))?,
+                self.components
+                    .secret_vault()
+                    .cloned()
+                    .ok_or_else(|| component_missing("secret_vault"))?,
+                self.components
+                    .wallet_profiles()
+                    .cloned()
+                    .ok_or_else(|| component_missing("wallet_profile_store"))?,
+                self.components
+                    .encrypted_secrets()
+                    .cloned()
+                    .ok_or_else(|| component_missing("encrypted_secret_blob_store"))?,
+            );
+            let message = intent.signing_message()?;
+            let signature = service.sign(intent.account_id(), message.clone()).await?;
+            let signer = self
+                .components
+                .signer()
+                .ok_or_else(|| component_missing("chain_signer"))?;
+            if !signer
+                .verify(
+                    Sr25519PublicKey::from_bytes(intent.account_id().into_bytes()),
+                    message,
+                    signature,
+                )
+                .await?
+            {
+                return Err(EngineError::contract(
+                    ContractErrorCode::Integrity,
+                    "热钱包签名未通过原账户和冻结 transform 复核",
+                ));
+            }
+            Ok(SigningCompletion::new(
+                intent.account_id(),
+                intent.payload_hash()?,
+                signature,
+            ))
+        })
+    }
+
+    /// Freeze a default-account mutation using the current SDK wallet revision and CSPRNG nonce.
+    pub fn prepare_default_wallet_account_change(
+        &self,
+        expected_revision: u64,
+        ordered_account_ids: Vec<AccountId32>,
+        ttl_seconds: u64,
+    ) -> EngineFuture<'_, DefaultAccountChangeAuthorization> {
+        let service = self.local_wallet_service(&[CapabilityName::WalletProfile]);
+        Box::pin(async move {
+            service?
+                .prepare_default_account_change(expected_revision, ordered_account_ids, ttl_seconds)
+                .await
+        })
+    }
+
+    /// Commit only a signature over the exact immutable authorization returned above.
+    pub fn commit_default_wallet_account_change<'a>(
+        &'a self,
+        authorization: &'a DefaultAccountChangeAuthorization,
+        signature: Sr25519Signature,
+    ) -> EngineFuture<'a, WalletState> {
+        let service = self.local_wallet_service(&[CapabilityName::WalletProfile]);
+        Box::pin(async move {
+            service?
+                .commit_default_account_change(authorization, signature)
+                .await
+        })
+    }
+
+    /// Hot default changes use the same generic signing intent, then the same exact CAS commit as
+    /// external signatures. The account mode is never supplied by the caller.
+    pub fn authorize_hot_default_wallet_account_change(
+        &self,
+        authorization: DefaultAccountChangeAuthorization,
+    ) -> EngineFuture<'_, WalletState> {
+        Box::pin(async move {
+            let intent = authorization.signing_intent()?;
+            let completion = self.sign_wallet_intent(intent).await?;
+            self.commit_default_wallet_account_change(&authorization, completion.signature())
+                .await
+        })
+    }
+
     /// 已验证链调用审阅独立于钱包管理；不启动 provider，也不调用宿主传入的 metadata。
     #[cfg(all(feature = "qr", feature = "chain"))]
-    pub fn review_qr_sign_request(&self, request: citizen_sdk_qr::SignRequest) -> EngineFuture<'_, crate::QrReview> {
+    pub fn review_qr_sign_request(
+        &self,
+        request: citizen_sdk_qr::SignRequest,
+    ) -> EngineFuture<'_, crate::QrReview> {
         Box::pin(async move {
             let lease = self.begin_qr_operation()?;
-            let result = crate::qr_review::review_request(self.components.chain_client()?.as_ref(), request).await?;
+            let result =
+                crate::qr_review::review_request(self.components.chain_client()?.as_ref(), request)
+                    .await?;
             lease.ensure_current()?;
             Ok(result)
         })
@@ -719,28 +1404,76 @@ impl CitizenEngine {
     ) -> EngineFuture<'a, Sr25519Signature> {
         Box::pin(async move {
             let lease = self.begin_qr_operation()?;
-            self.require_local_capabilities(&[CapabilityName::LocalSigning, CapabilityName::HardwareVault, CapabilityName::UserAuthentication])?;
+            self.require_local_capabilities(&[
+                CapabilityName::LocalSigning,
+                CapabilityName::HardwareVault,
+                CapabilityName::UserAuthentication,
+            ])?;
             ensure_current()?;
             let client = self.components.chain_client()?;
-            let current = crate::qr_review::review_request(client.as_ref(), review.request().clone()).await?;
-            if !review.matches(&current) { return Err(EngineError::contract(ContractErrorCode::Conflict, "确认后交易 Runtime 或检查点已改变")); }
-            let guard = || { lease.ensure_current()?; ensure_current() };
+            let current =
+                crate::qr_review::review_request(client.as_ref(), review.request().clone()).await?;
+            if !review.matches(&current) {
+                return Err(EngineError::contract(
+                    ContractErrorCode::Conflict,
+                    "确认后交易 Runtime 或检查点已改变",
+                ));
+            }
+            let guard = || {
+                lease.ensure_current()?;
+                ensure_current()
+            };
             let service = SigningService::new(
-                self.components.signer().cloned().ok_or_else(|| component_missing("chain_signer"))?,
-                self.components.secret_vault().cloned().ok_or_else(|| component_missing("secret_vault"))?,
-                self.components.wallet_profiles().cloned().ok_or_else(|| component_missing("wallet_profile_store"))?,
-                self.components.encrypted_secrets().cloned().ok_or_else(|| component_missing("encrypted_secret_blob_store"))?,
+                self.components
+                    .signer()
+                    .cloned()
+                    .ok_or_else(|| component_missing("chain_signer"))?,
+                self.components
+                    .secret_vault()
+                    .cloned()
+                    .ok_or_else(|| component_missing("secret_vault"))?,
+                self.components
+                    .wallet_profiles()
+                    .cloned()
+                    .ok_or_else(|| component_missing("wallet_profile_store"))?,
+                self.components
+                    .encrypted_secrets()
+                    .cloned()
+                    .ok_or_else(|| component_missing("encrypted_secret_blob_store"))?,
             );
-            let message = review.request().signing_message().map_err(|_| EngineError::contract(ContractErrorCode::Decode, "二维码签名载荷无效"))?;
-            let signature = service.sign_guarded(AccountId32::from_bytes(*review.request().signer_public_key.as_bytes()), message.clone(), &guard).await?;
+            let message = review.request().signing_message().map_err(|_| {
+                EngineError::contract(ContractErrorCode::Decode, "二维码签名载荷无效")
+            })?;
+            let signature = service
+                .sign_guarded(
+                    AccountId32::from_bytes(*review.request().signer_public_key.as_bytes()),
+                    message.clone(),
+                    &guard,
+                )
+                .await?;
             guard()?;
-            let signer = self.components.signer().ok_or_else(|| component_missing("chain_signer"))?;
-            if !signer.verify(review.request().signer_public_key, message, signature).await? {
-                return Err(EngineError::contract(ContractErrorCode::Integrity, "二维码签名未通过原账户和已审阅载荷复核"));
+            let signer = self
+                .components
+                .signer()
+                .ok_or_else(|| component_missing("chain_signer"))?;
+            if !signer
+                .verify(review.request().signer_public_key, message, signature)
+                .await?
+            {
+                return Err(EngineError::contract(
+                    ContractErrorCode::Integrity,
+                    "二维码签名未通过原账户和已审阅载荷复核",
+                ));
             }
             guard()?;
-            let current = crate::qr_review::review_request(client.as_ref(), review.request().clone()).await?;
-            if !review.matches(&current) { return Err(EngineError::contract(ContractErrorCode::Conflict, "认证期间交易 Runtime 或检查点已改变")); }
+            let current =
+                crate::qr_review::review_request(client.as_ref(), review.request().clone()).await?;
+            if !review.matches(&current) {
+                return Err(EngineError::contract(
+                    ContractErrorCode::Conflict,
+                    "认证期间交易 Runtime 或检查点已改变",
+                ));
+            }
             guard()?;
             Ok(signature)
         })
@@ -748,14 +1481,29 @@ impl CitizenEngine {
 
     #[cfg(all(feature = "qr", feature = "chain"))]
     fn begin_qr_operation(&self) -> Result<EngineQrOperationLease, EngineError> {
-        if !self.components.modules.contains(Modules::QR | Modules::CHAIN) {
-            return Err(EngineError::contract(ContractErrorCode::Unsupported, "链调用审阅要求 qr 与 chain 模块"));
+        if !self
+            .components
+            .modules
+            .contains(Modules::QR | Modules::CHAIN)
+        {
+            return Err(EngineError::contract(
+                ContractErrorCode::Unsupported,
+                "链调用审阅要求 qr 与 chain 模块",
+            ));
         }
         self.require_capabilities(&[CapabilityName::ChainRead])?;
         let mut state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
-        if state.lifecycle != EngineLifecycle::Running { return Err(lifecycle_error("二维码审阅要求已运行的 verified chain")); }
-        state.qr_operations = state.qr_operations.checked_add(1).ok_or_else(|| lifecycle_error("二维码操作数量耗尽"))?;
-        Ok(EngineQrOperationLease { state: Arc::clone(&self.state), generation: state.generation })
+        if state.lifecycle != EngineLifecycle::Running {
+            return Err(lifecycle_error("二维码审阅要求已运行的 verified chain"));
+        }
+        state.qr_operations = state
+            .qr_operations
+            .checked_add(1)
+            .ok_or_else(|| lifecycle_error("二维码操作数量耗尽"))?;
+        Ok(EngineQrOperationLease {
+            state: Arc::clone(&self.state),
+            generation: state.generation,
+        })
     }
 
     pub fn delete_wallet_account(&self, account_id: AccountId32) -> EngineFuture<'_, ()> {
@@ -785,233 +1533,60 @@ impl CitizenEngine {
         })
     }
 
-    /// 完成一笔钱包转账直到得到准确 finalized 执行终态或明确交易池拒绝。
-    ///
-    /// 这是没有进度观察器的便利入口，仍会完整执行 submit-and-watch；它不是“只提交”
-    /// API，也不返回可脱离历史状态机单独广播的 signed bytes。
+    /// Reads a deterministic public page from the local execution-only store.
     #[cfg(feature = "chain")]
-    pub fn transfer_with_remark(
+    pub fn get_transaction_history(
         &self,
-        source_account_id: AccountId32,
-        destination: AccountId32,
-        amount_fen: u128,
-        remark: String,
-    ) -> EngineFuture<'_, WalletTransferWatchResult> {
-        self.transfer_with_remark_and_watch(
-            source_account_id,
-            destination,
-            amount_fen,
-            remark,
-            Arc::new(NoopWalletTransferObserver),
-            WalletTransferCancellation::default(),
-        )
+        before_execution_id: Option<TransactionExecutionId>,
+        limit: usize,
+    ) -> EngineFuture<'_, citizen_sdk_contracts::TransactionHistoryPage> {
+        let service = self.history_service_from_components();
+        Box::pin(async move {
+            self.require_capabilities(&[CapabilityName::History])?;
+            service?.page(before_execution_id, limit).await
+        })
     }
 
-    /// 钱包转账的唯一完整 submit-and-watch 路径。
-    ///
-    /// 从设备金库解锁账户，在 Rust 内完成准确 Runtime 构造和 sr25519 签名；随后先以
-    /// 同账户 single-flight CAS 持久化 `Pending`，再把 signed extrinsic 交给 provider
-    /// 的 submit-and-watch。`InBlock` 不结束 future；`Finalized` 会从准确 canonical
-    /// 块体和同 index `System.Events` 核验 Success/Failed。断线、dropped、retracted 或
-    /// timeout 返回可重试错误，但不会清除 durable `Pending/InBlock` 门。
-    /// 取消仅通知本笔请求；调用方必须继续 await 到完成，确保已经开始的金库与 CAS
-    /// 真正返回。取消后不再签发下一阶段广播，不影响并行请求和后台监控。
-    #[allow(clippy::too_many_arguments)]
+    /// Reconciles at most 32 non-terminal SDK executions against finalized chain evidence.
     #[cfg(feature = "chain")]
-    pub fn transfer_with_remark_and_watch(
-        &self,
-        source_account_id: AccountId32,
-        destination: AccountId32,
-        amount_fen: u128,
-        remark: String,
-        observer: Arc<dyn WalletTransferObserver>,
-        cancellation: WalletTransferCancellation,
-    ) -> EngineFuture<'_, WalletTransferWatchResult> {
+    pub fn sync_transaction_history(&self) -> EngineFuture<'_, TransactionHistoryState> {
+        let preparation = self.prepare_finalized_history_runtime(&[
+            CapabilityName::ChainRead,
+            CapabilityName::History,
+            CapabilityName::TransactionSubmit,
+            CapabilityName::TransactionVerify,
+        ]);
         Box::pin(async move {
-            let (history_runtime, mut guard) = self.prepare_finalized_history_runtime(&[
-                CapabilityName::ChainRead,
-                CapabilityName::TransactionBuild,
-                CapabilityName::TransactionSubmit,
-                CapabilityName::TransactionVerify,
-                CapabilityName::History,
-                CapabilityName::WalletProfile,
-                CapabilityName::LocalSigning,
-                CapabilityName::HardwareVault,
-                CapabilityName::UserAuthentication,
-            ])?;
-            guard.request_cancellation = Some(cancellation);
-            guard.ensure_current()?;
-            let service = self.wallet_service_from_components()?;
-            let history = self.history_service_from_components()?;
-            let nonce_source = self.components.account_nonce_source().ok_or_else(|| {
-                EngineError::CapabilityUnavailable("account_nonce_source_missing".to_owned())
+            let (runtime, guard) = preparation?;
+            let signer = self.components.signer().ok_or_else(|| {
+                EngineError::CapabilityUnavailable("chain_signer_missing".to_owned())
             })?;
-
-            // 在构造交易前固定该账户的 finalized 起始游标。finalized watch 到达后只会
-            // 从这个已持久锚顺序追赶，不能跳到宿主给出的块直接伪造终态。
-            history_runtime
-                .initialize_accounts(&[source_account_id], &guard)
-                .await?;
-            guard.ensure_current()?;
-            // 在访问金库和读取新 nonce 之前寻找已持久授权。同参数重试只恢复该字节，
-            // 包括取消、进程退出和 CAS 已落盘但调用未返回的窗口。
-            let resumable = history
-                .resumable_transfer(source_account_id, destination, amount_fen, &remark)
-                .await?;
-            guard.ensure_current()?;
-            if let Some(record) = resumable {
-                crate::wallet_transfer_watch::reconcile_before_rebroadcast(
-                    self.components.chain_client()?.as_ref(),
-                    &history_runtime,
-                    &history,
+            let (mut positions, mut rebroadcasted) = {
+                let monitor = self
+                    .chain_monitor
+                    .lock()
+                    .map_err(|_| EngineError::StatePoisoned)?;
+                (
+                    monitor.execution_positions.clone(),
+                    monitor.rebroadcasted_executions.clone(),
+                )
+            };
+            let state = runtime
+                .reconcile_generic_execution_batch(
+                    &mut positions,
+                    &mut rebroadcasted,
+                    signer.as_ref(),
                     &guard,
-                    source_account_id,
-                )
-                .await?;
-                let (_, current) = history
-                    .require_submission_snapshot(source_account_id, record.transaction_hash())
-                    .await?;
-                guard.ensure_current()?;
-                record.require_same_submission_facts(&current)?;
-                // 同步已证明终态时不再要求读取构造 Runtime，也绝不重新广播。
-                if matches!(
-                    current.status(),
-                    citizen_sdk_contracts::HistoryTransactionStatus::Pending
-                        | citizen_sdk_contracts::HistoryTransactionStatus::InBlock { .. }
-                ) {
-                    let signer = self.components.signer().ok_or_else(|| {
-                        EngineError::CapabilityUnavailable("chain_signer_missing".to_owned())
-                    })?;
-                    crate::finalized_history_runtime::cancellable_chain(
-                        crate::transaction_builder::validate_recorded_transfer(
-                            self.components.chain_client()?.as_ref(),
-                            signer.as_ref(),
-                            &current,
-                        ),
-                        &guard,
-                    )
-                    .await??;
-                }
-                return watch_recorded_transfer(
-                    self.components.chain_client()?.as_ref(),
-                    &history_runtime,
-                    &history,
-                    &guard,
-                    &observer,
-                    source_account_id,
-                    record.transaction_hash(),
-                    record.signed_extrinsic().clone(),
-                )
-                .await;
-            }
-            let built = service
-                .build_transfer_with_remark(
-                    self.components.chain_client()?.as_ref(),
-                    nonce_source.as_ref(),
-                    source_account_id,
-                    destination,
-                    amount_fen,
-                    remark,
                 )
                 .await?;
             guard.ensure_current()?;
-            let hash_context = crate::finalized_history_runtime::cancellable_chain(
-                self.components
-                    .chain_client()?
-                    .get_runtime_context_at(built.signed().payload().block()),
-                &guard,
-            )
-            .await??;
-            guard.ensure_current()?;
-            if hash_context.block() != built.signed().payload().block()
-                || hash_context.version() != built.signed().payload().runtime_version()
-            {
-                return Err(EngineError::BlockContextMismatch(
-                    "提交前的准确 Runtime context 与构造轨迹不一致".to_owned(),
-                ));
-            }
-            let transaction_hash =
-                crate::signed_extrinsic_hash(&hash_context, built.signed().extrinsic())?;
-            history
-                .record_pending_before_broadcast(
-                    built.source_account_id(),
-                    transaction_hash,
-                    built.signed().payload().nonce(),
-                    built.call().destination(),
-                    built.call().amount_fen(),
-                    built.call().remark(),
-                    built.signed().extrinsic().clone(),
-                    built.signed().payload().block(),
-                    built.signed().payload().runtime_version(),
-                    built.signed().payload().genesis_hash(),
-                )
-                .await?;
-
-            watch_recorded_transfer(
-                self.components.chain_client()?.as_ref(),
-                &history_runtime,
-                &history,
-                &guard,
-                &observer,
-                source_account_id,
-                transaction_hash,
-                built.signed().extrinsic().clone(),
-            )
-            .await
-        })
-    }
-
-    /// 把新纳入监控的账户游标原子初始化到调用时的当前 finalized head。
-    ///
-    /// 这是 Rust Core 的高层确定性入口；FFI/语言绑定当前不直接投影低层扫描服务。
-    #[cfg(feature = "chain")]
-    pub fn initialize_finalized_history(
-        &self,
-        account_ids: Vec<AccountId32>,
-    ) -> EngineFuture<'_, TransactionHistoryState> {
-        let preparation = self.prepare_finalized_history_runtime(&[
-            CapabilityName::ChainRead,
-            CapabilityName::History,
-        ]);
-        Box::pin(async move {
-            let (runtime, guard) = preparation?;
-            runtime.initialize_accounts(&account_ids, &guard).await
-        })
-    }
-
-    /// 确定性同步一批 finalized 历史；一次最多连续处理 120 个块，不创建 timer/thread。
-    #[cfg(feature = "chain")]
-    pub fn sync_finalized_history_batch(
-        &self,
-        account_ids: Vec<AccountId32>,
-    ) -> EngineFuture<'_, TransactionHistoryState> {
-        let preparation = self.prepare_finalized_history_runtime(&[
-            CapabilityName::ChainRead,
-            CapabilityName::History,
-        ]);
-        Box::pin(async move {
-            let (runtime, guard) = preparation?;
-            runtime.sync_batch(&account_ids, &guard).await
-        })
-    }
-
-    /// 把 provider typed watch 事实映射到本机 pending；该入口永不从 watch 伪造链上成功。
-    #[cfg(feature = "chain")]
-    pub fn apply_transaction_watch_event(
-        &self,
-        account_id: AccountId32,
-        transaction_hash: Hash32,
-        event: ExtrinsicWatchEvent,
-    ) -> EngineFuture<'_, TransactionHistoryState> {
-        let preparation = self.prepare_finalized_history_runtime(&[
-            CapabilityName::ChainRead,
-            CapabilityName::History,
-        ]);
-        Box::pin(async move {
-            let (runtime, guard) = preparation?;
-            runtime
-                .apply_watch_event(account_id, transaction_hash, event, &guard)
-                .await
+            let mut monitor = self
+                .chain_monitor
+                .lock()
+                .map_err(|_| EngineError::StatePoisoned)?;
+            monitor.execution_positions = positions;
+            monitor.rebroadcasted_executions = rebroadcasted;
+            Ok(state)
         })
     }
 
@@ -1161,6 +1736,16 @@ impl CitizenEngine {
         require_no_inflight_history_operations(&state, "provider start failure")?;
         state.lifecycle = EngineLifecycle::StartFailed;
         state.generation = next_generation(state.generation)?;
+        #[cfg(feature = "chain")]
+        self.prepared_transactions
+            .lock()
+            .map_err(|_| EngineError::StatePoisoned)?
+            .clear();
+        #[cfg(feature = "chain")]
+        self.transaction_executions
+            .lock()
+            .map_err(|_| EngineError::StatePoisoned)?
+            .clear();
         self.refresh_capabilities_while_state_locked(EngineLifecycle::StartFailed)
     }
 
@@ -1173,6 +1758,16 @@ impl CitizenEngine {
         state.lifecycle = EngineLifecycle::Stopped;
         state.generation = next_generation(state.generation)?;
         state.export_in_progress = false;
+        #[cfg(feature = "chain")]
+        self.prepared_transactions
+            .lock()
+            .map_err(|_| EngineError::StatePoisoned)?
+            .clear();
+        #[cfg(feature = "chain")]
+        self.transaction_executions
+            .lock()
+            .map_err(|_| EngineError::StatePoisoned)?
+            .clear();
         self.refresh_capabilities_while_state_locked(EngineLifecycle::Stopped)
     }
 
@@ -1191,6 +1786,16 @@ impl CitizenEngine {
         state.lifecycle = EngineLifecycle::Disposed;
         state.generation = next_generation(state.generation)?;
         state.export_in_progress = false;
+        #[cfg(feature = "chain")]
+        self.prepared_transactions
+            .lock()
+            .map_err(|_| EngineError::StatePoisoned)?
+            .clear();
+        #[cfg(feature = "chain")]
+        self.transaction_executions
+            .lock()
+            .map_err(|_| EngineError::StatePoisoned)?
+            .clear();
         self.refresh_capabilities_while_state_locked(EngineLifecycle::Disposed)
     }
 
@@ -1678,7 +2283,6 @@ impl CitizenEngine {
                 state: Arc::clone(&self.state),
                 generation,
                 cancellation,
-                request_cancellation: None,
             },
         ))
     }
@@ -1745,13 +2349,42 @@ impl CitizenEngine {
     }
 }
 
+#[cfg(feature = "chain")]
+fn next_transaction_execution_id(
+    registry: &Mutex<HashMap<TransactionExecutionId, ClaimedTransactionExecution>>,
+) -> Result<TransactionExecutionId, EngineError> {
+    let executions = registry.lock().map_err(|_| EngineError::StatePoisoned)?;
+    for _ in 0..32 {
+        let mut bytes = [0_u8; 16];
+        getrandom::getrandom(&mut bytes).map_err(|_| {
+            EngineError::contract(
+                ContractErrorCode::Unavailable,
+                "操作系统随机源无法生成 transaction execution id",
+            )
+        })?;
+        let Ok(id) = TransactionExecutionId::try_new(bytes) else {
+            continue;
+        };
+        if !executions.contains_key(&id) {
+            return Ok(id);
+        }
+    }
+    Err(EngineError::contract(
+        ContractErrorCode::Internal,
+        "transaction execution id 随机碰撞次数超限",
+    ))
+}
+
 struct EnginePrivateKeyViewLease {
     state: Arc<Mutex<EngineState>>,
     generation: u64,
 }
 
 #[cfg(all(feature = "qr", feature = "chain"))]
-struct EngineQrOperationLease { state: Arc<Mutex<EngineState>>, generation: u64 }
+struct EngineQrOperationLease {
+    state: Arc<Mutex<EngineState>>,
+    generation: u64,
+}
 
 #[cfg(all(feature = "qr", feature = "chain"))]
 impl EngineQrOperationLease {
@@ -1767,7 +2400,9 @@ impl EngineQrOperationLease {
 #[cfg(all(feature = "qr", feature = "chain"))]
 impl Drop for EngineQrOperationLease {
     fn drop(&mut self) {
-        if let Ok(mut state) = self.state.lock() { state.qr_operations = state.qr_operations.saturating_sub(1); }
+        if let Ok(mut state) = self.state.lock() {
+            state.qr_operations = state.qr_operations.saturating_sub(1);
+        }
     }
 }
 
@@ -2019,6 +2654,10 @@ impl CitizenEngine {
                 .chain_monitor
                 .lock()
                 .map_err(|_| EngineError::StatePoisoned)?;
+            if !monitor.running {
+                monitor.execution_positions.clear();
+                monitor.rebroadcasted_executions.clear();
+            }
             monitor.running = true;
             Ok(())
         })
@@ -2032,10 +2671,13 @@ impl CitizenEngine {
         // 独立 stop 不得被先前正在执行的钱包变更恢复；更换 token 防止迟到恢复。
         state.history_cancel = Arc::new(crate::chain_monitor::MonitorCancellation::default());
         state.history_cancel.cancel();
-        self.chain_monitor
+        let mut monitor = self
+            .chain_monitor
             .lock()
-            .map_err(|_| EngineError::StatePoisoned)?
-            .running = false;
+            .map_err(|_| EngineError::StatePoisoned)?;
+        monitor.running = false;
+        monitor.execution_positions.clear();
+        monitor.rebroadcasted_executions.clear();
         Ok(())
     }
 
@@ -2106,45 +2748,10 @@ impl CitizenEngine {
             .lock()
             .map_err(|_| EngineError::StatePoisoned)?;
         monitor.revision = None;
-        monitor.pending_positions.clear();
         result
     }
 
-    #[cfg(feature = "chain")]
-    pub fn refresh_chain_monitor_accounts(&self) -> EngineFuture<'_, bool> {
-        Box::pin(async move {
-            let (_, guard) = self.prepare_finalized_history_runtime(&[CapabilityName::History])?;
-            let profiles = self
-                .components
-                .wallet_profiles()
-                .ok_or_else(|| lifecycle_error("wallet profiles missing"))?;
-            let stored = profiles.load().await?;
-            guard.ensure_current()?;
-            let accounts = stored
-                .profile()
-                .map(|profile| {
-                    profile
-                        .accounts()
-                        .iter()
-                        .map(|account| account.account_id())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let mut monitor = self
-                .chain_monitor
-                .lock()
-                .map_err(|_| EngineError::StatePoisoned)?;
-            let changed = accounts != monitor.accounts;
-            if changed {
-                monitor.revision = None;
-                monitor.pending_positions.clear();
-            }
-            monitor.accounts = accounts;
-            Ok(changed)
-        })
-    }
-
-    /// 一个有界批次，复用准确 finalized/body/System.Events 核验；不重新广播 pending。
+    /// Runs one bounded generic execution reconciliation batch.
     #[cfg(feature = "chain")]
     pub fn poll_chain_monitor(&self) -> EngineFuture<'_, crate::ChainMonitorUpdate> {
         Box::pin(async move {
@@ -2170,103 +2777,74 @@ impl CitizenEngine {
             let (runtime, guard) = self.prepare_finalized_history_runtime(&[
                 CapabilityName::History,
                 CapabilityName::ChainRead,
+                CapabilityName::TransactionSubmit,
+                CapabilityName::TransactionVerify,
             ])?;
-            let stored = self
-                .components
-                .wallet_profiles()
-                .ok_or_else(|| lifecycle_error("wallet profiles missing"))?
-                .load()
-                .await?;
+            let local = self.history_service_from_components()?.load().await?;
             guard.ensure_current()?;
-            let accounts = stored
-                .profile()
-                .map(|profile| {
-                    profile
-                        .accounts()
-                        .iter()
-                        .map(|account| account.account_id())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let local_history = self.history_service_from_components()?.load().await?;
-            guard.ensure_current()?;
-            let has_pending = local_history.records().iter().any(|record| {
-                accounts.contains(&record.account_id())
-                    && matches!(
-                        record.status(),
-                        citizen_sdk_contracts::HistoryTransactionStatus::Pending
-                            | citizen_sdk_contracts::HistoryTransactionStatus::InBlock { .. }
-                    )
-            });
-            let (mut positions, chain_revision, should_sync) = {
+            let has_reconcilable = local
+                .executions()
+                .iter()
+                .any(|record| !record.status().is_chain_terminal());
+            let (mut positions, mut rebroadcasted, chain_revision, should_sync) = {
                 let monitor = self
                     .chain_monitor
                     .lock()
                     .map_err(|_| EngineError::StatePoisoned)?;
-                let positions = if monitor.accounts == accounts {
-                    monitor.pending_positions.clone()
-                } else {
-                    Default::default()
-                };
                 (
-                    positions,
+                    monitor.execution_positions.clone(),
+                    monitor.rebroadcasted_executions.clone(),
                     monitor.chain_revision,
-                    has_pending
-                        || monitor.needs_catchup
-                        || monitor.accounts != accounts
+                    has_reconcilable
                         || monitor.revision.is_none()
                         || monitor.chain_revision != monitor.synced_chain_revision,
                 )
             };
-            let mut target = None;
-            let history = if accounts.is_empty() || !should_sync {
-                local_history
-            } else {
-                target = Some(
+            let mut finalized_block = None;
+            let history = if should_sync {
+                finalized_block = Some(
                     crate::finalized_history_runtime::cancellable_chain(
                         self.components.chain_client()?.get_finalized_head(),
                         &guard,
                     )
                     .await??,
                 );
-                runtime.initialize_accounts(&accounts, &guard).await?;
-                runtime.sync_batch(&accounts, &guard).await?;
+                let signer = self.components.signer().ok_or_else(|| {
+                    EngineError::CapabilityUnavailable("chain_signer_missing".to_owned())
+                })?;
                 runtime
-                    .reconcile_pending_batch(&accounts, &mut positions, &guard)
+                    .reconcile_generic_execution_batch(
+                        &mut positions,
+                        &mut rebroadcasted,
+                        signer.as_ref(),
+                        &guard,
+                    )
                     .await?
+            } else {
+                local
             };
             guard.ensure_current()?;
-            let finalized_block = history
-                .cursors()
-                .iter()
-                .filter(|cursor| accounts.contains(&cursor.account_id()))
-                .map(|cursor| cursor.last_synced_block())
-                .min_by_key(|block| block.number());
             let pending_count = history
-                .records()
+                .executions()
                 .iter()
                 .filter(|record| {
-                    accounts.contains(&record.account_id())
-                        && matches!(
-                            record.status(),
-                            citizen_sdk_contracts::HistoryTransactionStatus::Pending
-                                | citizen_sdk_contracts::HistoryTransactionStatus::InBlock { .. }
-                        )
+                    matches!(
+                        record.status(),
+                        citizen_sdk_contracts::HistoryTransactionStatus::Pending
+                            | citizen_sdk_contracts::HistoryTransactionStatus::InBlock { .. }
+                    )
                 })
                 .count();
             let mut monitor = self
                 .chain_monitor
                 .lock()
                 .map_err(|_| EngineError::StatePoisoned)?;
-            let history_changed =
-                monitor.revision != Some(history.revision()) || monitor.accounts != accounts;
+            let history_changed = monitor.revision != Some(history.revision());
             monitor.revision = Some(history.revision());
-            monitor.accounts = accounts;
-            monitor.pending_positions = positions;
+            monitor.execution_positions = positions;
+            monitor.rebroadcasted_executions = rebroadcasted;
             monitor.synced_chain_revision = chain_revision;
-            monitor.needs_catchup = target
-                .zip(finalized_block)
-                .is_some_and(|(target, synced)| synced.number() < target.number());
+            monitor.needs_catchup = false;
             Ok(crate::ChainMonitorUpdate {
                 finalized_block,
                 history_revision: history.revision(),
@@ -2304,47 +2882,15 @@ struct EngineHistoryOperationLease {
     state: Arc<Mutex<EngineState>>,
     generation: u64,
     cancellation: Arc<crate::chain_monitor::MonitorCancellation>,
-    request_cancellation: Option<WalletTransferCancellation>,
 }
 
 #[cfg(feature = "chain")]
 impl FinalizedHistoryRunGuard for EngineHistoryOperationLease {
-    fn begin_watch(&self) {
-        if let Some(token) = &self.request_cancellation {
-            token.begin_watch();
-        }
-    }
-    fn begin_execution(&self) {
-        if let Some(token) = &self.request_cancellation {
-            token.begin_execution();
-        }
-    }
-    fn execution_budget(&self) -> Option<std::time::Duration> {
-        self.request_cancellation
-            .as_ref()
-            .and_then(WalletTransferCancellation::execution_budget)
-    }
-
     fn ensure_current(&self) -> Result<(), EngineError> {
-        if self
-            .request_cancellation
-            .as_ref()
-            .and_then(WalletTransferCancellation::remaining_budget)
-            .is_some_and(|remaining| remaining.is_zero())
-        {
-            return Err(EngineError::contract(
-                ContractErrorCode::Timeout,
-                "wallet transfer budget expired; durable pending history retained",
-            ));
-        }
         let state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
         if state.lifecycle != EngineLifecycle::Running
             || state.generation != self.generation
             || self.cancellation.is_cancelled()
-            || self
-                .request_cancellation
-                .as_ref()
-                .is_some_and(WalletTransferCancellation::is_cancelled)
         {
             return Err(lifecycle_error(
                 "finalized history operation outlived its running Engine generation",
@@ -2354,13 +2900,6 @@ impl FinalizedHistoryRunGuard for EngineHistoryOperationLease {
     }
 
     fn poll_cancelled(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
-        if self
-            .request_cancellation
-            .as_ref()
-            .is_some_and(|token| token.signal.poll_cancelled(cx).is_ready())
-        {
-            return std::task::Poll::Ready(());
-        }
         self.cancellation.poll_cancelled(cx)
     }
 }
@@ -2387,7 +2926,9 @@ fn require_no_inflight_history_operations(
     operation: &str,
 ) -> Result<(), EngineError> {
     if state.qr_operations != 0 {
-        return Err(lifecycle_error(format!("{operation} requires QR authentication and review operations to drain")));
+        return Err(lifecycle_error(format!(
+            "{operation} requires QR authentication and review operations to drain"
+        )));
     }
     if state.private_key_views != 0 {
         return Err(lifecycle_error(format!(

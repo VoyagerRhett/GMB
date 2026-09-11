@@ -5,15 +5,15 @@ use std::{
 
 use citizensdk::{
     CitizenSdkAccountBalanceInfo, CitizenSdkAccountId, CitizenSdkAccountNonceInfo,
-    CitizenSdkFeeSnapshotInfo, CitizenSdkFinalizedTransferInfo, CitizenSdkHistoryCursorInfo,
-    CitizenSdkHistoryInfo, CitizenSdkHistoryRecordInfo, CitizenSdkHostBoolResultV1,
-    CitizenSdkHostBytesResultV1, CitizenSdkHostHash32, CitizenSdkHostId128,
-    CitizenSdkHostPublicStoreV1, CitizenSdkHostRecordResultV1, CitizenSdkHostSecretRefV1,
-    CitizenSdkHostSecretVaultV1, CitizenSdkHostSecureStoreV1, CitizenSdkHostServicesV1,
-    CitizenSdkHostStatusResultV1, CitizenSdkHostVaultAvailabilityResultV1,
-    CitizenSdkHostWalletKeyRefV1, CitizenSdkMutableBytesView, CitizenSdkPreparedWalletInfo,
-    CitizenSdkResultKind, CitizenSdkU128, CitizenSdkWalletAccountInfo, CitizenSdkWalletProfileInfo,
-    CitizenSdkWalletTransferInfo,
+    CitizenSdkFeeSnapshotInfo, CitizenSdkHostBoolResultV1, CitizenSdkHostBytesResultV1,
+    CitizenSdkHostHash32, CitizenSdkHostId128, CitizenSdkHostPublicStoreV1,
+    CitizenSdkHostRecordResultV1, CitizenSdkHostSecretRefV1, CitizenSdkHostSecretVaultV1,
+    CitizenSdkHostSecureStoreV1, CitizenSdkHostServicesV1, CitizenSdkHostStatusResultV1,
+    CitizenSdkHostVaultAvailabilityResultV1, CitizenSdkHostWalletKeyRefV1,
+    CitizenSdkMutableBytesView, CitizenSdkPreparedWalletInfo, CitizenSdkResultKind,
+    CitizenSdkTransactionHistoryPageInfo, CitizenSdkTransactionHistoryRecordInfo, CitizenSdkU128,
+    CitizenSdkWalletAccountInfo, CitizenSdkWalletProfileInfo, CitizenSdkWalletStateAccountInfo,
+    CitizenSdkWalletStateInfo,
 };
 
 fn rust_exports(source: &str) -> BTreeSet<String> {
@@ -70,8 +70,8 @@ fn base_wallet_and_qr_exports_are_exact_and_disjoint() {
     let old = rust_exports(include_str!("../src/lib.rs"));
     let wallet = rust_exports(include_str!("../src/wallet_abi.rs"));
     let qr = rust_exports(include_str!("../src/qr_abi.rs"));
-    assert_eq!(old.len(), 39);
-    assert_eq!(wallet.len(), 41);
+    assert_eq!(old.len(), 49);
+    assert_eq!(wallet.len(), 48);
     assert_eq!(qr.len(), 9);
     assert!(old.is_disjoint(&wallet));
     assert!(old.is_disjoint(&qr));
@@ -88,6 +88,12 @@ fn base_wallet_and_qr_exports_are_exact_and_disjoint() {
         "citizensdk_get_account_nonce",
         "citizensdk_get_best_fee_snapshot",
         "citizensdk_get_wallet_profile",
+        "citizensdk_get_wallet_state",
+        "citizensdk_import_cold_account_id",
+        "citizensdk_import_cold_account_ss58",
+        "citizensdk_reorder_wallet_accounts_without_default_change",
+        "citizensdk_rename_account",
+        "citizensdk_delete_account",
         "citizensdk_prepare_wallet_creation",
         "citizensdk_prepared_wallet_copy_mnemonic",
         "citizensdk_prepared_wallet_release",
@@ -100,9 +106,11 @@ fn base_wallet_and_qr_exports_are_exact_and_disjoint() {
         "citizensdk_delete_wallet",
         "citizensdk_reconcile_wallet_cleanup",
         "citizensdk_sign_wallet_payload",
-        "citizensdk_transfer_with_remark",
-        "citizensdk_initialize_finalized_history",
-        "citizensdk_sync_finalized_history_batch",
+        "citizensdk_begin_signing",
+        "citizensdk_consume_external_signature",
+        "citizensdk_cancel_signing_session",
+        "citizensdk_begin_default_account_change",
+        "citizensdk_consume_default_account_change",
         "citizensdk_result_get_account_balance",
         "citizensdk_result_get_account_balance_count",
         "citizensdk_result_get_account_balance_at",
@@ -110,23 +118,46 @@ fn base_wallet_and_qr_exports_are_exact_and_disjoint() {
         "citizensdk_result_get_fee_snapshot",
         "citizensdk_result_estimate_fee",
         "citizensdk_result_get_wallet_profile",
+        "citizensdk_result_get_wallet_state",
+        "citizensdk_result_get_wallet_state_account",
         "citizensdk_result_get_wallet_account_count",
         "citizensdk_result_get_wallet_account",
         "citizensdk_result_get_signature",
+        "citizensdk_result_get_signing_outcome",
+        "citizensdk_result_get_default_account_change",
         "citizensdk_result_get_prepared_wallet",
-        "citizensdk_result_get_wallet_transfer",
-        "citizensdk_result_get_history_info",
-        "citizensdk_result_get_history_cursor",
-        "citizensdk_result_get_history_record",
-        "citizensdk_result_get_finalized_transfer",
     ]
     .into_iter()
     .map(str::to_owned)
     .collect();
     assert_eq!(wallet, expected_wallet);
 
+    let transaction = rust_exports(include_str!("../src/transaction_abi.rs"));
+    let expected_transaction: BTreeSet<_> = [
+        "citizensdk_prepare_transaction",
+        "citizensdk_prepared_transaction_release",
+        "citizensdk_result_get_prepared_transaction",
+        "citizensdk_execute_prepared_transaction",
+        "citizensdk_transaction_execution_consume_qr_response",
+        "citizensdk_transaction_execution_cancel",
+        "citizensdk_result_get_transaction_execution",
+        "citizensdk_get_transaction_history",
+        "citizensdk_sync_transaction_history",
+        "citizensdk_result_get_transaction_history_page",
+        "citizensdk_result_get_transaction_history_record",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    assert_eq!(transaction, expected_transaction);
+
     let header = header_functions(include_str!("../../../include/citizensdk.h"));
-    let all: BTreeSet<_> = old.union(&wallet).chain(qr.iter()).cloned().collect();
+    let all: BTreeSet<_> = old
+        .union(&wallet)
+        .chain(qr.iter())
+        .chain(transaction.iter())
+        .cloned()
+        .collect();
     assert_eq!(header, all);
 }
 
@@ -155,13 +186,13 @@ fn appended_result_values_and_portable_product_layouts_are_frozen() {
     assert_eq!(CitizenSdkResultKind::WalletAccounts as u32, 13);
     assert_eq!(CitizenSdkResultKind::Signature as u32, 14);
     assert_eq!(CitizenSdkResultKind::PreparedWallet as u32, 15);
-    assert_eq!(CitizenSdkResultKind::WalletTransfer as u32, 16);
-    assert_eq!(CitizenSdkResultKind::TransactionHistory as u32, 17);
+    assert_eq!(CitizenSdkResultKind::TransactionHistoryPage as u32, 17);
     assert_eq!(CitizenSdkResultKind::AccountBalances as u32, 18);
     assert_eq!(CitizenSdkResultKind::QrReview as u32, 19);
     assert_eq!(CitizenSdkResultKind::QrSigned as u32, 20);
+    assert_eq!(CitizenSdkResultKind::WalletState as u32, 21);
     assert!(include_str!("../../../include/citizensdk_types.h")
-        .contains("#define CITIZENSDK_RESULT_ACCOUNT_BALANCES UINT32_C(18)"));
+        .contains("#define CITIZENSDK_RESULT_ACCOUNT_BALANCES 18U"));
 
     assert_eq!(size_of::<CitizenSdkU128>(), 16);
     assert_eq!(align_of::<CitizenSdkU128>(), 8);
@@ -171,12 +202,11 @@ fn appended_result_values_and_portable_product_layouts_are_frozen() {
     assert_eq!(size_of::<CitizenSdkFeeSnapshotInfo>(), 104);
     assert_eq!(size_of::<CitizenSdkWalletProfileInfo>(), 96);
     assert_eq!(size_of::<CitizenSdkWalletAccountInfo>(), 72);
+    assert_eq!(size_of::<CitizenSdkWalletStateInfo>(), 56);
+    assert_eq!(size_of::<CitizenSdkWalletStateAccountInfo>(), 88);
     assert_eq!(size_of::<CitizenSdkPreparedWalletInfo>(), 16);
-    assert_eq!(size_of::<CitizenSdkWalletTransferInfo>(), 144);
-    assert_eq!(size_of::<CitizenSdkHistoryInfo>(), 32);
-    assert_eq!(size_of::<CitizenSdkHistoryCursorInfo>(), 152);
-    assert_eq!(size_of::<CitizenSdkHistoryRecordInfo>(), 320);
-    assert_eq!(size_of::<CitizenSdkFinalizedTransferInfo>(), 216);
+    assert_eq!(size_of::<CitizenSdkTransactionHistoryPageInfo>(), 40);
+    assert_eq!(size_of::<CitizenSdkTransactionHistoryRecordInfo>(), 336);
 }
 
 #[test]
@@ -305,11 +335,7 @@ fn module_validation_rejects_invalid_or_uncompiled_combinations() {
         Modules::HISTORY
     } else {
         0
-    }) | (if cfg!(feature = "qr") {
-        Modules::QR
-    } else {
-        0
-    });
+    }) | (if cfg!(feature = "qr") { Modules::QR } else { 0 });
     for bits in [
         Modules::WALLET,
         Modules::SIGNING,

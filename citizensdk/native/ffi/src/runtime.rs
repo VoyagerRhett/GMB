@@ -443,11 +443,18 @@ impl NativeRuntime {
         };
         #[cfg(feature = "qr")]
         let outcome = if matches!(cancellation, CancellationState::Requested)
-            && matches!(&outcome, Ok(ResultPayload::QrReview(_) | ResultPayload::QrSigned(_)))
-        {
+            && matches!(
+                &outcome,
+                Ok(ResultPayload::QrReview(_) | ResultPayload::QrSigned(_))
+            ) {
             // 与取消登记同一 registry 线性化；关闭最后一段计算到结果提交之间的竞态。
-            Err(FfiError::new(CitizenSdkErrorCode::Cancelled, "二维码操作已取消且真实作业已排空"))
-        } else { outcome };
+            Err(FfiError::new(
+                CitizenSdkErrorCode::Cancelled,
+                "二维码操作已取消且真实作业已排空",
+            ))
+        } else {
+            outcome
+        };
         #[cfg(not(feature = "qr"))]
         let _ = cancellation;
         let result = match outcome {
@@ -1058,13 +1065,26 @@ mod tests {
 
     #[cfg(feature = "qr")]
     #[test]
-    fn qr_cancel_after_work_before_commit_suppresses_success_and_keeps_destroy_busy_until_release() {
+    fn qr_cancel_after_work_before_commit_suppresses_success_and_keeps_destroy_busy_until_release()
+    {
         let runtime = runtime();
         let (sender, receiver) = mpsc::channel::<CitizenSdkEvent>();
-        runtime.set_event_callback(Some(record_event), (&sender as *const mpsc::Sender<CitizenSdkEvent>).cast_mut().cast()).unwrap();
-        for _ in 0..2 { receiver.recv_timeout(Duration::from_secs(2)).unwrap(); }
+        runtime
+            .set_event_callback(
+                Some(record_event),
+                (&sender as *const mpsc::Sender<CitizenSdkEvent>)
+                    .cast_mut()
+                    .cast(),
+            )
+            .unwrap();
+        for _ in 0..2 {
+            receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
         let (id, _cancellation) = runtime.begin_request(true).unwrap();
-        assert_eq!(runtime.shutdown().unwrap_err().code, CitizenSdkErrorCode::Busy);
+        assert_eq!(
+            runtime.shutdown().unwrap_err().code,
+            CitizenSdkErrorCode::Busy
+        );
         runtime.request_cancel(id).unwrap();
         runtime.complete_request(id, Ok(ResultPayload::QrSigned("{\"kind\":2}".to_owned())));
         let event = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -1072,14 +1092,21 @@ mod tests {
         let result = ownership::get(event.result).unwrap();
         assert_eq!(result.code, CitizenSdkErrorCode::Cancelled);
         assert!(matches!(result.payload, ResultPayload::Empty));
-        assert_eq!(runtime.shutdown().unwrap_err().code, CitizenSdkErrorCode::Busy);
+        assert_eq!(
+            runtime.shutdown().unwrap_err().code,
+            CitizenSdkErrorCode::Busy
+        );
         ownership::release(event.result).unwrap();
         runtime.result_released();
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             match runtime.set_event_callback(None, std::ptr::null_mut()) {
                 Ok(()) => break,
-                Err(error) if error.code == CitizenSdkErrorCode::Busy && Instant::now() < deadline => std::thread::yield_now(),
+                Err(error)
+                    if error.code == CitizenSdkErrorCode::Busy && Instant::now() < deadline =>
+                {
+                    std::thread::yield_now()
+                }
                 Err(error) => panic!("callback drain failed: {error:?}"),
             }
         }

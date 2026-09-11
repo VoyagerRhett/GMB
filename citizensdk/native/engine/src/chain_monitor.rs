@@ -1,5 +1,5 @@
-//! SDK 钱包历史协调状态；订阅和共识来自 provider，这里只管理账户代际与取消租约。
-use citizen_sdk_contracts::{AccountId32, FinalizedBlockRef};
+//! SDK generic execution-history coordination state.
+use citizen_sdk_contracts::{FinalizedBlockRef, TransactionExecutionId};
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -47,13 +47,15 @@ impl MonitorCancellation {
 pub(crate) struct ChainMonitorState {
     pub(crate) running: bool,
     pub(crate) polling: bool,
-    pub(crate) accounts: Vec<AccountId32>,
     pub(crate) revision: Option<u64>,
     // 只是通知代次，不是区块高度或第二份链状态；避免空闲钱包不断请求链。
     pub(crate) chain_revision: u64,
     pub(crate) synced_chain_revision: u64,
     pub(crate) needs_catchup: bool,
-    pub(crate) pending_positions: std::collections::BTreeMap<citizen_sdk_contracts::Hash32, u64>,
+    /// Per-process generic recovery progress. Durable facts stay exclusively in the typed store.
+    pub(crate) execution_positions: std::collections::BTreeMap<TransactionExecutionId, u64>,
+    /// Exact signed bytes are resubmitted at most once per running monitor generation.
+    pub(crate) rebroadcasted_executions: std::collections::BTreeSet<TransactionExecutionId>,
 }
 
 /// Core 与 SDK 调度器之间的更新，不是新的持久模型或宿主账户真源。

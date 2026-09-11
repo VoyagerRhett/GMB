@@ -2,21 +2,24 @@ use std::mem::{align_of, offset_of, size_of};
 
 use citizensdk::{
     CitizenSdkAccountBalanceInfo, CitizenSdkAccountId, CitizenSdkAccountNonceInfo,
-    CitizenSdkBlockRef, CitizenSdkBytesView, CitizenSdkCapabilitySnapshot,
-    CitizenSdkCapabilityStatus, CitizenSdkCreateOptions, CitizenSdkEvent, CitizenSdkExecutionInfo,
-    CitizenSdkExportedStateInfo, CitizenSdkFeeSnapshotInfo, CitizenSdkFinalizedTransferInfo,
-    CitizenSdkHistoryCursorInfo, CitizenSdkHistoryInfo, CitizenSdkHistoryRecordInfo,
-    CitizenSdkHistoryStatus, CitizenSdkHostBoolResultV1, CitizenSdkHostBytesKind,
-    CitizenSdkHostBytesResultV1, CitizenSdkHostHash32, CitizenSdkHostId128,
-    CitizenSdkHostPublicStoreV1, CitizenSdkHostRecordDomain, CitizenSdkHostRecordResultV1,
-    CitizenSdkHostSecretKind, CitizenSdkHostSecretRefV1, CitizenSdkHostSecretVaultV1,
-    CitizenSdkHostSecureStoreV1, CitizenSdkHostServicesV1, CitizenSdkHostStatusResultV1,
-    CitizenSdkHostVaultAvailability, CitizenSdkHostVaultAvailabilityResultV1,
-    CitizenSdkHostWalletKeyRefV1, CitizenSdkMutableBytesView, CitizenSdkPreparedWalletInfo,
+    CitizenSdkBlockBodyInfo, CitizenSdkBlockHeaderInfo, CitizenSdkBlockRef, CitizenSdkBytesView,
+    CitizenSdkCapabilitySnapshot, CitizenSdkCapabilityStatus, CitizenSdkChainSyncStatusInfo,
+    CitizenSdkCreateOptions, CitizenSdkDefaultAccountChangeInfo, CitizenSdkEvent,
+    CitizenSdkExecutionInfo, CitizenSdkExportedStateInfo, CitizenSdkFeeSnapshotInfo,
+    CitizenSdkHostBoolResultV1, CitizenSdkHostBytesKind, CitizenSdkHostBytesResultV1,
+    CitizenSdkHostHash32, CitizenSdkHostId128, CitizenSdkHostPublicStoreV1,
+    CitizenSdkHostRecordDomain, CitizenSdkHostRecordResultV1, CitizenSdkHostSecretKind,
+    CitizenSdkHostSecretRefV1, CitizenSdkHostSecretVaultV1, CitizenSdkHostSecureStoreV1,
+    CitizenSdkHostServicesV1, CitizenSdkHostStatusResultV1, CitizenSdkHostVaultAvailability,
+    CitizenSdkHostVaultAvailabilityResultV1, CitizenSdkHostWalletKeyRefV1,
+    CitizenSdkMutableBytesView, CitizenSdkPreparedTransactionInfo, CitizenSdkPreparedWalletInfo,
     CitizenSdkResultInfo, CitizenSdkResultKind, CitizenSdkRuntimeContextInfo,
-    CitizenSdkTransferDirection, CitizenSdkTransferResolution, CitizenSdkU128,
-    CitizenSdkWalletAccountInfo, CitizenSdkWalletOrigin, CitizenSdkWalletProfileInfo,
-    CitizenSdkWalletTransferInfo, CitizenSdkWalletWordCount, CitizenSdkWatchEventInfo,
+    CitizenSdkSigningOutcomeInfo, CitizenSdkTransactionExecutionId,
+    CitizenSdkTransactionExecutionInfo, CitizenSdkTransactionExecutionStatus,
+    CitizenSdkTransactionHistoryPageInfo, CitizenSdkTransactionHistoryRecordInfo,
+    CitizenSdkTransactionHistoryStatus, CitizenSdkU128, CitizenSdkWalletAccountInfo,
+    CitizenSdkWalletOrigin, CitizenSdkWalletProfileInfo, CitizenSdkWalletStateAccountInfo,
+    CitizenSdkWalletStateInfo, CitizenSdkWalletWordCount, CitizenSdkWatchEventInfo,
     CITIZENSDK_ABI_VERSION, CITIZENSDK_CAPABILITY_COUNT, CITIZENSDK_HOST_DEK_BYTES,
 };
 
@@ -94,6 +97,30 @@ fn original_public_layout_remains_frozen() {
         payload_len: 16,
         error_message_len: 24,
     });
+    assert_layout!(CitizenSdkSigningOutcomeInfo, 112, 8, {
+        struct_size: 0,
+        abi_version: 4,
+        status: 8,
+        transport: 12,
+        account_id: 16,
+        payload_hash: 48,
+        expires_at: 80,
+        signature_len: 88,
+        session_id_len: 96,
+        transport_request_len: 104,
+    });
+    assert_layout!(CitizenSdkDefaultAccountChangeInfo, 112, 8, {
+        struct_size: 0,
+        abi_version: 4,
+        status: 8,
+        transport: 12,
+        current_default_account_id: 16,
+        payload_hash: 48,
+        expires_at: 80,
+        committed_revision: 88,
+        session_id_len: 96,
+        transport_request_len: 104,
+    });
     assert_layout!(CitizenSdkRuntimeContextInfo, 80, 8, {
         struct_size: 0,
         abi_version: 4,
@@ -101,6 +128,33 @@ fn original_public_layout_remains_frozen() {
         spec_version: 64,
         transaction_version: 68,
         metadata_len: 72,
+    });
+    assert_layout!(CitizenSdkChainSyncStatusInfo, 136, 8, {
+        struct_size: 0,
+        abi_version: 4,
+        peer_count: 8,
+        is_syncing: 16,
+        is_usable: 17,
+        reserved: 18,
+        best: 24,
+        finalized: 80,
+    });
+    assert_layout!(CitizenSdkBlockHeaderInfo, 168, 8, {
+        struct_size: 0,
+        abi_version: 4,
+        block: 8,
+        parent_hash: 64,
+        state_root: 96,
+        extrinsics_root: 128,
+        digest_len: 160,
+    });
+    assert_layout!(CitizenSdkBlockBodyInfo, 80, 8, {
+        struct_size: 0,
+        abi_version: 4,
+        block: 8,
+        extrinsic_count: 64,
+        reserved: 68,
+        total_bytes: 72,
     });
     assert_layout!(CitizenSdkWatchEventInfo, 112, 8, {
         struct_size: 0,
@@ -307,70 +361,96 @@ fn account_wallet_and_history_layout_and_constants_are_exact() {
         ss58_address_len: 56,
         name_len: 64,
     });
+    assert_layout!(CitizenSdkWalletStateInfo, 56, 8, {
+        struct_size: 0,
+        abi_version: 4,
+        revision: 8,
+        account_count: 16,
+        has_default_account: 20,
+        default_account_id: 24,
+    });
+    assert_layout!(CitizenSdkWalletStateAccountInfo, 88, 8, {
+        struct_size: 0,
+        abi_version: 4,
+        sign_mode: 8,
+        wallet_index: 12,
+        has_account_index: 16,
+        account_index: 20,
+        is_default: 24,
+        reserved: 28,
+        account_id: 32,
+        created_at_millis: 64,
+        ss58_address_len: 72,
+        name_len: 80,
+    });
     assert_layout!(CitizenSdkPreparedWalletInfo, 16, 8, {
         struct_size: 0,
         abi_version: 4,
         prepared_wallet: 8,
     });
-    assert_layout!(CitizenSdkWalletTransferInfo, 144, 8, {
+    assert_layout!(CitizenSdkPreparedTransactionInfo, 168, 8, {
         struct_size: 0,
         abi_version: 4,
-        transaction_hash: 8,
-        resolution: 40,
-        has_execution: 44,
-        execution: 48,
-        pool_rejection_reason_len: 136,
+        prepared_transaction: 8,
+        preparation_id: 16,
+        source_account_id: 32,
+        call_data_hash: 64,
+        best_block: 96,
+        runtime_spec_number: 152,
+        transaction_format_number: 156,
+        nonce: 160,
     });
-    assert_layout!(CitizenSdkHistoryInfo, 32, 8, {
+    assert_layout!(CitizenSdkTransactionExecutionId, 16, 1, { bytes: 0 });
+    assert_layout!(CitizenSdkTransactionExecutionInfo, 288, 8, {
+        struct_size: 0,
+        abi_version: 4,
+        status: 8,
+        transport: 12,
+        execution_id: 16,
+        source_account_id: 32,
+        call_data_hash: 64,
+        transaction_hash: 96,
+        expires_at: 128,
+        has_block: 136,
+        has_extrinsic_index: 140,
+        has_dispatch_failure: 144,
+        has_module_failure: 148,
+        has_replacement_hash: 152,
+        dispatch_variant: 156,
+        pallet_index: 160,
+        error_index: 164,
+        block: 168,
+        extrinsic_index: 224,
+        replacement_hash: 228,
+        session_id_len: 264,
+        transport_request_len: 272,
+        pool_rejection_reason_len: 280,
+    });
+    assert_layout!(CitizenSdkTransactionHistoryPageInfo, 40, 8, {
         struct_size: 0,
         abi_version: 4,
         revision: 8,
-        cursor_count: 16,
-        record_count: 20,
-        transfer_count: 24,
-        reserved: 28,
+        record_count: 16,
+        has_next_before_execution_id: 20,
+        next_before_execution_id: 24,
     });
-    assert_layout!(CitizenSdkHistoryCursorInfo, 152, 8, {
+    assert_layout!(CitizenSdkTransactionHistoryRecordInfo, 336, 8, {
         struct_size: 0,
         abi_version: 4,
-        account_id: 8,
-        tracking_start_block: 40,
-        last_synced_block: 96,
-    });
-    assert_layout!(CitizenSdkHistoryRecordInfo, 320, 8, {
-        struct_size: 0,
-        abi_version: 4,
-        account_id: 8,
-        transaction_hash: 40,
-        nonce: 72,
-        destination_account_id: 80,
-        amount_fen: 112,
-        status: 128,
-        has_block: 132,
-        block: 136,
-        has_execution: 192,
-        reserved: 196,
-        execution: 200,
-        created_at_millis: 288,
-        updated_at_millis: 296,
-        remark_len: 304,
-        pool_rejection_reason_len: 312,
-    });
-    assert_layout!(CitizenSdkFinalizedTransferInfo, 216, 8, {
-        struct_size: 0,
-        abi_version: 4,
-        tracked_account_id: 8,
-        from_account_id: 40,
-        to_account_id: 72,
-        amount_fen: 104,
-        block: 120,
-        event_record_index: 176,
-        has_extrinsic_index: 180,
-        extrinsic_index: 184,
-        direction: 188,
-        source_pallet_len: 192,
-        remark_display_len: 200,
-        remark_bytes_len: 208,
+        execution_id: 8,
+        source_account_id: 24,
+        call_data_hash: 56,
+        transaction_hash: 88,
+        status: 120,
+        has_block: 124,
+        block: 128,
+        has_execution: 184,
+        has_replacement_hash: 188,
+        execution: 192,
+        replacement_hash: 280,
+        created_at_millis: 312,
+        updated_at_millis: 320,
+        pool_rejection_reason_len: 328,
     });
 
     assert_eq!(CitizenSdkResultKind::AccountBalance as u32, 9);
@@ -380,21 +460,41 @@ fn account_wallet_and_history_layout_and_constants_are_exact() {
     assert_eq!(CitizenSdkResultKind::WalletAccounts as u32, 13);
     assert_eq!(CitizenSdkResultKind::Signature as u32, 14);
     assert_eq!(CitizenSdkResultKind::PreparedWallet as u32, 15);
-    assert_eq!(CitizenSdkResultKind::WalletTransfer as u32, 16);
-    assert_eq!(CitizenSdkResultKind::TransactionHistory as u32, 17);
+    assert_eq!(CitizenSdkResultKind::TransactionHistoryPage as u32, 17);
+    assert_eq!(CitizenSdkResultKind::PreparedTransaction as u32, 27);
+    assert_eq!(CitizenSdkResultKind::TransactionExecution as u32, 28);
+    assert_eq!(
+        CitizenSdkTransactionExecutionStatus::ExternalPending as u32,
+        1
+    );
+    assert_eq!(
+        CitizenSdkTransactionExecutionStatus::FinalizedSuccess as u32,
+        2
+    );
+    assert_eq!(
+        CitizenSdkTransactionExecutionStatus::FinalizedFailed as u32,
+        3
+    );
+    assert_eq!(CitizenSdkTransactionExecutionStatus::PoolRejected as u32, 4);
+    assert_eq!(CitizenSdkTransactionHistoryStatus::Pending as u32, 1);
+    assert_eq!(
+        CitizenSdkTransactionHistoryStatus::FinalizedFailed as u32,
+        5
+    );
     assert_eq!(CitizenSdkWalletWordCount::Words12 as u32, 12);
     assert_eq!(CitizenSdkWalletWordCount::Words18 as u32, 18);
     assert_eq!(CitizenSdkWalletWordCount::Words24 as u32, 24);
     assert_eq!(CitizenSdkWalletOrigin::Created as u32, 1);
     assert_eq!(CitizenSdkWalletOrigin::Imported as u32, 2);
-    assert_eq!(CitizenSdkHistoryStatus::Pending as u32, 1);
-    assert_eq!(CitizenSdkHistoryStatus::InBlock as u32, 2);
-    assert_eq!(CitizenSdkHistoryStatus::PoolRejected as u32, 3);
-    assert_eq!(CitizenSdkHistoryStatus::FinalizedSuccess as u32, 4);
-    assert_eq!(CitizenSdkHistoryStatus::FinalizedFailed as u32, 5);
-    assert_eq!(CitizenSdkTransferResolution::FinalizedSuccess as u32, 1);
-    assert_eq!(CitizenSdkTransferResolution::FinalizedFailed as u32, 2);
-    assert_eq!(CitizenSdkTransferResolution::PoolRejected as u32, 3);
-    assert_eq!(CitizenSdkTransferDirection::Outgoing as u32, 1);
-    assert_eq!(CitizenSdkTransferDirection::Incoming as u32, 2);
+    assert_eq!(CitizenSdkTransactionHistoryStatus::Pending as u32, 1);
+    assert_eq!(CitizenSdkTransactionHistoryStatus::InBlock as u32, 2);
+    assert_eq!(CitizenSdkTransactionHistoryStatus::PoolRejected as u32, 3);
+    assert_eq!(
+        CitizenSdkTransactionHistoryStatus::FinalizedSuccess as u32,
+        4
+    );
+    assert_eq!(
+        CitizenSdkTransactionHistoryStatus::FinalizedFailed as u32,
+        5
+    );
 }

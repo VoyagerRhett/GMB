@@ -35,33 +35,132 @@ void main() {
     expect(signature.bytes, everyElement(7));
   });
 
-  test('交易历史复制三个集合和公开remark bytes', () {
-    final transfer = CitizenFinalizedTransfer(
-      trackedAccountId: _account(1),
-      fromAccountId: _account(1),
-      toAccountId: _account(2),
-      amountFen: BigInt.from(100),
-      block: CitizenBlockRef(
-        hash: _account(3),
-        number: BigInt.one,
-        finality: CitizenBlockFinality.finalized,
+  test('统一钱包状态复制全局顺序并从首项派生默认账户', () {
+    final accounts = <CitizenWalletStateAccount>[
+      CitizenWalletStateAccount(
+        signMode: CitizenWalletSignMode.cold,
+        walletIndex: 1,
+        accountIndex: null,
+        accountId: _account(1),
+        ss58Address: 'CitizenAddress',
+        name: '冷账户',
+        createdAtMillis: BigInt.one,
+        isDefault: true,
       ),
-      eventRecordIndex: 0,
-      extrinsicIndex: 1,
-      direction: CitizenTransferDirection.outgoing,
-      sourcePallet: 'OnchainTransaction',
-      remarkDisplay: '公开备注',
-      remarkBytes: Uint8List.fromList(<int>[1, 2]),
-    );
-    final transfers = <CitizenFinalizedTransfer>[transfer];
-    final history = CitizenTransactionHistory(
+    ];
+    final state = CitizenWalletState(
       revision: BigInt.one,
-      cursors: const <CitizenHistoryCursor>[],
-      records: const <CitizenHistoryRecord>[],
-      transfers: transfers,
+      hotProfile: null,
+      accounts: accounts,
     );
-    transfers.clear();
-    expect(history.transfers.single.remarkDisplay, '公开备注');
+    accounts.clear();
+    expect(state.accounts, hasLength(1));
+    expect(state.defaultAccount?.signMode, CitizenWalletSignMode.cold);
+  });
+
+  test('通用交易历史页只冻结安全execution投影', () {
+    final records = <CitizenTransactionHistoryRecord>[
+      CitizenTransactionHistoryRecord(
+        executionId: '0x${'01' * 16}',
+        sourceAccountId: _account(1),
+        callDataHash: _account(2),
+        transactionHash: _account(3),
+        status: CitizenTransactionHistoryStatus.pending,
+        block: null,
+        execution: null,
+        replacementHash: null,
+        createdAtMillis: BigInt.one,
+        updatedAtMillis: BigInt.one,
+        poolRejectionReason: null,
+      ),
+    ];
+    final history = CitizenTransactionHistoryPage(
+      revision: BigInt.one,
+      records: records,
+      nextBeforeExecutionId: null,
+    );
+    records.clear();
+    expect(
+      history.records.single.status,
+      CitizenTransactionHistoryStatus.pending,
+    );
+    expect(() => history.records.clear(), throwsUnsupportedError);
+  });
+
+  test('通用链字节模型复制header、body、runtime和显式状态', () {
+    final block = CitizenBlockRef(
+      hash: _account(3),
+      number: BigInt.one,
+      finality: CitizenBlockFinality.finalized,
+    );
+    final bytes = Uint8List.fromList(<int>[1, 2]);
+    final header = CitizenBlockHeader(
+      block: block,
+      parentHash: _account(1),
+      stateRoot: _account(2),
+      extrinsicsRoot: _account(3),
+      digest: bytes,
+    );
+    final body = CitizenBlockBody(block: block, extrinsics: <Uint8List>[bytes]);
+    final runtime = CitizenRuntimeContext(
+      block: block,
+      specVersion: 1,
+      transactionVersion: 1,
+      metadata: bytes,
+    );
+    final state = CitizenChainState(
+      formatVersion: 1,
+      finalized: block,
+      database: bytes,
+    );
+    bytes.fillRange(0, bytes.length, 0);
+    expect(header.digest, <int>[1, 2]);
+    expect(body.extrinsics.single, <int>[1, 2]);
+    expect(runtime.metadata, <int>[1, 2]);
+    expect(state.database, <int>[1, 2]);
+    expect(() => body.extrinsics.single[0] = 0, throwsUnsupportedError);
+  });
+
+  test('通用交易准备与执行模型复制并冻结所有公开字节', () {
+    final source = Uint8List.fromList(List<int>.filled(32, 1));
+    final callHash = Uint8List.fromList(List<int>.filled(32, 2));
+    final transactionHash = Uint8List.fromList(List<int>.filled(32, 3));
+    final replacementHash = Uint8List.fromList(List<int>.filled(32, 4));
+    final prepared = CitizenPreparedTransaction(
+      preparationId: '0x${'01' * 16}',
+      sourceAccountId: source,
+      callDataHash: callHash,
+      bestBlock: CitizenBlockRef(
+        hash: _account(5),
+        number: BigInt.one,
+        finality: CitizenBlockFinality.best,
+      ),
+      runtimeSpecNumber: 1,
+      transactionFormatNumber: 1,
+      nonce: BigInt.zero,
+    );
+    final completed = CitizenTransactionExecutionCompleted(
+      executionId: '0x${'02' * 16}',
+      sourceAccountId: source,
+      callDataHash: callHash,
+      transactionHash: transactionHash,
+      resolution: CitizenTransactionResolution.poolRejected,
+      execution: null,
+      poolRejectionReason: 'usurped',
+      replacementHash: replacementHash,
+    );
+    source.fillRange(0, source.length, 0);
+    callHash.fillRange(0, callHash.length, 0);
+    transactionHash.fillRange(0, transactionHash.length, 0);
+    replacementHash.fillRange(0, replacementHash.length, 0);
+    expect(prepared.sourceAccountId, everyElement(1));
+    expect(prepared.callDataHash, everyElement(2));
+    expect(completed.transactionHash, everyElement(3));
+    expect(completed.replacementHash, everyElement(4));
+    expect(() => prepared.sourceAccountId[0] = 9, throwsUnsupportedError);
+    expect(() => completed.callDataHash[0] = 9, throwsUnsupportedError);
+    expect(() => completed.transactionHash[0] = 9, throwsUnsupportedError);
+    expect(() => completed.replacementHash![0] = 9, throwsUnsupportedError);
   });
 }
 

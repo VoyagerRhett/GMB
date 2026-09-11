@@ -1,8 +1,9 @@
-//! 无秘密钱包公开事实的原子仓储。
+//! 热钱包公开资料、仅公钥冷账户和全局账户顺序的无秘密原子仓储。
 
 use crate::{ContractFuture, WalletState};
 
-/// 只保存 `WalletState`；助记词、母种子、mini-secret、私钥和签名均不属于该类型。
+/// 只保存 `WalletState`。冷账户没有秘密引用；助记词、母种子、mini-secret、私钥和签名
+/// 均不属于该类型。宿主必须把完整状态作为一个 CAS 单元，不能把账户顺序另存为影子真源。
 pub trait WalletProfileStore: Send + Sync {
     fn load(&self) -> ContractFuture<'_, WalletState>;
 

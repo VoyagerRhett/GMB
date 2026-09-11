@@ -213,10 +213,6 @@ class PendingTransport final : public csf::NativeTransport {
     throw csf::ContractFailure(CITIZENSDK_ERROR_CANCELLED,
                                "Fixture request completed after detach");
   }
-  csf::Value copy_progress(citizensdk_result_handle_t, int64_t) override {
-    assert(false);
-    return {};
-  }
   citizensdk_lifecycle_t lifecycle_state() override {
     return CITIZENSDK_LIFECYCLE_CREATED;
   }

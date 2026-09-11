@@ -429,7 +429,10 @@ fn engine_gathers_provider_evidence_without_arbitrary_rpc() {
         Ok(outcome) => outcome,
         Err(error) => panic!("engine verification failed: {error}"),
     };
-    assert!(matches!(outcome, ExecutionConclusion::Success { .. }));
+    assert!(
+        matches!(outcome, ExecutionConclusion::Success { .. }),
+        "expected provider evidence to prove success, got {outcome:?}"
+    );
 }
 
 #[test]
@@ -449,7 +452,10 @@ fn persistent_runtime_cache_is_never_transaction_execution_evidence() {
         futures::executor::block_on(engine.verify_transaction_at(context.block(), signed, hash))
             .unwrap_or_else(|error| panic!("engine verification failed: {error}"));
 
-    assert!(matches!(outcome, ExecutionConclusion::Success { .. }));
+    assert!(
+        matches!(outcome, ExecutionConclusion::Success { .. }),
+        "expected live provider evidence to prove success, got {outcome:?}"
+    );
     assert_eq!(
         counters.runtime_cache_loads.load(Ordering::SeqCst),
         0,

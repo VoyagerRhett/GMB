@@ -1,7 +1,7 @@
 # CitizenSDK 原生产物与候选打包
 
-当前闭集为 89 个 Core C 函数、Linux/Windows 各 17 个 Host C 函数、3 个
-ZXing-C++ 图像 C 函数和五端统一 36 个 Flutter 方法。新增符号不改变 ABI v1
+当前闭集为 117 个 Core C 函数、Linux/Windows 各 17 个 Host C 函数、3 个
+ZXing-C++ 图像 C 函数和五端统一 63 个 Flutter 方法。新增符号不改变 ABI v1
 既有结构和数值。模块选择只影响运行时服务与
 资源装配，不是发布包裁剪：现有正式包装仍编译 full，并完整携带链资产。未选 chain 的实例
 不加载这些资产、不创建链数据库或启动 smoldot。模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
@@ -41,9 +41,9 @@ Simulator ARM64 Swift 链接。后两项不声称真机运行，也不要求上�
 
 ## 静态依赖准备与证据（第 10.5 步）
 
-中央唯一来源为 TataConsole 的 flows/gmb/shared/dependencies.json 内
-native_dependencies 子合同；同目录 dependencies.mjs 的 prepare-native 子命令执行准备。
-SDK 不依赖另一个仓库路径：release.mjs 只固定子合同规范 JSON 的 SHA256，并验证输入收据
+产品依赖合同由本产品 `scripts/dependencies.json` 保存，`scripts/dependencies.mjs` 的
+prepare-native 子命令执行准备；塔塔依赖库只保存离线原件，不决定或阻断产品依赖。
+release.mjs 只固定子合同规范 JSON 的 SHA256，并验证输入收据
 内的合同副本。不自动升级，不使用 latest；SQLite 的官方 SHA3-256 与独立计算的 SHA256
 分别保存、分别验证，绝不混写算法。
 
@@ -61,7 +61,7 @@ OpenSSL 头固定为 142 个；TPM2-TSS 头固定为八个；SQLite 只带 sqlit
 
 准确调用接口（路径由既有中央作业提供，不是第二套 CI）：
 
-    node <中央 flows>/gmb/shared/dependencies.mjs prepare-native --scope citizensdk \
+    node scripts/dependencies.mjs prepare-native --scope citizensdk \
       --platform <LinuxARM|LinuxAMD|Windows> --work <全新中央工作子目录> \
       --sources <既存归档缓存目录> --sdk <同源SDK目录> --mode <ci|release> \
       --source-sha <冻结GMB提交> --software-version <源码版本>
@@ -131,7 +131,7 @@ CITIZENSDK_NATIVE_OUTPUT_DIR=<原生产物目录>
 `darwin/Sources/CitizenSDK` Swift 源码、根产品头、Privacy Manifest 与完整 CitizenChain 资产组合为一个
 `CitizenSDK.xcframework`。其闭集只有 iOS 设备变体、iOS 模拟器变体与 macOS；三个
 Apple machine slice 的架构元数据均为 `arm64`；
-每个 slice 精确导出产品头声明的 89 个符号及 3 个 QR 图像符号，并拒绝 `smoldot_*`、`citizen_sr25519_*`、
+每个 slice 精确导出产品头声明的 117 个符号及 3 个 QR 图像符号，并拒绝 `smoldot_*`、`citizen_sr25519_*`、
 `account_crypto_*` 和其它架构。
 
 legacy `libsmoldot.dylib` 只允许作为源码树外的 macOS `arm64` 差分测试宿主库生成；它绝不进入
@@ -143,7 +143,10 @@ XCFramework、Hosted 或 GitHub 候选。其 `LC_ID_DYLIB` 是编译工作区的
 `smoldot_*`、`citizen_sr25519_*` 或 `account_crypto_*` 泄露都会失败。它只写入调用者指定的
 外部 `abi-host/` 目录，不加入 `all`，也不进入 Android/Apple 正式候选。
 产品 ABI v1 保持既有 73 个符号，再追加模块验证、模块构造和无实例验签三个符号，以及四个链查询/结果符号，
-QR 统一为 9 个协议、审阅、签名和结果符号，总计 89 个；构建产物与头文件
+QR 统一为 9 个协议、审阅、签名和结果符号；统一钱包状态增加 8 个入口，通用冷热签名与默认
+账户授权再增加 7 个入口，第 1.4 步安全链读取增加 10 个入口，第 1.5 步交易准备增加 3 个入口，
+第 1.6 步冷热交易执行增加 4 个入口形成 121 个；第 1.7 步以 4 个通用历史入口替换 8 个业务
+转账/历史入口，总计 117 个；构建产物与头文件
 任一缺失、额外或重复都必须失败关闭。
 
 Android Core 在进入 Gradle 前由固定 NDK 的 `llvm-strip --strip-unneeded` 显式处理一次；该同一
@@ -207,7 +210,7 @@ linux/lib/LinuxAMD/libcitizensdk.so
 linux/lib/LinuxAMD/libcitizensdk_host.so
 ```
 
-独立 Core 动态库必须精确导出89个公开函数及4个内部查看链接函数；Host只装配typed stores、TPM/认证、SDK-owned
+独立 Core 动态库必须精确导出114个公开函数及4个内部查看链接函数；Host只装配typed stores、TPM/认证、SDK-owned
 钱包流程和生命周期，不复制 smoldot、signer 或 Engine。Host 只能按 SONAME 依赖 Core 一次，
 两库不得出现绝对 `DT_NEEDED` 或构建机 RPATH/RUNPATH。CMake 公开目标固定为
 `CitizenSDK::Core` 与 `CitizenSDK::Host`，C++ convenience API 保持 header-only，不引入跨
@@ -362,7 +365,7 @@ CI 与 Release 都使用确定性候选算法，但 Release 的成立条件是�
 验证，不宣称不同 Runner、不同 run 的压缩包在所有环境下必然逐字节相同。
 
 工具来源和准备属于既有中央 dependencies.json / dependencies.mjs；SDK 源码不依赖 TATA。
-Flutter 固定 3.44.4 官方提交，Android 明确选 NDK 28.2.13676358、Gradle 8.14、CMake 3.22.1；
+Flutter 固定 3.44.4 官方提交，Android 明确选 NDK 28.2.13676358、Gradle 8.14、CMake 3.31.6；
 后者由 sdkmanager 维护安装元数据，并将安装文件与已验 SHA256 的官方归档逐字节比较。
 Windows 初始化 runner 已装 MSVC，保留 /MD。Linux 使用固定官方 Debian rootfs、签名 APT
 快照及 CMake 3.31.6；系统包版本留在本作业记录中，不把 Ubuntu 24.04 的 GLIBC 2.39 链入 SDK。
@@ -378,7 +381,7 @@ AppArmor userns 和 seccomp 准确 unshare(CLONE_NEWUSER|CLONE_NEWNET) 规则。
 保存前删除最终运行库。原件由中央对象库管理；安装树、测试金库、消费者、证据和候选不缓存。
 
 两条流程的测试命令合同相同：根包一次发现并执行全部根测试和已经迁入的 smoldot 测试，
-不把历史的 230 项与 51 项固定成两套数量门禁，并以 `flutter test --timeout=2m` 统一执行；
+不把历史的 230 项与 51 项固定成两套数量门禁，并以 `scripts/test.sh flutter --timeout=2m` 统一执行；
 第 2 步隔离副本实际执行结果为 288/288。外层两分钟超时必须长于来源测试内部的 30 秒活链
 订阅窗口。Android 在临时 Flutter 宿主中执行 Gradle
 `:citizen_sdk:testDebugUnitTest`；Apple 必须启动 iOS 模拟器变体 runtime 执行 XCTest，并验证

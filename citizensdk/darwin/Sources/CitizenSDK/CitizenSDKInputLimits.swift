@@ -1,25 +1,18 @@
 import Foundation
 
 internal enum CitizenSDKInputLimits {
-    static let maximumHistoryAccounts = 1_990
     static let maximumBalanceAccounts = 1_990
     static let maximumSigningPayloadBytes = 16 * 1_024 * 1_024
     static let maximumWalletSecretBytes = 1_024
     static let maximumAdditionalAccounts = 1_989
-    static let maximumTransferRemarkBytes = 99
     static let maximumAccountNameUTF16Units = 128
+    static let maximumStorageKeyBytes = 4 * 1_024
+    static let maximumStorageBatchKeys = 1_024
+    static let maximumStorageBatchKeyBytes = 1_024 * 1_024
 
     static func accountID(_ value: Data, label: String = "accountID") throws -> Data {
         try CitizenSDKChecks.require(value.count == 32, "\(label) must contain exactly 32 bytes")
         return value
-    }
-
-    static func accountIDs(_ values: [Data]) throws -> [Data] {
-        try CitizenSDKChecks.require((1...maximumHistoryAccounts).contains(values.count),
-                                     "accountIDs must contain 1...\(maximumHistoryAccounts) entries")
-        let checked = try values.map { try accountID($0) }
-        try CitizenSDKChecks.require(Set(checked).count == checked.count, "accountIDs must be unique")
-        return checked
     }
 
     /// 批量余额不是历史订阅：允许空列表与重复账户，不排序或去重。
@@ -35,10 +28,20 @@ internal enum CitizenSDKInputLimits {
         return value
     }
 
-    static func transferRemark(_ value: Data) throws -> Data {
-        try CitizenSDKChecks.require(value.count <= maximumTransferRemarkBytes,
-                                     "transfer remark exceeds \(maximumTransferRemarkBytes) bytes")
+    static func storageKey(_ value: Data) throws -> Data {
+        try CitizenSDKChecks.require((1...maximumStorageKeyBytes).contains(value.count),
+                                     "storage key must contain 1...4 KiB")
         return value
+    }
+
+    static func storageKeys(_ values: [Data]) throws -> [Data] {
+        try CitizenSDKChecks.require((1...maximumStorageBatchKeys).contains(values.count),
+                                     "storage batch must contain 1...1024 keys")
+        let checked = try values.map(storageKey)
+        try CitizenSDKChecks.require(
+            checked.reduce(0) { $0 + $1.count } <= maximumStorageBatchKeyBytes,
+            "storage batch keys exceed 1 MiB")
+        return checked
     }
 
     static func accountName(_ value: String) throws -> String {

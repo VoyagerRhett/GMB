@@ -7,13 +7,59 @@ use std::{
 };
 
 use citizen_sdk_contracts::{
-    AccountNonce, ExecutionConclusion, ExportedChainState, ExtrinsicWatchEvent,
-    FinalizedAccountBalance, Hash32, RuntimeContext, Sr25519Signature, TransactionHistoryState,
-    VerifiedBlockRef, WalletAccount, WalletProfile,
+    AccountNonce, ChainSyncStatus, ExecutionConclusion, ExportedChainState, ExtrinsicWatchEvent,
+    FinalizedAccountBalance, Hash32, PreparedTransactionSummary, RuntimeContext, SigningCompletion,
+    Sr25519Signature, TransactionExecutionCompleted, TransactionExecutionId,
+    TransactionHistoryPage, VerifiedBlockBody, VerifiedBlockHeader, VerifiedBlockRef,
+    WalletAccount, WalletProfile, WalletState,
 };
+
+#[derive(Clone, Debug)]
+pub(crate) struct ExternalSigningPending {
+    pub(crate) account_id: citizen_sdk_contracts::AccountId32,
+    pub(crate) payload_hash: Hash32,
+    pub(crate) expires_at: u64,
+    pub(crate) session_id: String,
+    pub(crate) transport_request: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum SigningOutcomePayload {
+    Completed(SigningCompletion),
+    ExternalPending(ExternalSigningPending),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum DefaultAccountChangePayload {
+    Completed {
+        current_default_account_id: citizen_sdk_contracts::AccountId32,
+        payload_hash: Hash32,
+        committed_revision: u64,
+    },
+    ExternalPending(ExternalSigningPending),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PreparedTransactionPayload {
+    pub(crate) handle: crate::abi::CitizenSdkPreparedTransactionHandle,
+    pub(crate) summary: PreparedTransactionSummary,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TransactionExternalSigningPending {
+    pub(crate) execution_id: TransactionExecutionId,
+    pub(crate) source_account_id: citizen_sdk_contracts::AccountId32,
+    pub(crate) call_data_hash: Hash32,
+    pub(crate) external: ExternalSigningPending,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum TransactionExecutionPayload {
+    ExternalPending(TransactionExternalSigningPending),
+    Completed(TransactionExecutionCompleted),
+}
 #[cfg(feature = "chain")]
 use citizen_sdk_engine::BestFeeSnapshot;
-use citizen_sdk_engine::WalletTransferWatchResult;
 
 use crate::{
     abi::{
@@ -42,12 +88,19 @@ pub enum ResultPayload {
     WalletAccounts(Vec<WalletAccount>),
     Signature(Sr25519Signature),
     PreparedWallet(u64),
-    WalletTransfer(WalletTransferWatchResult),
-    TransactionHistory(TransactionHistoryState),
+    TransactionHistoryPage(TransactionHistoryPage),
     #[cfg(feature = "qr")]
     QrReview(std::sync::Arc<crate::qr_abi::QrReviewResult>),
     #[cfg(feature = "qr")]
     QrSigned(String),
+    WalletState(WalletState),
+    SigningOutcome(SigningOutcomePayload),
+    DefaultAccountChange(DefaultAccountChangePayload),
+    ChainSyncStatus(ChainSyncStatus),
+    BlockHeader(VerifiedBlockHeader),
+    BlockBody(VerifiedBlockBody),
+    PreparedTransaction(PreparedTransactionPayload),
+    TransactionExecution(TransactionExecutionPayload),
 }
 
 impl ResultPayload {
@@ -71,12 +124,19 @@ impl ResultPayload {
             Self::WalletAccounts(_) => CitizenSdkResultKind::WalletAccounts,
             Self::Signature(_) => CitizenSdkResultKind::Signature,
             Self::PreparedWallet(_) => CitizenSdkResultKind::PreparedWallet,
-            Self::WalletTransfer(_) => CitizenSdkResultKind::WalletTransfer,
-            Self::TransactionHistory(_) => CitizenSdkResultKind::TransactionHistory,
+            Self::TransactionHistoryPage(_) => CitizenSdkResultKind::TransactionHistoryPage,
             #[cfg(feature = "qr")]
             Self::QrReview(_) => CitizenSdkResultKind::QrReview,
             #[cfg(feature = "qr")]
             Self::QrSigned(_) => CitizenSdkResultKind::QrSigned,
+            Self::WalletState(_) => CitizenSdkResultKind::WalletState,
+            Self::SigningOutcome(_) => CitizenSdkResultKind::SigningOutcome,
+            Self::DefaultAccountChange(_) => CitizenSdkResultKind::DefaultAccountChange,
+            Self::ChainSyncStatus(_) => CitizenSdkResultKind::ChainSyncStatus,
+            Self::BlockHeader(_) => CitizenSdkResultKind::BlockHeader,
+            Self::BlockBody(_) => CitizenSdkResultKind::BlockBody,
+            Self::PreparedTransaction(_) => CitizenSdkResultKind::PreparedTransaction,
+            Self::TransactionExecution(_) => CitizenSdkResultKind::TransactionExecution,
         }
     }
 
@@ -93,8 +153,21 @@ impl ResultPayload {
             | Self::WalletProfile(_)
             | Self::WalletAccounts(_)
             | Self::PreparedWallet(_)
-            | Self::WalletTransfer(_)
-            | Self::TransactionHistory(_) => 0,
+            | Self::TransactionHistoryPage(_) => 0,
+            Self::PreparedTransaction(_) => 0,
+            Self::TransactionExecution(TransactionExecutionPayload::Completed(_)) => 0,
+            Self::TransactionExecution(TransactionExecutionPayload::ExternalPending(pending)) => {
+                (pending.external.session_id.len() + pending.external.transport_request.len())
+                    as u64
+            }
+            Self::ChainSyncStatus(_) => 0,
+            Self::WalletState(_) => 0,
+            Self::SigningOutcome(SigningOutcomePayload::Completed(_))
+            | Self::DefaultAccountChange(DefaultAccountChangePayload::Completed { .. }) => 0,
+            Self::SigningOutcome(SigningOutcomePayload::ExternalPending(pending))
+            | Self::DefaultAccountChange(DefaultAccountChangePayload::ExternalPending(pending)) => {
+                (pending.session_id.len() + pending.transport_request.len()) as u64
+            }
             #[cfg(feature = "chain")]
             Self::FeeSnapshot(_) => 0,
             Self::Storage(Some(bytes)) => bytes.len() as u64,
@@ -105,6 +178,8 @@ impl ResultPayload {
                 .map(Vec::len)
                 .sum::<usize>() as u64,
             Self::RuntimeContext(context) => context.metadata().len() as u64,
+            Self::BlockHeader(header) => header.digest().len() as u64,
+            Self::BlockBody(body) => body.extrinsics().iter().map(Vec::len).sum::<usize>() as u64,
             Self::ExportedState(state) => state.database().len() as u64,
             Self::Signature(_) => 64,
             #[cfg(feature = "qr")]

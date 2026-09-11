@@ -16,7 +16,7 @@ Core 的账户、钱包、轻节点、sr25519 或交易实现。Host 合同目�
 五个生产实现文件，链接同版已安装 Host/Core，不建立测试专用 adapter、第二份 Host/Core 或
 下载测试框架：
 
-- `citizen_sdk_flutter_codec_test.cc`：36 方法、固定 tuple、整数/UTF-8/累计输入预算、标准 wire
+- `citizen_sdk_flutter_codec_test.cc`：63 方法、固定 tuple、整数/UTF-8/累计输入预算、标准 wire
   与内嵌 NUL 无损，以及钱包资料、交易终态、进度和历史返回值语义；
 - `citizen_sdk_flutter_sessions_test.cc`：全部路由、接受前早完成、失败保留、事件 epoch、关闭
   重试、跨 session/引擎的钱包变更门禁、删除后资料回读与 detach 所有权；

@@ -10,6 +10,14 @@ Rust 先验证模块，chain/history 才创建 public store，wallet/signing 才
 `QR_V1` 协议与扫码签名会话由同一 Rust QR 模块实现，不设兼容或回退识别器。
 本次第 2 步仅更新源码、注释、合同和测试，尚未执行新的真实构建、平台测试或硬件验收；下文旧分步运行记录保留为历史证据，不代表本次变更已验证。
 
+第 1.2 步在 C++/Flutter session 中新增统一钱包状态、冷公钥导入、revision 重排和统一改名/删除。
+它们只投影 Core 的公开账户事实；冷账户路径不弹出 Win32 认证、不调用 PCP Vault，且不提供
+无授权 default setter、旧 App 钱包迁移或兼容读取。
+
+第 1.5/1.6 步加入 opaque callData 准备及冷热执行。Windows session 只保管 owner-bound
+preparation token，并在同步 admission 失败时恢复；冷签 response 固定进入 Core 既有 `QR_V1`，
+executionId 可取消同一 Core 长观察。Win32/Flutter 不构造业务 call、签名、payload 或 extrinsic。
+
 本目录是同一个 CitizenSDK 的 Windows 系统适配，不是另一个钱包或轻节点实现。
 最低 Windows 11，机器目标 `x86_64-pc-windows-msvc`；公开平台名只有 **Windows**。
 本步新增源码与原生构建合同，尚未在 Windows 实际编译、运行或分发。macOS 验收不能
@@ -73,11 +81,15 @@ SDK 认证窗口可临时获得焦点；认证窗口再次失焦会取消，晚�
 私钥不进入窗口文本消息、剪贴板、Flutter 或通用 result。完整安全流程和真实 Win32/TPM
 验收尚未完成。生成私有头仅通过 `CITIZENSDK_INTERNAL_INCLUDE_DIR` 给内部目标使用，不安装。
 
+第 1.4 步新增 12 个通用安全链读取方法。Windows codec/session 仅把固定 tuple 投影到同一
+121 项 Core ABI，并校验准确块、optional bytes、body 顺序、累计资源上限和 import finalized
+回执；不通过 WinHTTP/Win32 建立旁路网络，不解码任何宿主业务 SCALE。
+
 ## Flutter 适配源码
 
 `citizen_sdk_plugin` 通过官方 `flutter`、`flutter_wrapper_plugin` 连接包内同版
 `CitizenSDK::Host/Core`，不重新编译核心。使用官方 StandardMethodCodec 和已有双 channel、
-36 方法；钱包交互只接本目录现有 Win32 安全流程。无会话 verifySignature 在环境/Host 创建前
+63 方法；钱包交互只接本目录现有 Win32 安全流程。无会话 verifySignature 在环境/Host 创建前
 直接调用公共 Core；Dart 使用静态 CitizenSigning.verify，无需 open 或事件订阅。
 
 Windows 宿主须在顶层 CMake 引入 generated_plugins.cmake 之前声明一次：
