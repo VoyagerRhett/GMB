@@ -311,9 +311,9 @@ constexpr const char *kMethods[] = {
     "getTransactionHistory", "syncTransactionHistory",
     "qrParse", "qrCreateSignRequest",
     "qrConsumeSignResponse", "qrCancelSignRequest", "qrEncodeAccountId",
-    "qrEncodeUserTransfer", "qrDecodeLuminance", "qrEncode", "qrScan", "signQrRequest",
+    "qrDecodeLuminance", "qrEncode", "qrScan", "signQrRequest",
 };
-static_assert(std::size(kMethods) == 63);
+static_assert(std::size(kMethods) == 62);
 
 [[noreturn]] void fail(citizensdk_error_code_t code, const char *message) {
   throw ContractFailure(code, message);
@@ -630,9 +630,11 @@ bool flag(uint32_t value) {
 ContractFailure::ContractFailure(citizensdk_error_code_t error_code,
                                  std::string message,
                                  std::optional<std::string> session_id,
-                                 std::optional<int64_t> request_sequence)
+                                 std::optional<int64_t> request_sequence,
+                                 citizensdk_failure_stage_t failure_stage)
     : std::runtime_error(std::move(message)), code(error_code),
-      session(std::move(session_id)), sequence(request_sequence) {}
+      session(std::move(session_id)), sequence(request_sequence),
+      stage(failure_stage == 0 ? flutter_default_failure_stage(error_code) : failure_stage) {}
 
 const char *method_name(Method method) noexcept {
   const auto index = static_cast<std::size_t>(method);
@@ -1033,17 +1035,6 @@ DecodedRequest decode_request(const std::string &name,
       case Method::qr_encode_account_id: {
         (void)list(root, 4); result.account_id = account(fields[3]); break;
       }
-      case Method::qr_encode_user_transfer: {
-        (void)list(root, 10); result.qr_request_id = string(fields[3], 16, 128);
-        result.qr_expires_at = static_cast<uint64_t>(integer(fields[4]));
-        require(result.qr_expires_at > 0, CITIZENSDK_ERROR_INVALID_ARGUMENT, "QR expiry must be positive");
-        result.account_id = account(fields[5]); result.qr_amount = string(fields[6], 1, 64);
-        result.qr_symbol = string(fields[7], 1, 16); result.qr_memo = string(fields[8], 0, 256);
-        result.qr_bank_cid = string(fields[9], 1, 32);
-        require(result.qr_amount.size() <= 64 && result.qr_symbol.size() <= 16 &&
-                    result.qr_memo.size() <= 256 && result.qr_bank_cid.size() <= 32,
-                CITIZENSDK_ERROR_INVALID_ARGUMENT, "QR transfer text exceeds UTF-8 limits"); break;
-      }
       case Method::qr_decode_luminance: {
         (void)list(root, 7); const auto *pixels = std::get_if<Value::Bytes>(&fields[3].data);
         const auto width = integer(fields[4]), height = integer(fields[5]), stride = integer(fields[6]);
@@ -1067,7 +1058,8 @@ DecodedRequest decode_request(const std::string &name,
     }
   } catch (const ContractFailure &error) {
     throw ContractFailure(error.code, error.what(), result.session,
-                          result.sequence > 0 ? std::optional<int64_t>(result.sequence) : std::nullopt);
+                          result.sequence > 0 ? std::optional<int64_t>(result.sequence) : std::nullopt,
+                          error.stage);
   }
   return result;
 }
@@ -1107,13 +1099,19 @@ Value event(const std::string &session, int64_t sequence,
                 Value::string(type), std::move(payload)});
 }
 Value error_details(citizensdk_error_code_t code, const std::string &message,
-                    std::optional<std::string> session, std::optional<int64_t> sequence) {
-  require(code >= 1 && code <= 22 && (!sequence || *sequence > 0) && valid_utf8(message),
+                    std::optional<std::string> session, std::optional<int64_t> sequence,
+                    const std::string &method, citizensdk_failure_stage_t stage) {
+  if (stage == 0) stage = flutter_default_failure_stage(code);
+  bool known_method = false;
+  for (std::size_t index = 0; index <= static_cast<std::size_t>(Method::sign_qr_request); ++index)
+    known_method = known_method || method == method_name(static_cast<Method>(index));
+  require(code >= 1 && code <= 22 && stage >= 1 && stage <= 8 && known_method &&
+              (!sequence || *sequence > 0) && valid_utf8(message),
           CITIZENSDK_ERROR_INTEGRITY, "Invalid error envelope");
   if (session) (void)response(*session, 0, Value::list({}));
   return tuple({Value::integer(kProtocolVersion), session ? Value::string(*session) : Value::null(),
                 sequence ? Value::integer(*sequence) : Value::null(), Value::integer(code),
-                Value::string(message)});
+                Value::integer(stage), Value::string(method), Value::string(message)});
 }
 
 Value lifecycle(citizensdk_lifecycle_t value) {
@@ -1182,8 +1180,13 @@ citizensdk_result_info_t inspect_result(citizensdk_result_handle_t result,
     require(confirmed == required, CITIZENSDK_ERROR_INTEGRITY,
             "Core error text length changed during copy");
     const std::string message = copied_text(bytes);
+    citizensdk_failure_stage_t stage = 0;
+    check_code(citizensdk_result_get_failure_stage(result, &stage));
+    require(stage >= 1 && stage <= 8, CITIZENSDK_ERROR_INTEGRITY,
+            "Core returned an unknown failure stage");
     throw ContractFailure(info.error_code,
-                          message.empty() ? "CitizenSDK operation failed" : message);
+                          message.empty() ? "CitizenSDK operation failed" : message,
+                          {}, {}, stage);
   }
   require(info.kind == kind, CITIZENSDK_ERROR_INTEGRITY,
           "Core returned an unexpected result kind");
@@ -1823,7 +1826,7 @@ Value copy_public_result(Method method, citizensdk_result_handle_t result) {
     case Method::qr_parse: case Method::qr_create_sign_request:
     case Method::qr_scan: case Method::sign_qr_request:
     case Method::qr_consume_sign_response: case Method::qr_cancel_sign_request:
-    case Method::qr_encode_account_id: case Method::qr_encode_user_transfer:
+    case Method::qr_encode_account_id:
     case Method::qr_decode_luminance: case Method::qr_encode:
       fail(CITIZENSDK_ERROR_INVALID_STATE, "This method has no borrowed Core result");
   }
@@ -2127,7 +2130,7 @@ void validate_public_value(Method method, const Value &value) {
       case Method::qr_parse: case Method::qr_create_sign_request:
       case Method::qr_scan: case Method::sign_qr_request:
       case Method::qr_consume_sign_response: case Method::qr_cancel_sign_request:
-      case Method::qr_encode_account_id: case Method::qr_encode_user_transfer:
+      case Method::qr_encode_account_id:
       case Method::qr_decode_luminance: case Method::qr_encode:
         fail(CITIZENSDK_ERROR_INVALID_STATE, "This method uses its dedicated lifecycle/capability encoder");
     }

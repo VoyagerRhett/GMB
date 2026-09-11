@@ -9,7 +9,7 @@ mod codec;
 mod session;
 
 pub use codec::{
-    parse, AccountIdCode, QrCode, QrError, QrErrorCode, SignRequest, SignResponse, UserTransfer,
+    parse, AccountIdCode, QrCode, QrError, QrErrorCode, SignRequest, SignResponse,
     MAX_QR_JSON_BYTES, MAX_QR_TEXT_BYTES, QR_V1,
 };
 pub use session::{QrClock, QrSession, QrSessionStore, SystemQrClock};

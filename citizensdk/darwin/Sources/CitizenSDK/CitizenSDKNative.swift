@@ -892,22 +892,6 @@ internal final class CitizenSDKNative: @unchecked Sendable {
         return try qrString(output)
     }
 
-    func qrEncodeUserTransfer(requestID: String, expiresAt: UInt64, accountID: Data,
-                              amount: String, symbol: String, memo: String,
-                              bankCIDNumber: String) throws -> String {
-        var account = try cAccount(accountID)
-        let values = [requestID, amount, symbol, memo, bankCIDNumber].map { Data($0.utf8) }
-        let output = try withUnsafePointer(to: &account) { account in
-            try Self.withViews(values) { views in
-                try qrOutput { output, capacity, required in
-                    citizensdk_qr_encode_user_transfer(handle, views[0], expiresAt, account,
-                        views[1], views[2], views[3], views[4], output, capacity, required)
-                }
-            }
-        }
-        return try qrString(output)
-    }
-
     func qrDecodeLuminance(_ data: Data, width: UInt32, height: UInt32,
                            rowStride: UInt32) throws -> CitizenQRDocument {
         try callLock.withLock {

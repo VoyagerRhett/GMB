@@ -54,3 +54,7 @@ provider/Engine future。`drive` 不公开 runtime handle 或 RPC，且拒绝从
 `native/smoldot/ffi` 只保留归档 Dart/smoldot macOS `arm64` 差分测试所需的 legacy
 `smoldot_*`/`citizen_sr25519_*` 符号边界。本 crate 不改变其句柄、回调、库名或任意现有
 符号；根 Dart、Android 与 Apple 已经通过上层产品级 `citizensdk_*` C ABI 消费本 provider。
+
+第 1.9 步的 CitizenApp-shaped 与 third-party-shaped fixture 各自生成不同 storage key 和 opaque
+RuntimeCall，但都只进入同一 `VerifiedChainClient`/Engine 路径。本 provider 不登记这些业务 key、
+事件或 call schema；本步骤也不修改 `native/smoldot/pow/**`。

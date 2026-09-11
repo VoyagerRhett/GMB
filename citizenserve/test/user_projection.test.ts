@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { Miniflare } from 'miniflare';
+import type { Miniflare } from 'miniflare';
 
 import { purgeIdentity } from '../src/account/purge';
 import {
@@ -16,6 +16,7 @@ import { decodeCitizenIdentityEvents } from '../src/chain/citizen_identity_event
 import type { ChainCidProjectionState } from '../src/chain/identity';
 import { bytesToHex, concatBytes, hexToBytes, scaleCompact, u64Le } from '../src/shared/signing_message';
 import type { Env, UserProjectionCursorRow } from '../src/types';
+import { createTestMiniflare } from './miniflare';
 
 const ACCOUNT_A = `0x${'11'.repeat(32)}`;
 const ACCOUNT_B = `0x${'22'.repeat(32)}`;
@@ -65,14 +66,11 @@ describe('CitizenIdentity 官方事件解码', () => {
 
 describe('finalized 用户投影', () => {
   beforeEach(async () => {
-    miniflare = new Miniflare({
-      modules: true,
-      script: 'export default { fetch() { return new Response("test"); } }',
-      compatibilityDate: '2026-07-29',
-      d1Databases: ['DB'],
-      r2Buckets: ['SQUARE_PRIVATE', 'SQUARE_PUBLIC_MEDIA'],
-      kvNamespaces: ['SQUARE_CACHE'],
-      bindings: {
+    miniflare = createTestMiniflare({
+      d1Bindings: ['DB'],
+      r2Bindings: ['SQUARE_PRIVATE', 'SQUARE_PUBLIC_MEDIA'],
+      kvBindings: ['SQUARE_CACHE'],
+      textBindings: {
         CHAIN_URL: 'https://chain.test',
         CHAIN_ID: 'client-id',
         CHAIN_SECRET: 'client-secret',

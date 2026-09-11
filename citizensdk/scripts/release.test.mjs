@@ -4309,7 +4309,136 @@ test('模块选择和独立签名历史门面只投影同一Core，不产生第�
   }
 });
 
-test('Dart、Android、Darwin、Linux、Windows 固定同一 Flutter 双通道和 63 方法合同', () => {
+test('QR_V1 生产公开面不包含任何消费 App 的业务二维码 schema', () => {
+  const productionRoots = [
+    'native/qr/src', 'native/engine/src', 'native/ffi/src', 'include', 'lib',
+    'android/native/src/main', 'android/src/main', 'darwin/Sources',
+    'linux/src', 'linux/include', 'windows/src', 'windows/include',
+  ];
+  const files = [];
+  const visit = (path) => {
+    const entry = lstatSync(path);
+    if (entry.isSymbolicLink()) throw new Error(`生产源码扫描拒绝符号链接：${path}`);
+    if (entry.isDirectory()) {
+      for (const name of readdirSync(path).sort()) visit(join(path, name));
+    } else if (entry.isFile()) {
+      files.push(path);
+    }
+  };
+  for (const root of productionRoots) visit(join(citizenSdkRoot, ...root.split('/')));
+  const productBusinessSchema = /UserTransfer|user_transfer|userTransfer|qrEncodeUserTransfer|qr_encode_user_transfer|bank_cid_number|bankCIDNumber|qr_(?:amount|symbol|memo|bank_cid)/u;
+  for (const path of files) {
+    const source = readFileSync(path, 'utf8');
+    assert.doesNotMatch(source, productBusinessSchema, path);
+    if (path.includes('/qr/') || /CitizenSDKQr|citizen_sdk_qr|citizen_qr/u.test(path)) {
+      assert.doesNotMatch(source, /["'](?:amount|symbol|memo|bank_cid_number)["']/u, path);
+    }
+    assert.doesNotMatch(source, /QR_V(?:0|[2-9][0-9]*)/u, path);
+  }
+  assert.match(readFileSync(join(citizenSdkRoot, 'native/qr/src/codec.rs'), 'utf8'),
+               /pub const QR_V1: &str = "QR_V1";/u);
+});
+
+test('三类消费者和独立签名器只依赖同一正式公开面', () => {
+  const consumerRoot = join(citizenSdkRoot, 'test', 'consumers');
+  const expectedFiles = [
+    'README.md',
+    'citizenapp_fixture/README.md',
+    'citizenapp_fixture/citizenapp_fixture.dart',
+    'consumer_test_support.dart',
+    'external_signer/README.md',
+    'external_signer/generic_qr_v1_signer.dart',
+    'multi_consumer_contract_test.dart',
+    'reference/README.md',
+    'reference/reference_consumer.dart',
+    'third_party_fixture/README.md',
+    'third_party_fixture/third_party_fixture.dart',
+  ];
+  const actualFiles = [];
+  const visit = (directory, prefix = '') => {
+    for (const name of readdirSync(directory).sort()) {
+      const path = join(directory, name);
+      const info = lstatSync(path);
+      assert.equal(info.isSymbolicLink(), false, `消费者夹具拒绝链接：${path}`);
+      const relativePath = prefix ? `${prefix}/${name}` : name;
+      if (info.isDirectory()) visit(path, relativePath);
+      else {
+        assert.equal(info.isFile(), true, `消费者夹具只允许普通文件：${path}`);
+        actualFiles.push(relativePath);
+      }
+    }
+  };
+  visit(consumerRoot);
+  assert.deepEqual(actualFiles, expectedFiles);
+
+  const adapters = [
+    'reference/reference_consumer.dart',
+    'citizenapp_fixture/citizenapp_fixture.dart',
+    'third_party_fixture/third_party_fixture.dart',
+    'external_signer/generic_qr_v1_signer.dart',
+  ];
+  for (const relativePath of adapters) {
+    const path = join(consumerRoot, ...relativePath.split('/'));
+    const source = readFileSync(path, 'utf8');
+    const imports = [...source.matchAll(/^import '([^']+)';$/gmu)].map((match) => match[1]);
+    assert.equal(
+      imports.filter((value) => value === 'package:citizen_sdk/citizen_sdk.dart').length,
+      1,
+      relativePath,
+    );
+    assert.ok(
+      imports.every((value) => value.startsWith('dart:')
+        || value === 'package:citizen_sdk/citizen_sdk.dart'),
+      `${relativePath} 只能导入 Dart 标准库和 CitizenSDK 根公开库`,
+    );
+    assert.doesNotMatch(source, /package:citizen_sdk\/src|\.\.\/\.\.\/\.\.\/lib|CitizenSdkPlatform/u);
+    assert.doesNotMatch(source, /QR_V(?:0|[2-9][0-9]*)/u);
+  }
+
+  const reference = readFileSync(join(consumerRoot, 'reference/reference_consumer.dart'), 'utf8');
+  for (const capability of [
+    'CitizenChain', 'CitizenWallet', 'CitizenSigning', 'CitizenQr',
+    'CitizenTransactions', 'CitizenHistory',
+  ]) assert.match(reference, new RegExp(`final ${capability} `, 'u'));
+  assert.doesNotMatch(reference, /destination|amount|remark|booking|route|vote|proposal|governance/iu);
+
+  const citizenApp = readFileSync(
+    join(consumerRoot, 'citizenapp_fixture/citizenapp_fixture.dart'),
+    'utf8',
+  );
+  for (const businessField of ['destination', 'amountFen', 'remark', 'transferStorageKey']) {
+    assert.match(citizenApp, new RegExp(`\\b${businessField}\\b`, 'u'));
+  }
+  assert.match(citizenApp, /transactions\.prepareTransaction\(/u);
+  assert.match(citizenApp, /chain\.getStorage\(/u);
+
+  const thirdParty = readFileSync(
+    join(consumerRoot, 'third_party_fixture/third_party_fixture.dart'),
+    'utf8',
+  );
+  for (const businessField of ['bookingId', 'routeCode', 'seatCount', 'bookingStorageKey']) {
+    assert.match(thirdParty, new RegExp(`\\b${businessField}\\b`, 'u'));
+  }
+  assert.match(thirdParty, /transactions\.prepareTransaction\(/u);
+  assert.match(thirdParty, /chain\.getStorage\(/u);
+
+  const signer = readFileSync(
+    join(consumerRoot, 'external_signer/generic_qr_v1_signer.dart'),
+    'utf8',
+  );
+  assert.match(signer, /signing\.signQrRequest\(request\.canonicalText\)/u);
+  assert.match(signer, /qr\.parse\(signed\.canonicalText\)/u);
+  assert.doesNotMatch(signer, /CitizenWallet|citizenwallet|mnemonic|privateKey/iu);
+
+  const matrix = readFileSync(join(consumerRoot, 'multi_consumer_contract_test.dart'), 'utf8');
+  assert.match(matrix, /calls, hasLength\(3\)/u);
+  assert.match(matrix, /CitizenQrKind\.values\.any\(\(value\) => value\.value == 4\)/u);
+  assert.match(matrix, /CitizenWalletWordCount\.values/u);
+  assert.equal(citizenSdkSymbols().length, 117);
+  assert.equal(CITIZENSDK_INTERNAL_SYMBOLS.length, 4);
+});
+
+test('Dart、Android、Darwin、Linux、Windows 固定同一 Flutter 双通道和 62 方法合同', () => {
   const root = mkdtempSync(join(workRoot, 'release-flutter-contract-test-'));
   const sources = [
     'lib/src/platform/citizen_sdk_flutter_codec.dart',
@@ -4337,7 +4466,7 @@ test('Dart、Android、Darwin、Linux、Windows 固定同一 Flutter 双通道�
     );
     assert.throws(
       () => assertFlutterBindingContract(root),
-      /Linux Flutter 方法合同漂移：必须精确为固定 63 项/,
+      /Linux Flutter 方法合同漂移：必须精确为固定 62 项/,
     );
 
     writeFileSync(
@@ -4347,7 +4476,7 @@ test('Dart、Android、Darwin、Linux、Windows 固定同一 Flutter 双通道�
     );
     assert.throws(
       () => assertFlutterBindingContract(root),
-      /Linux Flutter 方法合同漂移：必须精确为固定 63 项/,
+      /Linux Flutter 方法合同漂移：必须精确为固定 62 项/,
     );
     writeFileSync(linuxMethods, methodSource);
 
@@ -4380,6 +4509,50 @@ test('Dart、Android、Darwin、Linux、Windows 固定同一 Flutter 双通道�
     assert.throws(() => assertFlutterBindingContract(root), /Windows method/u);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('1.10.3五端错误合同固定22类、8阶段、7字段和单一C真源getter', () => {
+  const header = readFileSync(join(citizenSdkRoot, 'include/citizensdk_types.h'), 'utf8');
+  const api = readFileSync(join(citizenSdkRoot, 'include/citizensdk.h'), 'utf8');
+  const stages = [
+    'ADMISSION', 'VALIDATION', 'AUTHENTICATION', 'PERSISTENCE',
+    'PROVIDER', 'VERIFICATION', 'CANCELLATION', 'TEARDOWN',
+  ];
+  stages.forEach((stage, index) => {
+    assert.match(header, new RegExp(`CITIZENSDK_FAILURE_STAGE_${stage} ${index + 1}U`, 'u'));
+  });
+  assert.equal(
+    [...api.matchAll(/citizensdk_result_get_failure_stage\s*\(/gu)].length,
+    1,
+  );
+
+  const dart = readFileSync(
+    join(citizenSdkRoot, 'lib/src/platform/citizen_sdk_flutter_codec.dart'),
+    'utf8',
+  );
+  assert.match(dart, /_tuple\(error\.details, 7, '错误 details'\)/u);
+  assert.match(dart, /expectedMethod != null && method != expectedMethod/u);
+
+  const android = readFileSync(
+    join(citizenSdkRoot, 'android/src/main/kotlin/org/citizen/sdk/CitizenSdkFlutterCodec.kt'),
+    'utf8',
+  );
+  assert.match(android, /code\.value,\s*stage\.value,\s*method,\s*message,/u);
+
+  const swift = readFileSync(
+    join(citizenSdkRoot, 'darwin/Sources/CitizenSDKFlutter/CitizenSdkFlutterCodec.swift'),
+    'utf8',
+  );
+  assert.match(swift, /\[version, session, sequence, Int64\(code\.rawValue\),\s*Int64\(failureStage\.rawValue\), method, message\]/u);
+
+  for (const platform of ['linux', 'windows']) {
+    const codec = readFileSync(
+      join(citizenSdkRoot, platform, 'src/citizen_sdk_flutter_codec.cc'),
+      'utf8',
+    );
+    assert.match(codec, /Value::integer\(stage\), Value::string\(method\), Value::string\(message\)/u);
+    assert.match(codec, /citizensdk_result_get_failure_stage\(result, &stage\)/u);
   }
 });
 
@@ -4971,6 +5144,131 @@ test('产品文档固定根说明、架构与平台模块的完整反向闭集',
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('1.10.1基线报告固定实测边界、问题分级与只读上游约束', () => {
+  const report = readFileSync(
+    join(citizenSdkRoot, 'docs/audits/SDK_BASELINE_1_10_1.md'),
+    'utf8',
+  );
+  for (const marker of [
+    'P0：未发现',
+    'P1：5 项',
+    'P2：2 项',
+    'public-state-v1.sqlite3',
+    'secure-state-v1.sqlite3',
+    '15 条编码为 31,468,424 bytes',
+    '149 页进入 freelist',
+    'Flutter 测试未运行，不计为通过',
+    '没有修改 `native/smoldot/pow/**`',
+  ]) {
+    assert.match(report, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+  }
+
+  const engine = readFileSync(
+    join(citizenSdkRoot, 'native/engine/tests/baseline_resource_contract.rs'),
+    'utf8',
+  );
+  assert.match(engine, /SAMPLE_COUNTS: \[usize; 4\] = \[0, 1, 100, 1_000\]/u);
+  assert.match(engine, /persistent_runtime_cache_retains_only_the_latest_sixty_four_contexts/u);
+  const provider = readFileSync(
+    join(citizenSdkRoot, 'native/smoldot/provider/tests/baseline_lifecycle_contract.rs'),
+    'utf8',
+  );
+  assert.match(provider, /offline_start_export_stop_has_five_descriptive_samples/u);
+  assert.match(provider, /bootNodes/u);
+  const dart = readFileSync(
+    join(citizenSdkRoot, 'test/baselines/sdk_1_10_1_contract_test.dart'),
+    'utf8',
+  );
+  assert.match(dart, /CitizenSdkFlutterCodec\.methods, hasLength\(62\)/u);
+  assert.match(dart, /CitizenExternalSignerTransport\.qrV1/u);
+  assert.match(dart, /isNot\(contains\('QR_V2'\)\)/u);
+});
+
+test('1.10.2资源合同保留64MiB链能力并限制持久cache与history总量', () => {
+  const chain = readFileSync(join(citizenSdkRoot, 'native/contracts/src/chain.rs'), 'utf8');
+  assert.match(chain, /MAX_RUNTIME_METADATA_BYTES: usize = 64 \* 1024 \* 1024/u);
+
+  const runtimeContract = readFileSync(
+    join(citizenSdkRoot, 'native/contracts/src/store/runtime_cache.rs'),
+    'utf8',
+  );
+  assert.match(runtimeContract, /MAX_PERSISTED_RUNTIME_CONTEXTS: usize = 64/u);
+  assert.match(runtimeContract, /MAX_PERSISTED_RUNTIME_METADATA_BYTES: usize = \(8 \* 1024 \* 1024\) - 56 - 55/u);
+
+  const engine = readFileSync(join(citizenSdkRoot, 'native/engine/src/engine.rs'), 'utf8');
+  assert.match(engine, /contexts\.get\(block\)\.cloned\(\)/u);
+  assert.match(engine, /context\.metadata\(\)\.len\(\) <= MAX_PERSISTED_RUNTIME_METADATA_BYTES/u);
+  assert.match(engine, /preflight_execution_before_signing/u);
+
+  const history = readFileSync(
+    join(citizenSdkRoot, 'native/contracts/src/store/transaction_history.rs'),
+    'utf8',
+  );
+  assert.match(history, /MAX_TRANSACTION_HISTORY_DURABLE_WEIGHT_BYTES: usize = 31 \* 1024 \* 1024/u);
+  assert.match(history, /durable_weight_bytes > MAX_TRANSACTION_HISTORY_DURABLE_WEIGHT_BYTES/u);
+  const historyEngine = readFileSync(
+    join(citizenSdkRoot, 'native/engine/src/transaction_history.rs'),
+    'utf8',
+  );
+  assert.match(historyEngine, /preflight_execution_before_signing/u);
+  assert.match(historyEngine, /TransactionHistoryQueryKind::OldestRetentionTerminal/u);
+  assert.doesNotMatch(historyEngine, /TransactionHistoryState/u);
+
+  for (const relativePath of [
+    'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkPublicStore.kt',
+    'darwin/Sources/CitizenSDK/CitizenSDKPublicStore.swift',
+    'linux/src/citizen_sdk_public_store.cc',
+    'windows/src/citizen_sdk_public_store.cc',
+  ]) {
+    const store = readFileSync(join(citizenSdkRoot, ...relativePath.split('/')), 'utf8');
+    const joinedStoreLiterals = store
+      .replace(/"\s*\+\s*"/gu, '')
+      .replace(/"\s*"/gu, '');
+    assert.match(
+      joinedStoreLiterals,
+      /SELECT rowid FROM runtime_cache ORDER BY rowid DESC LIMIT 64/u,
+      relativePath,
+    );
+  }
+  assert.doesNotMatch(engine, /MAX_RUNTIME_METADATA_BYTES.*8 \* 1024 \* 1024/u);
+});
+
+test('1.10.4历史按execution索引、原子mutation和有界回收进入四端冻结合同', () => {
+  const contract = readFileSync(
+    join(citizenSdkRoot, 'native/contracts/src/store/transaction_history.rs'), 'utf8');
+  for (const marker of [
+    'TransactionHistoryIndex', 'TransactionHistoryCursor', 'TransactionHistoryMutation',
+    'load_record', 'load_page', 'compare_and_swap',
+  ]) assert.match(contract, new RegExp(marker, 'u'));
+  assert.doesNotMatch(contract, /TransactionHistoryState/u);
+
+  const codec = readFileSync(join(citizenSdkRoot, 'native/ffi/src/host_codec.rs'), 'utf8');
+  for (const marker of ['THQ1', 'THB1', 'THM1', 'TXR1']) assert.match(codec, new RegExp(marker, 'u'));
+  const header = readFileSync(join(citizenSdkRoot, 'include/citizensdk_types.h'), 'utf8');
+  assert.match(header, /transaction_history_query/u);
+  assert.match(header, /transaction_history_mutate/u);
+  assert.doesNotMatch(header, /transaction_history_load|transaction_history_compare_and_swap/u);
+
+  for (const relativePath of [
+    'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkPublicStore.kt',
+    'darwin/Sources/CitizenSDK/CitizenSDKPublicStore.swift',
+    'linux/src/citizen_sdk_public_store.cc',
+    'windows/src/citizen_sdk_public_store.cc',
+  ]) {
+    const store = readFileSync(join(citizenSdkRoot, ...relativePath.split('/')), 'utf8');
+    for (const marker of [
+      'transaction_history_meta', 'transaction_history_records',
+      'transaction_history_newest_idx', 'transaction_history_retention_idx',
+      'transaction_history_reconcile_idx', 'incremental_vacuum(128)',
+    ]) assert.ok(store.includes(marker), relativePath);
+    assert.doesNotMatch(store, /\b(?:destination|amount|remark|direction|pallet|action)\b/iu, relativePath);
+    assert.doesNotMatch(store, /VACUUM(?!\s*\()/u, relativePath);
+  }
+  const monitor = readFileSync(join(citizenSdkRoot, 'native/ffi/src/chain_monitor.rs'), 'utf8');
+  assert.match(monitor, /Duration::from_secs\(30\)/u);
+  assert.match(monitor, /Some\(Some\(Err\(_\)\)\) \| Some\(None\)/u);
 });
 
 test('Hosted Package 合同固定过滤规则、变更日志与可解析依赖边界', () => {

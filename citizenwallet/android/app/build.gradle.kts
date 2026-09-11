@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // AGP提供内置Kotlin；Flutter插件在Android插件之后应用。
@@ -7,7 +9,7 @@ plugins {
 val flutterProductRoot = System.getenv("TATA_CONSOLE_FLUTTER_ROOT")
     ?.let { file(it) }
     ?: rootProject.projectDir.parentFile
-val flutterBuildProperties = java.util.Properties().apply {
+val flutterBuildProperties = Properties().apply {
     flutterProductRoot.resolve("android/local.properties").inputStream().use { load(it) }
 }
 val productVersionCode = flutterBuildProperties.getProperty("flutter.versionCode", "1").toInt()
@@ -15,15 +17,21 @@ val productVersionName = flutterBuildProperties.getProperty("flutter.versionName
 
 android {
     // 钱包所有资源统一归属 resources；Android 只读取其中的平台资源。
-    sourceSets.getByName("main").res.setSrcDirs(listOf("../../resources/android"))
+    sourceSets.getByName("main").res.directories.apply {
+        clear()
+        add("../../resources/android")
+    }
 
     namespace = "com.crcfrcn.citizenwallet"
-    compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    compileSdk = 36
+    ndkVersion = "28.2.13676358"
 
     // TataConsole本机编译只从中央工作目录打包Rust库，产品仓库不得保留生成的jniLibs。
     System.getenv("TATA_CONSOLE_NATIVE_ANDROID_DIR")?.takeIf { it.isNotBlank() }?.let { nativeDir ->
-        sourceSets.getByName("main").jniLibs.setSrcDirs(listOf(nativeDir))
+        sourceSets.getByName("main").jniLibs.directories.apply {
+            clear()
+            add(nativeDir)
+        }
     }
 
     compileOptions {
@@ -35,8 +43,8 @@ android {
         // Google Play 永久应用标识与 Kotlin namespace 保持一致，不改变现有安装数据。
         applicationId = "com.crcfrcn.citizenwallet"
         // local_auth 3.x 与新 SecureStorage 加固配置统一要求 API ≥ 24。
-        minSdk = maxOf(24, flutter.minSdkVersion)
-        targetSdk = flutter.targetSdkVersion
+        minSdk = 24
+        targetSdk = 36
         versionCode = productVersionCode
         versionName = productVersionName
         ndk {

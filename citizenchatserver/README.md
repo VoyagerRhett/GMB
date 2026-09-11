@@ -1,8 +1,9 @@
 # CitizenChatServer
 
-Cloudflare 正式资源统一使用小写 `<product>-<resource>`：Worker 为
-`citizenchatserver-workers`，D1 为 `citizenchatserver-d1`，R2 为
-`citizenchatserver-r2`，正式域名为 `chat.crcfrcn.com`。
+Cloudflare 正式资源只使用产品名称：Worker、D1 与 R2 均为
+`citizenchatserver`，正式域名为 `chat.crcfrcn.com`。Worker 内部资源句柄唯一为
+`D1`、`R2`、`DO`，其中 `DO` 的 `O` 是大写字母；公开变量与 Secret 统一使用
+`CHATSERVER_` 前缀。
 
 CI 只消费 TataChatServer 的正式 Cloudflare Release 并绑定当前 GMB `main` 的实例声明；
 Release 只封装准确成功 CI 候选；发布只由 TataConsole 原生发布器消费正式 GMB Release。

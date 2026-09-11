@@ -57,6 +57,22 @@ void main() {
       isNot(contains('qrCreateSignResponse')),
     );
     expect(CitizenSdkFlutterCodec.methods, isNot(contains('qrEncodeImage')));
+    expect(
+      CitizenSdkFlutterCodec.methods,
+      isNot(contains('qrEncodeUserTransfer')),
+    );
+    expect(
+      () => codec.decodeQrDocument(
+        jsonEncode(<String, Object?>{
+          'kind': 4,
+          'canonical_text': '{}',
+          'request_id': 'request-identifier',
+          'expires_at': 1700000000,
+          'account_id': _account(1),
+        }),
+      ),
+      throwsA(isA<CitizenSdkException>()),
+    );
   });
 
   test('历史通知只含 sequence，拒绝额外 payload 与无效顺序号', () {
@@ -151,7 +167,6 @@ void main() {
       'qrConsumeSignResponse',
       'qrCancelSignRequest',
       'qrEncodeAccountId',
-      'qrEncodeUserTransfer',
       'qrDecodeLuminance',
       'qrEncode',
       'qrScan',
@@ -287,15 +302,6 @@ void main() {
       'qrConsumeSignResponse': <Object?>['{}'],
       'qrCancelSignRequest': <Object?>['abcdefghijklmnop'],
       'qrEncodeAccountId': <Object?>[account],
-      'qrEncodeUserTransfer': <Object?>[
-        'abcdefghijklmnop',
-        10,
-        account,
-        '1',
-        'CNY',
-        '',
-        'bank-1',
-      ],
       'qrDecodeLuminance': <Object?>[
         Uint8List.fromList(<int>[0]),
         1,
@@ -673,7 +679,15 @@ void main() {
       () => codec.decodePlatformException(
         PlatformException(
           code: 'citizensdk.cancelled',
-          details: const <Object?>[1.0, 'session-a', 1, 22, 'cancelled'],
+          details: const <Object?>[
+            1.0,
+            'session-a',
+            1,
+            22,
+            7,
+            'close',
+            'cancelled',
+          ],
         ),
       ),
       throwsA(isA<CitizenSdkException>()),
@@ -743,7 +757,7 @@ void main() {
       () => codec.decodePlatformException(
         PlatformException(
           code: 'citizensdk.cancelled',
-          details: <Object?>[1, tooLong, 1, 22, 'cancelled'],
+          details: <Object?>[1, tooLong, 1, 22, 7, 'close', 'cancelled'],
         ),
       ),
       throwsA(isA<CitizenSdkException>()),
@@ -912,10 +926,20 @@ void main() {
     final exception = codec.decodePlatformException(
       PlatformException(
         code: 'citizensdk.authenticationCancelled',
-        details: <Object?>[1, 'session-a', 8, 10, '用户取消'],
+        details: <Object?>[
+          1,
+          'session-a',
+          8,
+          10,
+          3,
+          'beginSigning',
+          '用户取消',
+        ],
       ),
     );
     expect(exception.code, CitizenSdkErrorCode.authenticationCancelled);
+    expect(exception.stage, CitizenSdkFailureStage.authentication);
+    expect(exception.method, 'beginSigning');
     expect(exception.requestSequence, 8);
   });
 

@@ -3,8 +3,9 @@
 use citizen_sdk_contracts::{
     blake2_256, AccountId32, ExecutionConclusion, Hash32, HistoryTransactionStatus,
     OpaqueTransactionCall, PreparedTransactionSummary, RuntimeVersion, SignedExtrinsic,
-    TransactionExecutionId, TransactionExecutionRecord, TransactionHistoryState,
-    TransactionPreparationId, VerifiedBlockRef, MAX_TRANSACTION_CALL_DATA_BYTES,
+    TransactionExecutionId, TransactionExecutionRecord, TransactionHistoryIndex,
+    TransactionHistoryMutation, TransactionPreparationId, VerifiedBlockRef,
+    MAX_TRANSACTION_CALL_DATA_BYTES,
 };
 
 #[test]
@@ -114,13 +115,31 @@ fn durable_generic_execution_binds_exact_opaque_authorization_and_monotonic_stat
 }
 
 #[test]
-fn durable_generic_execution_ids_and_hashes_are_unique_in_one_snapshot() {
+fn durable_generic_mutation_rejects_duplicate_or_conflicting_execution_ids() {
     let record = execution_record([1; 16], [2; 32]);
-    assert!(TransactionHistoryState::try_new(1, vec![record.clone(), record]).is_err());
+    let index = TransactionHistoryIndex::try_new(
+        1,
+        1,
+        record.durable_weight_bytes(),
+        1,
+        record.durable_weight_bytes(),
+    )
+    .expect("index");
+    assert!(TransactionHistoryMutation::try_new(
+        0,
+        index,
+        Vec::new(),
+        vec![record.clone(), record.clone()],
+    )
+    .is_err());
 
-    let first = execution_record([3; 16], [4; 32]);
-    let second = execution_record([5; 16], [4; 32]);
-    assert!(TransactionHistoryState::try_new(1, vec![first, second]).is_err());
+    assert!(TransactionHistoryMutation::try_new(
+        0,
+        index,
+        vec![record.execution_id()],
+        vec![record],
+    )
+    .is_err());
 }
 
 fn execution_record(id: [u8; 16], transaction_hash: [u8; 32]) -> TransactionExecutionRecord {

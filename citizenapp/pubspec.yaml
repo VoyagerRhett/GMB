@@ -55,7 +55,7 @@ dependencies:
   isar_community: ^3.3.2
   isar_community_flutter_libs: ^3.3.2
   path_provider: ^2.1.6
-  saver_gallery: ^4.1.0
+  saver_gallery: 4.1.0
   file_picker: ^10.3.10
   # sr25519 纯 Dart 实现已彻底移除(全仓唯一 sr25519 实现 = 原生 schnorrkel,
   # 见 lib/wallet/core/native_sr25519.dart)。它仍作为 polkadart_keyring 的传递
@@ -74,12 +74,12 @@ dependencies:
   firebase_core: ^4.11.0
   firebase_messaging: ^16.4.1
   webview_flutter: ^4.13.0
-  video_player: ^2.10.1
+  video_player: 2.11.1
   image_size_getter: ^2.4.1
-  flutter_image_compress: ^2.4.0
+  flutter_image_compress: 2.4.0
   video_compress: ^3.1.4
   blurhash_dart: ^1.2.1
-  image: ^4.9.1
+  image: 4.9.1
   # 文章正文富文本编辑器；11.5.1 实现 Flutter 3.44 新增的 TextInputClient.onFocusReceived。
   flutter_quill: 11.5.1
   # CitizenApp 本机开发直接读取 TATA 仓库中的 TataChatSDK 唯一源码。
@@ -88,7 +88,7 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^4.0.0
+  flutter_lints: 4.0.0
   # 两款移动产品共同使用的代码生成器固定同一解析版本。
   build_runner: 2.15.0
   isar_community_generator: ^3.3.2

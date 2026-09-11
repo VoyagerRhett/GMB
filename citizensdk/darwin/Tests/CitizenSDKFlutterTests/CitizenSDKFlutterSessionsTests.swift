@@ -47,10 +47,12 @@ final class CitizenSDKFlutterSessionsTests: XCTestCase {
         }
         XCTAssertEqual(failure?.code, "citizensdk.integrity")
         let details = failure?.details as? [Any?]
-        XCTAssertEqual(details?.count, 5)
+        XCTAssertEqual(details?.count, 7)
         // FlutterError 的 Objective-C 桥接将元组中的空会话和空序号装箱为 NSNull。
         XCTAssertTrue(details?[1] is NSNull)
         XCTAssertTrue(details?[2] is NSNull)
+        XCTAssertEqual(details?[4] as? Int64, Int64(CitizenSDKFailureStage.verification.rawValue))
+        XCTAssertEqual(details?[5] as? String, "verifySignature")
     }
 
     func testProtocolVersionRejectsBoolAndFloatingNumbers() {

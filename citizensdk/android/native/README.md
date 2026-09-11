@@ -4,7 +4,7 @@
 默认 full。先调用统一模块校验，再仅创建所选服务的资源；chain 未选不加载链资产或创建链数据库，
 history 未选不初始化历史，wallet/signing 才使用配套 secure store/Vault。SigningService
 仅使用同宿主已有 SDK 安全账户归属资料，首次 provision 仍须钱包安全流程，秘密不导出。
-纯验签无需实例、钱包、金库或链；Flutter 五端共用 63 方法，open 仅 `[1, modules]`，
+纯验签无需实例、钱包、金库或链；Flutter 五端共用 62 方法，open 仅 `[1, modules]`，
 `verifySignature` 请求仅 `[1, accountId, signature, payload]`、响应仅 `[1, bool]`，
 不建立 session 或事件订阅。运行期模块选择不裁剪现有正式 full 包及链资产。
 JNI 中的十个 QR 入口只是同一 Rust `QR_V1` 与 ZXing-C++ 3.1.1 窄包装的类型化投影，

@@ -483,7 +483,7 @@ impl ProductComposition {
         let history_store_ready = self
             .history
             .as_ref()
-            .is_some_and(|history| futures_executor::block_on(history.load()).is_ok());
+            .is_some_and(|history| futures_executor::block_on(history.load_index()).is_ok());
         let Some(wallet) = self.wallet.as_ref() else {
             return ProductCapabilityFacts::chain_only().with_history(history_store_ready, false);
         };

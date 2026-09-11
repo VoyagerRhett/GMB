@@ -37,18 +37,40 @@ const deprecatedVersionTagField = ['release', 'tag'].join('_');
 
 test('Android从真实源码根启动Gradle并读取缓存Flutter配置', () => {
   const settings = readFileSync(new URL('../android/settings.gradle.kts', import.meta.url), 'utf8');
+  const root = readFileSync(new URL('../android/build.gradle.kts', import.meta.url), 'utf8');
   const application = readFileSync(new URL('../android/app/build.gradle.kts', import.meta.url), 'utf8');
+  const properties = readFileSync(new URL('../android/gradle.properties', import.meta.url), 'utf8');
   const runner = readFileSync(new URL('../scripts/citizenapp-run.sh', import.meta.url), 'utf8');
+  const flutterPatch = readFileSync(resolve(flowRoot, '../tools/flutter.patch'), 'utf8');
+  const kotlin = /^\+\s*implementation\("org\.jetbrains\.kotlin:kotlin-gradle-plugin:([\d.]+)"\)$/mu.exec(flutterPatch)?.[1];
+  const agp = /^\+\s*compileOnly\("com\.android\.tools\.build:gradle:([\d.]+)"\)$/mu.exec(flutterPatch)?.[1];
+  assert.ok(kotlin && agp, '中央 Flutter 修订必须唯一登记 AGP/KGP');
   assert.match(settings, /System\.getenv\("TATA_CONSOLE_FLUTTER_ROOT"\)/u);
   assert.match(settings, /settingsDir\.parentFile/u);
   assert.match(settings, /resolve\("android\/local\.properties"\)/u);
   assert.match(settings, /\.flutter-plugins-dependencies/u);
   assert.doesNotMatch(settings, /dev\.flutter\.flutter-plugin-loader|System\.getProperty\("user\.dir"\)/u);
+  assert.doesNotMatch(settings, /id\("com\.android\.(?:application|library)"\)\s+version/u);
+  assert.ok(root.includes(`classpath("com.android.tools.build:gradle:${agp}")`));
+  assert.ok(root.includes(`classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:${kotlin}")`));
+  assert.match(application, /import java\.util\.Properties/u);
+  assert.doesNotMatch(application, /java\.util\.Properties\(\)|setSrcDirs\(/u);
+  assert.match(application, /compileSdk = 36/u);
+  assert.match(application, /ndkVersion = "28\.2\.13676358"/u);
+  assert.match(application, /minSdk = 24/u);
+  assert.match(application, /targetSdk = 36/u);
+  assert.doesNotMatch(application, /(?:compileSdk|ndkVersion|minSdk|targetSdk)\s*=.*\bflutter\./u);
+  assert.deepEqual(properties.split('\n').filter((line) => /^android\.(?:builtInKotlin|newDsl)=/u.test(line)), [
+    'android.builtInKotlin=true',
+    'android.newDsl=true',
+  ]);
   assert.match(application, /source = System\.getenv\("TATA_CONSOLE_FLUTTER_ROOT"\) \?: "\.\.\/\.\."/u);
   assert.match(runner, /cd "\$APP_ROOT\/android"/u);
   assert.match(runner, /--no-problems-report/u);
   assert.match(runner, /--init-script "\$\{TATA_CONSOLE_GRADLE_INIT_SCRIPT/u);
   assert.match(runner, /TATA_CONSOLE_FLUTTER_GRADLE_ROOT="\$flutter_sdk\/packages\/flutter_tools\/gradle"/u);
+  assert.match(runner, /java_home="\$\{JAVA_HOME:-\/Applications\/Android Studio\.app\/Contents\/jbr\/Contents\/Home\}"/u);
+  assert.match(runner, /ANDROID_HOME="\$android_sdk" ANDROID_SDK_ROOT="\$android_sdk" JAVA_HOME="\$java_home" PATH="\$java_home\/bin:\$PATH"/u);
   assert.match(runner, /"\$APP_ROOT\/android\/gradlew"[\s\S]*--project-cache-dir "\$BUILD_WORK_DIR\/gradle-project"/u);
 });
 

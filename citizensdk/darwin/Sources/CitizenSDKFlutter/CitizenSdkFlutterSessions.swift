@@ -117,25 +117,25 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
             return FlutterError(code: "citizensdk.unavailable",
                                 message: "CitizenSDK Flutter engine is detached",
                                 details: CitizenSdkFlutterCodec.error(.unavailable,
-                                    "CitizenSDK Flutter engine is detached", session: nil, sequence: nil))
+                                    "CitizenSDK Flutter engine is detached", session: nil, sequence: nil, method: "open"))
         }
         guard let tuple = arguments as? [Any?], tuple.count == 1,
               Self.exactProtocolVersion(tuple[0]) else {
             return FlutterError(code: "citizensdk.invalidArgument",
                                 message: "CitizenSDK event subscription tuple is invalid",
                                 details: CitizenSdkFlutterCodec.error(.invalidArgument,
-                                    "CitizenSDK event subscription tuple is invalid", session: nil, sequence: nil))
+                                    "CitizenSDK event subscription tuple is invalid", session: nil, sequence: nil, method: "open"))
         }
         guard sink == nil else {
             return FlutterError(code: "citizensdk.busy", message: "CitizenSDK event subscription is already active",
                                 details: CitizenSdkFlutterCodec.error(.busy,
-                                    "CitizenSDK event subscription is already active", session: nil, sequence: nil))
+                                    "CitizenSDK event subscription is already active", session: nil, sequence: nil, method: "open"))
         }
         do { _ = try subscriptionEpoch.advance() }
         catch {
             return FlutterError(code: "citizensdk.integrity", message: "CitizenSDK event generation is exhausted",
                                 details: CitizenSdkFlutterCodec.error(.integrity,
-                                    "CitizenSDK event generation is exhausted", session: nil, sequence: nil))
+                                    "CitizenSDK event generation is exhausted", session: nil, sequence: nil, method: "open"))
         }
         sink = events
         sessions.values.forEach { session in
@@ -156,7 +156,7 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
         catch {
             return FlutterError(code: "citizensdk.integrity", message: "CitizenSDK event generation is exhausted",
                                 details: CitizenSdkFlutterCodec.error(.integrity,
-                                    "CitizenSDK event generation is exhausted", session: nil, sequence: nil))
+                                    "CitizenSDK event generation is exhausted", session: nil, sequence: nil, method: "open"))
         }
         sink = nil
         return nil
@@ -396,12 +396,6 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
                 return [try session.sdk.qrCancelSignRequest(fields[0] as! String)]
             case "qrEncodeAccountId":
                 return [try session.sdk.qrEncodeAccountID(fields[0] as! Data)]
-            case "qrEncodeUserTransfer":
-                return [try session.sdk.qrEncodeUserTransfer(
-                    requestID: fields[0] as! String, expiresAt: UInt64(fields[1] as! Int64),
-                    accountID: fields[2] as! Data, amount: fields[3] as! String,
-                    symbol: fields[4] as! String, memo: fields[5] as! String,
-                    bankCIDNumber: fields[6] as! String)]
             case "qrDecodeLuminance":
                 return [try session.sdk.qrDecodeLuminance(fields[0] as! Data,
                     width: UInt32(fields[1] as! Int64), height: UInt32(fields[2] as! Int64),
@@ -540,9 +534,10 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
     private func fail(_ result: @escaping FlutterResult, _ error: Error,
                       _ request: CitizenSdkFlutterCodec.Request) {
         if let contract = error as? CitizenSdkFlutterCodec.ContractFailure {
-            fail(result, contract.code, contract.message, request, session: contract.session, sequence: contract.sequence)
+            fail(result, contract.code, contract.message, request, session: contract.session,
+                 sequence: contract.sequence, stage: contract.stage)
         } else if let sdk = error as? CitizenSDKError {
-            fail(result, sdk.code, sdk.message, request)
+            fail(result, sdk.code, sdk.message, request, stage: sdk.stage)
         } else if error is CancellationError {
             fail(result, .cancelled, "CitizenSDK operation cancelled", request)
         } else {
@@ -550,10 +545,12 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
         }
     }
     private func fail(_ result: @escaping FlutterResult, _ code: CitizenSDKErrorCode, _ message: String,
-                      _ request: CitizenSdkFlutterCodec.Request, session: String? = nil, sequence: Int64? = nil) {
+                      _ request: CitizenSdkFlutterCodec.Request, session: String? = nil, sequence: Int64? = nil,
+                      stage: CitizenSDKFailureStage? = nil) {
         result(FlutterError(code: "citizensdk.\(CitizenSdkFlutterCodec.errorName(code))", message: message,
                             details: CitizenSdkFlutterCodec.error(code, message,
-                                session: session ?? request.sessionID, sequence: sequence ?? request.sequence)))
+                                session: session ?? request.sessionID, sequence: sequence ?? request.sequence,
+                                method: request.method, stage: stage)))
     }
 
     internal static func exactProtocolVersion(_ raw: Any?) -> Bool {

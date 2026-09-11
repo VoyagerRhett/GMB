@@ -53,6 +53,16 @@ typedef int32_t citizensdk_error_code_t;
 #define CITIZENSDK_ERROR_PANIC 21
 #define CITIZENSDK_ERROR_CANCELLED 22
 
+typedef uint32_t citizensdk_failure_stage_t;
+#define CITIZENSDK_FAILURE_STAGE_ADMISSION 1U
+#define CITIZENSDK_FAILURE_STAGE_VALIDATION 2U
+#define CITIZENSDK_FAILURE_STAGE_AUTHENTICATION 3U
+#define CITIZENSDK_FAILURE_STAGE_PERSISTENCE 4U
+#define CITIZENSDK_FAILURE_STAGE_PROVIDER 5U
+#define CITIZENSDK_FAILURE_STAGE_VERIFICATION 6U
+#define CITIZENSDK_FAILURE_STAGE_CANCELLATION 7U
+#define CITIZENSDK_FAILURE_STAGE_TEARDOWN 8U
+
 typedef uint32_t citizensdk_lifecycle_t;
 #define CITIZENSDK_LIFECYCLE_CREATED 1U
 #define CITIZENSDK_LIFECYCLE_IMPORTING_STATE 2U
@@ -368,10 +378,12 @@ typedef citizensdk_error_code_t (*citizensdk_host_runtime_cache_delete_v1_t)(
     void *host_context, uint64_t host_operation_id,
     citizensdk_host_hash32_t block_hash, void *sdk_context,
     citizensdk_host_status_completion_v1_t completion);
-typedef citizensdk_host_chain_database_load_v1_t
-    citizensdk_host_transaction_history_load_v1_t;
+typedef citizensdk_error_code_t (*citizensdk_host_transaction_history_query_v1_t)(
+    void *host_context, uint64_t host_operation_id,
+    citizensdk_bytes_view_t query, void *sdk_context,
+    citizensdk_host_record_completion_v1_t completion);
 typedef citizensdk_error_code_t
-    (*citizensdk_host_transaction_history_compare_and_swap_v1_t)(
+    (*citizensdk_host_transaction_history_mutate_v1_t)(
         void *host_context, uint64_t host_operation_id,
         uint64_t expected_revision, citizensdk_bytes_view_t candidate_record,
         void *sdk_context, citizensdk_host_record_completion_v1_t completion);
@@ -386,14 +398,13 @@ typedef struct citizensdk_host_public_store_v1 {
   citizensdk_host_runtime_cache_load_v1_t runtime_cache_load;
   citizensdk_host_runtime_cache_store_v1_t runtime_cache_store;
   citizensdk_host_runtime_cache_delete_v1_t runtime_cache_delete;
-  citizensdk_host_transaction_history_load_v1_t transaction_history_load;
-  citizensdk_host_transaction_history_compare_and_swap_v1_t
-      transaction_history_compare_and_swap;
+  citizensdk_host_transaction_history_query_v1_t transaction_history_query;
+  citizensdk_host_transaction_history_mutate_v1_t transaction_history_mutate;
 } citizensdk_host_public_store_v1_t;
 
 typedef citizensdk_host_chain_database_load_v1_t
     citizensdk_host_wallet_profile_load_v1_t;
-typedef citizensdk_host_transaction_history_compare_and_swap_v1_t
+typedef citizensdk_host_transaction_history_mutate_v1_t
     citizensdk_host_wallet_profile_compare_and_swap_v1_t;
 typedef citizensdk_error_code_t
     (*citizensdk_host_encrypted_secret_blob_load_v1_t)(

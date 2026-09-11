@@ -16,6 +16,10 @@ pub const MAX_TRANSACTION_HISTORY_RECORDS: usize = 4096;
 pub const MAX_TRANSACTION_HISTORY_PAGE_SIZE: usize = 100;
 pub const MAX_TRANSACTION_HISTORY_SYNC_BATCH: usize = 32;
 pub const MAX_TRANSACTION_POOL_REASON_BYTES: usize = 512;
+/// 通用恢复材料与保守固定开销的总预算；低于 32 MiB host payload 并保留 1 MiB 余量。
+pub const MAX_TRANSACTION_HISTORY_DURABLE_WEIGHT_BYTES: usize = 31 * 1024 * 1024;
+/// 覆盖 execution 固定字段以及所有通用状态变体的保守逐条开销。
+const TRANSACTION_HISTORY_RECORD_FIXED_WEIGHT_BYTES: usize = 1024;
 
 /// Durable state of an SDK-submitted transaction. Inclusion is not success.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -252,6 +256,39 @@ impl TransactionExecutionRecord {
         self.updated_at_millis
     }
 
+    /// 用于持久化 admission 的通用资源权重；不包含任何 App 业务分类。
+    pub fn durable_weight_bytes(&self) -> usize {
+        Self::try_durable_weight_for_lengths(
+            self.call_data.len(),
+            self.signed_extrinsic.as_bytes().len(),
+        )
+        .expect("validated transaction execution lengths cannot overflow durable weight")
+    }
+
+    /// 在签名前用已经冻结的 extrinsic template 长度执行精确资源准入。
+    pub fn try_durable_weight_for_lengths(
+        call_data_bytes: usize,
+        signed_extrinsic_bytes: usize,
+    ) -> ContractResult<usize> {
+        if !(1..=MAX_TRANSACTION_CALL_DATA_BYTES).contains(&call_data_bytes)
+            || !(1..=MAX_TRANSACTION_SIGNED_EXTRINSIC_BYTES).contains(&signed_extrinsic_bytes)
+        {
+            return Err(ContractError::new(
+                ContractErrorCode::InvalidArgument,
+                "通用交易恢复材料长度超出固定资源合同",
+            ));
+        }
+        TRANSACTION_HISTORY_RECORD_FIXED_WEIGHT_BYTES
+            .checked_add(call_data_bytes)
+            .and_then(|weight| weight.checked_add(signed_extrinsic_bytes))
+            .ok_or_else(|| {
+                ContractError::new(
+                    ContractErrorCode::InvalidArgument,
+                    "通用交易恢复材料资源权重溢出",
+                )
+            })
+    }
+
     pub fn require_same_submission_facts(&self, other: &Self) -> ContractResult<()> {
         if self.execution_id != other.execution_id
             || self.account_id != other.account_id
@@ -381,59 +418,279 @@ impl TransactionHistoryPage {
     }
 }
 
-/// Atomic execution-only store state. No account scan cursor or business event
-/// collection is permitted in this schema.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TransactionHistoryState {
+/// O(1) aggregate facts for the execution-only store.
+///
+/// Hosts may index only these product-independent resource facts. Account IDs,
+/// call data and signed extrinsics remain inside the opaque per-record value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionHistoryIndex {
     revision: u64,
-    executions: Vec<TransactionExecutionRecord>,
+    record_count: usize,
+    durable_weight_bytes: usize,
+    open_count: usize,
+    open_weight_bytes: usize,
 }
 
-impl TransactionHistoryState {
+impl TransactionHistoryIndex {
     pub fn try_new(
         revision: u64,
-        executions: Vec<TransactionExecutionRecord>,
+        record_count: usize,
+        durable_weight_bytes: usize,
+        open_count: usize,
+        open_weight_bytes: usize,
     ) -> ContractResult<Self> {
-        if executions.len() > MAX_TRANSACTION_HISTORY_RECORDS {
+        if record_count > MAX_TRANSACTION_HISTORY_RECORDS {
             return Err(ContractError::new(
                 ContractErrorCode::InvalidArgument,
                 "通用交易历史超过 4096 条固定上限",
             ));
         }
-        let ids: BTreeSet<_> = executions
-            .iter()
-            .map(|record| record.execution_id())
-            .collect();
-        let hashes: BTreeSet<_> = executions
-            .iter()
-            .map(|record| record.transaction_hash())
-            .collect();
-        if ids.len() != executions.len() || hashes.len() != executions.len() {
+        if durable_weight_bytes > MAX_TRANSACTION_HISTORY_DURABLE_WEIGHT_BYTES {
             return Err(ContractError::new(
                 ContractErrorCode::InvalidArgument,
-                "通用交易 executionId 或 transactionHash 重复",
+                "通用交易历史超过 31 MiB 持久化资源预算",
+            ));
+        }
+        if open_count > record_count || open_weight_bytes > durable_weight_bytes {
+            return Err(ContractError::new(
+                ContractErrorCode::InvalidArgument,
+                "通用交易历史 open 汇总超过总汇总",
             ));
         }
         Ok(Self {
             revision,
-            executions,
+            record_count,
+            durable_weight_bytes,
+            open_count,
+            open_weight_bytes,
         })
+    }
+
+    pub const fn empty() -> Self {
+        Self {
+            revision: 0,
+            record_count: 0,
+            durable_weight_bytes: 0,
+            open_count: 0,
+            open_weight_bytes: 0,
+        }
     }
 
     pub const fn revision(&self) -> u64 {
         self.revision
     }
-    pub fn executions(&self) -> &[TransactionExecutionRecord] {
-        &self.executions
+    pub const fn record_count(&self) -> usize {
+        self.record_count
+    }
+    pub const fn durable_weight_bytes(&self) -> usize {
+        self.durable_weight_bytes
+    }
+    pub const fn open_count(&self) -> usize {
+        self.open_count
+    }
+    pub const fn open_weight_bytes(&self) -> usize {
+        self.open_weight_bytes
+    }
+}
+
+impl Default for TransactionHistoryIndex {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+/// Stable record position. Ordering always includes the execution ID so equal
+/// timestamps cannot duplicate or omit records between pages.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionHistoryCursor {
+    created_at_millis: u64,
+    execution_id: TransactionExecutionId,
+}
+
+impl TransactionHistoryCursor {
+    pub const fn new(created_at_millis: u64, execution_id: TransactionExecutionId) -> Self {
+        Self {
+            created_at_millis,
+            execution_id,
+        }
+    }
+    pub const fn created_at_millis(&self) -> u64 {
+        self.created_at_millis
+    }
+    pub const fn execution_id(&self) -> TransactionExecutionId {
+        self.execution_id
+    }
+}
+
+/// Closed query vocabulary for generic history storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionHistoryQueryKind {
+    Newest,
+    OldestRetentionTerminal,
+    OldestReconcilable,
+}
+
+/// One revision-fenced record lookup.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransactionHistoryRecordSnapshot {
+    index: TransactionHistoryIndex,
+    record: Option<TransactionExecutionRecord>,
+}
+
+impl TransactionHistoryRecordSnapshot {
+    pub const fn new(
+        index: TransactionHistoryIndex,
+        record: Option<TransactionExecutionRecord>,
+    ) -> Self {
+        Self { index, record }
+    }
+    pub const fn index(&self) -> TransactionHistoryIndex {
+        self.index
+    }
+    pub const fn record(&self) -> Option<&TransactionExecutionRecord> {
+        self.record.as_ref()
+    }
+    pub fn into_record(self) -> Option<TransactionExecutionRecord> {
+        self.record
+    }
+}
+
+/// At most one public page of records from one exact store revision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransactionHistoryRecordBatch {
+    index: TransactionHistoryIndex,
+    records: Vec<TransactionExecutionRecord>,
+    has_more: bool,
+}
+
+impl TransactionHistoryRecordBatch {
+    pub fn try_new(
+        index: TransactionHistoryIndex,
+        records: Vec<TransactionExecutionRecord>,
+        has_more: bool,
+    ) -> ContractResult<Self> {
+        if records.len() > MAX_TRANSACTION_HISTORY_PAGE_SIZE
+            || records.len() > index.record_count()
+            || (records.is_empty() && has_more)
+        {
+            return Err(ContractError::new(
+                ContractErrorCode::InvalidArgument,
+                "通用交易历史查询批次无效",
+            ));
+        }
+        let ids = records
+            .iter()
+            .map(TransactionExecutionRecord::execution_id)
+            .collect::<BTreeSet<_>>();
+        if ids.len() != records.len() {
+            return Err(ContractError::new(
+                ContractErrorCode::InvalidArgument,
+                "通用交易历史查询批次包含重复 executionId",
+            ));
+        }
+        Ok(Self {
+            index,
+            records,
+            has_more,
+        })
+    }
+    pub const fn index(&self) -> TransactionHistoryIndex {
+        self.index
+    }
+    pub fn records(&self) -> &[TransactionExecutionRecord] {
+        &self.records
+    }
+    pub const fn has_more(&self) -> bool {
+        self.has_more
+    }
+}
+
+/// One atomic revision transition. Deletes and upserts become visible with the
+/// next aggregate index or none of them do.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransactionHistoryMutation {
+    expected_revision: u64,
+    next_index: TransactionHistoryIndex,
+    deletes: Vec<TransactionExecutionId>,
+    upserts: Vec<TransactionExecutionRecord>,
+}
+
+impl TransactionHistoryMutation {
+    pub fn try_new(
+        expected_revision: u64,
+        next_index: TransactionHistoryIndex,
+        deletes: Vec<TransactionExecutionId>,
+        upserts: Vec<TransactionExecutionRecord>,
+    ) -> ContractResult<Self> {
+        if next_index.revision()
+            != expected_revision.checked_add(1).ok_or_else(|| {
+                ContractError::new(
+                    ContractErrorCode::InvalidState,
+                    "通用交易历史 revision 已耗尽",
+                )
+            })?
+            || deletes.len() > MAX_TRANSACTION_HISTORY_RECORDS
+            || upserts.len() > MAX_TRANSACTION_HISTORY_PAGE_SIZE
+        {
+            return Err(ContractError::new(
+                ContractErrorCode::InvalidArgument,
+                "通用交易历史 mutation 形状无效",
+            ));
+        }
+        let delete_ids = deletes.iter().copied().collect::<BTreeSet<_>>();
+        let upsert_ids = upserts
+            .iter()
+            .map(TransactionExecutionRecord::execution_id)
+            .collect::<BTreeSet<_>>();
+        if delete_ids.len() != deletes.len()
+            || upsert_ids.len() != upserts.len()
+            || !delete_ids.is_disjoint(&upsert_ids)
+        {
+            return Err(ContractError::new(
+                ContractErrorCode::InvalidArgument,
+                "通用交易历史 mutation executionId 重复或冲突",
+            ));
+        }
+        Ok(Self {
+            expected_revision,
+            next_index,
+            deletes,
+            upserts,
+        })
+    }
+    pub const fn expected_revision(&self) -> u64 {
+        self.expected_revision
+    }
+    pub const fn next_index(&self) -> TransactionHistoryIndex {
+        self.next_index
+    }
+    pub fn deletes(&self) -> &[TransactionExecutionId] {
+        &self.deletes
+    }
+    pub fn upserts(&self) -> &[TransactionExecutionRecord] {
+        &self.upserts
     }
 }
 
 pub trait TransactionHistoryStore: Send + Sync {
-    fn load(&self) -> ContractFuture<'_, TransactionHistoryState>;
+    fn load_index(&self) -> ContractFuture<'_, TransactionHistoryIndex>;
+
+    fn load_record(
+        &self,
+        expected_revision: u64,
+        execution_id: TransactionExecutionId,
+    ) -> ContractFuture<'_, TransactionHistoryRecordSnapshot>;
+
+    fn load_page(
+        &self,
+        expected_revision: u64,
+        kind: TransactionHistoryQueryKind,
+        before: Option<TransactionHistoryCursor>,
+        limit: usize,
+    ) -> ContractFuture<'_, TransactionHistoryRecordBatch>;
 
     fn compare_and_swap(
         &self,
-        expected_revision: u64,
-        next: TransactionHistoryState,
-    ) -> ContractFuture<'_, TransactionHistoryState>;
+        mutation: TransactionHistoryMutation,
+    ) -> ContractFuture<'_, TransactionHistoryIndex>;
 }

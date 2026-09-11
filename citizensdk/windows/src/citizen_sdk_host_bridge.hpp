@@ -54,8 +54,8 @@ class HostBridge final : public std::enable_shared_from_this<HostBridge> {
   void runtime_store(const std::array<uint8_t, 32> &hash,
                      const Bytes &candidate);
   void runtime_delete(const std::array<uint8_t, 32> &hash);
-  HostRecord history_load();
-  HostRecord history_cas(uint64_t expected, const Bytes &candidate);
+  HostRecord history_query(const Bytes &query);
+  HostRecord history_mutate(uint64_t expected, const Bytes &mutation);
   HostRecord profile_load();
   HostRecord profile_cas(uint64_t expected, const Bytes &candidate);
   HostRecord secret_load(const SecretIdentity &identity);

@@ -180,16 +180,6 @@ internal class CitizenSdkNative private constructor(
         call { nativeQrCancelSignRequest(it, requestId.toByteArray(Charsets.UTF_8)) }
     fun qrEncodeAccountId(accountId: ByteArray): String =
         call { strictUtf8(nativeQrEncodeAccountId(it, accountId)) }
-    fun qrEncodeUserTransfer(
-        requestId: String, expiresAt: Long, accountId: ByteArray, amount: String,
-        symbol: String, memo: String, bankCidNumber: String,
-    ): String = call {
-        strictUtf8(nativeQrEncodeUserTransfer(
-            it, requestId.toByteArray(Charsets.UTF_8), expiresAt, accountId,
-            amount.toByteArray(Charsets.UTF_8), symbol.toByteArray(Charsets.UTF_8),
-            memo.toByteArray(Charsets.UTF_8), bankCidNumber.toByteArray(Charsets.UTF_8),
-        ))
-    }
     fun qrDecodeLuminance(data: ByteArray, width: Int, height: Int, rowStride: Int): CitizenQrDocument =
         qrParse(call { strictUtf8(nativeQrDecodeLuminance(it, data, width, height, rowStride)) })
     fun qrEncode(text: String, scale: Int): CitizenQrImage = call {
@@ -398,7 +388,6 @@ internal class CitizenSdkNative private constructor(
     private external fun nativeQrConsumeSignResponse(bridge: Long, text: ByteArray): ByteArray
     private external fun nativeQrCancelSignRequest(bridge: Long, requestId: ByteArray): Boolean
     private external fun nativeQrEncodeAccountId(bridge: Long, accountId: ByteArray): ByteArray
-    private external fun nativeQrEncodeUserTransfer(bridge: Long, requestId: ByteArray, expiresAt: Long, accountId: ByteArray, amount: ByteArray, symbol: ByteArray, memo: ByteArray, bankCidNumber: ByteArray): ByteArray
     private external fun nativeQrDecodeLuminance(bridge: Long, data: ByteArray, width: Int, height: Int, rowStride: Int): ByteArray
     private external fun nativeQrEncode(bridge: Long, text: ByteArray, scale: Int): ByteArray
     private external fun nativePrepareTransaction(

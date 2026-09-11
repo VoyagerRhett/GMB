@@ -602,8 +602,20 @@ internal enum CitizenSDKNativeCodec {
         prepare(&info.struct_size, &info.abi_version, citizensdk_result_info_t.self)
         try CitizenSDKChecks.requireOK(citizensdk_result_get_info(result, &info), "Core result identity is invalid")
         if info.error_code != 0 {
+            var rawStage: citizensdk_failure_stage_t = 0
+            try CitizenSDKChecks.requireOK(
+                citizensdk_result_get_failure_stage(result, &rawStage),
+                "Core failure stage is invalid"
+            )
+            guard let stage = CitizenSDKFailureStage(rawValue: rawStage) else {
+                throw CitizenSDKError(.integrity, "Core returned an unknown failure stage")
+            }
             let message = try resultErrorMessage(result)
-            throw CitizenSDKError(.checked(info.error_code), message.isEmpty ? "CitizenSDK operation failed" : message)
+            throw CitizenSDKError(
+                .checked(info.error_code),
+                message.isEmpty ? "CitizenSDK operation failed" : message,
+                stage: stage
+            )
         }
         guard info.kind == kind else {
             throw CitizenSDKError(.integrity, "Core returned result kind \(info.kind), expected \(kind)")

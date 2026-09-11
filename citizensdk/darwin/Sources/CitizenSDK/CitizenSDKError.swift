@@ -31,14 +31,50 @@ public enum CitizenSDKErrorCode: Int32, CaseIterable, Sendable {
     }
 }
 
+/// Product-independent failure phase shared verbatim with `citizensdk_failure_stage_t`.
+public enum CitizenSDKFailureStage: UInt32, CaseIterable, Sendable {
+    case admission = 1
+    case validation = 2
+    case authentication = 3
+    case persistence = 4
+    case provider = 5
+    case verification = 6
+    case cancellation = 7
+    case teardown = 8
+
+    public static func defaultStage(for code: CitizenSDKErrorCode) -> Self {
+        switch code {
+        case .invalidArgument, .decode: return .validation
+        case .authenticationCancelled, .authenticationRequired, .keyInvalidated, .permissionDenied:
+            return .authentication
+        case .storage: return .persistence
+        case .unavailable, .network, .timeout: return .provider
+        case .integrity: return .verification
+        case .cancelled: return .cancellation
+        case .internalFailure, .panic: return .teardown
+        default: return .admission
+        }
+    }
+}
+
 /// Public failures contain neither secrets nor Core request/result identities.
 public struct CitizenSDKError: LocalizedError, Sendable, Equatable {
     public let code: CitizenSDKErrorCode
+    public let stage: CitizenSDKFailureStage
     public let message: String
+    public let method: String?
+    public let sessionID: String?
+    public let requestSequence: Int64?
 
-    public init(_ code: CitizenSDKErrorCode, _ message: String) {
+    public init(_ code: CitizenSDKErrorCode, _ message: String,
+                stage: CitizenSDKFailureStage? = nil, method: String? = nil,
+                sessionID: String? = nil, requestSequence: Int64? = nil) {
         self.code = code
+        self.stage = stage ?? .defaultStage(for: code)
         self.message = message
+        self.method = method
+        self.sessionID = sessionID
+        self.requestSequence = requestSequence
     }
 
     public var errorDescription: String? { message }

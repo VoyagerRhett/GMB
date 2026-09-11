@@ -61,7 +61,6 @@ const EXPECTED_EXPORTS: [&str; 117] = [
     "citizensdk_sign_qr_request",
     "citizensdk_result_copy_qr",
     "citizensdk_qr_encode_account_id",
-    "citizensdk_qr_encode_user_transfer",
     "citizensdk_qr_parse",
     "citizensdk_rename_wallet_account",
     "citizensdk_rename_account",
@@ -84,6 +83,7 @@ const EXPECTED_EXPORTS: [&str; 117] = [
     "citizensdk_result_get_fee_snapshot",
     "citizensdk_result_get_hash",
     "citizensdk_result_get_info",
+    "citizensdk_result_get_failure_stage",
     "citizensdk_result_get_prepared_wallet",
     "citizensdk_result_get_prepared_transaction",
     "citizensdk_result_get_transaction_execution",
@@ -239,15 +239,15 @@ fn rust_and_c_publish_exactly_the_reviewed_product_symbols() {
     let wallet = rust_exports(include_str!("../src/wallet_abi.rs"));
     let qr = rust_exports(include_str!("../src/qr_abi.rs"));
     let transaction = rust_exports(include_str!("../src/transaction_abi.rs"));
-    assert_eq!(rust.len(), 49, "base Rust export count changed");
-    assert_eq!(wallet.len(), 56, "wallet Rust export count changed");
+    assert_eq!(rust.len(), 50, "base Rust export count changed");
+    assert_eq!(wallet.len(), 48, "wallet Rust export count changed");
     for export in wallet {
         assert!(
             rust.insert(export.clone()),
             "duplicate Rust export {export}"
         );
     }
-    assert_eq!(qr.len(), 9, "QR Rust export count changed");
+    assert_eq!(qr.len(), 8, "QR Rust export count changed");
     for export in qr {
         assert!(
             rust.insert(export.clone()),
@@ -256,7 +256,7 @@ fn rust_and_c_publish_exactly_the_reviewed_product_symbols() {
     }
     assert_eq!(
         transaction.len(),
-        7,
+        11,
         "transaction Rust export count changed"
     );
     for export in transaction {
@@ -269,8 +269,8 @@ fn rust_and_c_publish_exactly_the_reviewed_product_symbols() {
         .into_keys()
         .collect();
 
-    assert_eq!(rust.len(), 121, "Rust export count changed");
-    assert_eq!(header.len(), 121, "C declaration count changed");
+    assert_eq!(rust.len(), 117, "Rust export count changed");
+    assert_eq!(header.len(), 117, "C declaration count changed");
     assert_eq!(rust, expected, "Rust export set changed");
     assert_eq!(header, expected, "C declaration set changed");
     assert!(!rust.contains("citizensdk_set_default_wallet_account"));

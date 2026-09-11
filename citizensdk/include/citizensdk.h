@@ -48,7 +48,9 @@ CITIZENSDK_API citizensdk_error_code_t citizensdk_verify_signature(
  * text is strict UTF-8 QR_V1; query variable output with NULL/0. The image
  * codec is the separate citizensdk_qr_image API and always uses ZXing-C++.
  * Parsing returns the Core's expanded JSON, including canonical_text and kind.
- * The SDK owns expiry time. No platform decodes QR_V1 wire fields itself. */
+ * The SDK owns expiry time. No platform decodes QR_V1 wire fields itself.
+ * QR_V1 exposes only generic sign request/response and account public-key
+ * documents; consumer-App payment or transfer schemas are outside this ABI. */
 CITIZENSDK_API citizensdk_error_code_t citizensdk_qr_parse(
     citizensdk_handle_t handle, citizensdk_bytes_view_t text,
     uint8_t *output, uint64_t output_capacity, uint64_t *out_required);
@@ -84,13 +86,6 @@ CITIZENSDK_API citizensdk_error_code_t citizensdk_qr_cancel_sign_request(
 CITIZENSDK_API citizensdk_error_code_t citizensdk_qr_encode_account_id(
     citizensdk_handle_t handle, const citizensdk_account_id_t *account_id,
     uint8_t *output, uint64_t output_capacity, uint64_t *out_required);
-CITIZENSDK_API citizensdk_error_code_t citizensdk_qr_encode_user_transfer(
-    citizensdk_handle_t handle, citizensdk_bytes_view_t request_id,
-    uint64_t expires_at, const citizensdk_account_id_t *account_id,
-    citizensdk_bytes_view_t amount, citizensdk_bytes_view_t symbol,
-    citizensdk_bytes_view_t memo, citizensdk_bytes_view_t bank_cid_number,
-    uint8_t *output, uint64_t output_capacity, uint64_t *out_required);
-
 /* All input views are copied before return. Empty system_name/system_version
  * select CitizenSDK/1.0.0 defaults. The three verified chain assets are
  * mandatory and are revalidated before a smoldot provider is constructed. */
@@ -122,7 +117,7 @@ citizensdk_destroy(citizensdk_handle_t handle);
  * conflicting transition returns BUSY. Registration is the commit point and
  * its immediate state notifications are best-effort/queryable synchronously.
  * HISTORY_CHANGED (5) is a payloadless history invalidation from SDK-owned
- * wallet monitoring; read the existing history API for the latest snapshot.
+ * transaction execution monitoring; read the history API for the latest snapshot.
  * It carries only sequence; request_id/result/capability_revision/reserved are
  * zero. Stop drains the monitor, pending host writes and owned subscriptions
  * before removing the provider. The event pointer is valid only during the callback. */
@@ -414,6 +409,9 @@ CITIZENSDK_API citizensdk_error_code_t citizensdk_import_state(
 
 CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_info(
     citizensdk_result_handle_t result, citizensdk_result_info_t *out_info);
+/* Available only for a ready failed result; success and released handles are rejected. */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_failure_stage(
+    citizensdk_result_handle_t result, citizensdk_failure_stage_t *out_stage);
 CITIZENSDK_API citizensdk_error_code_t
 citizensdk_result_copy_error_message(citizensdk_result_handle_t result,
                                      uint8_t *buffer, uint64_t capacity,

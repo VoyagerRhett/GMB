@@ -2,17 +2,22 @@ use crate::{
     abi::CitizenSdkErrorCode,
     host_codec::{
         decode_chain_database_snapshot, decode_encrypted_secret_blob_snapshot, decode_host_record,
-        decode_runtime_context, decode_transaction_history_state, decode_wallet_state,
-        encode_chain_database_snapshot, encode_encrypted_secret_blob_snapshot, encode_host_record,
-        encode_runtime_context, encode_transaction_history_state, encode_wallet_state,
-        HostCodecErrorKind, HostRecordDomain, HOST_RECORD_FORMAT_VERSION,
+        decode_runtime_context, decode_transaction_execution_record,
+        decode_transaction_history_host_batch, decode_wallet_state, encode_chain_database_snapshot,
+        encode_encrypted_secret_blob_snapshot, encode_host_record, encode_runtime_context,
+        encode_transaction_execution_record, encode_transaction_history_host_batch,
+        encode_transaction_history_index_query, encode_transaction_history_mutation,
+        encode_transaction_history_page_query, encode_transaction_history_record_query,
+        encode_wallet_state, HostCodecErrorKind, HostRecordDomain, HOST_RECORD_FORMAT_VERSION,
     },
 };
 use citizen_sdk_contracts::{
     citizen_ss58_address, AccountId32, ChainDatabaseSnapshot, ColdWalletAccount,
     EncryptedSecretBlobSnapshot, EncryptedSecretBlobState, EncryptedSecretEnvelope, Hash32,
-    Hash32Bytes, RuntimeContext, RuntimeVersion, SecretOwner, SecretRef, TransactionHistoryState,
-    VaultGeneration, VerifiedBlockRef, WalletState,
+    Hash32Bytes, HistoryTransactionStatus, RuntimeContext, RuntimeVersion, SecretOwner, SecretRef,
+    SignedExtrinsic, TransactionExecutionId, TransactionExecutionRecord, TransactionHistoryIndex,
+    TransactionHistoryMutation, TransactionHistoryQueryKind, VaultGeneration, VerifiedBlockRef,
+    WalletState, MAX_PERSISTED_RUNTIME_METADATA_BYTES,
 };
 
 const HEADER_LEN: usize = 56;
@@ -42,14 +47,12 @@ fn generic_execution_round_trips_complete_recovery_material_and_rejects_wrong_sc
         6,
     )
     .unwrap_or_else(|error| panic!("execution fixture failed: {error}"));
-    let state = TransactionHistoryState::try_new(1, vec![record])
-        .unwrap_or_else(|error| panic!("history fixture failed: {error}"));
-    let encoded = encode_transaction_history_state(&state)
-        .unwrap_or_else(|error| panic!("history encode failed: {error}"));
+    let encoded = encode_transaction_execution_record(&record)
+        .unwrap_or_else(|error| panic!("execution encode failed: {error}"));
     assert_eq!(
-        decode_transaction_history_state(&encoded)
-            .unwrap_or_else(|error| panic!("history decode failed: {error}")),
-        state
+        decode_transaction_execution_record(&encoded)
+            .unwrap_or_else(|error| panic!("execution decode failed: {error}")),
+        record
     );
 
     let payload = decode_host_record(HostRecordDomain::TransactionHistory, &encoded)
@@ -59,7 +62,186 @@ fn generic_execution_round_trips_complete_recovery_material_and_rejects_wrong_sc
     wrong_schema[0] ^= 0xff;
     let invalid = encode_host_record(HostRecordDomain::TransactionHistory, &wrong_schema)
         .unwrap_or_else(|error| panic!("invalid fixture encode failed: {error}"));
-    assert!(decode_transaction_history_state(&invalid).is_err());
+    assert!(decode_transaction_execution_record(&invalid).is_err());
+}
+
+fn baseline_execution(index: usize) -> TransactionExecutionRecord {
+    let ordinal = u128::try_from(index + 1)
+        .unwrap_or_else(|error| panic!("baseline ordinal failed: {error}"));
+    let mut transaction_hash = [0_u8; 32];
+    transaction_hash[..16].copy_from_slice(&ordinal.to_le_bytes());
+    let call_data = vec![
+        u8::try_from(index % 251)
+            .unwrap_or_else(|error| panic!("baseline marker failed: {error}"));
+        128
+    ];
+    let call_data_hash = Hash32::from_bytes(
+        citizen_sdk_contracts::blake2_256(&call_data)
+            .unwrap_or_else(|error| panic!("baseline callData hash failed: {error}")),
+    );
+    TransactionExecutionRecord::try_new(
+        TransactionExecutionId::try_new(ordinal.to_le_bytes())
+            .unwrap_or_else(|error| panic!("baseline execution id failed: {error}")),
+        AccountId32::from_bytes([0x11; 32]),
+        call_data_hash,
+        call_data,
+        Hash32::from_bytes(transaction_hash),
+        SignedExtrinsic::try_new(vec![0x84; 256])
+            .unwrap_or_else(|error| panic!("baseline extrinsic failed: {error}")),
+        VerifiedBlockRef::best(Hash32::from_bytes([0x41; 32]), 2),
+        RuntimeVersion::new(1, 1),
+        citizen_sdk_contracts::ChainIdentity::citizenchain().genesis_hash(),
+        u64::try_from(index).unwrap_or_else(|error| panic!("baseline nonce failed: {error}")),
+        HistoryTransactionStatus::Pending,
+        u64::try_from(index + 1)
+            .unwrap_or_else(|error| panic!("baseline timestamp failed: {error}")),
+        u64::try_from(index + 1)
+            .unwrap_or_else(|error| panic!("baseline timestamp failed: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("baseline execution failed: {error}"))
+}
+
+#[test]
+fn execution_history_codec_is_per_record_and_query_batches_are_bounded() {
+    const COUNTS: [usize; 4] = [0, 1, 100, 1_000];
+    const ROUNDS: usize = 5;
+    let reference_len = encode_transaction_execution_record(&baseline_execution(0))
+        .unwrap_or_else(|error| panic!("reference execution encode failed: {error}"))
+        .len();
+
+    for count in COUNTS {
+        let records = (0..count.min(100))
+            .map(baseline_execution)
+            .collect::<Vec<_>>();
+        let mut encode_samples = Vec::with_capacity(ROUNDS);
+        let mut decode_samples = Vec::with_capacity(ROUNDS);
+        let mut encoded_bytes = 0_usize;
+        for _ in 0..ROUNDS {
+            let started = std::time::Instant::now();
+            let encoded = records
+                .iter()
+                .map(|record| {
+                    encode_transaction_execution_record(record)
+                        .unwrap_or_else(|error| panic!("baseline encode failed: {error}"))
+                })
+                .collect::<Vec<_>>();
+            encode_samples.push(started.elapsed().as_nanos());
+            encoded_bytes = encoded.iter().map(Vec::len).sum();
+            let started = std::time::Instant::now();
+            let decoded = encoded
+                .iter()
+                .map(|value| {
+                    decode_transaction_execution_record(value)
+                        .unwrap_or_else(|error| panic!("baseline decode failed: {error}"))
+                })
+                .collect::<Vec<_>>();
+            decode_samples.push(started.elapsed().as_nanos());
+            assert_eq!(decoded, records);
+        }
+        assert_eq!(encoded_bytes, records.len() * reference_len);
+        assert!(records.iter().all(|record| {
+            encode_transaction_execution_record(record)
+                .map(|encoded| {
+                    encoded.len() <= HostRecordDomain::TransactionHistory.max_encoded_record_bytes()
+                })
+                .unwrap_or(false)
+        }));
+        println!(
+            "sdk-baseline history_record_codec total_database_records={count} sampled_records={} encoded_bytes={encoded_bytes} encode_ns={encode_samples:?} decode_ns={decode_samples:?}",
+            records.len()
+        );
+    }
+}
+
+#[test]
+fn execution_history_host_batch_round_trips_index_and_opaque_records() {
+    let records = (0..100).map(baseline_execution).collect::<Vec<_>>();
+    let durable_weight = records
+        .iter()
+        .map(TransactionExecutionRecord::durable_weight_bytes)
+        .sum();
+    let index = TransactionHistoryIndex::try_new(7, 1_000, durable_weight, 100, durable_weight)
+        .unwrap_or_else(|error| panic!("history index fixture failed: {error}"));
+    let encoded = encode_transaction_history_host_batch(index, &records, true)
+        .unwrap_or_else(|error| panic!("history batch encode failed: {error}"));
+    let decoded = decode_transaction_history_host_batch(&encoded)
+        .unwrap_or_else(|error| panic!("history batch decode failed: {error}"));
+    assert_eq!(decoded.index(), index);
+    assert_eq!(decoded.records(), records);
+    assert!(decoded.has_more());
+}
+
+#[test]
+fn history_query_and_mutation_wire_shapes_are_fixed_and_descriptor_tampering_fails() {
+    let record = baseline_execution(0);
+    let weight = record.durable_weight_bytes();
+    let index = TransactionHistoryIndex::try_new(1, 1, weight, 1, weight)
+        .unwrap_or_else(|error| panic!("history index fixture failed: {error}"));
+
+    let index_query = encode_transaction_history_index_query();
+    assert_eq!(index_query.len(), 58);
+    assert_eq!(&index_query[..5], b"THQ1\x01");
+    assert_eq!(
+        encode_transaction_history_record_query(1, record.execution_id()).len(),
+        58
+    );
+    assert_eq!(
+        encode_transaction_history_page_query(1, TransactionHistoryQueryKind::Newest, None, 100)
+            .unwrap_or_else(|error| panic!("history page query failed: {error}"))
+            .len(),
+        58
+    );
+
+    let mutation = TransactionHistoryMutation::try_new(0, index, Vec::new(), vec![record.clone()])
+        .unwrap_or_else(|error| panic!("history mutation fixture failed: {error}"));
+    let mutation_wire = encode_transaction_history_mutation(&mutation)
+        .unwrap_or_else(|error| panic!("history mutation encode failed: {error}"));
+    assert_eq!(&mutation_wire[..4], b"THM1");
+
+    let mut batch = encode_transaction_history_host_batch(index, &[record], false)
+        .unwrap_or_else(|error| panic!("history batch encode failed: {error}"));
+    // The descriptor starts at byte 41. Its indexed executionId must agree
+    // with the integrity-protected opaque TXR1 record later in the same value.
+    batch[41] ^= 1;
+    assert_eq!(
+        decode_transaction_history_host_batch(&batch)
+            .err()
+            .unwrap_or_else(|| panic!("tampered descriptor must fail"))
+            .ffi_code(),
+        CitizenSdkErrorCode::Integrity
+    );
+}
+
+#[test]
+fn runtime_metadata_persistence_limit_preserves_the_larger_core_contract() {
+    let block = VerifiedBlockRef::finalized(Hash32::from_bytes([0x55; 32]), 9);
+    let persisted = RuntimeContext::try_new(
+        block,
+        RuntimeVersion::new(1, 1),
+        vec![0x42; MAX_PERSISTED_RUNTIME_METADATA_BYTES],
+    )
+    .unwrap_or_else(|error| panic!("persistable runtime context failed: {error}"));
+    let encoded = encode_runtime_context(&persisted)
+        .unwrap_or_else(|error| panic!("maximum persistent runtime context failed: {error}"));
+    assert_eq!(encoded.len(), 8 * 1024 * 1024);
+
+    let memory_only = RuntimeContext::try_new(
+        block,
+        RuntimeVersion::new(1, 1),
+        vec![0x42; MAX_PERSISTED_RUNTIME_METADATA_BYTES + 1],
+    )
+    .unwrap_or_else(|error| panic!("Core-valid memory-only context failed: {error}"));
+    assert!(memory_only.metadata().len() <= citizen_sdk_contracts::MAX_RUNTIME_METADATA_BYTES);
+    let error = encode_runtime_context(&memory_only)
+        .err()
+        .unwrap_or_else(|| panic!("metadata above persistent capacity must not be encoded"));
+    assert_eq!(error.kind(), HostCodecErrorKind::PayloadTooLarge);
+    println!(
+        "sdk-baseline runtime_metadata contract_limit_bytes={} persistent_metadata_limit_bytes={MAX_PERSISTED_RUNTIME_METADATA_BYTES} encoded_record_bytes={} memory_only_metadata_bytes={}",
+        citizen_sdk_contracts::MAX_RUNTIME_METADATA_BYTES,
+        encoded.len(),
+        memory_only.metadata().len()
+    );
 }
 
 #[test]
@@ -226,7 +408,7 @@ fn malformed_records_map_to_decode_without_echoing_stored_bytes() {
 }
 
 #[test]
-fn all_five_typed_models_round_trip_through_strict_binary_codecs() {
+fn singleton_models_and_per_execution_history_round_trip_through_strict_binary_codecs() {
     let chain = ChainDatabaseSnapshot::new(0, None);
     let encoded = encode_chain_database_snapshot(&chain)
         .unwrap_or_else(|error| panic!("chain encode failed: {error}"));
@@ -259,13 +441,12 @@ fn all_five_typed_models_round_trip_through_strict_binary_codecs() {
         wallet
     );
 
-    let history = TransactionHistoryState::try_new(0, Vec::new())
-        .unwrap_or_else(|error| panic!("history fixture failed: {error}"));
-    let encoded = encode_transaction_history_state(&history)
-        .unwrap_or_else(|error| panic!("history encode failed: {error}"));
+    let history = baseline_execution(0);
+    let encoded = encode_transaction_execution_record(&history)
+        .unwrap_or_else(|error| panic!("history record encode failed: {error}"));
     assert_eq!(
-        decode_transaction_history_state(&encoded)
-            .unwrap_or_else(|error| panic!("history decode failed: {error}")),
+        decode_transaction_execution_record(&encoded)
+            .unwrap_or_else(|error| panic!("history record decode failed: {error}")),
         history
     );
 

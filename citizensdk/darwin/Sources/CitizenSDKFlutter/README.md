@@ -1,6 +1,6 @@
 # CitizenSDK Flutter Apple adapter
 
-当前五端统一 63 方法；open 唯一请求为 `[1, modules]`。六模块由同一 Rust 实现按需装配。
+当前五端统一 62 方法；open 唯一请求为 `[1, modules]`。六模块由同一 Rust 实现按需装配。
 十个 QR 方法与其它平台使用同名、同 tuple 和同上限；图像识别/生成只连接 SDK 内 ZXing-C++ 3.1.1。
 无会话 verifySignature 只接受 `[1, accountId, signature, payload]`，返回 `[1, bool]`，
 错误 session/sequence 均为 null；不创建 facade/session、事件订阅、链数据库或金库。

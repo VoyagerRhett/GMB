@@ -306,27 +306,39 @@ int32_t runtime_delete(void *context, uint64_t operation_id,
                           nullptr, sdk_context, completion);
 }
 
-int32_t history_load(void *context, uint64_t operation_id, void *sdk_context,
-                     citizensdk_host_record_completion_v1_t completion) {
+int32_t history_query(void *context, uint64_t operation_id,
+                      citizensdk_bytes_view_t query, void *sdk_context,
+                      citizensdk_host_record_completion_v1_t completion) {
+  if (completion == nullptr || query.data == nullptr || query.len != 58) {
+    return CITIZENSDK_ERROR_INVALID_ARGUMENT;
+  }
   auto *bridge = static_cast<CitizenSdkHostBridge *>(context);
   ScopedEnv scoped(bridge->vm());
   if (scoped.env == nullptr) return kInternal;
-  jobject record =
-      call_record_no_args(bridge, scoped.env, "transactionHistoryLoad");
-  if (scoped.env->ExceptionCheck()) return exception_code(scoped.env);
+  JNIEnv *env = scoped.env;
+  jclass type = env->GetObjectClass(bridge->host_services());
+  jmethodID method = env->GetMethodID(
+      type, "transactionHistoryQuery",
+      "([B)Lorg/citizen/sdk/internal/CitizenSdkHostRecord;");
+  jbyteArray bytes = java_bytes(env, query.data, static_cast<size_t>(query.len));
+  jobject record = method == nullptr || bytes == nullptr
+      ? nullptr : env->CallObjectMethod(bridge->host_services(), method, bytes);
+  env->DeleteLocalRef(type);
+  if (bytes != nullptr) env->DeleteLocalRef(bytes);
+  if (env->ExceptionCheck()) return exception_code(env);
   complete_record(scoped.env, operation_id, sdk_context, completion,
                   CITIZENSDK_HOST_RECORD_TRANSACTION_HISTORY, record);
   return kOk;
 }
 
-int32_t history_cas(void *context, uint64_t operation_id,
-                    uint64_t expected_revision,
-                    citizensdk_bytes_view_t candidate, void *sdk_context,
-                    citizensdk_host_record_completion_v1_t completion) {
+int32_t history_mutate(void *context, uint64_t operation_id,
+                       uint64_t expected_revision,
+                       citizensdk_bytes_view_t mutation, void *sdk_context,
+                       citizensdk_host_record_completion_v1_t completion) {
   return singleton_cas(static_cast<CitizenSdkHostBridge *>(context),
-                       "transactionHistoryCompareAndSwap",
+                       "transactionHistoryMutate",
                        CITIZENSDK_HOST_RECORD_TRANSACTION_HISTORY, operation_id,
-                       expected_revision, candidate, sdk_context, completion);
+                       expected_revision, mutation, sdk_context, completion);
 }
 
 int32_t wallet_load(void *context, uint64_t operation_id, void *sdk_context,
@@ -632,8 +644,8 @@ CitizenSdkHostBridge::CitizenSdkHostBridge(JavaVM *vm, JNIEnv *env,
   public_store_.runtime_cache_load = runtime_load;
   public_store_.runtime_cache_store = runtime_store;
   public_store_.runtime_cache_delete = runtime_delete;
-  public_store_.transaction_history_load = history_load;
-  public_store_.transaction_history_compare_and_swap = history_cas;
+  public_store_.transaction_history_query = history_query;
+  public_store_.transaction_history_mutate = history_mutate;
 
   secure_store_.struct_size = sizeof(secure_store_);
   secure_store_.abi_version = CITIZENSDK_ABI_VERSION;
@@ -684,12 +696,14 @@ bool CitizenSdkHostBridge::create(JNIEnv *env,
   options.system_version = {kVersion, sizeof(kVersion) - 1};
   // 只投影所选资源组；模块依赖和编译能力统一由 Rust 校验。
   const bool secrets = (modules & (CITIZENSDK_MODULE_WALLET | CITIZENSDK_MODULE_SIGNING)) != 0;
-  services_.public_store = (modules & CITIZENSDK_MODULE_CHAIN) != 0 ? &public_store_ : nullptr;
+  services_.public_store =
+      (modules & (CITIZENSDK_MODULE_CHAIN | CITIZENSDK_MODULE_HISTORY)) != 0
+          ? &public_store_ : nullptr;
   services_.secure_store = secrets ? &secure_store_ : nullptr;
   services_.secret_vault = secrets ? &vault_ : nullptr;
   if ((modules & CITIZENSDK_MODULE_HISTORY) == 0) {
-    public_store_.transaction_history_load = nullptr;
-    public_store_.transaction_history_compare_and_swap = nullptr;
+    public_store_.transaction_history_query = nullptr;
+    public_store_.transaction_history_mutate = nullptr;
   }
   const int32_t code = citizensdk_create_with_modules(&options, &services_, modules, &handle_);
   if (code != kOk) {

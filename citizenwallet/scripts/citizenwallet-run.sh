@@ -58,7 +58,7 @@ flutter config --build-dir="$FLUTTER_BUILD_RELATIVE" >/dev/null
 # 项目缓存、依赖缓存、编译物和临时文件继续使用当前Android任务缓存。
 build_android_release() {
   local properties flutter_command flutter_sdk android_sdk product_version version_name version_code
-  local flutter_version dart_defines link_target
+  local flutter_version dart_defines link_target java_home
   properties="$TATA_CONSOLE_FLUTTER_ROOT/android/local.properties"
   flutter_command="$(command -v flutter)"
   while [[ -L "$flutter_command" ]]; do
@@ -68,6 +68,9 @@ build_android_release() {
   done
   flutter_sdk="$(cd "$(dirname "$flutter_command")/.." && pwd -P)"
   android_sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}"
+  # JDK选择属于CitizenWallet产品流程：保留调用方选择；本机未传入时使用
+  # Android Studio随包JBR。Gradle自行报告工具错误，不增加控制台前置门禁。
+  java_home="${JAVA_HOME:-/Applications/Android Studio.app/Contents/jbr/Contents/Home}"
   product_version="$(sed -n 's/^version:[[:space:]]*//p' "$TATA_CONSOLE_FLUTTER_ROOT/pubspec.yaml" | head -n 1)"
   version_name="${product_version%%+*}"
   version_code="${product_version##*+}"
@@ -89,6 +92,7 @@ print(",".join(base64.b64encode(f"{name}={value[key]}".encode()).decode() for na
 ')"
   (
     cd "$CITIZENWALLET_DIR/android"
+    ANDROID_HOME="$android_sdk" ANDROID_SDK_ROOT="$android_sdk" JAVA_HOME="$java_home" PATH="$java_home/bin:$PATH" \
     TATA_CONSOLE_FLUTTER_GRADLE_ROOT="$flutter_sdk/packages/flutter_tools/gradle" \
     FLUTTER_ROOT="$flutter_sdk" "$CITIZENWALLET_DIR/android/gradlew" --no-daemon --stacktrace --no-problems-report \
       --init-script "${TATA_CONSOLE_GRADLE_INIT_SCRIPT:?CitizenWallet缺少Gradle缓存初始化脚本}" \
@@ -158,5 +162,8 @@ elif [[ "$PLATFORM" == android ]]; then
     exit 1
   }
   "$SCRIPT_DIR/build-signer-native.sh" verify-android-package "$ANDROID_APK"
+  # 原生安全进程只接收当前产品/平台缓存根的固定候选名；复制在产品流程
+  # 完成后发生，子进程退出前写完，原生层随后再校验普通文件、包名和未签名状态。
+  cp "$ANDROID_APK" "$TATA_CONSOLE_CACHE_DIR/android.apk"
   echo "==> Android无私钥候选完成，正在交给原生安全进程完成Build签名。"
 fi

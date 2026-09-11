@@ -76,12 +76,11 @@ class ChatPushService implements sdk.ChatPushBridge {
     MethodChannel? permissionsChannel,
     MethodChannel? notificationsChannel,
     Future<sdk.ChatPushToken> Function()? tokenProvider,
-  }) : _tokenProvider = tokenProvider,
-       _permissionsChannel =
-           permissionsChannel ?? const MethodChannel('citizenapp/permissions'),
-       _notificationsChannel =
-           notificationsChannel ??
-           const MethodChannel('citizenapp/chat_notifications');
+  })  : _tokenProvider = tokenProvider,
+        _permissionsChannel =
+            permissionsChannel ?? const MethodChannel('citizenapp/permissions'),
+        _notificationsChannel = notificationsChannel ??
+            const MethodChannel('citizenapp/chat_notifications');
 
   final Future<sdk.ChatPushToken> Function()? _tokenProvider;
   final MethodChannel _permissionsChannel;
@@ -106,10 +105,10 @@ class ChatPushService implements sdk.ChatPushBridge {
     if (Platform.isIOS) {
       await FirebaseMessaging.instance
           .setForegroundNotificationPresentationOptions(
-            alert: true,
-            badge: false,
-            sound: true,
-          );
+        alert: true,
+        badge: false,
+        sound: true,
+      );
     }
     _messageSubscription ??= FirebaseMessaging.onMessage.listen(_handleMessage);
     _tokenSubscription ??= FirebaseMessaging.instance.onTokenRefresh.listen((
@@ -205,11 +204,11 @@ class ChatPushService implements sdk.ChatPushBridge {
 Future<void> chatRuntimeBackgroundHandler(RemoteMessage message) async {
   if (!ChatPushService.isWakeData(message.data)) return;
   try {
-    await CitizenChatSdk.runStartupPreflight<void>(
+    await sdk.ChatRuntimeCore.runStartupPreflight<void>(
       operation: () async {
         await ensureChatFirebaseReady();
         await ChatPushService.storeWake();
-        await CitizenChatSdk(receiveOnly: true).handleWake();
+        await createCitizenChatRuntime(receiveOnly: true).handleWake();
       },
     );
   } catch (error) {

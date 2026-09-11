@@ -19,8 +19,6 @@ class CitizenQrDocument internal constructor(
             val signerAccountId: String, val reviewPayload: String) : Content()
         data class SignResponse(val requestId: String, val expiresAt: Long,
             val signerAccountId: String, val signature: String) : Content()
-        data class UserTransfer(val requestId: String, val expiresAt: Long, val accountId: String,
-            val amount: String, val symbol: String, val memo: String, val bankCidNumber: String) : Content()
         data class AccountId(val accountId: String) : Content()
     }
     internal companion object {
@@ -33,8 +31,6 @@ class CitizenQrDocument internal constructor(
                     value.getInt("action").also { check(it in 1..65535) }, value.hex("signer_account_id", 32), value.hex("review_payload"))
                 2 -> Content.SignResponse(value.text("request_id"), value.expiration(),
                     value.hex("signer_account_id", 32), value.hex("signature", 64))
-                4 -> Content.UserTransfer(value.text("request_id"), value.expiration(), value.hex("account_id", 32),
-                    value.text("amount"), value.text("symbol"), value.text("memo"), value.text("bank_cid_number"))
                 5 -> Content.AccountId(value.hex("account_id", 32))
                 else -> error("unsupported Core QR kind")
             }

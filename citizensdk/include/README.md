@@ -1,6 +1,6 @@
 # CitizenSDK C/C++ headers
 
-当前公共 Core 为 117 个函数；统一钱包状态、通用冷热签名、默认账户授权、安全链读取、通用交易准备与冷热执行闭环已加入，既有 ABI v1
+当前公共 Core 为 117 个函数；统一钱包状态、通用冷热签名、默认账户授权、安全链读取、通用交易准备与冷热执行闭环及只读失败阶段 getter 已加入，既有 ABI v1
 结构和数值保持。当前模块化与新增链查询仅完成源码、注释、合同和测试用例更新，尚未完成真实构建、平台测试或硬件验收；下文旧分步运行记录仅为历史证据。
 
 `citizensdk.h` is the only product header. It includes
@@ -196,5 +196,5 @@ being installed remains lossless beyond 64 events and under concurrency.
 ## Windows 平台 Host 头
 
 `../windows/include/citizen_sdk/citizensdk_host.h` 提供 14 项资源装配 API，并不替代
-本目录 121 项 Core ABI。C++ Host 为 header-only 所有权包装，不导出 STL ABI。HWND
+本目录 117 项 Core ABI。C++ Host 为 header-only 所有权包装，不导出 STL ABI。HWND
 仅作 UI owner 配置，设备口令、CNG 句柄及秘密不进入公开头。Windows 运行验收尚未执行。

@@ -22,10 +22,6 @@ pluginManagement {
     }
 }
 
-plugins {
-    id("com.android.application") version "9.0.1" apply false
-}
-
 // 插件清单属于产品自己的Flutter解析结果；Gradle根固定为真实android目录，
 // 缓存工程只提供生成状态，不再用跨根设置脚本参与Gradle根解析。
 val flutterProjectRoot = System.getenv("TATA_CONSOLE_FLUTTER_ROOT")

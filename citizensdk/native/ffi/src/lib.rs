@@ -1214,6 +1214,31 @@ pub unsafe extern "C" fn citizensdk_result_get_info(
 }
 
 #[no_mangle]
+/// Copies the product-independent stage retained by a ready failed result.
+///
+/// # Safety
+/// `out_stage` must be writable. Successful results do not have a failure stage.
+pub unsafe extern "C" fn citizensdk_result_get_failure_stage(
+    result: CitizenSdkResultHandle,
+    out_stage: *mut CitizenSdkFailureStage,
+) -> i32 {
+    ffi_status(|| {
+        if out_stage.is_null() {
+            return Err(FfiError::invalid("failure stage output is null"));
+        }
+        let owned = ownership::get(result)?;
+        let stage = owned.failure_stage.ok_or_else(|| {
+            FfiError::new(
+                CitizenSdkErrorCode::InvalidState,
+                "successful result does not have a failure stage",
+            )
+        })?;
+        ptr::write(out_stage, stage);
+        Ok(())
+    })
+}
+
+#[no_mangle]
 /// Copies or size-queries the UTF-8 diagnostic owned by a result.
 ///
 /// # Safety
@@ -2283,6 +2308,46 @@ mod tests {
             block_from_abi(abi).unwrap_or_else(|error| panic!("round trip failed: {error:?}")),
             block
         );
+    }
+
+    #[test]
+    fn failure_stage_getter_accepts_only_ready_failed_results() {
+        use ownership::OwnedResult;
+
+        let failed = ownership::insert(OwnedResult::failure(
+            7,
+            FfiError::at_stage(
+                CitizenSdkErrorCode::Network,
+                CitizenSdkFailureStage::Provider,
+                "provider unavailable",
+            ),
+        ))
+        .unwrap_or_else(|error| panic!("failed result insert failed: {error:?}"));
+        let mut stage = CitizenSdkFailureStage::Admission;
+        assert_eq!(
+            unsafe { citizensdk_result_get_failure_stage(failed, &mut stage) },
+            CitizenSdkErrorCode::Ok.as_i32()
+        );
+        assert_eq!(stage, CitizenSdkFailureStage::Provider);
+        assert_eq!(
+            unsafe { citizensdk_result_get_failure_stage(failed, ptr::null_mut()) },
+            CitizenSdkErrorCode::InvalidArgument.as_i32()
+        );
+        ownership::release(failed)
+            .unwrap_or_else(|error| panic!("failed result release failed: {error:?}"));
+        assert_eq!(
+            unsafe { citizensdk_result_get_failure_stage(failed, &mut stage) },
+            CitizenSdkErrorCode::InvalidHandle.as_i32()
+        );
+
+        let success = ownership::insert(OwnedResult::success(7, ResultPayload::Empty))
+            .unwrap_or_else(|error| panic!("success result insert failed: {error:?}"));
+        assert_eq!(
+            unsafe { citizensdk_result_get_failure_stage(success, &mut stage) },
+            CitizenSdkErrorCode::InvalidState.as_i32()
+        );
+        ownership::release(success)
+            .unwrap_or_else(|error| panic!("success result release failed: {error:?}"));
     }
 
     #[test]

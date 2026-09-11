@@ -99,7 +99,6 @@ final class CitizenSdkFlutterCodec {
     'qrConsumeSignResponse',
     'qrCancelSignRequest',
     'qrEncodeAccountId',
-    'qrEncodeUserTransfer',
     'qrDecodeLuminance',
     'qrEncode',
     'qrScan',
@@ -111,6 +110,7 @@ final class CitizenSdkFlutterCodec {
     if (modules <= 0 || modules > 0xffffffff) {
       throw const CitizenSdkException(
         code: CitizenSdkErrorCode.invalidArgument,
+        stage: CitizenSdkFailureStage.validation,
         message: 'modules 必须是非零 uint32',
       );
     }
@@ -129,6 +129,7 @@ final class CitizenSdkFlutterCodec {
     } on CitizenSdkException catch (error) {
       throw CitizenSdkException(
         code: CitizenSdkErrorCode.invalidArgument,
+        stage: CitizenSdkFailureStage.validation,
         message: error.message,
       );
     }
@@ -153,6 +154,7 @@ final class CitizenSdkFlutterCodec {
         !methods.contains(method)) {
       throw CitizenSdkException(
         code: CitizenSdkErrorCode.unsupported,
+        stage: CitizenSdkFailureStage.admission,
         message: '未知或非法 session method：$method',
       );
     }
@@ -167,6 +169,7 @@ final class CitizenSdkFlutterCodec {
       // `decode` category is reserved for malformed native responses/events.
       throw CitizenSdkException(
         code: CitizenSdkErrorCode.invalidArgument,
+        stage: CitizenSdkFailureStage.validation,
         message: error.message,
       );
     }
@@ -276,8 +279,11 @@ final class CitizenSdkFlutterCodec {
     );
   }
 
-  CitizenSdkException decodePlatformException(PlatformException error) {
-    final tuple = _tuple(error.details, 5, '错误 details');
+  CitizenSdkException decodePlatformException(
+    PlatformException error, {
+    String? expectedMethod,
+  }) {
+    final tuple = _tuple(error.details, 7, '错误 details');
     _expectProtocol(tuple[0]);
     final sessionId = _nullableSessionId(tuple[1], 'sessionId');
     final requestSequence = _nullablePositiveInt(tuple[2], 'requestSequence');
@@ -307,12 +313,31 @@ final class CitizenSdkFlutterCodec {
       22 => CitizenSdkErrorCode.cancelled,
       _ => throw _decodeFailure('未知 errorCode：$numericCode'),
     };
+    final numericStage = _positiveInt(tuple[4], 'failureStage');
+    final stage = switch (numericStage) {
+      1 => CitizenSdkFailureStage.admission,
+      2 => CitizenSdkFailureStage.validation,
+      3 => CitizenSdkFailureStage.authentication,
+      4 => CitizenSdkFailureStage.persistence,
+      5 => CitizenSdkFailureStage.provider,
+      6 => CitizenSdkFailureStage.verification,
+      7 => CitizenSdkFailureStage.cancellation,
+      8 => CitizenSdkFailureStage.teardown,
+      _ => throw _decodeFailure('未知 failureStage'),
+    };
+    final method = _string(tuple[5], 'method');
+    if (!methods.contains(method) ||
+        (expectedMethod != null && method != expectedMethod)) {
+      throw _decodeFailure('错误 method 不属于当前公开调用');
+    }
     if (error.code != 'citizensdk.${code.name}') {
       throw _decodeFailure('PlatformException code 与 errorCode 不一致');
     }
     return CitizenSdkException(
       code: code,
-      message: _nullableString(tuple[4], 'errorMessage') ?? code.name,
+      stage: stage,
+      method: method,
+      message: _nullableString(tuple[6], 'errorMessage') ?? code.name,
       sessionId: sessionId,
       requestSequence: requestSequence,
     );
@@ -1264,28 +1289,6 @@ final class CitizenSdkFlutterCodec {
         _expectLength(fields, 1, '$method fields');
         _hex32(fields[0], '$method.accountId');
         return;
-      case 'qrEncodeUserTransfer':
-        _expectLength(fields, 7, '$method fields');
-        final requestId = _string(fields[0], '$method.requestId');
-        if (requestId.length < 16 || requestId.length > 128) {
-          throw _decodeFailure('二维码 requestId 长度无效');
-        }
-        _positiveInt(fields[1], '$method.expiresAt');
-        _hex32(fields[2], '$method.accountId');
-        final amount = _string(fields[3], '$method.amount');
-        final symbol = _string(fields[4], '$method.symbol');
-        final memo = _string(fields[5], '$method.memo');
-        final bank = _string(fields[6], '$method.bankCidNumber');
-        if (utf8.encode(amount).isEmpty ||
-            utf8.encode(amount).length > 64 ||
-            utf8.encode(symbol).isEmpty ||
-            utf8.encode(symbol).length > 16 ||
-            utf8.encode(memo).length > 256 ||
-            utf8.encode(bank).isEmpty ||
-            utf8.encode(bank).length > 32) {
-          throw _decodeFailure('二维码收款字段长度无效');
-        }
-        return;
       case 'qrDecodeLuminance':
         _expectLength(fields, 4, '$method fields');
         final pixels = _bytesView(fields[0], '$method.data');
@@ -1477,7 +1480,6 @@ final class CitizenSdkFlutterCodec {
         return;
       case 'qrCreateSignRequest':
       case 'qrEncodeAccountId':
-      case 'qrEncodeUserTransfer':
         _expectLength(value, 1, '$method value');
         _qrText(value[0], '$method.text');
         return;
@@ -1536,16 +1538,6 @@ final class CitizenSdkFlutterCodec {
         'signer_account_id',
         'signature',
       });
-    } else if (kind == 4) {
-      keys.addAll(<String>{
-        'request_id',
-        'expires_at',
-        'account_id',
-        'amount',
-        'symbol',
-        'memo',
-        'bank_cid_number',
-      });
     } else if (kind == 5) {
       keys.add('account_id');
     } else {
@@ -1602,14 +1594,8 @@ final class CitizenSdkFlutterCodec {
       signature: kind == 2
           ? bytes(decoded['signature'], 'qr.signature', 64, 64)
           : null,
-      accountId: kind == 4 || kind == 5
+      accountId: kind == 5
           ? _hex32(decoded['account_id'], 'qr.accountId')
-          : null,
-      amount: kind == 4 ? _string(decoded['amount'], 'qr.amount') : null,
-      symbol: kind == 4 ? _string(decoded['symbol'], 'qr.symbol') : null,
-      memo: kind == 4 ? _string(decoded['memo'], 'qr.memo') : null,
-      bankCidNumber: kind == 4
-          ? _string(decoded['bank_cid_number'], 'qr.bankCidNumber')
           : null,
       signRequest: signed
           ? _qrText(decoded['sign_request'], 'qr.signRequest')
@@ -1956,8 +1942,11 @@ final class CitizenSdkFlutterCodec {
     return raw;
   }
 
-  CitizenSdkException _decodeFailure(String message) =>
-      CitizenSdkException(code: CitizenSdkErrorCode.decode, message: message);
+  CitizenSdkException _decodeFailure(String message) => CitizenSdkException(
+    code: CitizenSdkErrorCode.decode,
+    stage: CitizenSdkFailureStage.verification,
+    message: message,
+  );
 }
 
 final class DecodedCitizenSdkResponse {

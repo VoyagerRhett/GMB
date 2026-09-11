@@ -5,16 +5,16 @@ use citizensdk::{
     CitizenSdkBlockBodyInfo, CitizenSdkBlockHeaderInfo, CitizenSdkBlockRef, CitizenSdkBytesView,
     CitizenSdkCapabilitySnapshot, CitizenSdkCapabilityStatus, CitizenSdkChainSyncStatusInfo,
     CitizenSdkCreateOptions, CitizenSdkDefaultAccountChangeInfo, CitizenSdkEvent,
-    CitizenSdkExecutionInfo, CitizenSdkExportedStateInfo, CitizenSdkFeeSnapshotInfo,
-    CitizenSdkHostBoolResultV1, CitizenSdkHostBytesKind, CitizenSdkHostBytesResultV1,
-    CitizenSdkHostHash32, CitizenSdkHostId128, CitizenSdkHostPublicStoreV1,
-    CitizenSdkHostRecordDomain, CitizenSdkHostRecordResultV1, CitizenSdkHostSecretKind,
-    CitizenSdkHostSecretRefV1, CitizenSdkHostSecretVaultV1, CitizenSdkHostSecureStoreV1,
-    CitizenSdkHostServicesV1, CitizenSdkHostStatusResultV1, CitizenSdkHostVaultAvailability,
-    CitizenSdkHostVaultAvailabilityResultV1, CitizenSdkHostWalletKeyRefV1,
-    CitizenSdkMutableBytesView, CitizenSdkPreparedTransactionInfo, CitizenSdkPreparedWalletInfo,
-    CitizenSdkResultInfo, CitizenSdkResultKind, CitizenSdkRuntimeContextInfo,
-    CitizenSdkSigningOutcomeInfo, CitizenSdkTransactionExecutionId,
+    CitizenSdkExecutionInfo, CitizenSdkExportedStateInfo, CitizenSdkFailureStage,
+    CitizenSdkFeeSnapshotInfo, CitizenSdkHostBoolResultV1, CitizenSdkHostBytesKind,
+    CitizenSdkHostBytesResultV1, CitizenSdkHostHash32, CitizenSdkHostId128,
+    CitizenSdkHostPublicStoreV1, CitizenSdkHostRecordDomain, CitizenSdkHostRecordResultV1,
+    CitizenSdkHostSecretKind, CitizenSdkHostSecretRefV1, CitizenSdkHostSecretVaultV1,
+    CitizenSdkHostSecureStoreV1, CitizenSdkHostServicesV1, CitizenSdkHostStatusResultV1,
+    CitizenSdkHostVaultAvailability, CitizenSdkHostVaultAvailabilityResultV1,
+    CitizenSdkHostWalletKeyRefV1, CitizenSdkMutableBytesView, CitizenSdkPreparedTransactionInfo,
+    CitizenSdkPreparedWalletInfo, CitizenSdkResultInfo, CitizenSdkResultKind,
+    CitizenSdkRuntimeContextInfo, CitizenSdkSigningOutcomeInfo, CitizenSdkTransactionExecutionId,
     CitizenSdkTransactionExecutionInfo, CitizenSdkTransactionExecutionStatus,
     CitizenSdkTransactionHistoryPageInfo, CitizenSdkTransactionHistoryRecordInfo,
     CitizenSdkTransactionHistoryStatus, CitizenSdkU128, CitizenSdkWalletAccountInfo,
@@ -41,6 +41,14 @@ macro_rules! assert_layout {
 fn original_public_layout_remains_frozen() {
     assert_eq!(CITIZENSDK_ABI_VERSION, 1);
     assert_eq!(CITIZENSDK_CAPABILITY_COUNT, 10);
+    assert_eq!(CitizenSdkFailureStage::Admission as u32, 1);
+    assert_eq!(CitizenSdkFailureStage::Validation as u32, 2);
+    assert_eq!(CitizenSdkFailureStage::Authentication as u32, 3);
+    assert_eq!(CitizenSdkFailureStage::Persistence as u32, 4);
+    assert_eq!(CitizenSdkFailureStage::Provider as u32, 5);
+    assert_eq!(CitizenSdkFailureStage::Verification as u32, 6);
+    assert_eq!(CitizenSdkFailureStage::Cancellation as u32, 7);
+    assert_eq!(CitizenSdkFailureStage::Teardown as u32, 8);
 
     assert_layout!(CitizenSdkBytesView, 16, 8, { data: 0, len: 8 });
     assert_layout!(CitizenSdkU128, 16, 8, { low: 0, high: 8 });
@@ -266,8 +274,8 @@ fn host_v1_layout_and_constants_are_exact() {
         runtime_cache_load: 32,
         runtime_cache_store: 40,
         runtime_cache_delete: 48,
-        transaction_history_load: 56,
-        transaction_history_compare_and_swap: 64,
+        transaction_history_query: 56,
+        transaction_history_mutate: 64,
     });
     assert_layout!(CitizenSdkHostSecureStoreV1, 48, 8, {
         struct_size: 0,

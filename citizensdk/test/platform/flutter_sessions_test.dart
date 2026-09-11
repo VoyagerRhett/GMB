@@ -314,6 +314,8 @@ final class _SessionPlatform implements CitizenSdkPlatform {
       if (mismatchedHeadError) {
         throw CitizenSdkException(
           code: CitizenSdkErrorCode.network,
+          stage: CitizenSdkFailureStage.provider,
+          method: method,
           message: 'wrong correlation',
           sessionId: 'foreign-session',
           requestSequence: sequence,

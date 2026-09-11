@@ -26,12 +26,12 @@ CI/Release 验证，当前源码注册不是正式发布或这些平台运行通
 iOS 模拟器变体可运行产品 ABI 与公开链能力，但没有 Secure Enclave；硬件金库、钱包和
 依赖它们的签名/交易能力必须通过 capability snapshot 报告不可用。
 
-共享 `citizen/sdk/core/v1` 的 63 方法 tuple 从未定义 mnemonic、password、DEK、child secret、
+共享 `citizen/sdk/core/v1` 的 62 方法 tuple 从未定义 mnemonic、password、DEK、child secret、
 private key、prepared/result/native handle 或 signed-extrinsic 位置。Android、Darwin、Linux
 以及第 8.2 步 Windows adapter 源码都遵守同一秘密不跨 Flutter 的合同。Linux 使用长度保持的标准消息 codec，线上仍是
 标准 string tag；内嵌 NUL 的合法备注不得被 GLib 的 NUL 结尾字符串表示截断。
 
-`sdk.qr` 公开严格 `QR_V1` 文本、扫码签名会话、账户/转账编码和亮度图像编解码。
+`sdk.qr` 公开严格 `QR_V1` 文本、扫码签名会话、账户公钥编码和亮度图像编解码。
 图像统一由 SDK 内 ZXing-C++ 3.1.1 完成。`sdk.qr.scan()` 打开 SDK 自有相机窗口；
 已有亮度图像仍可使用 `decodeLuminance`，两者都返回 Core 解析的同一种公开文档。
 `CitizenSdkModules.qr` 可单独打开，不启动链、钱包或金库。
@@ -39,6 +39,11 @@ private key、prepared/result/native handle 或 signed-extrinsic 位置。Androi
 设备授权、现有 SigningService 签名和响应编码，返回公开结果及 `qrImage`。
 调用方不传时间、待签字节、签名注入或原生审阅句柄。`qr.encode` 是唯一图像生成入口。
 无相机、拒绝权限、设备中断、取消或链未就绪都明确失败，不使用第二识别器或降级签名。
+
+`test/consumers/` 是公开 Dart 面的反向编译合同。reference、CitizenApp-shaped、third-party-shaped
+和 external signer 四类夹具只能导入 `package:citizen_sdk/citizen_sdk.dart`；测试会拒绝任何
+`package:citizen_sdk/src`、内部 platform、外部产品实现或其它 QR 版本。消费 App 的字段与 codec
+可以不同，但传给 SDK 的始终只是公开账户、storage key、opaque payload/callData 和执行标识。
 
 Windows adapter 使用官方 StandardMethodCodec 的长度保持字符串。默认 `CitizenSdk.open()`
 不需要产品侧包装或别名；宿主在 generated_plugins.cmake 前声明一次
@@ -174,6 +179,8 @@ final fee = await sdk.chain.getFeeSnapshot();
   块；调用方传入的 hash/height/finality 不构成证明。
 - Header 会由 Core 重建完整 SCALE Header 并核对 Blake2-256；Body 保留 opaque extrinsic 的
   原顺序；runtime context 只提供准确块的版本与完整 SCALE metadata。
+- metadata 的公开功能上限保持 64 MiB。超过宿主单条持久 cache 容量的合法 metadata 仍完整
+  返回并在进程内缓存，只是不写可重建的 SQLite runtime cache；Dart 不需要分支或重试。
 - storage key 由 App 自己根据业务协议生成。SDK 仅执行准确块读取、optional 值与资源边界校验，
   不知道广场、投票、立法、提案、治理、旅行、商家或其它业务含义。
 - `getSystemEvents` 只接受 finalized block，并只返回 `System.Events` opaque SCALE bytes；业务
@@ -342,6 +349,14 @@ durable store，按 `createdAtMillis, executionId` 确定性倒序分页；limit
 当前快照。`syncTransactionHistory` 一次最多协调 32 条未终态记录，并直接返回同步后的第一页。
 两者都不接受账户列表、业务筛选器、区块范围或 pallet/call 参数。
 
+这两个 Dart 方法仍是同一公开 API；变化只在 SDK 内部持久层。Core 通过 `THQ1` 读取 index、
+目标 execution 或 limit-bounded page，通过 `THM1` 原子写一组 delete/upsert/meta，不再加载或
+重写其它 execution。平台 SQLite 是 Host 适配，不是 Dart API，也不是 App 业务数据库。
+
+历史内部同时限制 4,096 条与 31 MiB durable weight。执行前使用冻结 transaction template 的
+准确长度做签名前预检，pending 写入时复检；只有最旧终态可被驱逐，Pending/InBlock 不会因资源
+压力被删除。无法容纳返回稳定 `conflict`，公开方法不增加容量参数或 App 业务策略。
+
 `CitizenTransactionHistoryRecord` 只含 execution/source/call/transaction hash、状态、时间、可选
 verified block、同 index System 执行结论、replacement hash 和受限 pool rejection reason。
 它不含 nonce、callData、SigningPayload、签名、signed extrinsic、destination、amount、remark、
@@ -362,13 +377,18 @@ MethodChannel  citizen/sdk/core/v1
 EventChannel   citizen/sdk/events/v1
 ```
 
-63 个方法的请求、响应、事件、错误及所有嵌套值都是固定长度、固定位置的
+62 个方法的请求、响应、事件、错误及所有嵌套值都是固定长度、固定位置的
 `List` tuple。任意层级的 `Map`、未知枚举、额外字段、跨 session 响应、request/event
 序号缺口或乱序都失败关闭，没有兼容旁路。该协议是 binding 内部实现细节，
 不是业务应用应直接调用的公共 API。
 数值布尔位只接受整数 `1`，拒绝浮点 `1.0`等宽松类型；session ID 长度按
 1..128 个 UTF-16 code units 计算，Dart、Swift 与 Kotlin 使用同一边界，包含代理项的字符串
 不能因语言各自的字符计数方式而分叉。
+
+错误 tuple 固定为 `[1, sessionId?, requestSequence?, errorCode, failureStage, method,
+errorMessage?]`。`CitizenSdkException` 暴露同一 22 类 code、八阶段 stage、固定方法名和
+可选关联字段；未知 stage、非 62 项 method 或关联不一致均按 decode/integrity 失败关闭。
+阶段仅供诊断和策略选择，不能用来推断链上执行成功。
 
 open 仅接受 `[1, modules]`。无会话 `verifySignature` 仅接受
 `[1, accountId, signature, payload]`、返回 `[1, bool]`；错误沿用 PlatformException，

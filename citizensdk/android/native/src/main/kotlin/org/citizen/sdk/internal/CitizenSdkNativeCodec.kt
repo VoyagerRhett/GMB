@@ -16,6 +16,7 @@ internal object CitizenSdkNativeCodec {
         val reader = Reader(bytes)
         check(reader.u32Long() == VERSION.toLong()) { "unsupported JNI result version" }
         val errorCode = reader.i32()
+        val failureStage = reader.u32Long()
         val kind = reader.u32Long()
         val message = reader.text()
         if (errorCode != 0) {
@@ -24,14 +25,20 @@ internal object CitizenSdkNativeCodec {
             check(stableCode.value == errorCode) {
                 "JNI returned unknown error code $errorCode"
             }
+            val stableStage = CitizenSdkFailureStage.fromValue(failureStage.toInt())
+            check(stableStage != null && stableStage.value.toLong() == failureStage) {
+                "JNI returned unknown failure stage"
+            }
             return@decodeIntegrity Decoded(
                 null,
                 CitizenSdkException(
                     stableCode,
                     message.ifEmpty { "CitizenSDK operation failed" },
+                    stage = stableStage,
                 ),
             )
         }
+        check(failureStage == 0L) { "successful JNI result contains a failure stage" }
         val result = when (kind) {
             0L -> CitizenSdkNativeResult.Empty
             1L -> CitizenSdkNativeResult.Block(reader.block())

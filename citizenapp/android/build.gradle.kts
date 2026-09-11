@@ -1,11 +1,12 @@
-// AGP内置Kotlin使用与中央Flutter插件相同的版本，不应用独立Android Kotlin插件。
+// AGP与KGP必须由同一个根classpath解析，避免settings先锁定AGP内置的另一版KGP。
 buildscript {
     repositories {
         google()
         mavenCentral()
     }
     dependencies {
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.10")
+        classpath("com.android.tools.build:gradle:9.0.1")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.2.20")
     }
 }
 

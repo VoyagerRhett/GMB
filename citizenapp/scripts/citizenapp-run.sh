@@ -153,7 +153,7 @@ echo "[Build模式] smoldot轻节点 · 目标平台 $PLATFORM"
 # 从产品真实android目录启动，所有可写状态仍由既有环境变量指向本任务缓存。
 build_android_release() {
   local properties flutter_command flutter_sdk android_sdk product_version version_name version_code
-  local flutter_version dart_defines link_target
+  local flutter_version dart_defines link_target java_home
   properties="$TATA_CONSOLE_FLUTTER_ROOT/android/local.properties"
   flutter_command="$(command -v flutter)"
   while [[ -L "$flutter_command" ]]; do
@@ -163,6 +163,8 @@ build_android_release() {
   done
   flutter_sdk="$(cd "$(dirname "$flutter_command")/.." && pwd -P)"
   android_sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}"
+  # JDK与Android SDK由CitizenApp产品入口传给同一次Gradle调用；不在Worker增加前置检查。
+  java_home="${JAVA_HOME:-/Applications/Android Studio.app/Contents/jbr/Contents/Home}"
   product_version="$(sed -n 's/^version:[[:space:]]*//p' "$TATA_CONSOLE_FLUTTER_ROOT/pubspec.yaml" | head -n 1)"
   version_name="${product_version%%+*}"
   version_code="${product_version##*+}"
@@ -184,6 +186,7 @@ print(",".join(base64.b64encode(f"{name}={value[key]}".encode()).decode() for na
 ')"
   (
     cd "$APP_ROOT/android"
+    ANDROID_HOME="$android_sdk" ANDROID_SDK_ROOT="$android_sdk" JAVA_HOME="$java_home" PATH="$java_home/bin:$PATH" \
     TATA_CONSOLE_FLUTTER_GRADLE_ROOT="$flutter_sdk/packages/flutter_tools/gradle" \
     FLUTTER_ROOT="$flutter_sdk" "$APP_ROOT/android/gradlew" --no-daemon --stacktrace --no-problems-report \
       --init-script "${TATA_CONSOLE_GRADLE_INIT_SCRIPT:?CitizenApp缺少Gradle缓存初始化脚本}" \

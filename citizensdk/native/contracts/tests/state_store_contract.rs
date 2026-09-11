@@ -10,9 +10,12 @@ use citizen_sdk_contracts::{
     ChainDatabaseStore, ColdWalletAccount, ContractFuture, ContractResult,
     EncryptedSecretBlobSnapshot, EncryptedSecretBlobState, EncryptedSecretBlobStore,
     EncryptedSecretEnvelope, Hash32, Hash32Bytes, RuntimeCacheStore, RuntimeContext,
-    RuntimeVersion, SecretOwner, SecretRef, TransactionHistoryState, TransactionHistoryStore,
+    RuntimeVersion, SecretOwner, SecretRef, TransactionExecutionId, TransactionHistoryCursor,
+    TransactionHistoryIndex, TransactionHistoryMutation, TransactionHistoryQueryKind,
+    TransactionHistoryRecordBatch, TransactionHistoryRecordSnapshot, TransactionHistoryStore,
     VaultGeneration, VerifiedBlockRef, WalletAccount, WalletCleanupPlan, WalletOrigin,
     WalletProfile, WalletProfileStore, WalletProvisioningPlan, WalletSignMode, WalletState,
+    MAX_PERSISTED_RUNTIME_CONTEXTS, MAX_PERSISTED_RUNTIME_METADATA_BYTES,
 };
 
 fn block_on<F: Future>(future: F) -> F::Output {
@@ -85,16 +88,44 @@ impl WalletProfileStore for MemoryWalletProfiles {
 struct MemoryHistory;
 
 impl TransactionHistoryStore for MemoryHistory {
-    fn load(&self) -> ContractFuture<'_, TransactionHistoryState> {
-        Box::pin(async { TransactionHistoryState::try_new(0, Vec::new()) })
+    fn load_index(&self) -> ContractFuture<'_, TransactionHistoryIndex> {
+        Box::pin(async { Ok(TransactionHistoryIndex::empty()) })
+    }
+
+    fn load_record(
+        &self,
+        _expected_revision: u64,
+        _execution_id: TransactionExecutionId,
+    ) -> ContractFuture<'_, TransactionHistoryRecordSnapshot> {
+        Box::pin(async {
+            Ok(TransactionHistoryRecordSnapshot::new(
+                TransactionHistoryIndex::empty(),
+                None,
+            ))
+        })
+    }
+
+    fn load_page(
+        &self,
+        _expected_revision: u64,
+        _kind: TransactionHistoryQueryKind,
+        _before: Option<TransactionHistoryCursor>,
+        _limit: usize,
+    ) -> ContractFuture<'_, TransactionHistoryRecordBatch> {
+        Box::pin(async {
+            TransactionHistoryRecordBatch::try_new(
+                TransactionHistoryIndex::empty(),
+                Vec::new(),
+                false,
+            )
+        })
     }
 
     fn compare_and_swap(
         &self,
-        _expected_revision: u64,
-        next: TransactionHistoryState,
-    ) -> ContractFuture<'_, TransactionHistoryState> {
-        Box::pin(async move { Ok(next) })
+        mutation: TransactionHistoryMutation,
+    ) -> ContractFuture<'_, TransactionHistoryIndex> {
+        Box::pin(async move { Ok(mutation.next_index()) })
     }
 }
 
@@ -230,10 +261,22 @@ fn five_store_traits_are_separate_object_safe_boundaries() {
     assert_eq!(value_or_panic(block_on(chain.load())).revision(), 0);
     assert!(value_or_panic(block_on(runtime.load(Hash32::from_bytes([2; 32])))).is_none());
     assert_eq!(value_or_panic(block_on(wallet.load())).revision(), 0);
-    assert_eq!(value_or_panic(block_on(history.load())).revision(), 0);
+    assert_eq!(value_or_panic(block_on(history.load_index())).revision(), 0);
     assert!(value_or_panic(block_on(blobs.load(secret_ref(3, 4))))
         .envelope()
         .is_none());
+}
+
+#[test]
+fn runtime_cache_capacity_is_a_persistence_limit_not_a_core_limit() {
+    assert_eq!(MAX_PERSISTED_RUNTIME_CONTEXTS, 64);
+    assert_eq!(
+        MAX_PERSISTED_RUNTIME_METADATA_BYTES,
+        (8 * 1024 * 1024) - 56 - 55
+    );
+    assert!(
+        citizen_sdk_contracts::MAX_RUNTIME_METADATA_BYTES > MAX_PERSISTED_RUNTIME_METADATA_BYTES
+    );
 }
 
 #[test]

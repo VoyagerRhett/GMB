@@ -201,7 +201,7 @@ class HostTransport final : public NativeTransport {
       case Method::qr_parse: case Method::qr_create_sign_request:
       case Method::qr_scan: case Method::sign_qr_request:
       case Method::qr_consume_sign_response: case Method::qr_cancel_sign_request:
-      case Method::qr_encode_account_id: case Method::qr_encode_user_transfer:
+      case Method::qr_encode_account_id:
       case Method::qr_decode_luminance: case Method::qr_encode:
         return CITIZENSDK_ERROR_UNSUPPORTED;
     }
@@ -309,14 +309,6 @@ class HostTransport final : public NativeTransport {
         });
         return Value::list({Value::string(qr_text(std::move(output)))});
       }
-      case Method::qr_encode_user_transfer: {
-        auto output = qr_core_output([&](uint8_t *target, uint64_t capacity, uint64_t *required) {
-          return citizensdk_qr_encode_user_transfer(sdk, view(r.qr_request_id), r.qr_expires_at,
-              &r.account_id, view(r.qr_amount), view(r.qr_symbol), view(r.qr_memo),
-              view(r.qr_bank_cid), target, capacity, required);
-        });
-        return Value::list({Value::string(qr_text(std::move(output)))});
-      }
       case Method::qr_decode_luminance: {
         size_t required = 0;
         auto status = citizensdk_qr_image_decode_luminance(r.payload.data(), r.payload.size(),
@@ -409,11 +401,12 @@ std::string random_session_id() {
 }
 
 Reply failure(citizensdk_error_code_t code, const std::string &message,
-              const DecodedRequest &request) {
+              const DecodedRequest &request, citizensdk_failure_stage_t stage = 0) {
   const bool open = request.method == Method::open || request.method == Method::verify_signature;
   return {false, error_details(code, message,
           open ? std::optional<std::string>{} : request.session,
-          open ? std::optional<int64_t>{} : request.sequence), code, message};
+          open ? std::optional<int64_t>{} : request.sequence,
+          method_name(request.method), stage), code, message};
 }
 
 Reply success(const DecodedRequest &request, Value payload) {
@@ -629,8 +622,8 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     std::optional<Reply> copied;
     try { copied = success(route->request,
                            session->transport->copy_result(route->native_method, event_value.result)); }
-    catch (const ContractFailure &error) { copied = failure(error.code, error.what(), route->request); }
-    catch (const Error &error) { copied = failure(error.code(), error.what(), route->request); }
+    catch (const ContractFailure &error) { copied = failure(error.code, error.what(), route->request, error.stage); }
+    catch (const Error &error) { copied = failure(error.code(), error.what(), route->request, error.stage()); }
     catch (...) {
       try { copied = failure(CITIZENSDK_ERROR_INTERNAL,
                              "CitizenSDK public result copying failed", route->request); }
@@ -685,10 +678,10 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
       outcome = success(request, Value::list({state, Value::integer(1)}));
     } catch (const ContractFailure &error) {
       if (session && session->transport) { sessions.erase(session->id); session->transport->retire(); }
-      outcome = failure(error.code, error.what(), request);
+      outcome = failure(error.code, error.what(), request, error.stage);
     } catch (const Error &error) {
       if (session && session->transport) { sessions.erase(session->id); session->transport->retire(); }
-      outcome = failure(error.code(), error.what(), request);
+      outcome = failure(error.code(), error.what(), request, error.stage());
     } catch (...) {
       if (session && session->transport) { sessions.erase(session->id); session->transport->retire(); }
       outcome = failure(CITIZENSDK_ERROR_INTERNAL, "CitizenSDK open failed", request);
@@ -766,11 +759,12 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
   void settle_launch_failure(const std::shared_ptr<Session> &session,
                              const std::shared_ptr<Route> &route,
                              citizensdk_error_code_t code,
-                             const std::string &message) {
+                             const std::string &message,
+                             citizensdk_failure_stage_t stage = 0) {
     {
       std::lock_guard<std::mutex> guard(session->lock);
       route->completed = true;
-      route->ready = failure(code, message, route->request);
+      route->ready = failure(code, message, route->request, stage);
     }
     drain(session);
   }
@@ -786,9 +780,9 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
         default: submit(session, route); break;
       }
     } catch (const ContractFailure &error) {
-      settle_launch_failure(session, route, error.code, error.what());
+      settle_launch_failure(session, route, error.code, error.what(), error.stage);
     } catch (const Error &error) {
-      settle_launch_failure(session, route, error.code(), error.what());
+      settle_launch_failure(session, route, error.code(), error.what(), error.stage());
     } catch (...) {
       settle_launch_failure(session, route, CITIZENSDK_ERROR_INTERNAL,
                             "CitizenSDK wallet mutation dispatch failed");
@@ -916,14 +910,14 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
           {
             std::lock_guard<std::mutex> guard(session->lock);
             route->completed = true;
-            route->ready = failure(error.code, error.what(), route->request);
+            route->ready = failure(error.code, error.what(), route->request, error.stage);
           }
           state->drain(session);
         } catch (const Error &error) {
           {
             std::lock_guard<std::mutex> guard(session->lock);
             route->completed = true;
-            route->ready = failure(error.code(), error.what(), route->request);
+            route->ready = failure(error.code(), error.what(), route->request, error.stage());
           }
           state->drain(session);
         } catch (...) {
@@ -958,8 +952,8 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
       if (result.success && (route->native_method == Method::start ||
                              route->native_method == Method::stop)) {
         try { result = success(route->request, Value::list({lifecycle(session->transport->lifecycle_state())})); }
-        catch (const ContractFailure &error) { result = failure(error.code, error.what(), route->request); }
-        catch (const Error &error) { result = failure(error.code(), error.what(), route->request); }
+        catch (const ContractFailure &error) { result = failure(error.code, error.what(), route->request, error.stage); }
+        catch (const Error &error) { result = failure(error.code(), error.what(), route->request, error.stage()); }
         catch (...) { result = failure(CITIZENSDK_ERROR_INTERNAL, "CitizenSDK lifecycle query failed", route->request); }
       }
       if (result.success && route->fetch_profile_after_mutation &&
@@ -979,9 +973,9 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
         }
         try { submit(session, route); }
         catch (const ContractFailure &error) {
-          settle_launch_failure(session, route, error.code, error.what());
+          settle_launch_failure(session, route, error.code, error.what(), error.stage);
         } catch (const Error &error) {
-          settle_launch_failure(session, route, error.code(), error.what());
+          settle_launch_failure(session, route, error.code(), error.what(), error.stage());
         } catch (...) {
           settle_launch_failure(session, route, CITIZENSDK_ERROR_INTERNAL,
                                 "CitizenSDK wallet profile query failed");
@@ -1108,8 +1102,8 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     if (request.method >= Method::qr_parse && request.method <= Method::qr_encode) {
       std::optional<Reply> result;
       try { result = success(request, session->transport->qr(request)); }
-      catch (const ContractFailure &error) { result = failure(error.code, error.what(), request); }
-      catch (const Error &error) { result = failure(error.code(), error.what(), request); }
+      catch (const ContractFailure &error) { result = failure(error.code, error.what(), request, error.stage); }
+      catch (const Error &error) { result = failure(error.code(), error.what(), request, error.stage()); }
       catch (...) { result = failure(CITIZENSDK_ERROR_INTERNAL, "CitizenSDK QR operation failed", request); }
       reply(std::move(*result));
       return;
@@ -1117,8 +1111,8 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     if (request.method == Method::get_genesis_hash) {
       std::optional<Reply> result;
       try { result = success(request, Value::list({session->transport->genesis_hash()})); }
-      catch (const ContractFailure &error) { result = failure(error.code, error.what(), request); }
-      catch (const Error &error) { result = failure(error.code(), error.what(), request); }
+      catch (const ContractFailure &error) { result = failure(error.code, error.what(), request, error.stage); }
+      catch (const Error &error) { result = failure(error.code(), error.what(), request, error.stage()); }
       catch (...) { result = failure(CITIZENSDK_ERROR_INTERNAL, "CitizenSDK genesis query failed", request); }
       reply(std::move(*result));
       return;
@@ -1126,8 +1120,8 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     if (request.method == Method::cancel_signing) {
       std::optional<Reply> result;
       try { result = success(request, session->transport->cancel_signing(request)); }
-      catch (const ContractFailure &error) { result = failure(error.code, error.what(), request); }
-      catch (const Error &error) { result = failure(error.code(), error.what(), request); }
+      catch (const ContractFailure &error) { result = failure(error.code, error.what(), request, error.stage); }
+      catch (const Error &error) { result = failure(error.code(), error.what(), request, error.stage()); }
       catch (...) { result = failure(CITIZENSDK_ERROR_INTERNAL, "CitizenSDK signing cancellation failed", request); }
       reply(std::move(*result));
       return;
@@ -1135,8 +1129,8 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     if (request.method == Method::cancel_prepared_transaction) {
       std::optional<Reply> result;
       try { result = success(request, session->transport->cancel_prepared_transaction(request)); }
-      catch (const ContractFailure &error) { result = failure(error.code, error.what(), request); }
-      catch (const Error &error) { result = failure(error.code(), error.what(), request); }
+      catch (const ContractFailure &error) { result = failure(error.code, error.what(), request, error.stage); }
+      catch (const Error &error) { result = failure(error.code(), error.what(), request, error.stage()); }
       catch (...) { result = failure(CITIZENSDK_ERROR_INTERNAL,
                                      "CitizenSDK transaction cancellation failed", request); }
       reply(std::move(*result));
@@ -1145,8 +1139,8 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     if (request.method == Method::cancel_prepared_transaction_execution) {
       std::optional<Reply> result;
       try { result = success(request, session->transport->cancel_transaction_execution(request)); }
-      catch (const ContractFailure &error) { result = failure(error.code, error.what(), request); }
-      catch (const Error &error) { result = failure(error.code(), error.what(), request); }
+      catch (const ContractFailure &error) { result = failure(error.code, error.what(), request, error.stage); }
+      catch (const Error &error) { result = failure(error.code(), error.what(), request, error.stage()); }
       catch (...) { result = failure(CITIZENSDK_ERROR_INTERNAL,
                                      "CitizenSDK transaction execution cancellation failed",
                                      request); }
@@ -1155,8 +1149,8 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     }
     if (request.method == Method::get_capabilities) {
       try { reply(success(request, Value::list({session->transport->capability_snapshot()}))); }
-      catch (const ContractFailure &error) { reply(failure(error.code, error.what(), request)); }
-      catch (const Error &error) { reply(failure(error.code(), error.what(), request)); }
+      catch (const ContractFailure &error) { reply(failure(error.code, error.what(), request, error.stage)); }
+      catch (const Error &error) { reply(failure(error.code(), error.what(), request, error.stage())); }
       catch (...) { reply(failure(CITIZENSDK_ERROR_INTERNAL, "CitizenSDK capability query failed", request)); }
       return;
     }
@@ -1175,13 +1169,13 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     } catch (const ContractFailure &error) {
       {
         std::lock_guard<std::mutex> guard(session->lock);
-        route->completed = true; route->ready = failure(error.code, error.what(), route->request);
+        route->completed = true; route->ready = failure(error.code, error.what(), route->request, error.stage);
       }
       drain(session);
     } catch (const Error &error) {
       {
         std::lock_guard<std::mutex> guard(session->lock);
-        route->completed = true; route->ready = failure(error.code(), error.what(), route->request);
+        route->completed = true; route->ready = failure(error.code(), error.what(), route->request, error.stage());
       }
       drain(session);
     } catch (...) {

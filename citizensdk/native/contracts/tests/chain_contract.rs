@@ -11,7 +11,7 @@ use citizen_sdk_contracts::{
     ExportedChainState, ExtrinsicWatchEvent, FinalizedBlockRef, Hash32, RuntimeContext,
     RuntimeVersion, SignedExtrinsic, StateImportReceipt, SubmittedExtrinsic, VerifiedBlockRef,
     VerifiedChainClient, CITIZENCHAIN_CHAIN_ID, CITIZENCHAIN_GENESIS_HASH,
-    CITIZENCHAIN_PROTOCOL_ID,
+    CITIZENCHAIN_PROTOCOL_ID, MAX_RUNTIME_METADATA_BYTES,
 };
 use futures_core::Stream;
 
@@ -177,6 +177,30 @@ fn runtime_context_keeps_version_metadata_and_exact_block_together() {
     assert_eq!(context.version().transaction_version(), 12);
     assert_eq!(context.metadata(), b"meta");
     assert!(RuntimeContext::try_new(block, RuntimeVersion::new(1, 1), Vec::new()).is_err());
+}
+
+#[test]
+fn runtime_metadata_functional_limit_remains_sixty_four_mib() {
+    let block = VerifiedBlockRef::finalized(Hash32::from_bytes([0x6a; 32]), 32);
+    let context = value_or_panic(RuntimeContext::try_new(
+        block,
+        RuntimeVersion::new(101, 13),
+        vec![0x6d; MAX_RUNTIME_METADATA_BYTES],
+    ));
+    assert_eq!(context.metadata().len(), 64 * 1024 * 1024);
+    drop(context);
+
+    let rejected = RuntimeContext::try_new(
+        block,
+        RuntimeVersion::new(101, 13),
+        vec![0x6d; MAX_RUNTIME_METADATA_BYTES + 1],
+    )
+    .err()
+    .unwrap_or_else(|| panic!("64 MiB + 1 metadata must be rejected"));
+    assert_eq!(
+        rejected.code(),
+        citizen_sdk_contracts::ContractErrorCode::InvalidArgument
+    );
 }
 
 #[test]

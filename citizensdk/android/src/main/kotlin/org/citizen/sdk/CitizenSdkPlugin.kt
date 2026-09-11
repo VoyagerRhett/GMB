@@ -60,6 +60,7 @@ class CitizenSdkPlugin :
                     "CitizenSDK Flutter plugin is detached",
                     null,
                     null,
+                    call.method,
                 ),
             )
             return
@@ -70,12 +71,13 @@ class CitizenSdkPlugin :
             result.error(
                 "citizensdk.${failure.stableName}",
                 failure.message,
-                listOf(
-                    CitizenSdkFlutterCodec.PROTOCOL_VERSION,
+                CitizenSdkFlutterCodec.errorDetails(
+                    CitizenSdkErrorCode.fromValue(failure.errorCode),
+                    failure.message,
                     failure.sessionId,
                     failure.requestSequence,
-                    failure.errorCode,
-                    failure.message,
+                    call.method,
+                    failure.stage,
                 ),
             )
         } catch (_: Throwable) {
@@ -87,6 +89,7 @@ class CitizenSdkPlugin :
                     "CitizenSDK Flutter request decoding failed",
                     null,
                     null,
+                    call.method,
                 ),
             )
         }

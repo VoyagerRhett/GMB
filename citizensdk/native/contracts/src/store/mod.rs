@@ -12,11 +12,16 @@ pub use chain_database::{ChainDatabaseSnapshot, ChainDatabaseStore};
 pub use encrypted_secret_blob::{
     EncryptedSecretBlobSnapshot, EncryptedSecretBlobState, EncryptedSecretBlobStore,
 };
-pub use runtime_cache::RuntimeCacheStore;
+pub use runtime_cache::{
+    RuntimeCacheStore, MAX_PERSISTED_RUNTIME_CONTEXTS, MAX_PERSISTED_RUNTIME_METADATA_BYTES,
+};
 pub use transaction_history::{
-    HistoryTransactionStatus, TransactionExecutionRecord, TransactionHistoryPage,
-    TransactionHistoryRecord, TransactionHistoryState, TransactionHistoryStore,
-    MAX_TRANSACTION_HISTORY_PAGE_SIZE, MAX_TRANSACTION_HISTORY_RECORDS,
-    MAX_TRANSACTION_HISTORY_SYNC_BATCH, MAX_TRANSACTION_POOL_REASON_BYTES,
+    HistoryTransactionStatus, TransactionExecutionRecord, TransactionHistoryCursor,
+    TransactionHistoryIndex, TransactionHistoryMutation, TransactionHistoryPage,
+    TransactionHistoryQueryKind, TransactionHistoryRecord, TransactionHistoryRecordBatch,
+    TransactionHistoryRecordSnapshot, TransactionHistoryStore,
+    MAX_TRANSACTION_HISTORY_DURABLE_WEIGHT_BYTES, MAX_TRANSACTION_HISTORY_PAGE_SIZE,
+    MAX_TRANSACTION_HISTORY_RECORDS, MAX_TRANSACTION_HISTORY_SYNC_BATCH,
+    MAX_TRANSACTION_POOL_REASON_BYTES,
 };
 pub use wallet_profile::WalletProfileStore;

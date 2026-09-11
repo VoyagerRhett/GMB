@@ -12,8 +12,6 @@ public struct CitizenQRDocument: Sendable, Equatable {
         case signRequest(requestID: String, expiresAt: UInt64, action: UInt16,
                          signerAccountID: String, reviewPayload: String)
         case signResponse(requestID: String, expiresAt: UInt64, signerAccountID: String, signature: String)
-        case userTransfer(requestID: String, expiresAt: UInt64, accountID: String,
-                          amount: String, symbol: String, memo: String, bankCIDNumber: String)
         case accountID(String)
     }
     public let kind: UInt32
@@ -44,11 +42,6 @@ public struct CitizenQRDocument: Sendable, Equatable {
                 expiresAt: try value.required(value.expires_at),
                 signerAccountID: try value.hex(value.signer_account_id, count: 32),
                 signature: try value.hex(value.signature, count: 64))
-        case 4:
-            content = .userTransfer(requestID: try value.required(value.request_id),
-                expiresAt: try value.required(value.expires_at), accountID: try value.hex(value.account_id, count: 32),
-                amount: try value.required(value.amount), symbol: try value.required(value.symbol),
-                memo: try value.required(value.memo), bankCIDNumber: try value.required(value.bank_cid_number))
         case 5: content = .accountID(try value.hex(value.account_id, count: 32))
         default: throw CitizenSDKError(.integrity, "Core QR kind is invalid")
         }
@@ -66,10 +59,6 @@ internal struct CitizenSDKQrProjection: Decodable {
     let review_payload: String?
     let signature: String?
     let account_id: String?
-    let amount: String?
-    let symbol: String?
-    let memo: String?
-    let bank_cid_number: String?
     let sign_request: String?
     let pallet_name: String?
     let call_name: String?

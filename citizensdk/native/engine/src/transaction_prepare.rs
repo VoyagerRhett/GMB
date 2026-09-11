@@ -88,6 +88,10 @@ impl PreparedTransaction {
     pub(crate) fn call_data(&self) -> &[u8] {
         &self.call_data
     }
+    /// 签名只覆盖模板中的固定 64-byte 槽，因此签名前即可精确知道持久 extrinsic 长度。
+    pub(crate) fn signed_extrinsic_len(&self) -> usize {
+        self.extrinsic_template.len()
+    }
     pub(crate) const fn identity(&self) -> &ChainIdentity {
         &self.identity
     }

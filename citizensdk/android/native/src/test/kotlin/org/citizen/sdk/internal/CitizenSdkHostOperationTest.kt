@@ -74,8 +74,8 @@ class CitizenSdkHostOperationTest {
     fun `batch balance wire uses kind eighteen and rejects truncated or excessive results`() {
         fun wire(count: Int, includeBalances: Boolean = true): ByteArray {
             val stored = if (includeBalances) count else 0
-            val output = ByteBuffer.allocate(20 + stored * 124).order(ByteOrder.LITTLE_ENDIAN)
-                .putInt(1).putInt(0).putInt(18).putInt(0).putInt(count)
+            val output = ByteBuffer.allocate(24 + stored * 124).order(ByteOrder.LITTLE_ENDIAN)
+                .putInt(1).putInt(0).putInt(0).putInt(18).putInt(0).putInt(count)
             repeat(stored) {
                 output.put(ByteArray(32) { 3 }).putLong(7).putInt(2)
                 output.put(ByteArray(32) { 1 })
@@ -269,10 +269,11 @@ class CitizenSdkHostOperationTest {
 
     @Test
     fun `malformed UTF-8 and unknown errors fail as integrity`() {
-        val malformedText = ByteBuffer.allocate(4 * 4 + 1)
+        val malformedText = ByteBuffer.allocate(4 * 5 + 1)
             .order(ByteOrder.LITTLE_ENDIAN)
             .putInt(1)
             .putInt(CitizenSdkErrorCode.INVALID_ARGUMENT.value)
+            .putInt(CitizenSdkFailureStage.VALIDATION.value)
             .putInt(0)
             .putInt(1)
             .put(0xc3.toByte())
@@ -284,10 +285,11 @@ class CitizenSdkHostOperationTest {
             }.code,
         )
         listOf(-1, 23, Int.MAX_VALUE).forEach { unknown ->
-            val wire = ByteBuffer.allocate(4 * 4)
+            val wire = ByteBuffer.allocate(4 * 5)
                 .order(ByteOrder.LITTLE_ENDIAN)
                 .putInt(1)
                 .putInt(unknown)
+                .putInt(CitizenSdkFailureStage.ADMISSION.value)
                 .putInt(0)
                 .putInt(0)
                 .array()
@@ -308,10 +310,11 @@ class CitizenSdkHostOperationTest {
 
     @Test
     fun `wallet accounts kind remains distinct from wallet profile`() {
-        val wire = ByteBuffer.allocate(4 * 6 + 32 + 4 + 1 + 1 + 8 + 1)
+        val wire = ByteBuffer.allocate(4 * 7 + 32 + 4 + 1 + 1 + 8 + 1)
             .order(ByteOrder.LITTLE_ENDIAN)
             .putInt(1) // wire version
             .putInt(0) // error
+            .putInt(0) // successful result has no failure stage
             .putInt(13) // WALLET_ACCOUNTS
             .putInt(0) // error message length
             .putInt(1) // account count

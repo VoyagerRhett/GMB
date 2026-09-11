@@ -9,6 +9,10 @@
 入队，任何发送都不得持有 enqueue 锁等待宿主回调；结果所有权及一次释放合同不变。
 prepared transaction 恢复复用同一通用执行闭环，不新增 raw extrinsic 返回值或恢复符号。
 
+第 1.9 步不扩张 ABI；第 1.10.3 步只增加一个结果失败阶段 getter。三类业务形状消费者与独立 external signer 共享同一个 117 符号 Core、
+Linux/Windows 各 17 符号 Host 和 Apple 3 符号 QR 图像面。消费者夹具只使用正式根公开入口；
+业务 storage、event 与 RuntimeCall codec 不得进入 C ABI、result kind 或平台 Host。
+
 ## Boundary
 
 `native/ffi` and root `include` define the one product ABI. Official Dart,
@@ -26,7 +30,7 @@ QR 协议、审阅、签名与结果入口、8 个统一钱包状态/冷账户�
 默认账户授权入口；第 1.4 步再增加同步状态、finalized 块解析、Header/Body、System.Events
 以及对应结果读取 10 个入口；第 1.5 步增加通用交易准备 3 个入口，第 1.6 步增加通用冷热执行
 闭环 4 个入口形成 121 个；第 1.7 步以 4 个通用 execution history 入口替换 8 个业务入口，
-当前共 117 个。
+第 1.8 步删除业务二维码编码入口；第 1.10.3 步增加失败阶段 getter 后当前共 117 个。
 QR 解析和会话时间由 Core 管理；公开结构通过有界 UTF-8 JSON 复制。
 异步审阅结果由 `citizensdk_review_qr_sign_request` 创建，由 `citizensdk_sign_qr_request`
 一次消费，均使用原结果注册表、事件及释放合同；`citizensdk_result_copy_qr` 只复制公开内容。
@@ -314,6 +318,12 @@ invalid-state, integrity, authentication, storage, and decode failures are not
 collapsed into a generic unavailable error; diagnostic text remains secondary
 and thread-local.
 
+错误码与失败阶段是两条正交合同。失败 result 通过
+`citizensdk_result_get_failure_stage` 读取唯一阶段：`ADMISSION`、`VALIDATION`、
+`AUTHENTICATION`、`PERSISTENCE`、`PROVIDER`、`VERIFICATION`、`CANCELLATION` 或
+`TEARDOWN`。既有 `citizensdk_result_info_t` 布局不变；成功、未知及释放后的 result
+拒绝读取阶段。阶段只定位 SDK 边界，不代表进度、重试许可、交易成功或 finality。
+
 ## Host services
 
 The v1 host bundle separates chain database, exact-block runtime cache, wallet
@@ -326,6 +336,16 @@ validates the full envelope again before reconstructing a contract value.
 wallet/signing 需要配套 secure store 与 Vault。签名服务只访问同宿主已安全建立账户的归属资料，
 不等于启用钱包管理；首次 provision 仍经钱包流程。所有官方绑定采用相同的 public/secure
 数据域隔离，不提供任意键值旁路。
+
+`RuntimeContext` 的公开链读取上限仍为 64 MiB。`RUNTIME_CACHE` 只是内部可重建性能层：完整
+encoded record 上限为 8 MiB，因而 metadata 持久部分为 `8 MiB - 111 bytes`；更大的 Core 合法值
+不会进入 host callback，但链读取仍成功并保留内存 cache。四个平台每次 runtime store 提交后
+最多保留 64 条。`TRANSACTION_HISTORY` 已删除 whole-value load/CAS：
+`transaction_history_query` 接收固定 `THQ1`，返回 revision-fenced `THB1` index/单条/最多 100 条页；
+`transaction_history_mutate` 接收 `THM1`，原子提交 deletes/upserts/meta。单条 opaque record 仍使用
+domain-bound codec，31 MiB 是全部 execution 的资源预算，32 MiB 只是单次 Host wire 防御上限。
+Host struct 大小与字段偏移保持 72/56/64，但两个 history 字段的类型和语义已经替换；未发布旧
+callback 不保留 alias、wrapper 或 fallback。
 
 The Linux Host implements the same five operations over separate public and
 secure SQLite files and combines them with a TPM 2.0 vault. TPM callbacks wrap

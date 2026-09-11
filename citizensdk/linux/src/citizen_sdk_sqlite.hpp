@@ -38,7 +38,8 @@ class SQLiteStore {
   };
 
   SQLiteStore(const std::filesystem::path &directory, const char *file_name,
-              const std::vector<std::string> &schema, bool secure);
+              const std::vector<std::string> &schema, bool secure,
+              int schema_version = 1, bool incremental_vacuum = false);
   SQLiteStore(const SQLiteStore &) = delete;
   SQLiteStore &operator=(const SQLiteStore &) = delete;
   virtual ~SQLiteStore();

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Miniflare } from 'miniflare';
+import type { Miniflare } from 'miniflare';
 
 import worker from '../src/index';
 import { createUserFromFinalizedRegistration } from '../src/account/user_repository';
@@ -12,6 +12,7 @@ import {
   signingMessage,
 } from '../src/shared/signing_message';
 import type { Env, SessionState } from '../src/types';
+import { createTestMiniflare } from './miniflare';
 
 const ACCOUNT_A = `0x${'11'.repeat(32)}`;
 const ACCOUNT_B = `0x${'22'.repeat(32)}`;
@@ -257,14 +258,11 @@ describe('本人发布内容本地副本回灌 API', () => {
 });
 
 async function createHarness(): Promise<Harness> {
-  const miniflare = new Miniflare({
-    modules: true,
-    script: 'export default { fetch() { return new Response("test"); } }',
-    compatibilityDate: '2026-07-29',
-    d1Databases: ['DB'],
-    r2Buckets: ['SQUARE_PRIVATE', 'SQUARE_PUBLIC_MEDIA'],
-    kvNamespaces: ['SQUARE_CACHE'],
-    bindings: {
+  const miniflare = createTestMiniflare({
+    d1Bindings: ['DB'],
+    r2Bindings: ['SQUARE_PRIVATE', 'SQUARE_PUBLIC_MEDIA'],
+    kvBindings: ['SQUARE_CACHE'],
+    textBindings: {
       HASH_KEY: 'post-local-copy-test-rate-key',
       CHAIN_GENESIS_HASH: `0x${'12'.repeat(32)}`,
     },

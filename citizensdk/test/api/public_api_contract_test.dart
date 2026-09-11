@@ -84,7 +84,7 @@ void main() {
   test('Flutter五种平台注册共用channel、固定方法及无任意RPC/裸extrinsic闭集', () {
     expect(FlutterCitizenSdkPlatform.methodChannelName, 'citizen/sdk/core/v1');
     expect(FlutterCitizenSdkPlatform.eventChannelName, 'citizen/sdk/events/v1');
-    expect(CitizenSdkFlutterCodec.methods, hasLength(63));
+    expect(CitizenSdkFlutterCodec.methods, hasLength(62));
     expect(isA<CitizenWalletState>(), isNotNull);
     expect(isA<CitizenWalletStateAccount>(), isNotNull);
     expect(isA<CitizenQr>(), isNotNull);

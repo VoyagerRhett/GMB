@@ -1,6 +1,6 @@
 use core::fmt;
 
-use citizen_sdk_contracts::{ContractError, ContractErrorCode};
+use citizen_sdk_contracts::{ContractError, ContractErrorCode, FailureStage};
 
 /// Stable Rust-side failure categories used before the C ABI maps them to
 /// numeric public error codes.
@@ -46,6 +46,33 @@ impl fmt::Display for EngineError {
 impl EngineError {
     pub fn contract(code: ContractErrorCode, message: impl Into<String>) -> Self {
         Self::Contract(ContractError::new(code, message))
+    }
+
+    pub fn contract_at(
+        stage: FailureStage,
+        code: ContractErrorCode,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::Contract(ContractError::at_stage(code, stage, message))
+    }
+
+    pub(crate) const fn contract_code(&self) -> Option<ContractErrorCode> {
+        match self {
+            Self::Contract(error) => Some(error.code()),
+            _ => None,
+        }
+    }
+
+    /// 稳定阶段由真实失败边界决定，不要求绑定层解析英文诊断文本。
+    pub const fn failure_stage(&self) -> FailureStage {
+        match self {
+            Self::InvalidMetadata(_) => FailureStage::Validation,
+            Self::InvalidEvents(_) | Self::BlockContextMismatch(_) => FailureStage::Verification,
+            Self::CapabilityUnavailable(_) => FailureStage::Admission,
+            Self::Contract(error) => error.stage(),
+            Self::Cancelled => FailureStage::Cancellation,
+            Self::StatePoisoned => FailureStage::Teardown,
+        }
     }
 }
 

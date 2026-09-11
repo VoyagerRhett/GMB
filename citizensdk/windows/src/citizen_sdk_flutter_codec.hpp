@@ -18,6 +18,26 @@
 
 namespace citizen_sdk::flutter {
 
+inline citizensdk_failure_stage_t flutter_default_failure_stage(
+    citizensdk_error_code_t code) noexcept {
+  switch (code) {
+    case CITIZENSDK_ERROR_INVALID_ARGUMENT: case CITIZENSDK_ERROR_DECODE:
+      return CITIZENSDK_FAILURE_STAGE_VALIDATION;
+    case CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED:
+    case CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED:
+    case CITIZENSDK_ERROR_KEY_INVALIDATED: case CITIZENSDK_ERROR_PERMISSION_DENIED:
+      return CITIZENSDK_FAILURE_STAGE_AUTHENTICATION;
+    case CITIZENSDK_ERROR_STORAGE: return CITIZENSDK_FAILURE_STAGE_PERSISTENCE;
+    case CITIZENSDK_ERROR_UNAVAILABLE: case CITIZENSDK_ERROR_NETWORK:
+    case CITIZENSDK_ERROR_TIMEOUT: return CITIZENSDK_FAILURE_STAGE_PROVIDER;
+    case CITIZENSDK_ERROR_INTEGRITY: return CITIZENSDK_FAILURE_STAGE_VERIFICATION;
+    case CITIZENSDK_ERROR_CANCELLED: return CITIZENSDK_FAILURE_STAGE_CANCELLATION;
+    case CITIZENSDK_ERROR_INTERNAL: case CITIZENSDK_ERROR_PANIC:
+      return CITIZENSDK_FAILURE_STAGE_TEARDOWN;
+    default: return CITIZENSDK_FAILURE_STAGE_ADMISSION;
+  }
+}
+
 inline constexpr const char *kMethodChannel = "citizen/sdk/core/v1";
 inline constexpr const char *kEventChannel = "citizen/sdk/events/v1";
 inline constexpr int64_t kProtocolVersion = 1;
@@ -59,7 +79,7 @@ enum class Method {
   get_transaction_history, sync_transaction_history,
   qr_parse, qr_create_sign_request,
   qr_consume_sign_response, qr_cancel_sign_request, qr_encode_account_id,
-  qr_encode_user_transfer, qr_decode_luminance, qr_encode, qr_scan, sign_qr_request,
+  qr_decode_luminance, qr_encode, qr_scan, sign_qr_request,
 };
 
 const char *method_name(Method method) noexcept;
@@ -97,14 +117,9 @@ struct DecodedRequest final {
   std::vector<citizensdk_account_id_t> account_ids;
   uint64_t wallet_revision{};
   uint16_t qr_action{};
-  uint64_t qr_expires_at{};
   uint64_t qr_ttl{};
   std::string qr_text;
   std::string qr_request_id;
-  std::string qr_amount;
-  std::string qr_symbol;
-  std::string qr_memo;
-  std::string qr_bank_cid;
   uint32_t qr_width{};
   uint32_t qr_height{};
   uint32_t qr_stride{};
@@ -115,10 +130,12 @@ class ContractFailure final : public std::runtime_error {
  public:
   ContractFailure(citizensdk_error_code_t code, std::string message,
                   std::optional<std::string> session = {},
-                  std::optional<int64_t> sequence = {});
+                  std::optional<int64_t> sequence = {},
+                  citizensdk_failure_stage_t stage = 0);
   citizensdk_error_code_t code;
   std::optional<std::string> session;
   std::optional<int64_t> sequence;
+  citizensdk_failure_stage_t stage;
 };
 
 // Windows 使用官方 StandardMethodCodec；std::string 自带长度，不需要 Linux 的
@@ -137,7 +154,9 @@ Value event(const std::string &session, int64_t sequence,
             const std::string &type, Value payload);
 Value error_details(citizensdk_error_code_t code, const std::string &message,
                     std::optional<std::string> session = {},
-                    std::optional<int64_t> sequence = {});
+                    std::optional<int64_t> sequence = {},
+                    const std::string &method = "open",
+                    citizensdk_failure_stage_t stage = 0);
 const char *error_name(citizensdk_error_code_t code) noexcept;
 
 Value lifecycle(citizensdk_lifecycle_t value);

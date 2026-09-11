@@ -8,6 +8,7 @@ import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/8964/services/square_post_store.dart';
 import 'package:citizenapp/chat/tatachat_sdk_adapter.dart';
 import 'package:citizenapp/wallet/core/device_subkey.dart';
+import 'package:tatachat_sdk/tatachat_sdk.dart';
 
 const _owner =
     '0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d';
@@ -63,11 +64,13 @@ class _FakeSubkey extends DeviceSubkey {
   }
 }
 
-class _FakeChatRuntime extends CitizenChatSdk {
+class _FakeChatRuntime extends ChatSdk {
+  _FakeChatRuntime() : super(host: createCitizenChatRuntimeHost());
+
   bool cleared = false;
   @override
-  Future<void> clearAllForCidNumber({
-    required String cidNumber,
+  Future<void> clearAllForUserId({
+    required String userId,
     required String accountId,
   }) async {
     cleared = true;

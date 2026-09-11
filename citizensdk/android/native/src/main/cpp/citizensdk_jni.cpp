@@ -417,10 +417,11 @@ bool write_transaction_history_page(citizensdk_result_handle_t result,
   return true;
 }
 
-void write_failure(WireWriter *writer, int32_t code, uint32_t kind,
+void write_failure(WireWriter *writer, int32_t code, uint32_t stage, uint32_t kind,
                    const std::vector<uint8_t> &message) {
   writer->u32(kWireVersion);
   writer->i32(code);
+  writer->u32(stage);
   writer->u32(kind);
   writer->text(message);
 }
@@ -429,7 +430,8 @@ void write_internal_decode_failure(WireWriter *writer) {
   static const std::vector<uint8_t> message = {
       'J','N','I',' ','c','o','u','l','d',' ','n','o','t',' ','d','e','c','o','d','e',' ',
       't','h','e',' ','C','o','r','e',' ','r','e','s','u','l','t'};
-  write_failure(writer, CITIZENSDK_ERROR_INTEGRITY, 0, message);
+  write_failure(writer, CITIZENSDK_ERROR_INTEGRITY,
+                CITIZENSDK_FAILURE_STAGE_VERIFICATION, 0, message);
 }
 
 template <typename Call>
@@ -1492,27 +1494,6 @@ jbyteArray native_qr_encode_account(JNIEnv *env, jobject, jlong raw,
       });
 }
 
-jbyteArray native_qr_encode_transfer(JNIEnv *env, jobject, jlong raw,
-    jbyteArray request_bytes, jlong expires, jbyteArray account_bytes,
-    jbyteArray amount_bytes, jbyteArray symbol_bytes, jbyteArray memo_bytes,
-    jbyteArray bank_bytes) {
-  auto bridge = bridge_from(env, raw);
-  citizensdk_account_id_t account_id{};
-  std::vector<uint8_t> request, amount, symbol, memo, bank;
-  if (!bridge || expires <= 0 || !account(env, account_bytes, &account_id) ||
-      !qr_input(env, request_bytes, 128, &request, "QR request ID is invalid") ||
-      !qr_input(env, amount_bytes, 64, &amount, "QR amount is invalid") ||
-      !qr_input(env, symbol_bytes, 16, &symbol, "QR symbol is invalid") ||
-      memo_bytes == nullptr || env->GetArrayLength(memo_bytes) > 256 || !take_bytes(env, memo_bytes, &memo) ||
-      !qr_input(env, bank_bytes, 32, &bank, "QR bank CID is invalid")) return nullptr;
-  return qr_core_bytes(env, bridge,
-      [&](uint8_t *output, uint64_t capacity, uint64_t *required) {
-        return citizensdk_qr_encode_user_transfer(bridge->handle(), view(request),
-            static_cast<uint64_t>(expires), &account_id, view(amount), view(symbol),
-            view(memo), view(bank), output, capacity, required);
-      });
-}
-
 citizensdk_error_code_t qr_image_error(citizensdk_qr_image_status_t status) {
   switch (status) {
     case CITIZENSDK_QR_IMAGE_INVALID_ARGUMENT:
@@ -1657,7 +1638,6 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char *>("nativeQrConsumeSignResponse"), const_cast<char *>("(J[B)[B"), reinterpret_cast<void *>(native_qr_consume_response)},
     {const_cast<char *>("nativeQrCancelSignRequest"), const_cast<char *>("(J[B)Z"), reinterpret_cast<void *>(native_qr_cancel_request)},
     {const_cast<char *>("nativeQrEncodeAccountId"), const_cast<char *>("(J[B)[B"), reinterpret_cast<void *>(native_qr_encode_account)},
-    {const_cast<char *>("nativeQrEncodeUserTransfer"), const_cast<char *>("(J[BJ[B[B[B[B[B)[B"), reinterpret_cast<void *>(native_qr_encode_transfer)},
     {const_cast<char *>("nativeQrDecodeLuminance"), const_cast<char *>("(J[BIII)[B"), reinterpret_cast<void *>(native_qr_decode_luminance)},
     {const_cast<char *>("nativeQrEncode"), const_cast<char *>("(J[BI)[B"), reinterpret_cast<void *>(native_qr_encode_image)},
     {const_cast<char *>("nativePrepareTransaction"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_prepare_transaction)},
@@ -1826,7 +1806,12 @@ bool encode_result(citizensdk_result_handle_t result, uint64_t prepared_token,
     return true;
   }
   if (info.error_code != kOk) {
-    write_failure(writer, info.error_code, info.kind, message);
+    citizensdk_failure_stage_t stage = 0;
+    if (citizensdk_result_get_failure_stage(result, &stage) != kOk) {
+      write_internal_decode_failure(writer);
+      return true;
+    }
+    write_failure(writer, info.error_code, stage, info.kind, message);
     return true;
   }
 
@@ -2128,6 +2113,7 @@ bool encode_result(citizensdk_result_handle_t result, uint64_t prepared_token,
   }
   writer->u32(kWireVersion);
   writer->i32(kOk);
+  writer->u32(0);
   writer->u32(info.kind);
   writer->text(message);
   writer->fixed(payload.data().data(), payload.data().size());

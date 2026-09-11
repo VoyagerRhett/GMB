@@ -37,11 +37,13 @@ final class CitizenSDKFlutterSecretBoundaryTests: XCTestCase {
     }
 
     func testErrorTupleContainsOnlyStablePublicFields() {
-        let tuple = CitizenSdkFlutterCodec.error(.storage, "safe failure", session: "s", sequence: 4)
-        XCTAssertEqual(tuple.count, 5)
+        let tuple = CitizenSdkFlutterCodec.error(.storage, "safe failure", session: "s", sequence: 4,
+                                                 method: "getStorage")
+        XCTAssertEqual(tuple.count, 7)
         XCTAssertEqual(tuple[1] as? String, "s")
         XCTAssertEqual(tuple[2] as? Int64, 4)
-        XCTAssertEqual(tuple[4] as? String, "safe failure")
+        XCTAssertEqual(tuple[4] as? Int64, Int64(CitizenSDKFailureStage.persistence.rawValue))
+        XCTAssertEqual(tuple[5] as? String, "getStorage")
+        XCTAssertEqual(tuple[6] as? String, "safe failure")
     }
 }
-

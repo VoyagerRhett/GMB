@@ -33,17 +33,17 @@ class _TestBinding extends AccountDataBinding implements ChatDataBinding {
 
   @override
   Map<String, Object> toJson() => <String, Object>{
-    'key_domain': keyDomain,
-    'user_id': userId,
-    'binding_revision': bindingRevision,
-    'account_id': accountId,
-  };
+        'key_domain': keyDomain,
+        'user_id': userId,
+        'binding_revision': bindingRevision,
+        'account_id': accountId,
+      };
 }
 
 class _HandoverWalletManager extends WalletManager {
   _HandoverWalletManager(_TestBinding sourceBinding)
-    : sourceBinding = sourceBinding,
-      activeBinding = sourceBinding;
+      : sourceBinding = sourceBinding,
+        activeBinding = sourceBinding;
 
   final _TestBinding sourceBinding;
   _TestBinding activeBinding;
@@ -80,21 +80,24 @@ class _HandoverWalletManager extends WalletManager {
     String accountId,
     LocalKeyPurpose purpose, {
     String? context,
-  }) async => _key(accountId, purpose);
+  }) async =>
+      _key(accountId, purpose);
 
   @override
   Future<List<Uint8List>> readDataKeysForBinding(
     AccountDataBinding binding,
     List<({String? context, LocalKeyPurpose purpose})> requests,
-  ) async => requests
-      .map((request) => _key(binding.accountId, request.purpose))
-      .toList(growable: false);
+  ) async =>
+      requests
+          .map((request) => _key(binding.accountId, request.purpose))
+          .toList(growable: false);
 
   @override
   Future<List<Uint8List>> deriveDataKeysForBindingHandover(
     AccountDataBinding binding,
     List<({String? context, LocalKeyPurpose purpose})> requests,
-  ) => readDataKeysForBinding(binding, requests);
+  ) =>
+      readDataKeysForBinding(binding, requests);
 }
 
 class _FailingTargetHandoverWalletManager extends _HandoverWalletManager {
@@ -129,7 +132,7 @@ class _FailingTargetHandoverWalletManager extends _HandoverWalletManager {
 
 class _FailOnceCommitChatStore extends ChatStore {
   _FailOnceCommitChatStore({required ChatCrypto crypto})
-    : super(crypto: crypto);
+      : super(crypto: crypto);
 
   int commitCalls = 0;
 
@@ -149,7 +152,7 @@ class _FailOnceCommitChatStore extends ChatStore {
 /// 把一条来源绑定消息暂停在摘要已加密、尚未写入 ChatIsar 的窗口。
 class _PausingSummaryChatCrypto extends ChatCrypto {
   _PausingSummaryChatCrypto(WalletManager walletManager)
-    : super(CitizenChatStorageKeyProvider(walletManager));
+      : super(CitizenChatStorageKeyProvider(walletManager));
 
   Completer<void>? _paused;
   Completer<void>? _resume;
@@ -228,8 +231,7 @@ class _FailIfEmptyChatOpensKeys extends ChatCrypto {
 void main() {
   useIsolatedIsar();
 
-  const accountId =
-      '0x'
+  const accountId = '0x'
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
   const ownerUserId = 'CN220-CTZN2-100000001-2026';
   const peerUserId = 'CN220-CTZN2-100000002-2026';
@@ -251,9 +253,9 @@ void main() {
   );
 
   Directory bindingDirectory(Directory root, _TestBinding binding) => Directory(
-    '${root.path}/chat/by_user/${binding.cidNumber}/by_binding/'
-    '${binding.bindingRevision}/${binding.accountId}',
-  );
+        '${root.path}/chat/by_user/${binding.cidNumber}/by_binding/'
+        '${binding.bindingRevision}/${binding.accountId}',
+      );
 
   Map<String, dynamic> receiptMessage(File marker) =>
       jsonDecode(marker.readAsStringSync()) as Map<String, dynamic>;
@@ -263,17 +265,15 @@ void main() {
           as Map<String, dynamic>;
 
   Future<
-    ({
-      Directory root,
-      Directory sourceDirectory,
-      Directory targetDirectory,
-      File receipt,
-      _HandoverWalletManager manager,
-      ChatStore store,
-      CitizenChatSdk runtime,
-    })
-  >
-  createRuntimeHandoverFixture({
+      ({
+        Directory root,
+        Directory sourceDirectory,
+        Directory targetDirectory,
+        File receipt,
+        _HandoverWalletManager manager,
+        ChatStore store,
+        ChatSdk runtime,
+      })> createRuntimeHandoverFixture({
     ChatStore Function(_HandoverWalletManager manager)? createStore,
   }) async {
     final root = await Directory.systemTemp.createTemp('gmb-chat-binding-');
@@ -281,11 +281,10 @@ void main() {
       if (root.existsSync()) await root.delete(recursive: true);
     });
     final manager = _HandoverWalletManager(handoverSource);
-    final store =
-        createStore?.call(manager) ??
+    final store = createStore?.call(manager) ??
         ChatStore(crypto: ChatCrypto(CitizenChatStorageKeyProvider(manager)));
     await store.activateBindingFence(handoverSource);
-    final runtime = CitizenChatSdk(
+    final runtime = createCitizenChatRuntime(
       store: store,
       walletManager: manager,
       documentsDirectoryProvider: () async => root,
@@ -422,7 +421,9 @@ void main() {
         ownerUserId: ownerUserId,
         currentAccountId: accountId,
         conversationId: 'conv-pending',
-      )).single.plaintext,
+      ))
+          .single
+          .plaintext,
       payload,
     );
     expect(
@@ -430,7 +431,9 @@ void main() {
         bindingToken: token,
         ownerUserId: ownerUserId,
         currentAccountId: accountId,
-      )).single.localMessageId,
+      ))
+          .single
+          .localMessageId,
       localMessageId,
     );
 
@@ -522,7 +525,8 @@ void main() {
     final preview = (await store.readConversationPreviews(
       ownerUserId: ownerUserId,
       currentAccountId: accountId,
-    )).single;
+    ))
+        .single;
     expect(preview.lastMessage, '第二条');
     expect(preview.lastUpdatedAt.millisecondsSinceEpoch, 2000);
     expect(
@@ -531,7 +535,9 @@ void main() {
         ownerUserId: ownerUserId,
         currentAccountId: accountId,
         conversationId: conversationId,
-      )).single.localMessageId,
+      ))
+          .single
+          .localMessageId,
       latestLocalId,
     );
   });
@@ -635,9 +641,12 @@ void main() {
       currentAccountId: accountId,
       keyword: 'abc',
     );
-    expect(rows.map((r) => r.messageId), <String>[
-      'env-2',
-    ], reason: '假阳性 bcab 必须被滤掉，只留真正包含 abc 的记录');
+    expect(
+        rows.map((r) => r.messageId),
+        <String>[
+          'env-2',
+        ],
+        reason: '假阳性 bcab 必须被滤掉，只留真正包含 abc 的记录');
   });
 
   test('搜索：单字符查询无 bigram，仍能通过回落扫描命中', () async {
@@ -728,9 +737,10 @@ void main() {
       final before = await ChatIsar.instance.read(
         (isar) async =>
             (await isar.chatMessageEntitys.getByOwnerUserIdMessageId(
-              ownerUserId,
-              'env-handover',
-            ))!.plaintextCipher!,
+          ownerUserId,
+          'env-handover',
+        ))!
+                .plaintextCipher!,
       );
 
       await store.stageAccountHandover(source: source, target: target);
@@ -748,9 +758,10 @@ void main() {
       final stillSource = await ChatIsar.instance.read(
         (isar) async =>
             (await isar.chatMessageEntitys.getByOwnerUserIdMessageId(
-              ownerUserId,
-              'env-handover',
-            ))!.plaintextCipher!,
+          ownerUserId,
+          'env-handover',
+        ))!
+                .plaintextCipher!,
       );
       expect(stillSource, before, reason: 'finalized 前正式消息行不得切换');
 
@@ -841,9 +852,8 @@ void main() {
             .getByOwnerUserIdMessageId(ownerUserId, 'env-missing-marker'))!,
       );
       await ChatIsar.instance.writeTxn((isar) async {
-        final marker = await isar.chatAccountHandoverEntitys
-            .where()
-            .findFirst();
+        final marker =
+            await isar.chatAccountHandoverEntitys.where().findFirst();
         await isar.chatAccountHandoverEntitys.delete(marker!.id);
       });
 
@@ -955,9 +965,10 @@ void main() {
       final rowId = await ChatIsar.instance.read(
         (isar) async =>
             (await isar.chatMessageEntitys.getByOwnerUserIdMessageId(
-              ownerUserId,
-              'env-third-binding',
-            ))!.id,
+          ownerUserId,
+          'env-third-binding',
+        ))!
+                .id,
       );
 
       Future<void> expectTamperRejected(

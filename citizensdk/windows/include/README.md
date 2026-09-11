@@ -6,7 +6,7 @@ Config 使用唯一 `modules` 字段，默认 full。新增 `citizensdk_host_cre
 本次第 2 步仅更新源码、注释、合同和测试，尚未执行新的真实构建、平台测试或硬件验收；下文旧分步运行记录保留为历史证据，不代表本次变更已验证。
 
 `citizen_sdk/citizensdk_host.h` 是 17 项薄 Host C ABI，`citizen_sdk.hpp` 是不导出 STL ABI
-的 header-only C++ 所有权包装。根 `include/citizensdk.h` 的 121 项 Core ABI 保持既有结构和数值；
+的 header-only C++ 所有权包装。根 `include/citizensdk.h` 的 117 项 Core ABI 保持既有结构和数值；
 `citizensdk_qr_image.h` 另声明 3 项 ZXing-C++ 图像 ABI。
 `citizensdk_host_view_account_private_key` 和 C++ `view_account_private_key` 只控制 SDK 安全窗口，
 返回既有无秘密 WalletFlow，取消和真实排空语义不变。构建私有头不安装。

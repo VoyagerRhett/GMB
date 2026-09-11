@@ -2,6 +2,45 @@
 
 ## 1.0.0 - Unreleased
 
+- CitizenApp 接入任务第 1.10.4 步完成候选：通用 execution history 从 whole-history BLOB
+  替换为 index/exact/page 查询与原子 delete/upsert/meta mutation；Android、Apple、Linux、Windows
+  统一 schema v2、稳定索引和有界 incremental vacuum。旧开发库不迁移、不兼容。finalized
+  订阅错误/结束会按 1/2/4/8/16/30 秒重订阅，成功复位；未改 `native/smoldot/pow/**`，未触碰
+  CitizenApp/CitizenWallet，也未运行或操纵 Flutter。
+
+- CitizenApp 接入任务第 1.10.3 步新增与业务无关的八阶段失败分类：`admission`、
+  `validation`、`authentication`、`persistence`、`provider`、`verification`、
+  `cancellation`、`teardown`。22 个错误码保持原数值；新增唯一只读
+  `citizensdk_result_get_failure_stage`，既有结果结构、Host vtable、SQLite schema 不变。
+  Dart、Android、Apple、Linux、Windows 使用固定 7 字段错误 tuple，并绑定 62 项公开 method；
+  不记录或返回秘密、payload、callData、签名、extrinsic、metadata/storage 内容或本机路径。
+  当前闭集为 117 项 Core ABI、62 项 Flutter 方法、3 项 QR 图像函数和 Linux/Windows 各
+  17 项 Host 函数；唯一二维码协议仍为 `QR_V1`。
+
+- CitizenApp 接入任务第 1.10.2 步关闭三项已量化资源边界：Core runtime metadata 功能上限
+  继续为 64 MiB；单条 metadata 超出 8 MiB 持久记录容量时仍可读取并命中进程内 cache，只跳过
+  可重建的持久 cache。四个平台在原 SQLite 写事务内以 FIFO 保留最新 64 条 runtime context。
+  通用 execution history 新增 31 MiB durable weight，并在热签/冷签前只读预检、广播前 CAS
+  复检；只驱逐最旧终态，绝不驱逐 Pending/InBlock。公开 API/ABI、数据库 schema、`QR_V1`、
+  CitizenWallet 与定制 PoW 上游均未改变，也没有迁移或兼容逻辑。
+
+- CitizenApp 接入任务第 1.9 步建立多消费者公开面验收：新增无业务 reference、CitizenApp
+  形状、第三方旅行形状和独立 `QR_V1` signer 四类测试夹具。所有夹具只导入
+  `package:citizen_sdk/citizen_sdk.dart`；业务 storage key、SCALE 事件和 RuntimeCall 编码只留在
+  消费夹具。公共合同保持 116 项 Core ABI、五端 62 项 Flutter 方法和唯一 `QR_V1`，未增加
+  业务 API、迁移、兼容或外部产品依赖。
+
+- CitizenApp 接入任务第 1.8 步完成：删除 SDK 早期业务化二维码类型、编码入口和五端投影。
+  `QR_V1` 仍是唯一二维码协议，只保留通用签名 request/response、账户公钥、会话绑定、
+  过期/取消/单次消费和图像编解码；消费 App 自己负责收款及其它业务二维码语义。公开面现为
+  116 项 Core ABI、五端 62 项 Flutter 方法；删除项不迁移、不兼容、不复用数值空洞。
+  CitizenWallet 和定制 CitizenChain PoW 上游均未修改。
+
+- CitizenApp 接入任务第 1.7 步完成：SDK 历史收敛为自身提交交易的通用 execution fact，
+  CitizenApp 的目的账户、金额、备注、方向、业务事件及交易页模型归位 App 自有目录。旧业务
+  历史 schema、便利交易及八项 ABI 直接由四项通用历史 ABI 替换，不迁移、不兼容、不双写；
+  当步公开面为 117 项 Core ABI、五端 63 项 Flutter 方法。
+
 - CitizenApp 接入任务第 1.6 步完成：通用交易准备现在可由统一 WalletState 原子路由到热钱包
   强认证签名或既有 `QR_V1` 冷签名，签名经同一 sr25519 实现自验后先以 typed store CAS
   持久化完整授权字节，再 submit/watch，并以 canonical finalized body 与同 index

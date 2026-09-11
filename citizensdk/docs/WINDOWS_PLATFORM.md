@@ -4,12 +4,15 @@
 同一 ZXing-C++ 识别。系统相机隐私权限关闭、无设备或设备断开都明确失败，不启用其它识别器。
 链调用的签名窗口只展示 Rust 已验证审阅，确认后消费同一 Core 结果并复用现有设备授权。
 
-当前为 117 个 Core 函数、17 个 Host 函数、3 个 QR 图像函数和五端统一 63 个 Flutter 方法。
+当前为 117 个 Core 函数、17 个 Host 函数、3 个 QR 图像函数和五端统一 62 个 Flutter 方法。
 Config.modules 是唯一模块真源，旧 C Host 配置 enable_wallet 的布局/布尔含义保持。
 先由 Rust 验证模块，再按需创建 public/secure store 与 Vault；未选 chain 不加载链资产或创建
 链数据库，未选 history 不初始化历史。signing-only 不开放钱包管理/UI，只使用同宿主既有
 SDK 安全账户；首次 provision 仍须 wallet 流程。运行期选择不裁剪现有 full 包及链资产。
 模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
+
+Windows C++ 错误对象与 Flutter 七项错误 tuple 固定携带 code/stage/method 及可选关联；
+stage 只来自 C 结果 getter 或固定同步映射，不能持久化或从 message 猜测。
 
 Flutter 创建钱包只传 12／18／24 的 word_count；导入与追加账户显式传 0，不继承创建默认值。
 两种入口均经同一个原生 Host 参数校验器，不能静默忽略无关字段。
@@ -63,6 +66,13 @@ SQLite 主库、journal、WAL、SHM 通过已验证父 HANDLE 相对打开，IO/
 不借 `SQLITE_FCNTL_WIN32_SET_HANDLE` 测试接口替换默认 VFS 的句柄。
 
 Core 的 typed record、CAS、写前所有权、generation 和永久墓碑语义保留。
+public SQLite 的 `runtime_cache_store` 把 INSERT/REPLACE 和 rowid FIFO 裁剪放在同一事务，提交后
+最多 64 条；完整记录继续限制为 8 MiB。超过持久容量但符合 64 MiB Core 合同的 metadata 只留
+内存，不调用 Windows store。通用 history 在 Host CAS 前同时满足 4,096 条与 31 MiB durable
+weight。history public schema v2 由一行 meta、逐 execution opaque record 和三个通用索引组成；
+`THQ1` 查询与 `THM1` 原子 mutation 替代旧 singleton BLOB callback。旧 v1 不迁移、不兼容，
+也没有 App 业务列。终态删除后的物理回收满足固定阈值才执行，单次最多 128 页并监督 WAL
+checkpoint；不运行 full `VACUUM`，不删除 Pending/InBlock。
 PCP 持久对象创建不能被当成临时内存：崩溃恢复按 generation 精确定址，CAS 失败方不能销毁
 胜者 key；退休顺序是持久墓碑、删除 PCP key、删除对象记录，删除失败留可重放身份。
 平台实现必须串行化同一 generation 的跨实例副作用，避免墓碑清理后又出现晚到的持久 key。
@@ -115,7 +125,7 @@ MSVC/CTest、全量 PE 导出、UI、跨进程存储与真实 TPM 结果必须�
 ## Flutter 绑定与应用身份（第 8.2 步）
 
 依赖为 `CitizenSdk → 标准双通道 → Windows adapter → 已安装 Host/Core`。官方
-StandardMethodCodec 的字符串保留精确长度，不引入 Linux GLib 的专用内部表示。63 个
+StandardMethodCodec 的字符串保留精确长度，不引入 Linux GLib 的专用内部表示。62 个
 方法与其它四份绑定按独立金标对齐，不增加 Windows 专用 Dart 参数或业务方法。
 
 open 只接受 `[1, modules]`；无会话 verifySignature 只接受

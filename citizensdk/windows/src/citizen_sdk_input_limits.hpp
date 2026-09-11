@@ -12,6 +12,7 @@ inline constexpr uint64_t kMaximumChainDatabaseBytes = UINT64_C(512) * 1024;
 inline constexpr uint64_t kMaximumRuntimeCacheBytes = UINT64_C(8) * 1024 * 1024;
 inline constexpr uint64_t kMaximumWalletProfileBytes = UINT64_C(1) * 1024 * 1024;
 inline constexpr uint64_t kMaximumTransactionHistoryBytes = UINT64_C(32) * 1024 * 1024;
+inline constexpr uint64_t kTransactionHistoryQueryBytes = 58;
 inline constexpr uint64_t kMaximumEncryptedSecretBytes = UINT64_C(64) * 1024;
 inline constexpr uint64_t kMaximumAssetBytes = UINT64_C(128) * 1024 * 1024;
 inline constexpr uint64_t kMaximumPathBytes = 4096;

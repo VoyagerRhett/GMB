@@ -31,7 +31,9 @@ internal final class CitizenSDKHostBridge {
 
     private func publicStore() throws -> CitizenSDKPublicStore {
         resourceLock.lock(); defer { resourceLock.unlock() }
-        guard modules.contains(.chain) else { throw CitizenSDKError(.unsupported, "chain store is not selected") }
+        guard modules.contains(.chain) || modules.contains(.history) else {
+            throw CitizenSDKError(.unsupported, "public store is not selected")
+        }
         if let value = publicStoreValue { return value }
         try prepareStorageRoot()
         let value = try CitizenSDKPublicStore(directory: base.appendingPathComponent("public", isDirectory: true))
@@ -102,7 +104,7 @@ internal final class CitizenSDKHostBridge {
                     var services = citizensdk_host_services_v1_t()
                     services.struct_size = UInt32(MemoryLayout<citizensdk_host_services_v1_t>.size)
                     services.abi_version = 1
-                    services.public_store = modules.contains(.chain) ? publicPointer : nil
+                    services.public_store = (modules.contains(.chain) || modules.contains(.history)) ? publicPointer : nil
                     services.secure_store = modules.usesSecrets ? securePointer : nil
                     services.secret_vault = modules.usesSecrets ? vaultPointer : nil
                     return try withUnsafePointer(to: &services, body)
@@ -122,8 +124,8 @@ internal final class CitizenSDKHostBridge {
         publicVTable.runtime_cache_store = citizenSDKRuntimeCacheStore
         publicVTable.runtime_cache_delete = citizenSDKRuntimeCacheDelete
         if modules.contains(.history) {
-            publicVTable.transaction_history_load = citizenSDKTransactionHistoryLoad
-            publicVTable.transaction_history_compare_and_swap = citizenSDKTransactionHistoryCAS
+            publicVTable.transaction_history_query = citizenSDKTransactionHistoryQuery
+            publicVTable.transaction_history_mutate = citizenSDKTransactionHistoryMutate
         }
 
         secureVTable.struct_size = UInt32(MemoryLayout<citizensdk_host_secure_store_v1_t>.size)
@@ -168,9 +170,11 @@ internal final class CitizenSDKHostBridge {
     fileprivate func runtimeLoad(hash: Data) throws -> CitizenSDKHostRecord { try publicStore().runtimeCacheLoad(hash: hash) }
     fileprivate func runtimeStore(hash: Data, candidate: Data) throws { try publicStore().runtimeCacheStore(hash: hash, candidate: candidate) }
     fileprivate func runtimeDelete(hash: Data) throws { try publicStore().runtimeCacheDelete(hash: hash) }
-    fileprivate func historyLoad() throws -> CitizenSDKHostRecord { try publicStore().transactionHistoryLoad() }
-    fileprivate func historyCAS(expected: UInt64, candidate: Data) throws -> CitizenSDKHostRecord {
-        try publicStore().transactionHistoryCAS(expected: expected, candidate: candidate)
+    fileprivate func historyQuery(_ query: Data) throws -> CitizenSDKHostRecord {
+        try publicStore().transactionHistoryQuery(query)
+    }
+    fileprivate func historyMutate(expected: UInt64, mutation: Data) throws -> CitizenSDKHostRecord {
+        try publicStore().transactionHistoryMutate(expected: expected, bytes: mutation)
     }
     fileprivate func profileLoad() throws -> CitizenSDKHostRecord { try secureStore().walletProfileLoad() }
     fileprivate func profileCAS(expected: UInt64, candidate: Data) throws -> CitizenSDKHostRecord {
@@ -348,20 +352,25 @@ private func citizenSDKRuntimeCacheDelete(_ context: UnsafeMutableRawPointer?, _
     catch { return citizenSDKCode(error) }
 }
 
-private func citizenSDKTransactionHistoryLoad(_ context: UnsafeMutableRawPointer?, _ operationID: UInt64,
-                                              _ sdkContext: UnsafeMutableRawPointer?,
-                                              _ completion: citizensdk_host_record_completion_v1_t?) -> Int32 {
+private func citizenSDKTransactionHistoryQuery(_ context: UnsafeMutableRawPointer?, _ operationID: UInt64,
+                                               _ query: citizensdk_bytes_view_t,
+                                               _ sdkContext: UnsafeMutableRawPointer?,
+                                               _ completion: citizensdk_host_record_completion_v1_t?) -> Int32 {
     guard let host = citizenSDKHost(context), completion != nil else { return CitizenSDKErrorCode.invalidArgument.rawValue }
-    do { citizenSDKCompleteRecord(operationID, sdkContext, completion, try host.historyLoad()); return 0 }
+    do {
+        let bytes = citizenSDKData(query)
+        guard bytes.count == 58 else { return CitizenSDKErrorCode.invalidArgument.rawValue }
+        citizenSDKCompleteRecord(operationID, sdkContext, completion, try host.historyQuery(bytes)); return 0
+    }
     catch { return citizenSDKCode(error) }
 }
 
-private func citizenSDKTransactionHistoryCAS(_ context: UnsafeMutableRawPointer?, _ operationID: UInt64,
-                                             _ expected: UInt64, _ candidate: citizensdk_bytes_view_t,
-                                             _ sdkContext: UnsafeMutableRawPointer?,
-                                             _ completion: citizensdk_host_record_completion_v1_t?) -> Int32 {
+private func citizenSDKTransactionHistoryMutate(_ context: UnsafeMutableRawPointer?, _ operationID: UInt64,
+                                                _ expected: UInt64, _ mutation: citizensdk_bytes_view_t,
+                                                _ sdkContext: UnsafeMutableRawPointer?,
+                                                _ completion: citizensdk_host_record_completion_v1_t?) -> Int32 {
     guard let host = citizenSDKHost(context), completion != nil else { return CitizenSDKErrorCode.invalidArgument.rawValue }
-    do { citizenSDKCompleteRecord(operationID, sdkContext, completion, try host.historyCAS(expected: expected, candidate: citizenSDKData(candidate))); return 0 }
+    do { citizenSDKCompleteRecord(operationID, sdkContext, completion, try host.historyMutate(expected: expected, mutation: citizenSDKData(mutation))); return 0 }
     catch { return citizenSDKCode(error) }
 }
 

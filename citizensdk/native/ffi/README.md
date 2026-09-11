@@ -1,6 +1,6 @@
 # CitizenSDK product C ABI
 
-当前公共 Core 闭集为 88 个函数；ABI v1 既有结构和数值不重解释。
+当前公共 Core 闭集为 117 个函数；ABI v1 既有结构和数值不重解释。
 
 账户私钥查看另有SDK内部四操作链接闭集，声明由构建器生成而非进入公开include。
 open不解密，reveal记录一次确认，cancel不丢弃实际认证future，finish仅表示原生已清屏/清零。
@@ -64,13 +64,17 @@ and reports `CANCELLED`, but never clears durable Pending/InBlock history.
 
 既有 73 个公共函数保留，新增 `citizensdk_validate_modules`、
 `citizensdk_create_with_modules` 与 `citizensdk_verify_signature` 三个函数，
-另有创世哈希、批量余额及两个批量结果读取入口，以及八个 QR 协议/会话入口，当前共 88 个。
+另有创世哈希、批量余额及两个批量结果读取入口，以及八个 QR 协议/会话入口，后续统一钱包、
+通用签名、安全链读取、opaque 交易和 execution history 加上只读失败阶段 getter 形成当前 117 个。
 模块验证在任何平台资源创建前执行；wallet/signing/chain/transactions/history 五位按同一规则
 组合，旧构造仍进入同一私有装配函数并保持原默认组合。wallet 管理与签名不互相隐式启用，
 history 单独初始化；仅 chain 构造 provider、读取链资产并使用链持久化，
 wallet/signing 才需要配套 secure store 与 KEK/DEK Vault。
 签名使用同宿主已由 SDK 安全建立的账户归属元数据，不提供首次 provision 或秘密导出旁路。
 无实例纯验签不使用 handle、store、金库或事件订阅；签名无效返回 false，参数编码错误单独报告。
+
+第 1.9 步固定而不扩张该闭集。多消费者测试只走正式根公开面，不能使用四个内部测试符号、
+FFI 私有 module、raw signer 或平台专用旁路。
 
 启用链且装配持久 store 时，start 在 provider 启动前恢复并验证链数据库，export 返回前持久化
 同一精确 revision 快照，stop 在退订/停止依赖前 checkpoint。失败必须保留资源供重试；

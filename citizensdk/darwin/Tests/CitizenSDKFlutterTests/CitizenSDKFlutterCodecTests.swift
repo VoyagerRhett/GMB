@@ -160,7 +160,7 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
             "verifySignature", "prepareTransaction", "cancelPreparedTransaction", "executePreparedTransaction",
             "consumePreparedTransactionQrResponse", "cancelPreparedTransactionExecution",
             "getTransactionHistory", "syncTransactionHistory", "qrParse", "qrCreateSignRequest",
-            "qrConsumeSignResponse", "qrCancelSignRequest", "qrEncodeAccountId", "qrEncodeUserTransfer",
+            "qrConsumeSignResponse", "qrCancelSignRequest", "qrEncodeAccountId",
             "qrDecodeLuminance", "qrEncode", "qrScan", "signQrRequest",
         ]
         XCTAssertEqual(CitizenSdkFlutterCodec.methods, exactMethods)
@@ -237,8 +237,6 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
         requests["qrConsumeSignResponse"] = [version, "session-1", sequence, "{}"]
         requests["qrCancelSignRequest"] = [version, "session-1", sequence, "abcdefghijklmnop"]
         requests["qrEncodeAccountId"] = [version, "session-1", sequence, account]
-        requests["qrEncodeUserTransfer"] = [version, "session-1", sequence, "abcdefghijklmnop",
-            NSNumber(value: 10), account, "1", "CNY", "", "bank-1"]
         requests["qrDecodeLuminance"] = [version, "session-1", sequence,
             FlutterStandardTypedData(bytes: Data([0])), NSNumber(value: 1), NSNumber(value: 1), NSNumber(value: 1)]
         requests["qrEncode"] = [version, "session-1", sequence, "{}", NSNumber(value: 4)]

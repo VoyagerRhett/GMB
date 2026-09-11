@@ -42,7 +42,7 @@ pub use chain::{
 pub use chain_signer::{
     ChainSigner, DerivationJunction, Sr25519PublicKey, Sr25519Signature, SR25519_SIGNING_CONTEXT,
 };
-pub use error::{ContractError, ContractErrorCode, ContractResult};
+pub use error::{ContractError, ContractErrorCode, ContractResult, FailureStage};
 pub use secret_vault::{
     EncryptedSecretEnvelope, Hash32Bytes, SecretBuffer, SecretKind, SecretOwner, SecretRef,
     SecretVault, VaultAvailability, VaultGeneration,
@@ -57,10 +57,14 @@ pub use signing::{
 pub use store::{
     ChainDatabaseSnapshot, ChainDatabaseStore, EncryptedSecretBlobSnapshot,
     EncryptedSecretBlobState, EncryptedSecretBlobStore, HistoryTransactionStatus,
-    RuntimeCacheStore, TransactionExecutionRecord, TransactionHistoryPage,
-    TransactionHistoryRecord, TransactionHistoryState, TransactionHistoryStore, WalletProfileStore,
-    MAX_TRANSACTION_HISTORY_PAGE_SIZE, MAX_TRANSACTION_HISTORY_RECORDS,
-    MAX_TRANSACTION_HISTORY_SYNC_BATCH, MAX_TRANSACTION_POOL_REASON_BYTES,
+    RuntimeCacheStore, TransactionExecutionRecord, TransactionHistoryCursor,
+    TransactionHistoryIndex, TransactionHistoryMutation, TransactionHistoryPage,
+    TransactionHistoryQueryKind, TransactionHistoryRecord, TransactionHistoryRecordBatch,
+    TransactionHistoryRecordSnapshot, TransactionHistoryStore, WalletProfileStore,
+    MAX_PERSISTED_RUNTIME_CONTEXTS, MAX_PERSISTED_RUNTIME_METADATA_BYTES,
+    MAX_TRANSACTION_HISTORY_DURABLE_WEIGHT_BYTES, MAX_TRANSACTION_HISTORY_PAGE_SIZE,
+    MAX_TRANSACTION_HISTORY_RECORDS, MAX_TRANSACTION_HISTORY_SYNC_BATCH,
+    MAX_TRANSACTION_POOL_REASON_BYTES,
 };
 pub use transaction::{
     DispatchFailure, ExecutionConclusion, ExtrinsicWatchEvent, ModuleDispatchFailure,

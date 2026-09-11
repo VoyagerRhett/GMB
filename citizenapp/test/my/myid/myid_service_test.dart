@@ -117,14 +117,14 @@ void main() {
     expect(state.errorMessage, '请先创建钱包');
   });
 
-  test('MyId 身份只读不构造 CitizenChatSdk', () async {
+  test('MyId 身份只读不构造 ChatSdk', () async {
     final liveChatRuntimeCount = ChatRuntimeCore.debugLiveInstanceCount;
     final service = buildService(wallet: null);
     await service.getState();
     expect(
       ChatRuntimeCore.debugLiveInstanceCount,
       lessThanOrEqualTo(liveChatRuntimeCount),
-      reason: 'Wallet/MyId 普通读取不得惰性之外构造 CitizenChatSdk',
+      reason: 'Wallet/MyId 普通读取不得惰性之外构造 ChatSdk',
     );
   });
 
@@ -204,13 +204,13 @@ void main() {
 
   test('护照未生效/已过期/已吊销状态派生正确', () async {
     Uint8List voting({required int status}) => _encodeVoting(
-      from: 20260101,
-      until: 20310101,
-      status: status,
-      province: 'GD',
-      city: '0755',
-      town: '001',
-    );
+          from: 20260101,
+          until: 20310101,
+          status: status,
+          province: 'GD',
+          city: '0755',
+          town: '001',
+        );
 
     final notYet = await buildService(
       voting: voting(status: 0),
@@ -653,11 +653,11 @@ List<int> _vec(String s) {
 }
 
 List<int> _u32(int v) => [
-  v & 0xff,
-  (v >> 8) & 0xff,
-  (v >> 16) & 0xff,
-  (v >> 24) & 0xff,
-];
+      v & 0xff,
+      (v >> 8) & 0xff,
+      (v >> 16) & 0xff,
+      (v >> 24) & 0xff,
+    ];
 
 Uint8List _encodeVoting({
   required int from,
@@ -726,7 +726,7 @@ class _FakeWalletManager extends WalletManager {
 
   /// 当前钱包派生上下文激活记录。
   final List<({String cidNumber, int bindingRevision, String accountId})>
-  dataBindings = [];
+      dataBindings = [];
   final List<String> events = <String>[];
   int signCalls = 0;
   AccountDataBinding? activeDataBinding;
@@ -734,8 +734,7 @@ class _FakeWalletManager extends WalletManager {
     AccountDataBinding source,
     AccountDataBinding target,
     AccountDataHandoverState state,
-  })?
-  pendingHandover;
+  })? pendingHandover;
 
   @override
   Future<WalletProfile?> getDefaultWallet() async => _wallet;
@@ -794,13 +793,11 @@ class _FakeWalletManager extends WalletManager {
 
   @override
   Future<
-    ({
-      AccountDataBinding source,
-      AccountDataBinding target,
-      AccountDataHandoverState state,
-    })?
-  >
-  readPendingAccountDataHandover() async => pendingHandover;
+      ({
+        AccountDataBinding source,
+        AccountDataBinding target,
+        AccountDataHandoverState state,
+      })?> readPendingAccountDataHandover() async => pendingHandover;
 
   @override
   Future<void> recordPendingAccountDataHandover({
@@ -842,7 +839,9 @@ class _FakeWalletManager extends WalletManager {
   }
 }
 
-class _HandoverChatRuntime extends CitizenChatSdk {
+class _HandoverChatRuntime extends ChatSdk {
+  _HandoverChatRuntime() : super(host: createCitizenChatRuntimeHost());
+
   int discardCalls = 0;
 
   @override
@@ -928,7 +927,7 @@ class _SequenceResolver extends FinalizedIdentityResolver {
 /// 可变身份账户的假 resolver(对账测试:换绑前后链上身份账户切换)。
 class _MutableResolver extends FinalizedIdentityResolver {
   _MutableResolver(this._accountId, {int bindingRevision = 1})
-    : _bindingRevision = bindingRevision;
+      : _bindingRevision = bindingRevision;
   String _accountId;
   int _bindingRevision;
   void setAccountId(String accountId, {required int bindingRevision}) {
@@ -946,17 +945,18 @@ FinalizedIdentity _registeredIdentity(
   String accountId, {
   String cidNumber = 'GD-CTZN1-8F3A2B',
   int bindingRevision = 1,
-}) => FinalizedIdentity(
-  accountId: accountId,
-  ss58Address: _validAddress,
-  snapshot: CitizenIdentityChainSnapshot(
-    cidNumber: cidNumber,
-    accountId: Uint8List(32),
-    bindingRevision: bindingRevision,
-    votingIdentity: null,
-    candidateIdentity: null,
-  ),
-);
+}) =>
+    FinalizedIdentity(
+      accountId: accountId,
+      ss58Address: _validAddress,
+      snapshot: CitizenIdentityChainSnapshot(
+        cidNumber: cidNumber,
+        accountId: Uint8List(32),
+        bindingRevision: bindingRevision,
+        votingIdentity: null,
+        candidateIdentity: null,
+      ),
+    );
 
 /// 记录占号 / 换绑调用参数的假 RPC(不上链),验证 service 编排把账户与 CID 传对。
 class _FakeIdentityRpc extends CitizenIdentityRpc {
@@ -984,7 +984,7 @@ class _FakeIdentityRpc extends CitizenIdentityRpc {
 
   @override
   Future<({String txHash, int usedNonce, String blockHashHex})>
-  selfRebindCidAccount({
+      selfRebindCidAccount({
     required String cidNumber,
     required String newAccountId,
     required String currentAccountId,
@@ -1105,7 +1105,7 @@ class _FakeChainRpc extends ChainRpc {
 
   @override
   Future<({Uint8List blockHash, int blockNumber})>
-  fetchFinalizedBlock() async => (blockHash: Uint8List(32), blockNumber: 1);
+      fetchFinalizedBlock() async => (blockHash: Uint8List(32), blockNumber: 1);
 
   @override
   Future<Uint8List?> fetchStorageAtBlock(
@@ -1150,7 +1150,8 @@ class _FakeDivisionStore implements AdminDivisionStore {
     String level,
     String scopeKey,
     String code,
-  ) async => 'N($code)';
+  ) async =>
+      'N($code)';
   @override
   dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
 }

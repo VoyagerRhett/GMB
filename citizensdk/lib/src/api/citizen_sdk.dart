@@ -725,30 +725,6 @@ final class _CitizenQr implements CitizenQr {
           as String;
 
   @override
-  Future<String> encodeUserTransfer({
-    required String requestId,
-    required int expiresAt,
-    required String accountId,
-    required String amount,
-    required String symbol,
-    String memo = '',
-    required String bankCidNumber,
-  }) async =>
-      (await _session.invoke(
-            'qrEncodeUserTransfer',
-            fields: <Object?>[
-              requestId,
-              expiresAt,
-              accountId,
-              amount,
-              symbol,
-              memo,
-              bankCidNumber,
-            ],
-          ))[0]!
-          as String;
-
-  @override
   Future<CitizenQrDocument> decodeLuminance({
     required Uint8List data,
     required int width,

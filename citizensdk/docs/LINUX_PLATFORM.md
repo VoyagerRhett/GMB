@@ -13,6 +13,10 @@
 CitizenChain 轻节点、钱包、sr25519、Runtime 或交易实现；它只把根目录当前声明的 117 个
 `citizensdk_*` 产品 C ABI 与宿主操作系统能力组合起来。
 
+Linux 错误对象与 Flutter 七项错误 tuple 投影相同的 22 类 code、八类 failure stage、
+公开 method 和可选 session/request 关联。Core 异步失败的 stage 只经结果 getter 取得，
+不得解析诊断文本；Host 本地同步错误按固定 code→stage 表分类。
+
 ## 当前状态
 
 第 7.1 步新增 Linux C/C++ Host、typed stores、TPM 2.0 Vault 和 SDK-owned 钱包流程源码；
@@ -136,6 +140,14 @@ Linux Host 使用 `citizensdk_create_with_modules`，按选择装配同一五类
 Host config 强制要求小写 reverse-DNS `application_id`，实际状态根固定为
 `storage_root/<application_id>/citizensdk/v1/{public,secure}`；不同宿主应用不得意外共用数据库，
 改变 application ID 也不是隐式迁移入口。
+`RUNTIME_CACHE` 的完整记录上限保持 8 MiB，每次 INSERT/REPLACE 与 rowid FIFO 裁剪在同一事务
+提交，最多保留最新 64 条；替换已有 hash 不增长并成为最新项。Core 合法但超出该持久容量的
+metadata 只进入内存，不调用 Linux store。`TRANSACTION_HISTORY` 在 Host CAS 前已经通过 4,096
+条与 31 MiB durable weight 双重准入。history 不再保存 singleton BLOB：public schema v2 使用
+`transaction_history_meta`、逐 execution opaque record 与三个稳定排序索引；`THQ1`/`THM1`
+只暴露通用索引和原子 mutation。旧 public schema v1 直接拒绝，不迁移、不兼容、不双读。
+终态删除后按 `freelist > 16 && freelist/page_count > 25%` 单次执行最多 128 页 incremental vacuum
+及受监督 checkpoint；Pending/InBlock 不能删除，且不存在 full `VACUUM`。
 CAS 必须跨进程共享、耐久且强原子；
 `SQLITE_BUSY`、`SQLITE_ERROR`、`SQLITE_CORRUPT` 等后端错误不能伪装成“不存在”。路径必须
 拒绝符号链接、hardlink、非普通文件和越界组件；最终 public/secure 目录及 DB、WAL、SHM
@@ -171,7 +183,7 @@ observer 正常返回或抛出后都通过 RAII 对每个非零 result 执行一
 ## Flutter adapter 源码合同
 
 Linux Flutter adapter 固定 `citizen/sdk/core/v1` 与 `citizen/sdk/events/v1`，精确复用 Dart、
-Android、Darwin 的 63 方法和 fixed tuple。open 为 `[1, modules]`；无会话验签为
+Android、Darwin 的 62 方法和 fixed tuple。open 为 `[1, modules]`；无会话验签为
 `[1, accountId, signature, payload]`，返回 `[1, bool]`，在 session 查找及环境工厂前调用纯 Core，
 不创建 Host、数据库或金库。其余方法的一个 session 持有一个 Host/Core；Dart 只看见
 随机 session ID。请求在 Core 接受前预置 route；callback 动态范围内复制公开 result，只有

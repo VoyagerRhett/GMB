@@ -84,6 +84,16 @@ unsafe extern "C" fn record_cas(
     CitizenSdkErrorCode::Ok.as_i32()
 }
 
+unsafe extern "C" fn history_query(
+    _host_context: *mut c_void,
+    _host_operation_id: u64,
+    _query: CitizenSdkBytesView,
+    _sdk_context: *mut c_void,
+    _completion: CitizenSdkHostRecordCompletionV1,
+) -> i32 {
+    CitizenSdkErrorCode::Ok.as_i32()
+}
+
 unsafe extern "C" fn encrypted_load(
     _host_context: *mut c_void,
     _host_operation_id: u64,
@@ -178,8 +188,8 @@ fn complete_public_store() -> CitizenSdkHostPublicStoreV1 {
         runtime_cache_load: Some(runtime_load),
         runtime_cache_store: Some(runtime_store),
         runtime_cache_delete: Some(runtime_delete),
-        transaction_history_load: Some(record_load),
-        transaction_history_compare_and_swap: Some(record_cas),
+        transaction_history_query: Some(history_query),
+        transaction_history_mutate: Some(record_cas),
         ..CitizenSdkHostPublicStoreV1::default()
     }
 }
@@ -287,8 +297,8 @@ fn public_store_groups_are_independent_and_each_group_is_complete() {
         runtime_cache_load: None,
         runtime_cache_store: None,
         runtime_cache_delete: None,
-        transaction_history_load: None,
-        transaction_history_compare_and_swap: None,
+        transaction_history_query: None,
+        transaction_history_mutate: None,
         ..complete
     };
     assert!(validate_public_store_v1(&chain).is_ok());
@@ -306,7 +316,7 @@ fn public_store_groups_are_independent_and_each_group_is_complete() {
         ..chain
     };
     let partial_history = CitizenSdkHostPublicStoreV1 {
-        transaction_history_compare_and_swap: None,
+        transaction_history_mutate: None,
         ..history
     };
     assert!(validate_public_store_v1(&partial_chain).is_err());

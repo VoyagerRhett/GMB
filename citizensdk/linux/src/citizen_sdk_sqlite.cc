@@ -1028,21 +1028,33 @@ std::string canonical_schema_sql(const std::string &sql) {
   require(quote == '\0', CITIZENSDK_ERROR_INTEGRITY,
           "CitizenSDK SQLite schema contains an unterminated quoted token");
   constexpr std::string_view create_prefix = "createtable";
+  constexpr std::string_view create_index_prefix = "createindex";
   constexpr std::string_view optional_clause = "ifnotexists";
   if (canonical.size() >= create_prefix.size() + optional_clause.size() &&
       canonical.compare(create_prefix.size(), optional_clause.size(),
                         optional_clause) == 0) {
     canonical.erase(create_prefix.size(), optional_clause.size());
+  } else if (canonical.size() >=
+                 create_index_prefix.size() + optional_clause.size() &&
+             canonical.compare(create_index_prefix.size(),
+                               optional_clause.size(), optional_clause) == 0) {
+    canonical.erase(create_index_prefix.size(), optional_clause.size());
   }
   return canonical;
 }
 
-std::string expected_table_name(const std::string &sql) {
-  constexpr std::string_view prefix = "CREATE TABLE IF NOT EXISTS ";
-  require(sql.compare(0, prefix.size(), prefix.data(), prefix.size()) == 0,
+std::pair<std::string, std::string> expected_schema_object(
+    const std::string &sql) {
+  constexpr std::string_view table_prefix = "CREATE TABLE IF NOT EXISTS ";
+  constexpr std::string_view index_prefix = "CREATE INDEX IF NOT EXISTS ";
+  const bool table = sql.compare(0, table_prefix.size(), table_prefix.data(),
+                                 table_prefix.size()) == 0;
+  const std::string_view prefix = table ? table_prefix : index_prefix;
+  require(table || sql.compare(0, index_prefix.size(), index_prefix.data(),
+                               index_prefix.size()) == 0,
           CITIZENSDK_ERROR_INTERNAL,
           "CitizenSDK embedded SQLite schema is malformed");
-  const std::size_t end = sql.find('(', prefix.size());
+  const std::size_t end = sql.find(table ? '(' : ' ', prefix.size());
   require(end != std::string::npos && end > prefix.size(),
           CITIZENSDK_ERROR_INTERNAL,
           "CitizenSDK embedded SQLite table name is malformed");
@@ -1056,7 +1068,7 @@ std::string expected_table_name(const std::string &sql) {
               "abcdefghijklmnopqrstuvwxyz_0123456789") == std::string::npos,
           CITIZENSDK_ERROR_INTERNAL,
           "CitizenSDK embedded SQLite table identifier is invalid");
-  return name;
+  return {table ? "table" : "index", name};
 }
 
 void expect_single_row(SQLiteStore::Statement &statement,
@@ -1081,11 +1093,12 @@ void verify_schema(sqlite3 *database,
                       static_cast<int64_t>(schema.size()));
   expect_no_second_row(count, "CitizenSDK SQLite schema count is ambiguous");
   for (const std::string &expected_sql : schema) {
-    const std::string name = expected_table_name(expected_sql);
+    const auto [type, name] = expected_schema_object(expected_sql);
     SQLiteStore::Statement query(
         database,
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?");
-    query.bind(1, name);
+        "SELECT sql FROM sqlite_master WHERE type = ? AND name = ?");
+    query.bind(1, type);
+    query.bind(2, name);
     expect_single_row(query, "CitizenSDK SQLite table is missing");
     const std::string actual_sql = query.text(0, 65536);
     require(canonical_schema_sql(actual_sql) ==
@@ -1119,7 +1132,8 @@ void verify_text_pragma(sqlite3 *database, const char *sql,
 }
 
 void configure_and_verify_database(
-    sqlite3 *database, const std::vector<std::string> &schema, bool secure) {
+    sqlite3 *database, const std::vector<std::string> &schema, bool secure,
+    int schema_version, bool incremental_vacuum) {
   const auto execute_checked = [database](const char *sql) {
     if (sqlite3_exec(database, sql, nullptr, nullptr, nullptr) != SQLITE_OK) {
       throw sqlite_error(database, "CitizenSDK SQLite command failed");
@@ -1159,7 +1173,10 @@ void configure_and_verify_database(
                          "CitizenSDK SQLite object count is ambiguous");
   }
   const bool initialize = version == 0 && objects == 0;
-  require(initialize || version == 1, CITIZENSDK_ERROR_INTEGRITY,
+  require(schema_version > 0 && schema_version <= 0x7fffffff,
+          CITIZENSDK_ERROR_INTERNAL,
+          "CitizenSDK embedded SQLite schema version is invalid");
+  require(initialize || version == schema_version, CITIZENSDK_ERROR_INTEGRITY,
           "CitizenSDK SQLite schema version is unknown");
   if (initialize) {
     // Schema objects and their version marker are one rollback-journal
@@ -1167,12 +1184,17 @@ void configure_and_verify_database(
     // database or the complete v1 schema, never a version-zero partial schema.
     execute_checked("BEGIN IMMEDIATE");
     try {
+      if (incremental_vacuum) {
+        execute_checked("PRAGMA auto_vacuum=INCREMENTAL");
+      }
       for (const std::string &statement : schema) {
         execute_checked(statement.c_str());
       }
-      execute_checked("PRAGMA user_version=1");
+      const std::string version_sql =
+          "PRAGMA user_version=" + std::to_string(schema_version);
+      execute_checked(version_sql.c_str());
       verify_schema(database, schema);
-      verify_integer_pragma(database, "PRAGMA user_version", 1,
+      verify_integer_pragma(database, "PRAGMA user_version", schema_version,
                             "CitizenSDK SQLite schema version differs");
       execute_checked("COMMIT");
     } catch (...) {
@@ -1208,8 +1230,11 @@ void configure_and_verify_database(
                         "CitizenSDK SQLite trusted schema is enabled");
   verify_integer_pragma(database, "PRAGMA wal_autocheckpoint", 1000,
                         "CitizenSDK SQLite WAL checkpoint policy differs");
-  verify_integer_pragma(database, "PRAGMA user_version", 1,
+  verify_integer_pragma(database, "PRAGMA user_version", schema_version,
                         "CitizenSDK SQLite schema version differs");
+  verify_integer_pragma(database, "PRAGMA auto_vacuum",
+                        incremental_vacuum ? 2 : 0,
+                        "CitizenSDK SQLite auto-vacuum policy differs");
   verify_integer_pragma(database, "PRAGMA secure_delete", secure ? 1 : 0,
                         "CitizenSDK SQLite secure-delete policy differs");
 }
@@ -1278,7 +1303,8 @@ int SQLiteStore::open_private_directory(const std::filesystem::path &directory) 
 
 SQLiteStore::SQLiteStore(const std::filesystem::path &directory,
                          const char *file_name,
-                         const std::vector<std::string> &schema, bool secure) {
+                         const std::vector<std::string> &schema, bool secure,
+                         int schema_version, bool incremental_vacuum) {
   require(file_name != nullptr && file_name[0] != '\0' &&
               std::strchr(file_name, '/') == nullptr &&
               std::strchr(file_name, '\\') == nullptr,
@@ -1309,7 +1335,8 @@ SQLiteStore::SQLiteStore(const std::filesystem::path &directory,
       throw error;
     }
     enforce_file_permissions();
-    configure_and_verify_database(database_, schema, secure);
+    configure_and_verify_database(database_, schema, secure, schema_version,
+                                  incremental_vacuum);
     enforce_file_permissions();
   } catch (...) {
     close();

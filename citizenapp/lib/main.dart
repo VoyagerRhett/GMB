@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:local_auth/local_auth.dart';
+import 'package:tatachat_sdk/tatachat_sdk.dart' as sdk;
 import 'package:citizenapp/8964/square_tab_page.dart';
 import 'package:citizenapp/citizen/citizen_tab_page.dart';
 import 'package:citizenapp/chat/chat_product_configuration.dart';
@@ -45,7 +46,7 @@ final appNavigatorKey = GlobalKey<NavigatorState>();
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 任何 CitizenChatSdk、钱包页或 PIN 门禁构造前先处理跨重启擦除门闩。
+  // 任何 ChatSdk、钱包页或 PIN 门禁构造前先处理跨重启擦除门闩。
   // pending 不依赖已被平台阶段删除的 PIN，直接继续全量擦除；
   // 当前进程无论成败都只允许重试或退出，禁止恢复业务运行态。
   var wipeStartupResult = await AppLockService.recoverPersistentWipeAtStartup();
@@ -70,24 +71,24 @@ Future<void> main() async {
   }
 
   // 只有持久擦除门闩与上一进程 CID lease 都完成安全预检后，才允许注册
-  // 会构造 CitizenChatSdk 的后台入口；preflightBlocked 进程绝不启动任何业务生产者。
+  // 会构造 ChatSdk 的后台入口；preflightBlocked 进程绝不启动任何业务生产者。
   FirebaseMessaging.onBackgroundMessage(chatRuntimeBackgroundHandler);
 
   // 注入 P-256 设备子钥登记钩子（8964 层实现，避免 wallet/core 反向依赖）。已有子钥
   // 直接静默使用；只有实际业务确认缺钥时才鉴权一次生成，不在钱包创建或页面门禁触发。
-  DeviceSubkeyRegistrar.turnstileTokenProvider = () =>
-      acquireDeviceBindingTurnstileToken(
-        // 冷启动会话可能早于 MaterialApp 首帧；必须等根导航器就绪，禁止把空 token
-        // 发送给正式 Worker 后再把 403 伪装成通用设备认证失败。
-        isUiReady: () => appNavigatorKey.currentState != null,
-        present: () {
-          final navigator = appNavigatorKey.currentState;
-          if (navigator == null) return Future<String?>.value();
-          return navigator.push<String>(
-            MaterialPageRoute(builder: (_) => const SquareTurnstilePage()),
+  DeviceSubkeyRegistrar.turnstileTokenProvider =
+      () => acquireDeviceBindingTurnstileToken(
+            // 冷启动会话可能早于 MaterialApp 首帧；必须等根导航器就绪，禁止把空 token
+            // 发送给正式 Worker 后再把 403 伪装成通用设备认证失败。
+            isUiReady: () => appNavigatorKey.currentState != null,
+            present: () {
+              final navigator = appNavigatorKey.currentState;
+              if (navigator == null) return Future<String?>.value();
+              return navigator.push<String>(
+                MaterialPageRoute(builder: (_) => const SquareTurnstilePage()),
+              );
+            },
           );
-        },
-      );
   WalletManager.subkeyRegistrar = DeviceSubkeyRegistrar().register;
   WalletManager.coldDeviceBindingSigner = _signColdDeviceBinding;
   WalletManager.coldAccountDataKeyProvider = _provideColdAccountDataKeys;
@@ -336,17 +337,17 @@ Future<List<Uint8List>> _provideColdAccountDataKeys({
       nowEpochSeconds: now,
       ttlSeconds: 120,
     );
-    final response = await navigator
-        .push<QrEnvelope<AccountDataKeyResponseBody>>(
-          MaterialPageRoute(
-            builder: (_) => QrSignSessionPage(
-              request: request,
-              requestJson: signer.encodeRequest(request),
-              expectedSignerPublicKey: binding.accountId,
-              responseKind: QrKind.accountDataKeyResponse,
-            ),
-          ),
-        );
+    final response =
+        await navigator.push<QrEnvelope<AccountDataKeyResponseBody>>(
+      MaterialPageRoute(
+        builder: (_) => QrSignSessionPage(
+          request: request,
+          requestJson: signer.encodeRequest(request),
+          expectedSignerPublicKey: binding.accountId,
+          responseKind: QrKind.accountDataKeyResponse,
+        ),
+      ),
+    );
     if (response == null) {
       throw const WalletAuthException('冷钱包用途钥提供已取消');
     }
@@ -420,7 +421,7 @@ class _AppLockGateState extends State<_AppLockGate>
   /// 普通 Chat artifact 在首帧后整理，不能参与全局数据擦除启动门禁。
   Future<void> _recoverChatArtifactsAndPurge() async {
     try {
-      await CitizenChatSdk.recoverStartupArtifacts();
+      await sdk.ChatRuntimeCore.recoverStartupArtifacts();
     } catch (error) {
       debugPrint('chat_startup_artifacts:recovery_failed:${error.runtimeType}');
     }
@@ -430,7 +431,7 @@ class _AppLockGateState extends State<_AppLockGate>
   /// 清空解密出来的短命 Chat 附件。失败静默，不阻断 App 启动/切换。
   Future<void> _purgePlainAttachments() async {
     try {
-      await CitizenChatSdk.purgePlainAttachmentsWithoutAccount();
+      await sdk.ChatRuntimeCore.purgePlainAttachmentsWithoutAccount();
     } catch (_) {
       // 忽略：下次启动/切后台会再清一次。
     }
@@ -679,10 +680,9 @@ class _HomeTabGateState extends State<HomeTabGate> {
       _error = null;
     });
     try {
-      final openChat =
-          await (widget.preferenceReader ??
-                  UserIsar.instance.readOpenChatOnLaunch)()
-              .timeout(_readTimeout);
+      final openChat = await (widget.preferenceReader ??
+              UserIsar.instance.readOpenChatOnLaunch)()
+          .timeout(_readTimeout);
       if (!mounted || generation != _generation) return;
       setState(() => _initialTabIndex = openChat ? 2 : 0);
     } catch (_) {
@@ -741,13 +741,13 @@ class AppShell extends StatefulWidget {
   /// 只允许广场(0)或聊天(2)作为普通启动首页。
   final int initialTabIndex;
 
-  /// 测试只注入构造计数；生产固定首次进入 Chat Tab 时才创建 [CitizenChatSdk]。
+  /// 测试只注入构造计数；生产固定首次进入 Chat Tab 时才创建 [sdk.ChatSdk]。
   @visibleForTesting
-  final CitizenChatSdk Function()? chatRuntimeFactory;
+  final sdk.ChatSdk Function()? chatRuntimeFactory;
 
   /// 测试只替换五个主页面，避免为了验证壳层懒加载而启动真实链、网络或数据库。
   @visibleForTesting
-  final Widget Function(int tabIndex, CitizenChatSdk? chatRuntime)? tabBuilder;
+  final Widget Function(int tabIndex, sdk.ChatSdk? chatRuntime)? tabBuilder;
 
   /// 测试只注入 App 级“点击推送打开”数据；生产直接监听 Firebase。
   @visibleForTesting
@@ -762,9 +762,8 @@ class AppShell extends StatefulWidget {
   /// 「我的」顶部是照片，使用浅色图标；其余四个主 Tab 都是浅色背景，必须使用深色
   /// 图标。子路由的 AppBar 仍可用更靠前的 AnnotatedRegion 覆盖本样式。
   static SystemUiOverlayStyle systemUiOverlayStyleForTab(int tabIndex) {
-    final statusStyle = tabIndex == 4
-        ? SystemUiOverlayStyle.light
-        : SystemUiOverlayStyle.dark;
+    final statusStyle =
+        tabIndex == 4 ? SystemUiOverlayStyle.light : SystemUiOverlayStyle.dark;
     return statusStyle.copyWith(
       statusBarColor: Colors.transparent,
       systemNavigationBarColor: AppTheme.surfaceCard,
@@ -779,7 +778,7 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> {
   final AppUpdateController _updateController = AppUpdateController.instance;
   late final ValueNotifier<int> _selectedTab;
-  CitizenChatSdk? _chatRuntime;
+  sdk.ChatSdk? _chatRuntime;
   late int _currentIndex;
   int _pendingVoteCount = 0;
   int _squareNotifyCount = 0;
@@ -787,9 +786,9 @@ class _AppShellState extends State<AppShell> {
   StreamSubscription<Map<String, dynamic>>? _pushOpenSub;
 
   /// Chat 运行态只在用户首次打开聊天 Tab 时创建。广场、用户、钱包或公民页启动
-  /// 不得因为构造 CitizenChatSdk 而进入 Chat 的文件、密钥或网络生命周期。
-  CitizenChatSdk get _chatRuntimeForTab => _chatRuntime ??=
-      (widget.chatRuntimeFactory ?? () => CitizenChatSdk.instance)();
+  /// 不得因为构造 ChatSdk 而进入 Chat 的文件、密钥或网络生命周期。
+  sdk.ChatSdk get _chatRuntimeForTab => _chatRuntime ??=
+      (widget.chatRuntimeFactory ?? () => citizenChatRuntime)();
 
   @override
   void initState() {
@@ -800,7 +799,7 @@ class _AppShellState extends State<AppShell> {
     _checkRootStatus();
     // 启动后异步检查 Release 更新，只更新设置页状态，不阻塞主界面进入。
     _updateController.check();
-    // 点击推送属于 App 导航，不得为此提前构造 CitizenChatSdk。聊天推送只表示邮箱变化；
+    // 点击推送属于 App 导航，不得为此提前构造 ChatSdk。聊天推送只表示邮箱变化；
     // 广场推送仍直接切广场 Tab。
     unawaited(_startPushOpenRouting());
   }

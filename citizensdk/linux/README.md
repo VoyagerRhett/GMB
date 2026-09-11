@@ -4,6 +4,9 @@
 `citizensdk_host_create_with_modules` 进入同一装配逻辑。既有 C Host ABI v1 的
 `enable_wallet` 布局与含义保持，不能把其内存重解释为模块位；显式入口检查它与安全资源选择一致。
 Rust 先验证模块，chain/history 才创建 public store，wallet/signing 才创建配套 secure store/Vault；
+Linux public store 的 history 已替换为 schema v2 的 meta/逐 execution 行/三个索引，并以
+`THQ1`/`THM1` 实现有界查询和原子 mutation；旧 whole-BLOB schema 不迁移、不兼容。终态删除后
+只按固定阈值执行最多 128 页 incremental vacuum。本机不是 Linux runner，未把源码检查记为运行通过。
 签名-only 不开放钱包 UI，只使用同宿主既有 SDK 安全账户，首次建立仍须钱包流程。
 现有正式包装仍为 full 并含链资产，运行期未选链不加载资产或创建链数据库。
 第4步新增独立 qr=32，full=63。Linux 只将亮度帧交给 SDK 内唯一 ZXing-C++ 3.1.1 图像层，

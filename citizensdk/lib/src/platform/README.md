@@ -8,7 +8,7 @@ binding 实现协议；LinuxARM/LinuxAMD 共用官方 `linux` 注册，Windows �
 注册，两者的插件类型均为 `CitizenSdkPlugin`。
 Dart 不为平台复制第二套 transport。
 
-全部平台的 Flutter 边界完全相同：63 个方法只允许固定长度、固定位置的 List tuple，并逐层
+全部平台的 Flutter 边界完全相同：62 个方法只允许固定长度、固定位置的 List tuple，并逐层
 校验长度、类型、session、request sequence、event sequence 和枚举闭集。协议不接受 Map、
 任意 RPC、独立 signed extrinsic、原生 handle、助记词、密码、DEK、child secret 或私钥。
 创建、导入和追加账户只触发 SDK-owned 原生安全流程；秘密始终留在 Rust、平台金库与 SDK 自有安全界面内。

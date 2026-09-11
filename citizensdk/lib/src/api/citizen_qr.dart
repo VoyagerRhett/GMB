@@ -1,10 +1,11 @@
 import 'dart:typed_data';
 
 /// CitizenSDK 当前唯一接受的 QR_V1 区块链二维码类型。
+///
+/// 枚举数值的空洞是已删除业务 schema 的永久保留位，不得复用。
 enum CitizenQrKind {
   signRequest(1),
   signResponse(2),
-  userTransfer(4),
   accountId(5);
 
   const CitizenQrKind(this.value);
@@ -14,7 +15,7 @@ enum CitizenQrKind {
 /// Rust 已严格解析的统一公开二维码结构，不是可提交的授权凭证。
 ///
 /// 不同 kind 只含所属字段：签名请求含 action/reviewPayload，响应含 signature，
-/// 收款含 amount/symbol/memo/bankCidNumber，账户码只含 accountId。
+/// 账户码只含 accountId。
 /// 业务只读取这些公开字段，不自行解析 QR_V1 短键或构造待签字节。
 final class CitizenQrDocument {
   CitizenQrDocument({
@@ -27,10 +28,6 @@ final class CitizenQrDocument {
     Uint8List? reviewPayload,
     Uint8List? signature,
     this.accountId,
-    this.amount,
-    this.symbol,
-    this.memo,
-    this.bankCidNumber,
     this.signRequest,
   }) : reviewPayload = reviewPayload == null
            ? null
@@ -48,10 +45,6 @@ final class CitizenQrDocument {
   final Uint8List? reviewPayload;
   final Uint8List? signature;
   final String? accountId;
-  final String? amount;
-  final String? symbol;
-  final String? memo;
-  final String? bankCidNumber;
 
   /// 安全签名结果中的原请求规范文本；普通 parse 文档不含此字段。
   final String? signRequest;
@@ -114,15 +107,6 @@ abstract interface class CitizenQr {
 
   Future<bool> cancelSignRequest(String requestId);
   Future<String> encodeAccountId(String accountId);
-  Future<String> encodeUserTransfer({
-    required String requestId,
-    required int expiresAt,
-    required String accountId,
-    required String amount,
-    required String symbol,
-    String memo = '',
-    required String bankCidNumber,
-  });
 
   /// 既有图片输入同样返回 Rust 文档，不暴露未经解析的扫描文本。
   Future<CitizenQrDocument> decodeLuminance({

@@ -1837,14 +1837,14 @@ class _FakeProfileSessionProvider extends SquareSessionProvider {
       );
 }
 
-class _FakeRuntime extends CitizenChatSdk {
+class _FakeRuntime extends ChatSdk {
   _FakeRuntime({
     required this.address,
     this.enableRealtime = false,
     this.onDeleteConversation,
     this.retryCompleter,
     this.retryError,
-  });
+  }) : super(host: createCitizenChatRuntimeHost());
 
   final String address;
   final bool enableRealtime;
@@ -1868,7 +1868,7 @@ class _FakeRuntime extends CitizenChatSdk {
   }
 
   @override
-  Future<String?> readCidNumber() async => _ownerUserId;
+  Future<String?> readUserId() async => _ownerUserId;
 
   @override
   Future<List<ChatDeliveryResult>> sendSticker({
@@ -1906,7 +1906,7 @@ class _FakeRuntime extends CitizenChatSdk {
   Future<void> deleteLocalConversation(String conversationId) async {
     final deleter = onDeleteConversation;
     if (deleter == null) {
-      throw StateError('测试未注入 CitizenChatSdk 会话删除入口');
+      throw StateError('测试未注入 ChatSdk 会话删除入口');
     }
     await deleter(conversationId);
   }

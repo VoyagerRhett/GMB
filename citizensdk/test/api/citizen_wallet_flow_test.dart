@@ -330,6 +330,8 @@ final class _WalletPlatform implements CitizenSdkPlatform {
       if (error != null) {
         throw CitizenSdkException(
           code: error.code,
+          stage: error.stage,
+          method: method,
           message: error.message,
           sessionId: 'session-a',
           requestSequence: sequence,

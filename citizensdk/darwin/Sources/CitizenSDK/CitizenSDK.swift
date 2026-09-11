@@ -295,14 +295,6 @@ public final class CitizenSdk: @unchecked Sendable {
         try native.qrEncodeAccountID(accountID)
     }
 
-    public func qrEncodeUserTransfer(requestID: String, expiresAt: UInt64,
-                                     accountID: Data, amount: String, symbol: String,
-                                     memo: String = "", bankCIDNumber: String) throws -> String {
-        try native.qrEncodeUserTransfer(requestID: requestID, expiresAt: expiresAt,
-            accountID: accountID, amount: amount, symbol: symbol, memo: memo,
-            bankCIDNumber: bankCIDNumber)
-    }
-
     public func qrDecodeLuminance(_ data: Data, width: UInt32, height: UInt32,
                                   rowStride: UInt32) throws -> CitizenQRDocument {
         try native.qrDecodeLuminance(data, width: width, height: height, rowStride: rowStride)

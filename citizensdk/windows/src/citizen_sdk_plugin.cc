@@ -168,8 +168,11 @@ class UiQueue final {
 
 std::unique_ptr<Bytes> encoded_error(citizensdk_error_code_t code, const char *message,
                                     std::optional<std::string> session = {},
-                                    std::optional<int64_t> sequence = {}) {
-  const auto details = to_encodable_value(error_details(code, message, std::move(session), sequence));
+                                    std::optional<int64_t> sequence = {},
+                                    const std::string &method = "open",
+                                    citizensdk_failure_stage_t stage = 0) {
+  const auto details = to_encodable_value(
+      error_details(code, message, std::move(session), sequence, method, stage));
   return codec().EncodeErrorEnvelope(std::string("citizensdk.") + error_name(code), message, &details);
 }
 
@@ -180,6 +183,7 @@ struct PendingReply final {
   ::flutter::BinaryReply reply;
   std::optional<std::string> session;
   std::optional<int64_t> sequence;
+  std::string method{"open"};
   bool done{};
 
   void send(const Bytes *bytes) noexcept {
@@ -191,9 +195,10 @@ struct PendingReply final {
                                  bytes == nullptr ? 0 : bytes->size()); }
     catch (...) { /* 回调已消费，不能因宿主异常二次发送。 */ }
   }
-  void fail(citizensdk_error_code_t code, const char *message) noexcept {
+  void fail(citizensdk_error_code_t code, const char *message,
+            citizensdk_failure_stage_t stage = 0) noexcept {
     if (done) return;
-    try { const auto bytes = encoded_error(code, message, session, sequence); send(bytes.get()); }
+    try { const auto bytes = encoded_error(code, message, session, sequence, method, stage); send(bytes.get()); }
     catch (...) { send(nullptr); }
   }
   void finish(const Reply &value) noexcept {
@@ -290,6 +295,7 @@ struct PluginState final : std::enable_shared_from_this<PluginState> {
       const auto call = decode_method_call(message, size);
       if (!call) throw ContractFailure(CITIZENSDK_ERROR_INVALID_ARGUMENT, "CitizenSDK method message is invalid");
       const auto request = decode_request(call->method_name(), call->arguments());
+      response->method = method_name(request.method);
       if (!request.session.empty()) response->session = request.session;
       if (request.method != Method::open && request.method != Method::verify_signature)
         response->sequence = request.sequence;
@@ -308,8 +314,8 @@ struct PluginState final : std::enable_shared_from_this<PluginState> {
         if (!response->session) response->session = error.session;
         if (!response->sequence) response->sequence = error.sequence;
         remove_pending(response);
-        response->fail(error.code, error.what());
-      } else { PendingReply failure(std::move(reply)); failure.fail(error.code, error.what()); }
+        response->fail(error.code, error.what(), error.stage);
+      } else { PendingReply failure(std::move(reply)); failure.fail(error.code, error.what(), error.stage); }
     } catch (...) {
       if (response) { remove_pending(response); response->fail(CITIZENSDK_ERROR_INTERNAL, "CitizenSDK request failed"); }
       else { PendingReply failure(std::move(reply)); failure.fail(CITIZENSDK_ERROR_INTERNAL, "CitizenSDK request failed"); }

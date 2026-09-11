@@ -31,6 +31,15 @@
 
 _Static_assert(sizeof(void *) == 8, "CitizenSDK v1 ABI requires 64-bit hosts");
 _Static_assert(CITIZENSDK_OK == 0, "success code ABI");
+_Static_assert(CITIZENSDK_FAILURE_STAGE_ADMISSION == 1 &&
+                   CITIZENSDK_FAILURE_STAGE_VALIDATION == 2 &&
+                   CITIZENSDK_FAILURE_STAGE_AUTHENTICATION == 3 &&
+                   CITIZENSDK_FAILURE_STAGE_PERSISTENCE == 4 &&
+                   CITIZENSDK_FAILURE_STAGE_PROVIDER == 5 &&
+                   CITIZENSDK_FAILURE_STAGE_VERIFICATION == 6 &&
+                   CITIZENSDK_FAILURE_STAGE_CANCELLATION == 7 &&
+                   CITIZENSDK_FAILURE_STAGE_TEARDOWN == 8,
+               "failure stage ABI");
 _Static_assert(CITIZENSDK_EXTERNAL_SIGNER_QR_V1 == 1,
                "external signer literal ABI");
 _Static_assert(CITIZENSDK_SIGNING_COMPLETED == 1,
@@ -273,9 +282,8 @@ ABI_OFFSET(citizensdk_host_public_store_v1_t,
 ABI_OFFSET(citizensdk_host_public_store_v1_t, runtime_cache_load, 32);
 ABI_OFFSET(citizensdk_host_public_store_v1_t, runtime_cache_store, 40);
 ABI_OFFSET(citizensdk_host_public_store_v1_t, runtime_cache_delete, 48);
-ABI_OFFSET(citizensdk_host_public_store_v1_t, transaction_history_load, 56);
-ABI_OFFSET(citizensdk_host_public_store_v1_t,
-           transaction_history_compare_and_swap, 64);
+ABI_OFFSET(citizensdk_host_public_store_v1_t, transaction_history_query, 56);
+ABI_OFFSET(citizensdk_host_public_store_v1_t, transaction_history_mutate, 64);
 
 ABI_SIZE(citizensdk_host_secure_store_v1_t, 48);
 ABI_ALIGN(citizensdk_host_secure_store_v1_t, 8);
@@ -595,11 +603,6 @@ ABI_FUNCTION(citizensdk_qr_cancel_sign_request, citizensdk_error_code_t,
 ABI_FUNCTION(citizensdk_qr_encode_account_id, citizensdk_error_code_t,
              citizensdk_handle_t, const citizensdk_account_id_t *, uint8_t *,
              uint64_t, uint64_t *);
-ABI_FUNCTION(citizensdk_qr_encode_user_transfer, citizensdk_error_code_t,
-             citizensdk_handle_t, citizensdk_bytes_view_t, uint64_t,
-             const citizensdk_account_id_t *, citizensdk_bytes_view_t,
-             citizensdk_bytes_view_t, citizensdk_bytes_view_t,
-             citizensdk_bytes_view_t, uint8_t *, uint64_t, uint64_t *);
 ABI_FUNCTION(citizensdk_get_wallet_profile, citizensdk_error_code_t,
              citizensdk_handle_t, citizensdk_request_id_t *);
 ABI_FUNCTION(citizensdk_get_wallet_state, citizensdk_error_code_t,
@@ -714,6 +717,8 @@ ABI_FUNCTION(citizensdk_import_state, citizensdk_error_code_t,
              citizensdk_bytes_view_t, citizensdk_request_id_t *);
 ABI_FUNCTION(citizensdk_result_get_info, citizensdk_error_code_t,
              citizensdk_result_handle_t, citizensdk_result_info_t *);
+ABI_FUNCTION(citizensdk_result_get_failure_stage, citizensdk_error_code_t,
+             citizensdk_result_handle_t, citizensdk_failure_stage_t *);
 ABI_FUNCTION(citizensdk_result_copy_error_message, citizensdk_error_code_t,
              citizensdk_result_handle_t, uint8_t *, uint64_t, uint64_t *);
 ABI_FUNCTION(citizensdk_result_get_block_ref, citizensdk_error_code_t,

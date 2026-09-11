@@ -1,7 +1,7 @@
 # CitizenSDK 原生产物与候选打包
 
 当前闭集为 117 个 Core C 函数、Linux/Windows 各 17 个 Host C 函数、3 个
-ZXing-C++ 图像 C 函数和五端统一 63 个 Flutter 方法。新增符号不改变 ABI v1
+ZXing-C++ 图像 C 函数和五端统一 62 个 Flutter 方法。新增符号不改变 ABI v1
 既有结构和数值。模块选择只影响运行时服务与
 资源装配，不是发布包裁剪：现有正式包装仍编译 full，并完整携带链资产。未选 chain 的实例
 不加载这些资产、不创建链数据库或启动 smoldot。模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
@@ -146,8 +146,12 @@ XCFramework、Hosted 或 GitHub 候选。其 `LC_ID_DYLIB` 是编译工作区的
 QR 统一为 9 个协议、审阅、签名和结果符号；统一钱包状态增加 8 个入口，通用冷热签名与默认
 账户授权再增加 7 个入口，第 1.4 步安全链读取增加 10 个入口，第 1.5 步交易准备增加 3 个入口，
 第 1.6 步冷热交易执行增加 4 个入口形成 121 个；第 1.7 步以 4 个通用历史入口替换 8 个业务
-转账/历史入口，总计 117 个；构建产物与头文件
+转账/历史入口；第 1.8 步删除业务二维码编码入口、第 1.10.3 步增加只读失败阶段 getter 后总计 117 个；构建产物与头文件
 任一缺失、额外或重复都必须失败关闭。
+
+第 1.10.4 步没有增加产品函数：Host public-store 结构仍为 72 bytes，原偏移 56/64 的两个
+whole-history callback 直接替换为 `transaction_history_query`/`transaction_history_mutate`。
+正式四端包只接受 public SQLite schema v2；不存在旧回调符号、旧 codec、迁移器或兼容包装。
 
 Android Core 在进入 Gradle 前由固定 NDK 的 `llvm-strip --strip-unneeded` 显式处理一次；该同一
 staging 字节随后复制为独立 `libcitizensdk.so` 并进入 AAR。构建结束再逐字节对拍 AAR 与独立

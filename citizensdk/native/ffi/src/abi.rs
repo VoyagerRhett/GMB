@@ -13,7 +13,7 @@ pub use crate::host_providers::{
     CitizenSdkHostRuntimeCacheStoreV1, CitizenSdkHostSecretKind, CitizenSdkHostSecretRefV1,
     CitizenSdkHostSecretVaultV1, CitizenSdkHostSecureStoreV1, CitizenSdkHostServicesV1,
     CitizenSdkHostStatusCompletionV1, CitizenSdkHostStatusResultV1,
-    CitizenSdkHostTransactionHistoryCompareAndSwapV1, CitizenSdkHostTransactionHistoryLoadV1,
+    CitizenSdkHostTransactionHistoryMutateV1, CitizenSdkHostTransactionHistoryQueryV1,
     CitizenSdkHostVaultAvailability, CitizenSdkHostVaultAvailabilityCompletionV1,
     CitizenSdkHostVaultAvailabilityResultV1, CitizenSdkHostVaultAvailabilityV1,
     CitizenSdkHostVaultEnsureWalletKekV1, CitizenSdkHostVaultHasWalletKekV1,
@@ -74,6 +74,21 @@ impl CitizenSdkErrorCode {
     pub const fn as_i32(self) -> i32 {
         self as i32
     }
+}
+
+/// Product-independent phase in which an SDK operation failed.
+/// Existing error-code values and result-structure layouts remain unchanged.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CitizenSdkFailureStage {
+    Admission = 1,
+    Validation = 2,
+    Authentication = 3,
+    Persistence = 4,
+    Provider = 5,
+    Verification = 6,
+    Cancellation = 7,
+    Teardown = 8,
 }
 
 #[repr(u32)]

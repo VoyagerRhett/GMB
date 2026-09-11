@@ -468,10 +468,10 @@ packages:
     dependency: transitive
     description:
       name: image_picker_android
-      sha256: d5b3e1774af29c9ab00103afb0d4614070f924d2e0057ac867ec98800114793f
+      sha256: "0a55d645a670d6ae11efa948f955ae904afa472f1344fc15a7ddacc20c1e7219"
       url: "https://pub.dev"
     source: hosted
-    version: "0.8.13+17"
+    version: "0.8.13+23"
   image_picker_for_web:
     dependency: transitive
     description:
@@ -732,10 +732,10 @@ packages:
     dependency: "direct main"
     description:
       name: mobile_scanner
-      sha256: c92c26bf2231695b6d3477c8dcf435f51e28f87b1745966b1fe4c47a286171ce
+      sha256: "6b943ee30e7d9fa6bcab4238b6428e8df223be3731b9b75446fe8781dbd2286f"
       url: "https://pub.dev"
     source: hosted
-    version: "7.2.0"
+    version: "7.4.1"
   objective_c:
     dependency: transitive
     description:

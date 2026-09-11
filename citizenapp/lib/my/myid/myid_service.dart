@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
+import 'package:tatachat_sdk/tatachat_sdk.dart';
 import 'package:citizenapp/log/app_log.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/citizen/public/data/admin_division_store.dart';
@@ -47,14 +48,14 @@ enum MyIdStatus { normal, notYetValid, expired, revoked, queryFailed }
 class CidAccountDataHandover {
   CidAccountDataHandover({
     UserContactService? contactService,
-    CitizenChatSdk? chatRuntime,
+    ChatSdk? chatRuntime,
     WalletManager? walletManager,
-  }) : _contactService = contactService ?? UserContactService(autoSync: false),
-       _chatRuntime = chatRuntime ?? CitizenChatSdk.instance,
-       _walletManager = walletManager ?? WalletManager();
+  })  : _contactService = contactService ?? UserContactService(autoSync: false),
+        _chatRuntime = chatRuntime ?? citizenChatRuntime,
+        _walletManager = walletManager ?? WalletManager();
 
   final UserContactService _contactService;
-  final CitizenChatSdk _chatRuntime;
+  final ChatSdk _chatRuntime;
   final WalletManager _walletManager;
 
   Future<void> stage({
@@ -231,13 +232,11 @@ class CidAccountDataHandover {
       left.accountId == right.accountId;
 
   Future<
-    ({
-      AccountDataBinding source,
-      AccountDataBinding target,
-      AccountDataHandoverState state,
-    })
-  >
-  _requirePendingIntent({
+      ({
+        AccountDataBinding source,
+        AccountDataBinding target,
+        AccountDataHandoverState state,
+      })> _requirePendingIntent({
     required AccountDataBinding source,
     required AccountDataBinding target,
   }) async {
@@ -307,10 +306,10 @@ class MyIdState {
 
   /// 徽章分色信号:visitor/voting/candidate,与 [IdentityBadgeSnapshotStore] 契约一致。
   String get identityLevel => switch (tier) {
-    MyIdTier.candidate => 'candidate',
-    MyIdTier.voting => 'voting',
-    MyIdTier.visitor => 'visitor',
-  };
+        MyIdTier.candidate => 'candidate',
+        MyIdTier.voting => 'voting',
+        MyIdTier.visitor => 'visitor',
+      };
 }
 
 class MyIdService {
@@ -324,22 +323,22 @@ class MyIdService {
     CidAccountDataHandover? dataHandover,
     DateTime Function()? nowProvider,
     int Function()? cidYearProvider,
-  }) : _walletManager = walletManager ?? WalletManager(),
-       _divisionStore = divisionStore ?? IsarAdminDivisionStore(),
-       _badgeSnapshotStore = badgeSnapshotStore ?? IdentityBadgeSnapshotStore(),
-       _identityResolver =
-           identityResolver ??
-           FinalizedIdentityResolver(
-             walletManager: walletManager,
-             chainRpc: chainRpc,
-           ),
-       _identityRpc =
-           identityRpc ??
-           CitizenIdentityRpc(chainRpc: chainRpc, walletManager: walletManager),
-       _dataHandoverOverride = dataHandover,
-       _chainRpc = chainRpc ?? ChainRpc(),
-       _nowProvider = nowProvider ?? _beijingNow,
-       _cidYearProvider = cidYearProvider ?? _utcYear;
+  })  : _walletManager = walletManager ?? WalletManager(),
+        _divisionStore = divisionStore ?? IsarAdminDivisionStore(),
+        _badgeSnapshotStore =
+            badgeSnapshotStore ?? IdentityBadgeSnapshotStore(),
+        _identityResolver = identityResolver ??
+            FinalizedIdentityResolver(
+              walletManager: walletManager,
+              chainRpc: chainRpc,
+            ),
+        _identityRpc = identityRpc ??
+            CitizenIdentityRpc(
+                chainRpc: chainRpc, walletManager: walletManager),
+        _dataHandoverOverride = dataHandover,
+        _chainRpc = chainRpc ?? ChainRpc(),
+        _nowProvider = nowProvider ?? _beijingNow,
+        _cidYearProvider = cidYearProvider ?? _utcYear;
 
   final WalletManager _walletManager;
   final AdminDivisionStore _divisionStore;
@@ -350,8 +349,7 @@ class MyIdService {
 
   /// 身份只读与 Wallet 页面不得构造 Chat 运行态；只有实际 CID 换绑动作首次访问时
   /// 才创建跨域交接编排，并复用本服务已经确定的钱包边界。
-  late final CidAccountDataHandover _dataHandover =
-      _dataHandoverOverride ??
+  late final CidAccountDataHandover _dataHandover = _dataHandoverOverride ??
       CidAccountDataHandover(walletManager: _walletManager);
 
   final ChainRpc _chainRpc;
@@ -425,9 +423,8 @@ class MyIdService {
     );
 
     final candidateRaw = chainIdentity.candidateIdentity;
-    final candidate = candidateRaw == null
-        ? null
-        : _decodeCandidateIdentity(candidateRaw);
+    final candidate =
+        candidateRaw == null ? null : _decodeCandidateIdentity(candidateRaw);
     final tier = candidate != null ? MyIdTier.candidate : MyIdTier.voting;
     await _persistBadgeSnapshot(
       chainIdentity.cidNumber,
@@ -452,13 +449,11 @@ class MyIdService {
       passportValidUntil: _formatDateInt(voting.passportValidUntil),
       familyName: candidate?.familyName,
       givenName: candidate?.givenName,
-      citizenSexLabel: candidate == null
-          ? null
-          : (candidate.sex == 1 ? '女' : '男'),
+      citizenSexLabel:
+          candidate == null ? null : (candidate.sex == 1 ? '女' : '男'),
       birthDistrict: birth,
-      citizenBirthDate: candidate == null
-          ? null
-          : _formatDateInt(candidate.birthDate),
+      citizenBirthDate:
+          candidate == null ? null : _formatDateInt(candidate.birthDate),
     );
   }
 
@@ -607,7 +602,7 @@ class MyIdService {
   ///
   /// 链读失败**不吞**:上抛给调用方 fail-closed 处理,绝不静默当成「余额不足」或「充足」。
   Future<({BigInt requiredFen, BigInt balanceFen})>
-  fetchRegistrationAffordability(String bindAccountId) async {
+      fetchRegistrationAffordability(String bindAccountId) async {
     final requiredFen = await _chainRpc.fetchMinSelfPayBalanceFen();
     final balanceYuan = await _chainRpc.fetchFinalizedBalance(
       bindAccountId,

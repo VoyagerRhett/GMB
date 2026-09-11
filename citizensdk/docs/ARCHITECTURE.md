@@ -41,6 +41,11 @@ Rust Core 承接，只保留受保护的 smoldot 来源快照作上游审计输�
 原生核心与产品无关 Dart 层不得反向依赖 CitizenApp、CitizenWallet、TuyuLove、TuyuLife、
 TuyuBooking、聊天、广场、TUYU 协议、产品导航或产品数据库。
 
+第 1.9 步用 `test/consumers/` 固化这一依赖方向。reference consumer 同时组合 wallet、signing、
+qr、chain、transactions、history 六类公开接口；CitizenApp-shaped 与 third-party-shaped fixture
+只在各自测试目录定义业务 key、event decoder 和 RuntimeCall encoder；external signer 只组合
+`CitizenSigning` 与 `CitizenQr`。四者均只导入根公开库，不得导入 `lib/src`、内部符号或其它产品源码。
+
 ## 目录结构
 
 ```text
@@ -135,6 +140,12 @@ Substrate 规则计算哈希，在准确
 缺失、畸形、矛盾或跨块证据一律返回未核实。Engine 复用
 `test/transaction` 的生产 CitizenChain metadata/events 夹具，没有复制第二份输入。
 
+Core runtime metadata 的功能合同为 64 MiB。进程内准确块 cache 保留 64 项并可承载完整合同；
+四个平台的持久 runtime cache 是 8 MiB 完整记录、64 项 FIFO 的可重建性能层，metadata 可持久
+部分为 `8 MiB - 111 bytes`。Engine 查询顺序固定为内存、持久 cache、provider。超过持久容量但
+不超过 Core 上限的 provider context 正常完成链读取并进入内存，只跳过持久写入；缓存容量不能
+反向改变链能力，也不增加旧记录迁移或兼容分支。
+
 host 组合的链数据库生命周期由同一 Engine 原语闭合：start 在 provider start 前执行
 typed-store restore；export 使用稳定 finalized 锚导出并以完整 `revision + state` CAS；
 graceful stop 在任何退订、服务或 provider 停止副作用前完成同一持久化。失败时保持 Running
@@ -187,8 +198,16 @@ graceful stop 在任何退订、服务或 provider 停止副作用前完成同�
   链客户端；底层 watch 实际是 submit-and-watch，因此组合交易模块后必须先命中内部 pending。
   inBlock/finalized 块锚不等于成功；终态只接受绑定 txHash 与同一 extrinsic index
   `System.ExtrinsicSuccess/Failed` 的私有证据。显式同步一次最多处理 32 条未终态 execution，
+  历史索引同时受 4,096 条和 31 MiB durable weight 限制；逐条 weight 只包含 opaque callData、
+  signed extrinsic 与通用保守固定开销。冻结模板在签名前确定最终 extrinsic 长度，Engine 先只读
+  预检，再在 pending CAS 中复检真实候选。腾挪只按创建时间/ID 驱逐最旧 retention-terminal，
+  Pending/InBlock 不可驱逐；资源不足返回 `conflict`，不产生签名、广播或部分历史写入。
   不扫描账户业务流水，也不解释 destination、amount、remark、direction 或业务 pallet/event。
   历史操作代际租约覆盖全部 provider/store await 与最后一次 CAS。
+  store 合同是 `load_index`、按 executionId 读取、稳定游标有界分页和原子 mutation；状态更新只
+  读取/写回目标 execution，公开页面成本只受 limit（最大 100）约束，启动恢复只查询可协调记录。
+  四端 Host 把 opaque Core record 分行保存，索引描述与解码记录由 Core 逐项交叉验证，不允许
+  whole-history 缓存或 App 业务列。
   通用交易 C ABI 在独立四线程长观察池中选择完整 terminal future 与 cancellation；取消或
   interrupted/dropped/retracted/timeout 不清 durable Pending/InBlock 门，只有 canonical body、
   准确块 metadata 与同 index `System.Events` 核验才形成 finalized 终态。
@@ -301,6 +320,10 @@ workspace 都是 CitizenSDK 内部构建边界，不是多个 SDK。根 `include
 result、独立 callback thread、64 项有界事件队列和稳定错误码。异步请求接受后恰有一个完成
 事件；raw extrinsic watch 与高层 wallet transfer watch 可取消，其它原子/状态变更操作不会
 伪装成可回滚。
+
+失败 result 还保存八项闭集 `FailureStage`。该维度从 Contracts 经 Engine 和 C getter
+投影到五端，既不修改 result struct，也不进入 Host vtable 或持久化 schema；平台不得从
+message 猜测阶段。Flutter 继续使用原 62 个方法，只把 stage 和当前 method 加入固定错误 tuple。
 
 Capability revision 由 Engine 单调持有，链 ready 只读取 smoldot 自身 verified
 `is_usable`。Provider 内部固定 RPC allowlist，不对 ABI 暴露方法名。坏导入使当前组合进入

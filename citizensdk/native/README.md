@@ -1,6 +1,6 @@
 # CitizenSDK 原生核心
 
-当前 Core 为 88 个公开 C 函数；六模块由统一 Rust 装配与门禁决定。
+当前 Core 为 117 个公开 C 函数；六模块由统一 Rust 装配与门禁决定。
 运行期模块选择不裁剪现有正式 full 包或链资产。模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
 
 本目录承载同一 CitizenSDK 产品的统一原生核心：`contracts` 固定类型化依赖语义，`engine`
@@ -16,12 +16,15 @@ Dart/smoldot macOS `arm64` 差分测试所需的 legacy 入口，`smoldot/pow` �
 ```
 
 `native/ffi` 与根 `include` 已建立产品级唯一 C ABI，并让其经 Engine 调用真实 smoldot
-provider。ABI v1 保持既有结构、数值及默认构造行为，当前共 88 个函数。
+provider。ABI v1 保持既有结构、数值及默认构造行为，当前共 117 个函数。
 `citizensdk_validate_modules` 在平台资源创建前统一验证选择；
 `citizensdk_create_with_modules` 按选择装配同一 Core；
 `citizensdk_verify_signature` 是无实例纯验签，不需要金库、链或事件订阅。
 ABI 不开放任意 RPC、private key、child secret、低层 signer 或钱包裸 signed
 extrinsic。
+
+第 1.9 步不增加原生能力或业务类型。`test/consumers/` 的三类消费者和独立 signer 只使用
+正式 Dart 根公开面，反向证明同一 Core 可承载互不相关的业务字节；业务 fixture 不进入本目录。
 
 host 组合还固定公开链数据库生命周期：start 在 provider 启动前自动 restore，显式 export 在
 返回同一快照前先完成 exact revision CAS，graceful stop 在退订/停止服务/provider 前先
@@ -43,6 +46,9 @@ provider 的准确 finalized 块取得，持久 runtime cache 只用于性能，
 新增的 Rust 内部 `ProductComposition` 仍固定唯一 provider、准确 Runtime nonce 与 sr25519 实现。
 当前模块化构造只装配已选服务：wallet 管理与 SigningService 独立，history 也独立于 transactions。
 chain/history 按选择使用 public store，wallet/signing 才需要配套 secure store 与 Vault；
+history typed store 已按 execution 索引：Core 只读取汇总、目标记录或有界页，以一个 revisioned
+mutation 提交 deletes/upserts/meta。FFI 的 `THQ1`/`THB1`/`THM1` 固定线协议不解释 callData；
+四端 SQLite schema v2 分行存储 opaque record，拒绝旧 whole-BLOB schema 且不迁移。
 签名只读同宿主已安全建立的账户归属元数据，不开放钱包 UI，也不建立第二份账户或秘密仓库。
 首次 provision 仍须钱包流程；未启用模块明确拒绝。五个平台只投影同一 Core 规则。
 

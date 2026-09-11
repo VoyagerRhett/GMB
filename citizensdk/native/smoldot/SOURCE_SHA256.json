@@ -68,7 +68,7 @@
         },
         {
           "path": "README.md",
-          "sha256": "f42598f6bc57cb7d517c657f474a1ec577df6002d962404c2be4dff4e4816def"
+        "sha256": "dfbce3d35e8145e62bb7783a559bdd62f60b888df0bf63557fca65e3c11b6aed"
         },
         {
           "path": "src/account_nonce.rs",
@@ -88,7 +88,7 @@
         },
         {
           "path": "src/legacy.rs",
-          "sha256": "721bb4b19e57b45ae4df72fcf28c6d34aa1b9d7f5051cb8c903dfc080da9d4f8"
+          "sha256": "218f560207f1d78e621bcc8d6017dd7ab7ef2bf75cad81de71c4b3bf70309483"
         },
         {
           "path": "src/lib.rs",
@@ -96,11 +96,15 @@
         },
         {
           "path": "src/verified_chain_client.rs",
-          "sha256": "493df20627274d0aa38742c4a6c83c0a23d6d2452a9a795d09e0deef36a79990"
+          "sha256": "74259d254539eb0178ca3e8909b48d7e993b2023efbe994fe3eb8e2fa6af35b5"
         },
         {
           "path": "tests/account_nonce_contract.rs",
           "sha256": "13f2d194df11c94527fd5b513228cc1ec917f3735b12f3326c239b600821b754"
+        },
+        {
+          "path": "tests/baseline_lifecycle_contract.rs",
+          "sha256": "881490cfd192e6b6c5e1693ccba4a3e6725a7f8cdb7aeb34fd47de576e1cf5ee"
         },
         {
           "path": "tests/legacy_parity.rs",
@@ -108,7 +112,7 @@
         },
         {
           "path": "tests/verified_chain_client_contract.rs",
-          "sha256": "140e90e7e52b259919b0705c1df52d89366ef1e31c34ad672065201b4e18e308"
+          "sha256": "2239b6e9a0a3375bfa45d9a7fdf2157eee6696ff75c1e5154aba373f8ef17de8"
         }
       ],
       "excluded": [],

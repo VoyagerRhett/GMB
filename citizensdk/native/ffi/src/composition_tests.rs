@@ -52,7 +52,9 @@ use citizen_sdk_contracts::{
     CapabilityName, CapabilityReason, ChainDatabaseStore, ContractError, ContractErrorCode,
     ContractFuture, EncryptedSecretBlobSnapshot, EncryptedSecretBlobState,
     EncryptedSecretBlobStore, EncryptedSecretEnvelope, SecretBuffer, SecretRef, SecretVault,
-    TransactionHistoryState, TransactionHistoryStore, VaultAvailability, VaultGeneration,
+    TransactionExecutionId, TransactionHistoryCursor, TransactionHistoryIndex,
+    TransactionHistoryMutation, TransactionHistoryQueryKind, TransactionHistoryRecordBatch,
+    TransactionHistoryRecordSnapshot, TransactionHistoryStore, VaultAvailability, VaultGeneration,
     WalletProfileStore, WalletState,
 };
 use citizen_sdk_engine::resolve_capabilities;
@@ -384,7 +386,7 @@ struct FakeHistoryStore {
 }
 
 impl TransactionHistoryStore for FakeHistoryStore {
-    fn load(&self) -> ContractFuture<'_, TransactionHistoryState> {
+    fn load_index(&self) -> ContractFuture<'_, TransactionHistoryIndex> {
         let fail_load = self.fail_load;
         Box::pin(async move {
             if fail_load {
@@ -393,17 +395,45 @@ impl TransactionHistoryStore for FakeHistoryStore {
                     "fake history storage failure",
                 ))
             } else {
-                TransactionHistoryState::try_new(0, vec![])
+                Ok(TransactionHistoryIndex::empty())
             }
+        })
+    }
+
+    fn load_record(
+        &self,
+        _expected_revision: u64,
+        _execution_id: TransactionExecutionId,
+    ) -> ContractFuture<'_, TransactionHistoryRecordSnapshot> {
+        Box::pin(async {
+            Ok(TransactionHistoryRecordSnapshot::new(
+                TransactionHistoryIndex::empty(),
+                None,
+            ))
+        })
+    }
+
+    fn load_page(
+        &self,
+        _expected_revision: u64,
+        _kind: TransactionHistoryQueryKind,
+        _before: Option<TransactionHistoryCursor>,
+        _limit: usize,
+    ) -> ContractFuture<'_, TransactionHistoryRecordBatch> {
+        Box::pin(async {
+            TransactionHistoryRecordBatch::try_new(
+                TransactionHistoryIndex::empty(),
+                Vec::new(),
+                false,
+            )
         })
     }
 
     fn compare_and_swap(
         &self,
-        _expected_revision: u64,
-        next: TransactionHistoryState,
-    ) -> ContractFuture<'_, TransactionHistoryState> {
-        Box::pin(async move { Ok(next) })
+        mutation: TransactionHistoryMutation,
+    ) -> ContractFuture<'_, TransactionHistoryIndex> {
+        Box::pin(async move { Ok(mutation.next_index()) })
     }
 }
 

@@ -54,7 +54,8 @@ struct PendingReply final {
                     : std::optional<std::string>(request.session)),
 sequence(request.method == Method::open || request.method == Method::verify_signature
                      ? std::nullopt
-                     : std::optional<int64_t>(request.sequence)) {
+                     : std::optional<int64_t>(request.sequence)),
+        method(method_name(request.method)) {
     call = FL_METHOD_CALL(g_object_ref(value));
   }
   ~PendingReply() { g_clear_object(&call); }
@@ -82,10 +83,11 @@ sequence(request.method == Method::open || request.method == Method::verify_sign
     g_clear_object(&call);
   }
 
-  void fail(citizensdk_error_code_t code, const char *message) noexcept {
+  void fail(citizensdk_error_code_t code, const char *message,
+            citizensdk_failure_stage_t stage = 0) noexcept {
     if (done) return;
     try {
-      finish({false, error_details(code, message, session, sequence), code, message});
+      finish({false, error_details(code, message, session, sequence, method, stage), code, message});
     } catch (...) {
       // Even if constructing structured error details fails, a retained live
       // FlMethodCall must be answered before its last reference is dropped.
@@ -101,6 +103,7 @@ sequence(request.method == Method::open || request.method == Method::verify_sign
   FlMethodCall *call = nullptr;
   std::optional<std::string> session;
   std::optional<int64_t> sequence;
+  std::string method;
   bool done = false;
 };
 
@@ -251,19 +254,23 @@ void handler_destroyed(gpointer user_data) noexcept {
 FlMethodErrorResponse *failure_response(citizensdk_error_code_t code,
                                        const std::string &message,
                                        std::optional<std::string> session = {},
-                                       std::optional<int64_t> sequence = {}) {
+                                       std::optional<int64_t> sequence = {},
+                                       std::string method = "open",
+                                       citizensdk_failure_stage_t stage = 0) {
   const std::string name = std::string("citizensdk.") + error_name(code);
-  auto details = to_fl_value(error_details(code, message, session, sequence));
+  auto details = to_fl_value(error_details(code, message, session, sequence, method, stage));
   return fl_method_error_response_new(name.c_str(), message.c_str(), details.get());
 }
 
 void respond_failure(FlMethodCall *call, citizensdk_error_code_t code,
                      const std::string &message,
                      std::optional<std::string> session = {},
-                     std::optional<int64_t> sequence = {}) noexcept {
+                     std::optional<int64_t> sequence = {},
+                     std::string method = "open",
+                     citizensdk_failure_stage_t stage = 0) noexcept {
   try {
     g_autoptr(FlMethodErrorResponse) response =
-        failure_response(code, message, std::move(session), sequence);
+        failure_response(code, message, std::move(session), sequence, std::move(method), stage);
     g_autoptr(GError) error = nullptr;
     (void)fl_method_call_respond(call, FL_METHOD_RESPONSE(response), &error);
   } catch (...) {
@@ -298,25 +305,31 @@ void method_call(FlMethodChannel *, FlMethodCall *call, gpointer user_data) noex
     if (pending) {
       try {
         pending->finish({false,
-            error_details(error.code, error.what(), error.session, error.sequence),
+            error_details(error.code, error.what(), error.session, error.sequence,
+                          pending->method, error.stage),
             error.code, error.what()});
       } catch (...) {
-        pending->fail(CITIZENSDK_ERROR_INTERNAL, "CitizenSDK request failed");
+        pending->fail(CITIZENSDK_ERROR_INTERNAL, "CitizenSDK request failed",
+                      CITIZENSDK_FAILURE_STAGE_TEARDOWN);
       }
     } else {
-      respond_failure(call, error.code, error.what(), error.session, error.sequence);
+      const std::string method = fl_method_call_get_name(call);
+      respond_failure(call, error.code, error.what(), error.session, error.sequence,
+                      method, error.stage);
     }
   } catch (...) {
     if (pending) {
       try {
         pending->finish({false,
-            error_details(CITIZENSDK_ERROR_INTERNAL, "CitizenSDK request failed"),
+            error_details(CITIZENSDK_ERROR_INTERNAL, "CitizenSDK request failed",
+                          {}, {}, pending->method, CITIZENSDK_FAILURE_STAGE_TEARDOWN),
             CITIZENSDK_ERROR_INTERNAL, "CitizenSDK request failed"});
       } catch (...) {
         pending->fail(CITIZENSDK_ERROR_INTERNAL, "CitizenSDK request failed");
       }
     } else {
-      respond_failure(call, CITIZENSDK_ERROR_INTERNAL, "CitizenSDK request failed");
+      respond_failure(call, CITIZENSDK_ERROR_INTERNAL, "CitizenSDK request failed",
+                      {}, {}, fl_method_call_get_name(call), CITIZENSDK_FAILURE_STAGE_TEARDOWN);
     }
   }
   if (pending && pending->done) {

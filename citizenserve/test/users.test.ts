@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { Miniflare } from 'miniflare';
+import type { Miniflare } from 'miniflare';
 
 import {
   createUserFromFinalizedRegistration,
@@ -18,6 +18,7 @@ import type {
   IdentityLevel,
   UserRow,
 } from '../src/types';
+import { createTestMiniflare } from './miniflare';
 
 const ACCOUNT_A = `0x${'11'.repeat(32)}`;
 const ACCOUNT_B = `0x${'22'.repeat(32)}`;
@@ -36,11 +37,8 @@ let env: Env;
 
 describe('finalized 用户账户 D1 投影', () => {
   beforeEach(async () => {
-    miniflare = new Miniflare({
-      modules: true,
-      script: 'export default { fetch() { return new Response("test"); } }',
-      compatibilityDate: '2026-07-29',
-      d1Databases: ['DB'],
+    miniflare = createTestMiniflare({
+      d1Bindings: ['DB'],
     });
     env = await miniflare.getBindings<Env>();
     await applySchema(env);

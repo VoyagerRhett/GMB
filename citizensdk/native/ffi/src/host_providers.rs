@@ -46,7 +46,9 @@ use citizen_sdk_contracts::{
     ChainDatabaseSnapshot, ChainDatabaseStore, ContractError, ContractErrorCode, ContractFuture,
     EncryptedSecretBlobSnapshot, EncryptedSecretBlobState, EncryptedSecretBlobStore,
     EncryptedSecretEnvelope, Hash32, Hash32Bytes, RuntimeCacheStore, RuntimeContext, SecretBuffer,
-    SecretKind, SecretRef, SecretVault, TransactionHistoryState, TransactionHistoryStore,
+    SecretKind, SecretRef, SecretVault, TransactionExecutionId, TransactionHistoryCursor,
+    TransactionHistoryIndex, TransactionHistoryMutation, TransactionHistoryQueryKind,
+    TransactionHistoryRecordBatch, TransactionHistoryRecordSnapshot, TransactionHistoryStore,
     VaultAvailability, VaultGeneration, WalletProfileStore, WalletState,
 };
 use futures_channel::oneshot;
@@ -56,9 +58,11 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::abi::{CitizenSdkBytesView, CitizenSdkErrorCode, CITIZENSDK_ABI_VERSION};
 use crate::host_codec::{
     decode_chain_database_snapshot, decode_encrypted_secret_blob_snapshot, decode_runtime_context,
-    decode_transaction_history_state, decode_wallet_state, encode_chain_database_snapshot,
+    decode_transaction_history_host_batch, decode_wallet_state, encode_chain_database_snapshot,
     encode_encrypted_secret_blob_snapshot, encode_runtime_context,
-    encode_transaction_history_state, encode_wallet_state, HostCodecError, HostRecordDomain,
+    encode_transaction_history_index_query, encode_transaction_history_mutation,
+    encode_transaction_history_page_query, encode_transaction_history_record_query,
+    encode_wallet_state, HostCodecError, HostRecordDomain, TransactionHistoryHostBatch,
 };
 
 #[cfg(not(target_pointer_width = "64"))]
@@ -382,11 +386,20 @@ pub type CitizenSdkHostRuntimeCacheDeleteV1 = Option<
         completion: CitizenSdkHostStatusCompletionV1,
     ) -> i32,
 >;
-pub type CitizenSdkHostTransactionHistoryLoadV1 = CitizenSdkHostChainDatabaseLoadV1;
-/// Generic SDK-submitted executions form one atomic revisioned value; a host
-/// must not split this CAS into tables that can become visible at different
-/// revisions. Business history belongs to the integrating application.
-pub type CitizenSdkHostTransactionHistoryCompareAndSwapV1 = Option<
+/// Runs one bounded index/record/page query encoded by Core. The host may
+/// inspect only the fixed history wire header and keeps each Core record opaque.
+pub type CitizenSdkHostTransactionHistoryQueryV1 = Option<
+    unsafe extern "C" fn(
+        host_context: *mut c_void,
+        host_operation_id: u64,
+        query: CitizenSdkBytesView,
+        sdk_context: *mut c_void,
+        completion: CitizenSdkHostRecordCompletionV1,
+    ) -> i32,
+>;
+/// Applies delete IDs, opaque upserts and the next aggregate index in one host
+/// transaction guarded by the expected revision.
+pub type CitizenSdkHostTransactionHistoryMutateV1 = Option<
     unsafe extern "C" fn(
         host_context: *mut c_void,
         host_operation_id: u64,
@@ -398,8 +411,8 @@ pub type CitizenSdkHostTransactionHistoryCompareAndSwapV1 = Option<
 >;
 
 /// Public chain database, runtime cache, and reconstructable history storage.
-/// The identical-looking load signatures remain separately named fields so a
-/// host cannot route arbitrary domains through one generic storage callback.
+/// History is deliberately query/mutation based; singleton load/CAS remains
+/// only for the bounded chain database value.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct CitizenSdkHostPublicStoreV1 {
@@ -411,8 +424,8 @@ pub struct CitizenSdkHostPublicStoreV1 {
     pub runtime_cache_load: CitizenSdkHostRuntimeCacheLoadV1,
     pub runtime_cache_store: CitizenSdkHostRuntimeCacheStoreV1,
     pub runtime_cache_delete: CitizenSdkHostRuntimeCacheDeleteV1,
-    pub transaction_history_load: CitizenSdkHostTransactionHistoryLoadV1,
-    pub transaction_history_compare_and_swap: CitizenSdkHostTransactionHistoryCompareAndSwapV1,
+    pub transaction_history_query: CitizenSdkHostTransactionHistoryQueryV1,
+    pub transaction_history_mutate: CitizenSdkHostTransactionHistoryMutateV1,
 }
 
 impl Default for CitizenSdkHostPublicStoreV1 {
@@ -426,8 +439,8 @@ impl Default for CitizenSdkHostPublicStoreV1 {
             runtime_cache_load: None,
             runtime_cache_store: None,
             runtime_cache_delete: None,
-            transaction_history_load: None,
-            transaction_history_compare_and_swap: None,
+            transaction_history_query: None,
+            transaction_history_mutate: None,
         }
     }
 }
@@ -435,8 +448,7 @@ impl Default for CitizenSdkHostPublicStoreV1 {
 pub type CitizenSdkHostWalletProfileLoadV1 = CitizenSdkHostChainDatabaseLoadV1;
 /// Wallet profile and lifecycle/provisioning plans are one atomic revisioned
 /// value.  This callback never receives mnemonic or derived secret material.
-pub type CitizenSdkHostWalletProfileCompareAndSwapV1 =
-    CitizenSdkHostTransactionHistoryCompareAndSwapV1;
+pub type CitizenSdkHostWalletProfileCompareAndSwapV1 = CitizenSdkHostTransactionHistoryMutateV1;
 pub type CitizenSdkHostEncryptedSecretBlobLoadV1 = Option<
     unsafe extern "C" fn(
         host_context: *mut c_void,
@@ -872,8 +884,8 @@ pub fn validate_public_store_v1(
         provider.runtime_cache_delete.is_some(),
     ];
     let history = [
-        provider.transaction_history_load.is_some(),
-        provider.transaction_history_compare_and_swap.is_some(),
+        provider.transaction_history_query.is_some(),
+        provider.transaction_history_mutate.is_some(),
     ];
     let partial = [&chain[..], &runtime[..], &history[..]]
         .iter()
@@ -2130,7 +2142,7 @@ impl HostServicesAdapter {
     pub fn has_history(&self) -> bool {
         self.bridge
             .public
-            .is_some_and(|store| store.0.transaction_history_load.is_some())
+            .is_some_and(|store| store.0.transaction_history_query.is_some())
     }
 
     pub fn chain_database_store(&self) -> Arc<dyn ChainDatabaseStore> {
@@ -2679,13 +2691,15 @@ impl WalletProfileStore for HostWalletProfileStore {
     }
 }
 
-async fn load_history_state(
+async fn query_history(
     bridge: &Arc<HostBridge>,
-) -> Result<TransactionHistoryState, ContractError> {
-    let callback =
-        bridge.public()?.0.transaction_history_load.ok_or_else(|| {
-            ContractError::new(ContractErrorCode::Internal, "history load missing")
-        })?;
+    query: Vec<u8>,
+) -> Result<TransactionHistoryHostBatch, ContractError> {
+    let callback = bridge
+        .public()?
+        .0
+        .transaction_history_query
+        .ok_or_else(|| ContractError::new(ContractErrorCode::Internal, "history query missing"))?;
     let host_context = bridge.public()?.0.context as usize;
     let completion = bridge
         .call_record(
@@ -2696,6 +2710,7 @@ async fn load_history_state(
                     callback(
                         host_context as *mut c_void,
                         operation_id,
+                        input_view(&query),
                         sdk_context,
                         complete,
                     )
@@ -2703,112 +2718,164 @@ async fn load_history_state(
             },
         )
         .await?;
-    require_host_ok(completion.code, "host history load failed")?;
+    require_host_ok(completion.code, "host history query failed")?;
     if !completion.present {
-        if completion.revision != 0 {
-            return Err(ContractError::new(
-                ContractErrorCode::Integrity,
-                "absent history record has a nonzero revision",
-            ));
-        }
-        return TransactionHistoryState::try_new(0, Vec::new());
+        return Err(ContractError::new(
+            ContractErrorCode::Integrity,
+            "successful history query returned no payload",
+        ));
     }
-    let state = decode_transaction_history_state(&completion.record.ok_or_else(|| {
+    let batch = decode_transaction_history_host_batch(&completion.record.ok_or_else(|| {
         ContractError::new(
             ContractErrorCode::Integrity,
-            "present history record has no bytes",
+            "successful history query returned no bytes",
         )
     })?)
     .map_err(codec_contract_error)?;
-    if state.revision() != completion.revision {
+    if batch.index().revision() != completion.revision {
         return Err(ContractError::new(
             ContractErrorCode::Integrity,
-            "history revision disagrees with its typed payload",
+            "history query revision disagrees with its payload",
         ));
     }
-    Ok(state)
+    Ok(batch)
 }
 
 impl TransactionHistoryStore for HostTransactionHistoryStore {
-    fn load(&self) -> ContractFuture<'_, TransactionHistoryState> {
+    fn load_index(&self) -> ContractFuture<'_, TransactionHistoryIndex> {
         let bridge = Arc::clone(&self.bridge);
-        Box::pin(async move { load_history_state(&bridge).await })
+        Box::pin(async move {
+            let batch = query_history(&bridge, encode_transaction_history_index_query()).await?;
+            if !batch.records().is_empty() || batch.has_more() {
+                return Err(ContractError::new(
+                    ContractErrorCode::Integrity,
+                    "history index query returned records",
+                ));
+            }
+            Ok(batch.index())
+        })
+    }
+
+    fn load_record(
+        &self,
+        expected_revision: u64,
+        execution_id: TransactionExecutionId,
+    ) -> ContractFuture<'_, TransactionHistoryRecordSnapshot> {
+        let bridge = Arc::clone(&self.bridge);
+        Box::pin(async move {
+            let batch = query_history(
+                &bridge,
+                encode_transaction_history_record_query(expected_revision, execution_id),
+            )
+            .await?;
+            if batch.index().revision() != expected_revision
+                || batch.records().len() > 1
+                || batch.has_more()
+                || batch
+                    .records()
+                    .first()
+                    .is_some_and(|record| record.execution_id() != execution_id)
+            {
+                return Err(ContractError::new(
+                    ContractErrorCode::Integrity,
+                    "history record query returned an invalid result",
+                ));
+            }
+            Ok(TransactionHistoryRecordSnapshot::new(
+                batch.index(),
+                batch.records().first().cloned(),
+            ))
+        })
+    }
+
+    fn load_page(
+        &self,
+        expected_revision: u64,
+        kind: TransactionHistoryQueryKind,
+        before: Option<TransactionHistoryCursor>,
+        limit: usize,
+    ) -> ContractFuture<'_, TransactionHistoryRecordBatch> {
+        let bridge = Arc::clone(&self.bridge);
+        Box::pin(async move {
+            let query =
+                encode_transaction_history_page_query(expected_revision, kind, before, limit)
+                    .map_err(codec_contract_error)?;
+            let batch = query_history(&bridge, query).await?;
+            if batch.index().revision() != expected_revision || batch.records().len() > limit {
+                return Err(ContractError::new(
+                    ContractErrorCode::Integrity,
+                    "history page query returned an invalid revision or count",
+                ));
+            }
+            TransactionHistoryRecordBatch::try_new(
+                batch.index(),
+                batch.records().to_vec(),
+                batch.has_more(),
+            )
+        })
     }
 
     fn compare_and_swap(
         &self,
-        expected_revision: u64,
-        next: TransactionHistoryState,
-    ) -> ContractFuture<'_, TransactionHistoryState> {
+        mutation: TransactionHistoryMutation,
+    ) -> ContractFuture<'_, TransactionHistoryIndex> {
         let bridge = Arc::clone(&self.bridge);
         Box::pin(async move {
-            if next.revision()
-                != expected_revision.checked_add(1).ok_or_else(|| {
-                    ContractError::new(
-                        ContractErrorCode::InvalidState,
-                        "history revision is exhausted",
-                    )
-                })?
-            {
+            let encoded =
+                encode_transaction_history_mutation(&mutation).map_err(codec_contract_error)?;
+            let callback = bridge
+                .public()?
+                .0
+                .transaction_history_mutate
+                .ok_or_else(|| {
+                    ContractError::new(ContractErrorCode::Internal, "history mutation missing")
+                })?;
+            let host_context = bridge.public()?.0.context as usize;
+            let completion = bridge
+                .call_record(
+                    CitizenSdkHostRecordDomain::TransactionHistory,
+                    |operation_id, sdk_context, complete| {
+                        // SAFETY: copied callback/context contract. Host borrows
+                        // mutation bytes only until this invocation returns.
+                        unsafe {
+                            callback(
+                                host_context as *mut c_void,
+                                operation_id,
+                                mutation.expected_revision(),
+                                input_view(&encoded),
+                                sdk_context,
+                                complete,
+                            )
+                        }
+                    },
+                )
+                .await?;
+            require_host_ok(completion.code, "host history mutation failed")?;
+            if !completion.present {
                 return Err(ContractError::new(
-                    ContractErrorCode::InvalidArgument,
-                    "history candidate revision is not expected + 1",
+                    ContractErrorCode::Integrity,
+                    "successful history mutation returned no payload",
                 ));
             }
-            let encoded = encode_transaction_history_state(&next).map_err(codec_contract_error)?;
-            let attempt = async {
-                let callback = bridge
-                    .public()?
-                    .0
-                    .transaction_history_compare_and_swap
-                    .ok_or_else(|| {
-                        ContractError::new(ContractErrorCode::Internal, "history CAS missing")
-                    })?;
-                let host_context = bridge.public()?.0.context as usize;
-                let completion = bridge
-                    .call_record(
-                        CitizenSdkHostRecordDomain::TransactionHistory,
-                        |operation_id, sdk_context, complete| {
-                            // SAFETY: copied callback/context contract.
-                            unsafe {
-                                callback(
-                                    host_context as *mut c_void,
-                                    operation_id,
-                                    expected_revision,
-                                    input_view(&encoded),
-                                    sdk_context,
-                                    complete,
-                                )
-                            }
-                        },
-                    )
-                    .await?;
-                require_host_ok(completion.code, "host history CAS failed")?;
-                let actual =
-                    decode_transaction_history_state(&completion.record.ok_or_else(|| {
-                        ContractError::new(
-                            ContractErrorCode::Integrity,
-                            "successful history CAS returned no record",
-                        )
-                    })?)
-                    .map_err(codec_contract_error)?;
-                if !completion.present || completion.revision != actual.revision() || actual != next
-                {
-                    return Err(ContractError::new(
+            let batch =
+                decode_transaction_history_host_batch(&completion.record.ok_or_else(|| {
+                    ContractError::new(
                         ContractErrorCode::Integrity,
-                        "host history CAS did not return the exact candidate",
-                    ));
-                }
-                Ok(actual)
+                        "successful history mutation returned no bytes",
+                    )
+                })?)
+                .map_err(codec_contract_error)?;
+            if completion.revision != batch.index().revision()
+                || batch.index() != mutation.next_index()
+                || !batch.records().is_empty()
+                || batch.has_more()
+            {
+                return Err(ContractError::new(
+                    ContractErrorCode::Integrity,
+                    "host history mutation returned an invalid index",
+                ));
             }
-            .await;
-            match attempt {
-                Ok(actual) => Ok(actual),
-                Err(original) => match load_history_state(&bridge).await {
-                    Ok(actual) if actual == next => Ok(actual),
-                    _ => Err(original),
-                },
-            }
+            Ok(batch.index())
         })
     }
 }
@@ -3585,19 +3652,32 @@ mod production_tests {
         CitizenSdkErrorCode::Ok.as_i32()
     }
 
-    unsafe extern "C" fn absent_history_load(
+    unsafe extern "C" fn empty_history_query(
         _host_context: *mut c_void,
         operation_id: u64,
+        query: CitizenSdkBytesView,
         sdk_context: *mut c_void,
         completion: CitizenSdkHostRecordCompletionV1,
     ) -> i32 {
-        // SAFETY: this fake completes synchronously with canonical borrowed data.
+        let query = unsafe { borrowed_bytes(query) };
+        assert_eq!(&query[..4], b"THQ1");
+        let bytes = crate::host_codec::encode_transaction_history_host_batch(
+            TransactionHistoryIndex::empty(),
+            &[],
+            false,
+        )
+        .expect("empty history response");
+        let result = CitizenSdkHostRecordResultV1 {
+            host_operation_id: operation_id,
+            domain: CitizenSdkHostRecordDomain::TransactionHistory as u32,
+            present: 1,
+            record: input_view(&bytes),
+            ..CitizenSdkHostRecordResultV1::default()
+        };
         unsafe {
-            complete_absent_record(
-                operation_id,
-                CitizenSdkHostRecordDomain::TransactionHistory,
+            completion.unwrap_or_else(|| panic!("history completion is missing"))(
                 sdk_context,
-                completion,
+                &result,
             )
         };
         CitizenSdkErrorCode::Ok.as_i32()
@@ -3627,7 +3707,7 @@ mod production_tests {
         let public = CitizenSdkHostPublicStoreV1 {
             chain_database_load: Some(absent_chain_load),
             runtime_cache_load: Some(absent_runtime_load),
-            transaction_history_load: Some(absent_history_load),
+            transaction_history_query: Some(empty_history_query),
             ..CitizenSdkHostPublicStoreV1::default()
         };
         let secure = CitizenSdkHostSecureStoreV1 {
@@ -3674,11 +3754,10 @@ mod production_tests {
             );
             assert_eq!(
                 history
-                    .load()
+                    .load_index()
                     .await
                     .unwrap_or_else(|error| panic!("history load failed: {error}")),
-                TransactionHistoryState::try_new(0, Vec::new())
-                    .unwrap_or_else(|error| panic!("empty history failed: {error}"))
+                TransactionHistoryIndex::empty()
             );
             assert_eq!(
                 encrypted

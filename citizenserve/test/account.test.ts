@@ -1,12 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { Miniflare } from 'miniflare';
+import type { Miniflare } from 'miniflare';
 
 import { purgeIdentity } from '../src/account/purge';
 import { createUserFromFinalizedRegistration } from '../src/account/user_repository';
 import { routeRequest } from '../src/routes';
 import type { Env } from '../src/types';
+import { createTestMiniflare } from './miniflare';
 
 const ACCOUNT_ID = `0x${'11'.repeat(32)}`;
 const BLOCK_HASH = `0x${'aa'.repeat(32)}`;
@@ -21,13 +22,10 @@ let env: Env;
 
 describe('finalized CID 注销清理', () => {
   beforeEach(async () => {
-    miniflare = new Miniflare({
-      modules: true,
-      script: 'export default { fetch() { return new Response("test"); } }',
-      compatibilityDate: '2026-07-29',
-      d1Databases: ['DB'],
-      r2Buckets: ['SQUARE_PRIVATE', 'SQUARE_PUBLIC_MEDIA'],
-      kvNamespaces: ['SQUARE_CACHE'],
+    miniflare = createTestMiniflare({
+      d1Bindings: ['DB'],
+      r2Bindings: ['SQUARE_PRIVATE', 'SQUARE_PUBLIC_MEDIA'],
+      kvBindings: ['SQUARE_CACHE'],
     });
     env = await miniflare.getBindings<Env>();
     await applySchema(env);

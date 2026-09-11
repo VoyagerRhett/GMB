@@ -89,7 +89,17 @@ Rust Core 没有公开私钥返回接口；内部原生显示只提供本次查�
 Rust 在平台资源创建前统一校验 modules；wallet/signing 各有独立门禁，不因共享 secure
 store/Vault 而开放钱包 UI。chain 未选择时不构造 provider、读取链资产或创建链数据库；
 history 未选择时不初始化历史服务。SDK 执行的 prepared transaction 保持先持久化 pending 再广播。
-既有 ABI 结构与数值保持；统一钱包、通用冷热签名、安全链读取、通用交易准备与执行加入后，当前闭集为 117 个。
+既有 ABI 结构与数值保持；增加唯一只读失败阶段 getter 后，当前闭集为 117 个。
+
+公开错误只含稳定 code、八项通用 failure stage、固定公开 method、可选 session/request
+关联和经过控制的诊断文本。严禁写入助记词、password、payload、callData、签名、extrinsic、
+metadata/storage 内容、账户私有材料或本机路径。阶段不是日志系统、进度事件、重试承诺或
+交易终态；未知阶段必须失败关闭，平台不得以自由文本补充。
+
+第 1.9 步新增的 external signer 是测试消费者，不持有 SDK 内部 handle、signer message 或外部
+产品代码，只通过公开 `CitizenSigning.signQrRequest` 与 `CitizenQr.parse` 验证 request/response、
+account、hash、expiry 和 64 字节签名绑定。CitizenApp 与第三方业务夹具只在测试目录编码业务
+字节；Release 门禁拒绝它们进入生产源码、公开 ABI、平台状态或持久化模型。
 
 ### 安全链读取边界
 
@@ -122,6 +132,23 @@ expiry、重放或签名会销毁该 execution，绝不回退热签或接受裸�
 才是 pool rejection。取消会唤醒 provider wait 并排空已进入的 CAS，不删除真实 Pending/InBlock。
 重启扫描先查 finalized 证据；仍未终态时只在当前 chain/runtime 与完整签名字节全部一致后，每个
 monitor generation 重发一次原 signed extrinsic，不重新解锁、签名、迁移或兼容旧数据。
+
+历史 admission 同时验证 4,096 条和 31 MiB durable weight。最终 signed-extrinsic 长度由冻结
+template 在签名前确定，所以热钱包强认证/签名和冷钱包 `QR_V1` 交互之前先做无写入预检；pending
+CAS 再按真实候选复检。只允许驱逐最旧 retention-terminal，Pending/InBlock 永不驱逐。并发变化
+导致最终复检失败时仍不广播、不留下部分写入；预检失败时 signer、Vault 与历史 CAS 均不进入。
+
+history Host ABI 使用固定 58 字节 `THQ1` 查询和 `THM1` mutation。mutation 的 expected revision、
+终态删除、opaque upsert 与 `record_count/durable_weight/open_count/open_weight` 在一个 SQLite
+IMMEDIATE 事务中提交；Host 只解析通用描述字段，Core 再核对描述与防篡改记录。四端新库固定
+schema v2 与 `auto_vacuum=INCREMENTAL`；旧 v1/漂移 schema 失败关闭，不读取、不转换。终态删除后
+只有 freelist 超过 16 页且超过总页数 25% 才单次回收最多 128 页并监督 WAL checkpoint；绝不运行
+无界 full `VACUUM`，Pending/InBlock 也不能作为删除目标。
+
+runtime metadata 的 64 MiB Core 上限与 8 MiB 持久记录容量是不同职责。超过持久容量的合法
+metadata 只进入 64 项进程内准确块 cache，不能因性能 cache 写不下而阻断链读取；四个平台持久
+cache 每次写入与 FIFO 裁剪在同一 SQLite 事务内完成，提交后最多 64 条。该策略不扫描、迁移或
+解释旧数据，也不把宿主 cache 当成 finalized 执行证据。
 
 `exportState`/`importState` 只运输 CitizenSDK 当前 smoldot 数据库与 finalized 锚。导入只允许在
 启动前，Core 回执必须与输入锚完全一致；它不是 CitizenApp/CitizenWallet 数据迁移格式，不解析、

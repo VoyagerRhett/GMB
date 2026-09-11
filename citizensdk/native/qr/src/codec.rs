@@ -21,7 +21,6 @@ pub enum QrErrorCode {
     InvalidFormat,
     InvalidField,
     UnsupportedKind,
-    UnsupportedAction,
     Expired,
     MismatchedRequest,
     MismatchedAccount,
@@ -80,17 +79,6 @@ pub struct SignResponse {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UserTransfer {
-    pub request_id: String,
-    pub expires_at: u64,
-    pub account_id: AccountId32,
-    pub amount: String,
-    pub symbol: String,
-    pub memo: String,
-    pub bank_cid_number: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccountIdCode {
     pub account_id: AccountId32,
 }
@@ -99,7 +87,6 @@ pub struct AccountIdCode {
 pub enum QrCode {
     SignRequest(SignRequest),
     SignResponse(SignResponse),
-    UserTransfer(UserTransfer),
     AccountId(AccountIdCode),
 }
 
@@ -133,10 +120,10 @@ pub(crate) fn parse_at(raw: &str, now_epoch_seconds: u64) -> QrResult<QrCode> {
         ));
     }
     let kind = unsigned(envelope, "k")?;
+    // QR_V1 只保留通用签名请求、签名响应和账户公钥。已删除的业务 kind 数值永久留空，不得复用。
     match kind {
         1 => parse_sign_request(envelope, now_epoch_seconds),
         2 => parse_sign_response(envelope, now_epoch_seconds),
-        4 => parse_user_transfer(envelope, now_epoch_seconds),
         5 => parse_account_id(envelope),
         _ => Err(QrError::new(
             QrErrorCode::UnsupportedKind,
@@ -160,12 +147,6 @@ impl QrCode {
                 "expires_at": v.expires_at,
                 "signer_account_id": hex(v.signer_public_key.as_bytes()),
                 "signature": hex(v.signature.as_bytes()),
-            }),
-            Self::UserTransfer(v) => serde_json::json!({
-                "kind": 4, "canonical_text": v.encode()?, "request_id": v.request_id,
-                "expires_at": v.expires_at, "account_id": hex(v.account_id.as_bytes()),
-                "amount": v.amount, "symbol": v.symbol, "memo": v.memo,
-                "bank_cid_number": v.bank_cid_number,
             }),
             Self::AccountId(v) => serde_json::json!({
                 "kind": 5, "canonical_text": v.encode()?, "account_id": hex(v.account_id.as_bytes()),
@@ -240,27 +221,6 @@ impl SignResponse {
     }
 }
 
-impl UserTransfer {
-    pub fn encode(&self) -> QrResult<String> {
-        validate_request_id(&self.request_id)?;
-        validate_expiry_value(self.expires_at)?;
-        validate_transfer_fields(self)?;
-        checked_json(serde_json::json!({
-            "p": QR_V1,
-            "k": 4,
-            "i": self.request_id,
-            "e": self.expires_at,
-            "b": {
-                "n": account_id_text(self.account_id),
-                "v": self.amount,
-                "t": self.symbol,
-                "m": self.memo,
-                "l": self.bank_cid_number,
-            }
-        }))
-    }
-}
-
 impl AccountIdCode {
     pub fn encode(&self) -> QrResult<String> {
         checked_json(serde_json::json!({
@@ -330,27 +290,6 @@ fn parse_sign_response(envelope: &Map<String, Value>, now: u64) -> QrResult<QrCo
             "signature 长度或编码无效",
         )?),
     }))
-}
-
-fn parse_user_transfer(envelope: &Map<String, Value>, now: u64) -> QrResult<QrCode> {
-    exact_keys(envelope, &["p", "k", "i", "e", "b"])?;
-    let request_id = string(envelope, "i")?.to_owned();
-    validate_request_id(&request_id)?;
-    let expires_at = unsigned(envelope, "e")?;
-    validate_expiry(expires_at, now)?;
-    let body = object(field(envelope, "b")?, "收款码 body 必须是对象")?;
-    exact_keys(body, &["n", "v", "t", "m", "l"])?;
-    let transfer = UserTransfer {
-        request_id,
-        expires_at,
-        account_id: AccountId32::from_bytes(decode_account_id(string(body, "n")?)?),
-        amount: bounded_text(body, "v", 64, false)?,
-        symbol: bounded_text(body, "t", 16, false)?,
-        memo: bounded_text(body, "m", 256, true)?,
-        bank_cid_number: bounded_text(body, "l", 32, false)?,
-    };
-    validate_transfer_fields(&transfer)?;
-    Ok(QrCode::UserTransfer(transfer))
 }
 
 fn parse_account_id(envelope: &Map<String, Value>) -> QrResult<QrCode> {
@@ -442,24 +381,6 @@ impl<'de> Visitor<'de> for StrictValueVisitor {
         }
         Ok(StrictValue(Value::Object(values)))
     }
-}
-
-fn validate_transfer_fields(transfer: &UserTransfer) -> QrResult<()> {
-    if transfer.amount.is_empty()
-        || transfer.amount.len() > 64
-        || transfer.symbol.is_empty()
-        || transfer.symbol.len() > 16
-        || transfer.memo.len() > 256
-        || transfer.bank_cid_number.is_empty()
-        || transfer.bank_cid_number.len() > 32
-        || !transfer
-            .bank_cid_number
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    {
-        return Err(invalid_field("收款码字段长度或清算行 CID 无效"));
-    }
-    Ok(())
 }
 
 fn account_id_text(account_id: AccountId32) -> String {
@@ -560,19 +481,6 @@ fn decode_account_id(value: &str) -> QrResult<[u8; 32]> {
     Ok(output)
 }
 
-fn bounded_text(
-    object: &Map<String, Value>,
-    key: &str,
-    max_bytes: usize,
-    allow_empty: bool,
-) -> QrResult<String> {
-    let value = string(object, key)?;
-    if value.len() > max_bytes || (!allow_empty && value.is_empty()) {
-        return Err(invalid_field("二维码文本字段长度无效"));
-    }
-    Ok(value.to_owned())
-}
-
 fn object<'a>(value: &'a Value, message: &'static str) -> QrResult<&'a Map<String, Value>> {
     value
         .as_object()
@@ -639,6 +547,15 @@ mod tests {
     }
 
     #[test]
+    fn retired_business_kind_is_not_a_transport_document() {
+        let text = r#"{"p":"QR_V1","k":4,"i":"0123456789abcdef","e":100,"b":{}}"#;
+        assert_eq!(
+            parse(text, 99).unwrap_err().code(),
+            QrErrorCode::UnsupportedKind
+        );
+    }
+
+    #[test]
     fn rejects_duplicate_keys_without_imposing_payload_action_semantics() {
         let encoded = request().encode().unwrap();
         // serde_json 的对象键序不是协议合同的一部分；直接在根对象首位插入
@@ -678,20 +595,7 @@ mod tests {
             signer_public_key: request.signer_public_key,
             signature: Sr25519Signature::from_bytes([0; 64]),
         };
-        let transfer = UserTransfer {
-            request_id: request.request_id.clone(),
-            expires_at: request.expires_at,
-            account_id: AccountId32::from_bytes([7; 32]),
-            amount: "1".into(),
-            symbol: "GMB".into(),
-            memo: String::new(),
-            bank_cid_number: "1".into(),
-        };
-        for text in [
-            request.encode().unwrap(),
-            response.encode().unwrap(),
-            transfer.encode().unwrap(),
-        ] {
+        for text in [request.encode().unwrap(), response.encode().unwrap()] {
             assert!(parse(&text, 99).is_ok());
             let invalid = text.replace(&i64::MAX.to_string(), &(i64::MAX as u64 + 1).to_string());
             assert_eq!(
@@ -708,12 +612,6 @@ mod tests {
         response.expires_at += 1;
         assert_eq!(
             response.encode().unwrap_err().code(),
-            QrErrorCode::InvalidField
-        );
-        let mut transfer = transfer;
-        transfer.expires_at += 1;
-        assert_eq!(
-            transfer.encode().unwrap_err().code(),
             QrErrorCode::InvalidField
         );
     }

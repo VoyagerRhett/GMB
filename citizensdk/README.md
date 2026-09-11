@@ -12,6 +12,13 @@ Dart 分别使用 `sdk.wallet`、`sdk.signing`、`sdk.chain`、`sdk.transactions
 同一宿主中已由 SDK 安全建立的账户归属资料与设备金库；首次建立账户仍通过钱包安全流程，
 不增加私钥、种子、child secret 或任意秘密导出接口。
 
+第一部分冻结后的交易恢复仓储不再是 whole-history BLOB。Rust Core 通过固定 `THQ1` 查询读取
+revision 汇总、单条 execution 或最多 100 条稳定游标页，通过 `THM1` 在一次 revision CAS 中提交
+终态删除、逐条 opaque execution upsert 与新汇总。Android、Apple、Linux、Windows 的
+`public-state-v1.sqlite3` 使用 schema v2 的 `transaction_history_meta` 和
+`transaction_history_records`；只索引 executionId、时间、终态标志和资源 weight。旧 schema
+直接拒绝，不迁移、不兼容、不双读。数据库属于平台 Host，不是 Rust Core 内嵌数据库。
+
 `sdk.chain.getGenesisHash()` 读取 Core 固定链身份，不要求启动或联网；
 `sdk.chain.getAccountBalances(accountIds)` 复用同一 finalized 批量读取，保留输入顺序和重复项。
 两项查询均要求选择 chain 模块，不依赖钱包或签名。
@@ -29,6 +36,8 @@ nonce 选项、待签字节、raw extrinsic 或原生句柄。本步骤不签名
 
 `sdk.qr` 是独立的区块链二维码模块：Rust 唯一实现 `QR_V1` 解析、编码、请求会话、
 过期/取消/单次消费与响应验签；图像识别和生成五端唯一使用 ZXing-C++ 3.1.1。
+公开 transport 文档只包含通用签名请求、通用签名响应和账户公钥；收款、金额、币种、备注、
+清算机构及其它产品业务二维码由接入 App 自己定义，SDK 不登记或解释这些业务字段。
 `sdk.qr.scan()` 直接打开 SDK 扫描界面，返回 Core 解析后的公开字段。
 QR 与 signing 是两个模块：QR-only 不创建钱包、设备金库、链数据库或轻节点。
 链调用扫码签名使用 `qr + signing + chain`，调用 `sdk.signing.signQrRequest(text)` 即进入
@@ -101,10 +110,10 @@ Rust 路径已经建立 `native/contracts`、`native/engine`、真实
 `native/smoldot/provider` 和产品级唯一 `native/ffi`。根 `include/citizensdk.h` 只公开
 `citizensdk_*`。ABI v1 既有 73 个符号、结构布局、数值与默认构造行为不变，
 新增模块验证、显式模块构造和无实例验签三个入口，再补充创世哈希、批量余额及两个批量结果读取入口，
-QR 公开合同统一为 9 个协议、审阅、签名及结果入口；统一钱包、通用冷热签名与安全链读取加入后
+QR 公开合同统一为 8 个协议、审阅、签名及结果入口；统一钱包、通用冷热签名与安全链读取加入后
 第 1.5 步加入通用交易准备三项入口，第 1.6 步再加入准备执行、冷签响应消费、execution 取消与
 安全执行结果读取四项入口；第 1.7 步以四个通用历史入口替换八个业务转账/历史入口，当前总计
-117 个。五端 Flutter 方法闭集同步为 63 个。
+第 1.8 步删除一个业务二维码入口、第 1.10.3 步增加一个只读失败阶段 getter 后，当前总计 117 个。五端 Flutter 方法闭集仍为 62 个。
 原待签字节获取和外部签名拼装入口已删除，不保留兼容接口。图像层另以 3 个稳定 C 函数包装 ZXing-C++。
 `citizensdk_create_with_modules` 是官方绑定的模块构造入口；既有构造也进入同一私有装配逻辑，
 不建立第二套状态机。链、钱包管理、签名、交易和历史按选择提供，宿主仅补齐所选功能必需的
@@ -112,6 +121,12 @@ QR 公开合同统一为 9 个协议、审阅、签名及结果入口；统一�
 已收编的 smoldot 轻节点；任意 JSON-RPC 方法只存在于 crate 私有固定 allowlist，不能由
 Dart、Swift、Kotlin 或 C/C++ 传入。启用链的实例创建时 Rust 会再次核对随包资产摘要、正式链身份、
 完整 #0 header、genesis 和 state root，随后才构造轻节点。
+
+第 1.9 步的通用性验收位于 `test/consumers/`：零业务 reference、CitizenApp 形状和第三方旅行
+形状三类消费者，以及不依赖任何外部钱包产品实现的通用 `QR_V1` signer，全部只导入根公开库。
+两个业务夹具各自编码完全不同的 storage key、SCALE 业务值和 opaque RuntimeCall；SDK 生产代码、
+117 个 Core ABI 与 62 个 Flutter 方法不随业务变化。该目录只进入测试来源闭集，不进入 Hosted
+运行包。
 
 Engine 固定 `VerifiedChainClient`、`ChainSigner`、`SecretVault`、五类状态仓储、十项能力状态、
 准确区块 runtime context、启动前状态导入门禁和同一 extrinsic index 的
@@ -127,6 +142,12 @@ Core 在任何 provider 广播前 CAS 持久化完整授权事实，只有准确
 `System.Events` 才形成 finalized success/failed；重启仅重发同一 signed extrinsic 原字节，绝不迁移
 旧 App 数据、重新签名或解释业务 RuntimeCall。
 
+通用交易历史同时受 4,096 条和 31 MiB durable weight 约束；weight 只计算 opaque callData、
+signed extrinsic 与通用固定状态开销。冻结的 extrinsic template 在签名前已经确定最终长度，
+因此热钱包解锁/签名或冷钱包 `QR_V1` 交互前先只读预检，持久化时再以真实候选复检。空间不足
+只驱逐最旧 retention-terminal 记录，Pending/InBlock 永不驱逐；仍无法容纳时返回 `conflict`，
+不会广播或写入部分状态。
+
 状态导入触及 Provider 后若失败，同一 Engine/Provider 组合保持不可复用的 `StartFailed`；
 导入前还会读取 revisioned `ChainDatabaseStore` 的 finalized 锚，拒绝高度回退和同高度哈希
 冲突，并以 CAS/写后回读保存 exact 状态。产品 ABI 当前要求绑定销毁该 handle、创建新实例并
@@ -141,6 +162,12 @@ checkpoint API，宿主必须先成功 stop；旧 `citizensdk_create` 的显式 
 语义保持不变。host 构造的 start/stop/import 还是独占生命周期请求：只有此前异步请求已全部
 完成才会受理；受理后，新请求、回调/订阅控制和 destroy 在完成前返回 `BUSY`，因此 checkpoint、
 provider stop 与 Engine 状态提交之间不能插入另一项链或钱包工作。
+
+runtime metadata 的 Core 功能上限保持 64 MiB。宿主 `runtime_cache` 是可重建性能层：四个平台
+的完整单记录上限为 8 MiB，因此扣除 host envelope 与 typed 字段后，只持久化不超过
+`8 MiB - 111 bytes` 的 metadata；更大的合法 metadata 正常返回并保留在 64 项进程内准确块
+cache 中，不会因为无法持久化而让链读取失败。持久 cache 在每次写入的同一 SQLite 事务内按
+写入 FIFO 保留最新 64 项；没有 schema 变化、旧数据扫描或迁移。
 
 Rust 钱包公开合同同步固定现有热钱包事实：wallet index 为 `0`，账户 index `0` 必须等于
 `masterAccountId`，账户范围为 `//0..//1989`，SS58 prefix 为 `2027`。创建/导入 provisioning
@@ -461,7 +488,7 @@ Linux 环境才完成当前开发步骤。根包源码注册不代表已正式�
 实际编译/运行；第 8.4 步登记默认 Flutter 入口、DLL 候选投影和真实公开消费者，尚未正式分发，
 详见 [Windows 平台合同](docs/WINDOWS_PLATFORM.md)。
 
-Windows Flutter 只使用统一双通道和 63 方法，连接同版已安装 Host/Core/QR 图像层。宿主需一次声明
+Windows Flutter 只使用统一双通道和 62 方法，连接同版已安装 Host/Core/QR 图像层。宿主需一次声明
 `CITIZENSDK_APPLICATION_ID`，原样作为稳定应用数据命名空间，不是业务账户或 Windows
 身份认证；无默认值，不从文件名或展示名推导。公开类型仍只有 `CitizenSdk`，Windows
 使用默认平台和官方自动注册；缺少同版插件立即失败，不注入替代实现。宿主仍需这一项

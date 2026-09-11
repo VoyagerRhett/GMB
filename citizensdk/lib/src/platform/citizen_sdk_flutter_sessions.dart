@@ -252,9 +252,12 @@ final class CitizenSdkFlutterSession {
       raw = await _platform.invoke(method, arguments);
     } on CitizenSdkException catch (error) {
       if (error.sessionId != sessionId ||
-          error.requestSequence != requestSequence) {
+          error.requestSequence != requestSequence ||
+          error.method != method) {
         throw CitizenSdkException(
           code: CitizenSdkErrorCode.decode,
+          stage: CitizenSdkFailureStage.verification,
+          method: method,
           message: '原生错误未精确关联当前 session/request',
           sessionId: sessionId,
           requestSequence: requestSequence,

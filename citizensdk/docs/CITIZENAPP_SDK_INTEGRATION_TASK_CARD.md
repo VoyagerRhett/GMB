@@ -812,7 +812,7 @@ Core 状态机、签名与提交不变量：
 
 ### 1.7 通用交易观察与历史
 
-状态：实现完成，最终门禁执行中（2026-09-11）。
+状态：已完成（2026-09-11）。
 
 设计结论：1.7 只公开“由当前 CitizenSDK 实例实际提交过的通用交易授权及其可验证链状态”，不尝试从全链事件
 推断某个账户参与了哪些业务。任意入账、投票影响、订单变化、广场内容、治理结果等都需要业务语义，继续由各 App
@@ -923,6 +923,26 @@ Core 状态、同步与保留规则：
 - Host wire 只接受新唯一 schema；旧业务 schema 明确 Decode 失败。C ABI null/布局/枚举/presence/短缓冲/一次释放、
   C11/C++17、五端 63 方法与 tuple、117 符号、发布反向闭集和源码零残留全部通过。
 
+验证记录（2026-09-11）：
+
+- `scripts/test.sh cargo --workspace --all-targets --locked` 全量通过；期间由边界测试发现并修正归并后的
+  `twox128("System") ++ twox128("Events")` 固定存储键，finalized success/failure 重新由准确事件证据证明，未降低
+  断言或跳过失败用例。
+- `scripts/test.sh flutter --timeout=2m` 在隔离工程和外部宿主 smoldot 库下 130 项全部通过；Dart 公开方法闭集为
+  63，通用 history page/record 的非法 tuple、分页和防御复制合同通过。
+- `scripts/build-native.sh abi-host` 完成最新 Release Core 构建，117 个产品 ABI 符号精确闭集以及 C11/C++17
+  消费者编译/链接合同通过；生成物只写入 TATA 外部 cache/target。
+- `scripts/build-native.sh apple` 和 `apple-tests` 通过：iOS device、iOS Simulator、macOS 三个 Apple 变体编译；
+  Core XCTest 85 项通过（其中 5 项真实窗口测试按既有环境合同跳过），Flutter XCTest 33 项全部通过。
+- `scripts/build-native.sh android` 使用中央 Gradle 9.1.0、CMake 3.31.6、Android Studio JDK 和 NDK
+  28.2.13676358 完成 ARM64 Core/JNI/AAR Release 编译与产物核验。
+- `scripts/test.sh release` 的 101 项全部通过；产品源码、测试、文档、五端绑定、117/63 精确闭集、smoldot
+  离线来源、候选归档和 Hosted 消费合同均已纳入同一发布反向门禁。
+- CitizenApp 新目录的 `flutter analyze --no-pub` 通过，交易编码、历史扫描/存储/展示与钱包相关 86 项定向测试
+  全部通过。仓库级 `scripts/citizenapp-test.sh` 在执行测试前被缺失的 `/Users/rhett/GMB/.github/dependencies.json`
+  阻塞；这是现有总入口的环境前置文件缺失，不是本步骤测试失败，也没有通过修改脚本或补造版本清单绕过。
+- `native/smoldot/pow/**` 三个既有定制文件保持基线 SHA-256；CitizenWallet 源码、依赖和发布物均未修改。
+
 CitizenApp 业务实现归位记录：
 
 - `lib/transaction/history/data/local_tx_store.dart`：App 自己的 Isar 交易展示实体、目的账户、金额、备注、方向和
@@ -949,7 +969,7 @@ signed extrinsic；CitizenApp 只接收删除前复制出的 App 业务实现和
 
 ### 1.8 现存业务耦合清理与通用性反向门禁
 
-状态：完整技术方案待确认；未开始实现。
+状态：已完成（2026-09-11）。
 
 目标与边界：
 
@@ -1035,43 +1055,853 @@ signed extrinsic；CitizenApp 只接收删除前复制出的 App 业务实现和
 
 完成门禁：SDK 只知道 QR_V1 通用传输事实和密码学绑定，不知道任何 App 的业务 action 或展示字段；冷热交易共用
 同一通用 prepared execution；无迁移、兼容、wrapper、alias 或 fallback；CitizenWallet 与 `native/smoldot/pow/**`
-零改动；SDK 构建、测试和发布不读取 CitizenApp/CitizenWallet 源码。得到明确确认后一次完整执行 1.8，完成后更新
-文档、注释、测试、清理残留并自动输出 1.9 完整技术方案。
+零改动；SDK 构建、测试和发布不读取 CitizenApp/CitizenWallet 源码。
+
+完成记录：
+
+- `native/qr` 已删除 `UserTransfer`、历史 kind `4`、bank CID、amount/symbol/memo 和专用业务编解码；kind `4`
+  永久保留为空洞且明确拒绝，继续保留的只有唯一 `QR_V1` 下的通用签名 request/response、账户公钥和 QR 图片能力。
+- C ABI 已删除 `citizensdk_qr_encode_user_transfer`；Dart、Android、Darwin、Linux、Windows 已同步删除业务 DTO、
+  方法、tuple、dispatch、JNI 和审阅投影。当前精确闭集为 116 个 Core 公开 C 符号、4 个内部测试符号、3 个
+  Apple QR 图片符号、Linux/Windows 各 17 个 Host 符号和 62 个 Flutter 方法。
+- Release 门禁已加入生产源码业务 QR schema 与其它 QR 协议版本反向扫描，所有受固定来源合同约束的改动文件
+  已更新 SHA-256；历史文档中的旧数量只作为当时步骤记录保留，不作为当前合同。
+- Rust workspace/all-targets 全部通过；Flutter 130 项、Release 102 项通过；`abi-host` 精确验证 116 个产品符号及
+  C11/C++17 消费者；Apple Core 85 项与 Flutter 33 项通过（5 项真实窗口测试按既有环境合同跳过）；Android
+  ARM64 Core/JNI/AAR 真实构建通过。
+- 所有构建输出均位于仓库外部缓存；本步骤没有修改 CitizenApp、CitizenWallet 或 `native/smoldot/pow/**`，也没有
+  引入迁移、兼容、wrapper、alias、fallback 或第二套 QR 协议。
 
 ### 1.9 公共 API、五端包装与多消费者完整验收
 
-状态：未开始。
+状态：实现与本地可执行验收已完成（2026-09-11）；Apple Flutter adapter/Apple tests 因不得操作用户的 Flutter
+下载安装而保留待验收，同源远程 Linux/Windows/移动真机验收待单独授权。
 
-- 统一 Dart、C、Kotlin、Swift、C++ 的公开命名、生命周期、异步完成和错误合同，并验证 Android、iOS、
-  macOS、Linux、Windows 的源码投影、真实消费者和发布闭包。
-- 至少建立三类只使用发布包的 consumer：无业务 reference app、CitizenApp adapter fixture、与 CitizenApp
-  payload 完全不同的第三方/途遇风格 fixture；任何一个都不得要求修改 SDK 生产代码。
-- 验证钱包、冷热签名、external transport、轻节点、任意 storage、opaque callData 交易和通用历史。
-- CitizenWallet 只作为不修改的 QR adapter 外部协议基准；其它 external signer mock 证明核心未绑定 Wallet。
+目标与边界：
+
+- 对第 1.1—1.8 步形成的通用 SDK 做完整验收，不增加 CitizenApp 专用能力。验收范围是钱包、冷热签名、唯一
+  `QR_V1`、CitizenChain PoW 轻节点、验证后的通用链读取、opaque RuntimeCall 交易和 SDK 自身 execution 历史。
+- CitizenApp、途遇系列产品和第三方继续自己拥有业务 storage key、SCALE 业务解码、RuntimeCall 业务编码、页面、
+  订单、广场、投票、立法、提案和治理；SDK 只接收通用账户、字节、哈希、链状态与执行参数。
+- 不迁移、不兼容、不增加 deprecated wrapper/alias/fallback；禁止设计、命名、预留或兼容除 `QR_V1` 外的任何
+  QR 协议版本。
+- CitizenWallet 作为完全独立的外部冷签产品和黑盒协议消费者，不成为 SDK 依赖，不修改其源码、功能、依赖或
+  发布物。测试另建通用 external signer fixture，证明 SDK 没有绑定 CitizenWallet。
+- `native/smoldot/pow/**` 只做基线 SHA-256 校验；轻节点交易提交/watch、同步、验证和数据库能力优先直接复用
+  上游现有实现。若验收发现必须修改上游或既有 PoW 定制文件，立即停止并另出方案，取得二次确认后才能修改。
+
+冻结合同：
+
+- Core 产品 C ABI 精确闭集冻结为 116 个公开符号；4 个内部测试符号不得进入产品包；Apple 额外 3 个 QR 图片
+  符号；Linux/Windows Host 各 17 个符号；Flutter method channel 精确闭集冻结为 62 个方法。
+- Dart、C、Kotlin、Swift、C++ 对同一 Core 结果做薄投影；统一参数边界、防御复制、owner/source、short-buffer、
+  一次释放、取消、超时、停止、关闭、异步完成和错误码语义，不在平台层保存第二份业务或密码学状态。
+- 六类公共能力固定为钱包、通用签名、`QR_V1` external transport、轻节点/验证链读取、opaque callData 交易、
+  通用 execution 历史；任何 consumer 都不得通过 SDK API 传入或取回业务 DTO。
+- 热账户与仅公钥冷账户继续共用 prepared execution 和广播后状态机；差异只在签名来源，不能出现第二套交易
+  构造、提交、watch 或历史路径。
+
+目录及职责注释：
+
+- `test/consumers/reference/`：建立零业务 reference consumer，只依赖正式公开入口并覆盖六类能力；用于证明 SDK
+  不借用 CitizenApp 源码、内部 FFI 或测试专用符号。
+- `test/consumers/citizenapp_fixture/`：建立 CitizenApp 形状的消费 fixture。业务 destination/amount/remark、
+  storage key、SCALE event 和 RuntimeCall 编码只存在于该目录，交给 SDK 时一律退化为 opaque bytes/hash。
+- `test/consumers/third_party_fixture/`：建立与 CitizenApp 完全无关的途遇/第三方风格 fixture，使用不同业务载荷、
+  storage 和 RuntimeCall，证明无需修改 SDK 生产代码即可接入。
+- `test/consumers/external_signer/`：建立只实现 `QR_V1` 通用 request/response 的测试签名器；仅使用测试密钥，验证
+  request 绑定、expiry、owner、source、hash、签名和一次消费，不复制或依赖 CitizenWallet 实现。
+- `native/ffi/tests/`：继续维护精确 C ABI、C11/C++17、feature matrix、所有权和错误合同；`test/api/`、
+  `test/platform/`、`test/wallet/`、`test/transaction/` 维护 Dart 与五端共享向量和状态机断言。
+- `android/`、`darwin/`、`linux/`、`windows/` 的生产目录只允许补充投影合同注释和必要缺失测试；不得新增 Core
+  能力的本地实现、业务状态或平台专用协议。
+- `scripts/test.sh`、`scripts/build-native.sh`、`scripts/release.mjs`、`scripts/release.test.mjs` 仍是唯一测试、
+  构建与发布入口；所有输出写入 `/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk/`，源码树禁止出现 build、
+  target、`.build` 或发布产物。
+- `/Users/rhett/TATA/tataconsole/flows/gmb/citizensdk/{ci.mjs,release.mjs,remote-jobs.json}` 仅在真实多 runner 验收确有
+  必要时做最小调度调整；不在 GMB 仓库新增 `.github` 产品工作流，也不复制中央构建逻辑。
+- `README.md`、`CHANGELOG.md`、`native/**/README.md`、`docs/{ARCHITECTURE,SECURITY,DART_API,C_ABI,
+  WALLET_MODEL,SOURCE_PROVENANCE}.md` 和本任务卡记录最终合同、证据、限制及三类 consumer 边界。
+
+实施顺序：
+
+1. 只读冻结 116/4/3/17/62 精确闭集、错误码、result kind、生命周期、来源哈希、CitizenWallet 与 PoW 基线；先补
+   失败门禁，确保后续验收不能通过扩大 API、放松扫描或使用内部符号绕过。
+2. 建立 reference、CitizenApp-shaped、third-party-shaped 三类只依赖发布面的 consumer 和独立 external signer；
+   共用同一组 SDK 发布物，业务 fixture 只在各自目录构造 storage key、SCALE payload 与 opaque RuntimeCall。
+3. 按六类能力建立跨 consumer 矩阵：钱包创建/导入/删除、热冷签名、`QR_V1`、轻节点与任意验证 storage、热冷
+   交易及 execution 历史；验证三类业务变化不导致 SDK 生产代码或公开合同变化。
+4. 补齐跨语言失败向量：空值/上限/Unicode、owner/source 错配、short-buffer、错误 kind、过期/取消/重复消费、
+   stop/close、回调乱序、广播前后失败、reorg/finalized System outcome 和数据库重开；五端结果必须一致。
+5. 仅通过仓库脚本完成 Rust、Flutter、Release、abi-host、Apple、Android、本机 Linux/Windows 合同检查；冻结提交后
+   再通过中央流程执行真实 Linux/Windows/macOS/Android runner 和发布闭包，结果必须对应同一提交与来源哈希。
+6. 更新文档、注释、测试数量、精确闭集、Release hash/map 和来源记录；清理无引用 fixture、dead code、临时产物
+   与过时说明，最后执行 diff、业务词、其它 QR 版本、源码产物、CitizenWallet 和 PoW 零改动审计。
+
+测试矩阵：
+
+- 钱包：12/18/24 词助记词创建与用户手工重新导入、强认证、仅公钥冷账户、同钥去重、错误网络/长度、并发、
+  reopen/delete/close；不读取旧 App 钱包，不提供迁移或兼容。
+- 签名与 `QR_V1`：热签名、通用 external signer、冷交易 request/response、账户公钥、QR 图片；错误 owner/request/
+  signer/hash/signature/expiry/nonce、重复消费和已删除 kind `4` 必须失败；生产面不得出现其它 QR 版本。
+- 轻节点与链读取：定制 PoW chain spec、同步/重连/停止、verified storage/proof、header/finality、数据库 reopen；
+  交易 submit/watch 直接走既有 Provider/上游路径，不复制网络栈或修改 PoW 文件。
+- 交易与历史：至少三种互不相关的 App-generated opaque RuntimeCall 覆盖 prepare、热/冷执行、pending-before-
+  broadcast、submit/watch、finalized System outcome、失败恢复、分页、重开和边界；SDK 历史只含自身 execution fact。
+- 五端与打包：C11/C++17、Dart、Kotlin/JNI/AAR、Swift/XCFramework、Linux/Windows C++ Host 的精确方法、符号、
+  架构、链接、ownership、错误和真实消费者全部验证；测试不得从源码内部路径偷用实现。
+- 通用性反向门禁：SDK 生产源码、公开 API、持久状态和发布包不得出现 CitizenApp/途遇/第三方业务 schema、页面
+  DTO、action 白名单、业务 storage/call codec、迁移层、兼容层或 CitizenWallet 实现依赖。
+
+完成门禁：三类 consumer 必须使用同一正式 SDK 发布面和发布物完成各自不同业务，不修改 SDK 生产代码；六类能力
+和五端真实打包全部通过；当前精确闭集、唯一 `QR_V1`、无业务模型、无迁移兼容、CitizenWallet 与 PoW 零改动均由
+自动门禁证明。真实多 runner 涉及提交、推送或远程调度时，须先单独说明将发生的外部状态变更并取得明确授权；
+未获授权前只完成本地可验证部分，绝不伪造其它平台结果。得到确认后一次完整执行 1.9。
+
+完成记录：
+
+- 新增 `test/consumers/` 11 文件测试闭集：reference consumer 同时组合 `CitizenChain`、`CitizenWallet`、
+  `CitizenSigning`、`CitizenQr`、`CitizenTransactions`、`CitizenHistory`；CitizenApp-shaped 与
+  third-party-shaped fixture 各自拥有完全不同的业务 storage key、SCALE 风格事件和 RuntimeCall 编码；generic
+  external signer 只组合 `CitizenSigning` 与 `CitizenQr`。四类适配代码只导入根公开库。
+- 三种互不相关的 App-generated opaque RuntimeCall 均通过同一 `prepareTransaction` 路径；CitizenApp fixture 的
+  destination/amount/remark 和第三方 fixture 的 booking/route/seat 只存在于各自测试目录，未进入 SDK 生产代码、
+  公共类型、持久状态或发布包。
+- Release 增加多消费者反向门禁并把 SDK 测试来源闭集从 184 项冻结为 195 项；当前公共面仍精确为 116 个 Core
+  产品 C 符号、4 个内部测试符号、Apple 3 个 QR 图片符号、Linux/Windows 各 17 个 Host 符号和 62 个 Flutter
+  方法，未因消费者增加生产 API。
+- Rust workspace/all-targets 全部通过；Flutter 137 项全部通过，其中新增多消费者合同 7 项；Release 103 项全部
+  通过；`abi-host` 通过 116 个产品符号和 C11/C++17 消费者；Android ARM64 Core/JNI/AAR 真实构建通过。
+- Apple Core 的 iOS device、iOS simulator、macOS 三个 ARM64 slice 及 Core XCFramework 生成已经通过；随后只因
+  当前环境缺少可读取的 Flutter Apple engine framework 而停在 Flutter adapter 编译前。按用户明确要求，本步骤
+  不再启动、停止、删除、安装或修改任何 Flutter 下载/安装，因此 Apple Flutter adapter、Apple tests 和最终
+  XCFramework 复制不宣称通过，待用户已有 Flutter 安装可用后只读消费该安装再验收。
+- 未提交、未推送、未触发远程 runner；Linux/Windows 只通过同源 Release 源码、精确闭集和合成失败合同，不冒充
+  原生 runner 结果。任务命令未写入 CitizenApp 或 CitizenWallet；`native/smoldot/pow/**` 三个受保护文件摘要保持
+  `56e14104...`、`61a9c6d4...`、`e529306b...`，没有修改上游或既有 PoW 定制。
 
 ### 1.10 功能等价及通用性验收后的 SDK 改进
 
-状态：未开始。
+状态：1.10.1—1.10.3 已完成；剩余工作已统一并入 1.10.4，合并方案待确认、未执行。
 
-- 在 1.1—1.9 全部通过后，再评审安全边界、API 易用性、性能、数据库增长、后台同步、错误可观测性、
-  transport 扩展性和跨平台一致性。
-- 每项改进单独出方案；不得以某个 App 当前需求为由增加业务 API，不修改 CitizenWallet，不引入旧数据兼容。
-- 改进后重跑多消费者完整回归，不以 CitizenApp 单一消费者或局部测试代替通用 SDK 验收。
+目标与边界：
+
+- 以 1.9 冻结的通用公共面和多消费者证据为基线，先量化审计安全、易用性、性能、数据库增长、后台同步、
+  错误可观测性和五端一致性，再按证据实施 SDK 自身改进；不把某个 App 的业务需求当成 SDK 改进。
+- CitizenApp、途遇系列产品和第三方继续自己实现 storage key、SCALE 业务解码、RuntimeCall 业务编码、页面和业务
+  状态；SDK 只改进钱包、通用签名、唯一 `QR_V1`、轻节点/验证链读取、opaque 交易与 execution 历史。
+- 不迁移、不兼容、不增加 wrapper、alias、fallback 或 deprecated 入口；不读取旧 App 钱包/交易数据。用户需要
+  旧助记词账户时仍由用户手工输入助记词重新导入。
+- CitizenWallet 继续作为完全独立产品，不修改其源码、功能、依赖或发布物；禁止在 SDK 内复制其 UI、相机、扫码
+  流程或产品逻辑。
+- `native/smoldot/pow/**` 和上游轻节点实现保持只读；优先复用现有同步、验证、数据库、transaction submit/watch
+  能力。任何上游或既有 PoW 定制代码改动必须停止本步骤，另列准确文件、原因和替代方案，取得二次确认后执行。
+- 117/4/3/17/62 精确闭集现已冻结。只有审计证明确有跨 App 的底层能力缺口时，才为该能力另出子步骤方案；不得
+  借“易用性”扩大业务面或预留其它 QR 协议版本。
+
+目录及职责注释：
+
+- `native/contracts/src/`：只承载跨语言稳定的通用配置、能力和限制；新增字段必须能由所有消费者解释，且不得包含
+  App 名称、业务 action、页面 DTO、业务 storage/call schema 或迁移状态。
+- `native/engine/src/`：改进密钥生命周期、会话取消、轻节点生命周期、交易状态机、execution 历史保留和通用
+  诊断事实；仍以单一 Engine 为真源，不建立第二套缓存、提交、watch 或历史实现。
+- `native/signer/src/`、`native/qr/src/`：审计敏感内存清理、长度边界、随机数、expiry/nonce/owner/source/hash/
+  signature 绑定和一次消费；只允许 `QR_V1`，不得设计任何其它版本。
+- `native/smoldot/provider/src/`：只改进 SDK-owned Provider 适配、取消、背压、错误映射和已有上游能力调用；
+  `native/smoldot/pow/**` 不改，Provider 不复制上游网络、数据库、交易或验证实现。
+- `native/ffi/src/` 与 `include/`：只做通用 Core 能力的稳定 C 投影，完善 owner、short-buffer、一次释放、线程、
+  回调和错误注释；不得把内部诊断、密钥或 signer message 暴露为公共数据。
+- `lib/src/{api,models,platform}/`：Dart 只提供防御复制后的通用不可变模型和薄 API；平台目录只负责值投影、取消和
+  生命周期桥接，不保存第二份状态。
+- `android/`、`darwin/`、`linux/`、`windows/`：Kotlin/Swift/C++ 继续做同一 Core 结果的薄包装；改进必须由共享
+  向量证明五端一致，禁止平台专用业务语义或协议分叉。
+- `test/consumers/`：reference、CitizenApp-shaped、third-party-shaped 和 external signer 作为永久通用性回归；
+  各 fixture 的业务编码只留在自己的目录，不能进入 SDK 生产代码。
+- `scripts/{test.sh,build-native.sh,release.mjs,release.test.mjs}`：记录性能/大小基线、精确闭集、来源 hash、跨平台
+  失败门禁和发布证据；所有生成物继续只写仓库外部 TataConsole 缓存。
+- `README.md`、`CHANGELOG.md`、`native/**/README.md`、`docs/{ARCHITECTURE,SECURITY,DART_API,C_ABI,
+  WALLET_MODEL,SOURCE_PROVENANCE}.md` 与本任务卡：每个已实施改进同步说明动机、边界、风险、测试和残留限制。
+
+实施顺序与逐项确认门禁：
+
+1. `1.10.1 基线与问题分级`：只读采集钱包/签名/QR/轻节点/交易/历史的延迟、内存、数据库增长、取消耗时、错误
+   覆盖和五端差异；输出可复现测量命令、目录、基线值及 P0/P1/P2 排序，不改生产代码。先出本子步骤技术方案，
+   用户确认后执行。
+2. `1.10.2 安全与资源边界`：仅处理基线确认的敏感内存、输入上限、owner/source 绑定、取消/关闭、并发、背压和
+   资源释放问题；先写失败测试，再自 Core 向五端薄投影。涉及公开合同或上游代码时必须另行说明并确认。
+3. `1.10.3 通用 API 易用性与错误可观测性`：消除跨端命名/错误映射漂移，提供不含业务语义的阶段、错误类别和
+   关联标识；不得暴露密钥、签名原文、未经验证链数据或 App 业务字段，不以 wrapper/alias 保留旧入口。
+4. `1.10.4 第一部分最终合并步骤`：一次完成性能与持久化增长、后台同步与生命周期一致性、完整回归与发布冻结。
+   原计划的 1.10.5、1.10.6 全部并入本步骤，不再单独确认或执行；确认本步骤后连续完成全部实现、测试、文档、
+   注释、Release hash 和残留清理，最后冻结第一部分并直接输出第二部分 2.1 的完整技术方案。策略只能按时间、数量、
+   字节和通用状态配置，不能按 pallet/action/App 业务类型分支；同步、交易 submit/watch 和数据库继续复用现有上游
+   轻节点能力，平台层不得各自实现同步器或交易观察器。
+
+每个 `1.10.x` 都必须先提交包含准确目录、接口变化、失败向量、回滚边界和验收命令的技术方案，取得确认后才执行。
+1.10.4 是第一部分剩余工作的唯一合并步骤：确认后不得再拆成 1.10.5/1.10.6 或要求中途确认；只有实际发现必须修改
+`native/smoldot/pow/**`、CitizenWallet、CitizenApp、其它产品，或出现超出本方案批准边界的实现偏差/阻塞时才暂停
+沟通。完成后更新全部文档、注释、测试和 hash，清理残留并自动输出 2.1 完整方案，不要求用户再次催促。
+
+测试与完成门禁：
+
+- 功能回归：三类消费者对六类公共能力的行为不变；至少三种互不相关 opaque RuntimeCall 和不同业务 storage key
+  无需 SDK 改码；热冷账户继续共用 prepared execution、submit/watch 和历史状态机。
+- 安全回归：敏感数据清理、强认证、owner/source/request/hash/signature/expiry 绑定、short-buffer、一次释放、
+  取消/关闭/并发/乱序全部有失败测试；日志和公共错误不泄露秘密或未经验证数据。
+- 资源回归：建立可重复的延迟、峰值内存、队列、数据库增长与 reopen 基线；优化后不得以丢失 finalized 证明、
+  execution 恢复或跨端一致性换取指标。
+- 平台与发布：117 个 Core 产品符号、4 个内部测试符号、Apple 3 个 QR 图片符号、Linux/Windows 各 17 个 Host
+  符号和 62 个 Flutter 方法若无另行批准保持不变；C11/C++17、Dart、Kotlin、Swift、C++ 与发布消费者全部通过。
+- 反向门禁：生产源码和发布包不含 App 业务 schema、迁移/兼容层、CitizenWallet 实现依赖、其它 QR 协议版本或
+  新的轻节点网络/交易/数据库副本；CitizenWallet 与 `native/smoldot/pow/**` 的基线 hash 保持不变。
+
+完成门禁：只有经量化问题清单逐项关闭、三类消费者及五端合同全部回归、文档/注释/hash 同步、源码树和外部临时
+产物清理完成，1.10 才可标记完成；无法在本机证明的远程/真机结果必须明确标为待授权，禁止用源码扫描替代真实结果。
+
+#### 1.10.1 基线与问题分级技术方案
+
+状态：已确认并完成（2026-09-11）；生产 API/ABI/schema/协议零修改，Flutter 按明确要求未操作。
+
+本步骤只测量、审计和排序，不修改生产代码、公开 API、协议、ABI、平台绑定或数据库 schema；基线发现的问题进入
+1.10.2—1.10.4 按任务卡方案处理，不能在本步骤顺手修复。测试只使用独立临时账户、测试密钥、内存 Provider/Store 和
+仓库外临时数据库，不读取 CitizenApp、CitizenWallet 或任何用户数据。
+
+输出目录与注释职责：
+
+- `docs/audits/SDK_BASELINE_1_10_1.md`：唯一人工可读审计报告；按“测量环境、命令、样本、结果、风险、证据路径、
+  建议归属子步骤”记录，每个结论区分实测、源码事实和推断，禁止把未运行平台写成通过。
+- `test/baselines/sdk_1_10_1_contract_test.dart`：冻结公共 Dart 类型、六端口组合、输入上限、防御复制、错误类别和
+  三类 consumer 不变性；只断言稳定合同，不把机器相关毫秒数写成脆弱阈值。
+- `native/engine/tests/baseline_resource_contract.rs`：用确定性 fake Vault/Store/Provider 测量并断言队列、会话、
+  runtime cache、prepared execution、history page 和取消后的资源数量有界；不增加生产 benchmark hook。
+- `native/smoldot/provider/tests/baseline_lifecycle_contract.rs`：只通过现有公开 Provider 测试面记录 start/stop、重连、
+  submit/watch、数据库 export/import 的阶段和上限；不读取或修改 `native/smoldot/pow/**`。
+- `scripts/release.test.mjs`：加入审计报告/基线测试的来源闭集与反向边界，拒绝报告缺项、生产诊断 hook、其它 QR
+  版本、业务模型或测试数据越出外部缓存；`scripts/release.mjs` 只同步新文件和 SHA-256 闭集。
+- `/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk/step-1-10-1.<随机>/`：保存本轮时间、峰值 RSS、临时数据库、
+  事件轨迹和构建大小原始证据；完成后精确移入废纸篓，不把机器路径或生成物写入源码树。
+
+采集与分析顺序：
+
+1. 冻结环境与合同：记录提交状态、Rust/Dart/Flutter/Clang/Swift/Java/NDK/Gradle 版本、116/4/3/17/62 闭集、
+   12/18/24 助记词和唯一 `QR_V1`；记录三类 consumer、CitizenWallet、PoW hash 基线。不得安装、更新或停止任何
+   工具；缺失工具只标记相应指标未测。
+2. 安全基线：逐项追踪助记词、password、DEK、child secret、signer message、signature、QR session 和
+   signed extrinsic 的创建、借用、复制、日志与释放；验证强认证、zeroize、owner/source、expiry、nonce、hash、
+   取消、重复消费和错误回显边界，输出准确文件与风险等级。
+3. 资源与性能基线：在固定样本数和预热规则下分别记录钱包 create/import/sign、QR parse/sign/consume、verified
+   storage、prepare/execute/history page 的 wall time、CPU、峰值 RSS、分配/复制热点、队列深度和取消收敛时间；
+   至少重复 5 轮并报告中位数、P95、最大值和样本离散度，不承诺跨机器绝对性能。
+4. 数据增长基线：以 0、1、100、1,000 个 execution 与 runtime cache 样本记录数据库字节、索引、重开时间、
+   retention 后残留和失败恢复；只按通用状态/时间/数量/字节分析，不引入 pallet、action 或 App 业务分类。
+5. 生命周期与五端差异：对 Core、Dart、Kotlin、Swift、Linux/Windows C++ 的 start/stop/reopen、前后台、断网、
+   submit/watch 恢复、取消、回调顺序和错误映射建立对照表。本机未运行的平台只引用合同证据，单列“待 runner
+   验证”，不得用源码扫描代替运行。
+6. 分级与交付：P0 仅包含秘密泄漏、验签/验证绕过、持久状态损坏或不可恢复资源失控；P1 为有界性、并发、明显
+   性能/增长和跨端语义漂移；P2 为不改变安全语义的易用性与诊断改进。每项必须给出复现、影响、建议目录、是否
+   涉及公开合同/上游和对应 1.10.x；没有证据的问题不得进入实施清单。
+
+测试与验收命令：
+
+- 只通过 `scripts/test.sh cargo --workspace --all-targets --locked`、`scripts/test.sh flutter --timeout=2m` 和
+  `scripts/test.sh release` 回归；Flutter 不可用时不安装、不下载、不操作其进程，只如实保留该项待验收。
+- 使用 `scripts/build-native.sh abi-host` 复核产品符号、C11/C++17 和构建大小；Apple/Android 只在现成受控工具
+  可读时执行，不为完成指标修改或安装工具。Linux/Windows 原生 runner 仍需单独远程授权。
+- 最终执行 `git diff --check`、生产业务词/其它 QR 版本扫描、源码树 build/target/.build 扫描、195 文件测试闭集、
+  PoW hash 以及 CitizenApp/CitizenWallet 零写入审计；任何失败都进入报告，不能删除测试或放宽门禁。
+
+完成门禁：交付完整基线报告、可重复命令、原始证据摘要、P0/P1/P2 清单和逐项归属；生产代码/公开合同/协议/ABI
+零变化，CitizenWallet 与 PoW 零写入，无迁移兼容或其它 QR 版本；文档、注释、测试及 Release hash 同步后，自动
+输出最高优先级的 1.10.2 安全与资源边界完整技术方案，等待确认后再实施。
+
+执行结果：
+
+- 新增 `docs/audits/SDK_BASELINE_1_10_1.md` 作为唯一人工报告；测量环境、合同闭集、安全链路、5 轮性能、
+  0/1/100/1,000 条 execution 数据库增长、retention、生命周期矩阵和未运行平台均已明确区分实测/源码事实/推断。
+- 新增 Dart 公共合同基线、Engine 资源基线和 smoldot provider 离线生命周期基线；Rust 基线和完整 workspace 通过。
+  Dart/Flutter 基线因“不得操作 Flutter 下载安装/进程”的明确边界未运行，不写成通过。
+- ABI host 在明确仓库外 work/output 目录构建通过：21,221,664 bytes，116 个产品符号 + 4 个内部测试符号；
+  没有修改或读取 `native/smoldot/pow/**` 生产逻辑。
+- 分级为 P0=0、P1=5、P2=2。P1 包含：持久 runtime cache 无淘汰、history 条数与 32 MiB 宿主记录上限不一致、
+  runtime metadata 64 MiB 合同与 8 MiB 宿主记录上限不一致、history 单 BLOB O(N)、retention 后 SQLite 文件不缩小。
+- 本步骤没有读取用户数据库；临时 SQLite/ABI/测量证据完成摘要后精确清理。CitizenApp、CitizenWallet 和 PoW
+  文件树在本步骤前后的内容 diff/hash 不变；不宣称三个工作树原本 clean。
+
+#### 1.10.2 安全与资源边界完整技术方案
+
+状态：已完成并复核（2026-09-11）。
+
+目标与范围：只关闭 1.10.1 已证实的 P1-01、P1-02、P1-03，不把没有证据的“顺手优化”混入本步。SDK 仍只提供
+通用钱包、签名、唯一 `QR_V1`、验证链读取、轻节点、opaque 交易和通用历史；不增加 App 业务模型，不改
+CitizenWallet，不读取/迁移旧数据，不修改 `native/smoldot/pow/**`。P1-04/P1-05 的结构和压缩优化保留到 1.10.4。
+
+目录与职责：
+
+- `native/contracts/src/chain.rs`：Core 功能合同 `MAX_RUNTIME_METADATA_BYTES = 64 MiB` 保持不变。该上限约束链读取与
+  内存中的完整 runtime context，不能因为性能 cache 的单记录容量而降低。
+- `native/contracts/src/store/runtime_cache.rs`、`native/contracts/src/lib.rs`：新增内部持久 cache 合同：最多 64 个
+  准确 block-hash context；四个平台现有 SQLite 对完整 host record 的上限为 8 MiB，扣除 56-byte envelope 和
+  55-byte typed runtime 字段后，单条可持久 metadata 为 `8 MiB - 111 bytes`。这是性能 cache 容量，不是 Core
+  功能上限。
+- `native/engine/src/engine.rs`：准确块 runtime context 先查 Core 内存，再查宿主持久 cache，最后调用 provider。
+  provider 返回 `8 MiB - 111 bytes` 以上、但不超过 64 MiB 的合法 metadata 时，Core 正常返回并保留内存 cache，
+  跳过持久 store，不得因 cache 不可写反向使链读取失败；宿主异常超大 cache 记录不作为可信数据，也不触发迁移。
+- `native/ffi/src/host_codec.rs`：RuntimeCache codec 的最大完整 encoded record 与平台现有 8 MiB 限制一致；只编码
+  满足持久 cache 容量的 context。Host record 格式版本不变。
+- `native/contracts/src/store/runtime_cache.rs`：新增通用持久 cache 合同常量 `MAX_PERSISTED_RUNTIME_CONTEXTS = 64`，
+  明确 `store` 必须在同一事务中保持至多 64 个准确 block-hash 记录。trait 方法签名不变。
+- `android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkPublicStore.kt`、
+  `darwin/Sources/CitizenSDK/CitizenSDKPublicStore.swift`、`linux/src/citizen_sdk_public_store.cc`、
+  `windows/src/citizen_sdk_public_store.cc`：在现有 `runtime_cache_store` 事务中按 SQLite `rowid` 驱逐最早写入项，
+  插入/替换和淘汰原子完成；不新增表、列、索引或数据库文件。固定为通用 FIFO 写入保留策略，不按链业务/App 分支。
+- `native/contracts/src/store/transaction_history.rs`：新增通用 durable weight 上限与每条保守固定开销，weight 只由
+  callData bytes、signed extrinsic bytes 和 1,024-byte 通用保守固定开销组成；总预算固定为 31 MiB。
+  `TransactionHistoryState::try_new` 同时验证 `records <= 4096` 和总 weight，使任何合同合法 state 都能进入现有
+  32 MiB host record 并保留至少 1 MiB envelope/编码余量。
+- `native/engine/src/{transaction_prepare.rs,transaction_history.rs,engine.rs}`：冻结 extrinsic template 已能在签名前
+  精确给出最终 signed-extrinsic 长度。热钱包解锁/签名或冷钱包 `QR_V1` 会话建立前先只读准入；最终持久化仍在
+  CAS 门内用真实候选重复检查以关闭并发窗口。按数量或 weight 腾出空间时可重复驱逐“最旧且 retention-terminal”
+  的记录，永不驱逐 Pending/InBlock；无法容纳稳定返回 `conflict`，不广播、不产生部分历史写入。
+- `native/engine/tests/baseline_resource_contract.rs`：把 1.10.1 “80 条持久 cache 无淘汰”的基线改为目标合同，
+  断言 80 次写入后仅保留最新 64；另验证超过持久容量的 metadata 首次由 provider 返回、第二次命中内存，provider
+  只调用一次、持久 store 零调用且链读取两次均成功。
+- `native/contracts/tests/chain_contract.rs`、`native/contracts/tests/state_store_contract.rs`、
+  `native/contracts/tests/transaction_history_contract.rs`（新增）：覆盖 metadata 最大值/+1、history 最大 weight/+1、
+  4,096 小记录、15/16 大记录、所有记录均 open 时 fail-closed、终态多条驱逐顺序和状态更新不突破预算。
+- `native/ffi/src/host_codec_tests.rs`：验证 `8 MiB - 111 bytes` metadata 编码后的完整 record 恰好为 8 MiB；
+  `+1` 仍是 Core 合法内存值，但持久编码明确返回 `payload_too_large`；保留损坏、wrong-domain、short-buffer 和
+  hostile host response 拒绝测试。
+- `android/native/src/androidTest/**`、`darwin/Tests/CitizenSDKTests/**`、`linux/test/**`、`windows/test/**`：各自直接
+  写入 80 个 cache 记录，断言最新 64 可读、最旧 16 不可读；替换已有 hash 后再写一条可证明替换被提升为最新且
+  表没有增长。数据库文件、权限、schema 和 transaction 边界保持不变。
+- `docs/ARCHITECTURE.md`、`docs/SECURITY.md`、`docs/C_ABI.md`、`docs/DART_API.md`、平台文档及本任务卡：记录
+  runtime metadata 单一 admission、持久 cache 上限、history weight/backpressure 和不迁移不兼容边界。
+- `scripts/release.mjs`、`scripts/release.test.mjs`：同步测试/文档 hash；新增反向门禁，拒绝 Core 64 MiB 功能上限
+  被持久 cache 降低、无界 `runtime_cache_store`、history 仅检查条数、schema 变化、业务分类和 PoW 漂移。
+  `native/smoldot/SOURCE_SHA256.json` 只复核、不因本步骤改写上游来源声明。
+
+公开合同与兼容边界：
+
+- 方法、C ABI struct/vtable、116/4/3/17/62 闭集、Host record version、SQLite schema 和唯一 `QR_V1` 均不变。
+- `MAX_RUNTIME_METADATA_BYTES` 继续为 64 MiB；公开链读取能力不收紧。新增的 `8 MiB - 111 bytes` 仅是内部可持久
+  cache 容量。超过该容量的合法 metadata 仍可被 App 读取和在本进程复用，只是不写性能 cache。
+- history 的 4,096 条上限保留，同时新增总 weight 上限；小记录仍可到 4,096，大记录按实际恢复材料触发通用
+  backpressure。不会截断/丢弃 open record、callData、signed extrinsic 或 finalized proof。
+- 现有 SQLite 表按原 schema 直接执行新写入策略；不扫描、转换或重写旧数据库，不增加迁移代码。若现有表已超过
+  64 行，只在下一次正常 cache store 的同一事务内按当前规则收敛，这属于现行写入不变量，不是旧数据迁移。
+
+执行顺序与失败向量：
+
+1. 先把 P1-02/P1-03 的现有复现改为失败测试：Core 64 MiB 不变、持久 metadata `8 MiB-111/+1` 分流；history
+   4,096 小记录、15/16 最大记录、weight 边界和 pending-before-broadcast 零副作用。
+2. 实现 Core/持久 cache 两个不同职责的明确上限和 history weight；在签名前只读预检，持久化时再次精确准入，
+   保证已知资源不足不触发签名、任何失败都不进入网络提交或部分历史写入。
+3. 为四个平台 store 先加 80→64、重复键、事务回滚失败测试，再实现同事务 FIFO 淘汰；不得新增平台后台线程、
+   定时器或第二套 cache。
+4. 运行 Rust、可用原生平台与 Release 闭集，复核 ABI/schema/hash；Flutter 仍只在用户允许且现成环境可用时运行，
+   不安装、不下载、不启动或停止其安装流程。
+5. 更新文档、注释、hash，清理外部临时产物；输出 1.10.3 完整技术方案并等待确认。
+
+关键失败测试：
+
+- Core metadata 恰好 64 MiB 可创建，`+1` 返回 `invalid_argument`；metadata 恰好 `8 MiB-111` 可持久编码成 8 MiB
+  完整记录，持久容量 `+1` 仍可链读取并命中内存，但宿主 store 调用数为 0。
+- history 的 4,096 小记录与 15 条最大记录成功，16 条最大记录在 contract admission 失败；全部 open 且资源不足时
+  签名前预检返回 `conflict`、历史 CAS 为零，广播为零。
+- 64 个不同 block 后全可读；第 65—80 次每次提交后 count 始终 64；最旧被淘汰、最新保留；替换相同 hash 不增长。
+- SQLite insert 或 prune 任一步注入失败时整体 rollback，旧 64 条保持；损坏/过大宿主记录继续 fail-closed 且不泄漏内容。
+- 并发 store 最终不超过 64；close/cancel 与 store 竞态不越过现有 lease，不产生关闭后回调。
+
+回滚边界：本步骤可整体回滚 contracts/engine/host store/tests/docs/release hash；因为不改 schema、ABI 和记录格式，
+不存在迁移回滚。不得只回滚 Core 上限而保留平台策略，或只回滚平台策略而保留合同承诺。任何需要修改
+`native/smoldot/pow/**`、CitizenWallet、公开方法/ABI/schema 的新发现都立即停止并单独二次确认。
+
+验收命令与门禁：
+
+- `scripts/test.sh cargo --workspace --all-targets --locked`
+- `scripts/test.sh flutter --timeout=2m`（只有在不触碰 Flutter 安装/下载且用户允许时；否则明确保留未运行）
+- `scripts/test.sh release`
+- 使用 `scripts/build-native.sh abi-host` 的仓库外 work/output 复核 116+4 符号；现有本地工具可用时运行 Apple/
+  Android 原生 store 测试，Linux/Windows 继续由授权 runner 验证。
+- `git diff --check`、生产业务词/其它 QR 版本、schema、源码树 build/target/.build、CitizenApp/CitizenWallet diff hash、
+  `native/smoldot/pow/**` 内容 hash 全部通过；不得以源码扫描冒充未运行平台。
+
+完成门禁：P1-01/P1-02/P1-03 的失败向量全部转绿；任何合同合法 history state 均可被当前宿主编码，Core 合法但
+超过持久容量的 metadata 保持完整链读取并只驻留内存；持久 cache 始终有界；pending-before-broadcast、秘密生命周期、
+三类 consumer、ABI/QR/schema/PoW/三产品边界不回归；
+文档/注释/测试/Release hash 完整同步后才可标记 1.10.2 完成。
+
+执行结果（2026-09-11）：
+
+- P1-01 已关闭：Android、Apple、Linux、Windows 沿用原 `runtime_cache` 表，在原 store transaction 内执行
+  `INSERT OR REPLACE` 与 FIFO 淘汰；每次成功提交后最多 64 条，同一 hash 替换会提升为最新。四端合同测试覆盖
+  80→64、重复键提升，以及注入 prune 失败后插入与淘汰整体回滚；没有新增表、列、索引、文件或迁移代码。
+- P1-03 已关闭且没有收紧 Core：`MAX_RUNTIME_METADATA_BYTES` 仍为 64 MiB；持久 cache metadata 上限单独固定为
+  `8 MiB - 111 bytes = 8,388,497 bytes`。边界内完整 host record 恰为 8 MiB；超过持久容量但不超过 64 MiB 的
+  metadata 正常完成链读取、进入 Core 内存 cache、跳过宿主 store，连续读取只调用 provider 一次。
+- P1-02 已关闭：history 同时受 4,096 条与 31 MiB durable weight 约束；单条 weight 为 1,024 bytes 加原始
+  callData 与 signed extrinsic 长度。4,096 条小记录、15 条最大记录通过，16 条最大记录在合同准入时拒绝；Engine
+  在热签解锁/签名和冷签 `QR_V1` 会话建立前执行零写入预检，并在最终 CAS 门内用真实候选复检。淘汰只选择最旧
+  retention-terminal 记录，Pending/InBlock 永不淘汰，空间不足返回稳定 `conflict` 且不签名、不广播。
+- `scripts/test.sh cargo --workspace --all-targets --locked` 全工作区通过；ABI host 在仓库外 work/output 构建通过，
+  产物 21,223,632 bytes，导出仍为 116 个公开产品符号 + 4 个内部桥接符号，C11/C++17 头文件通过。公开 C ABI、
+  Flutter 62 方法、Apple QR image 3 方法、Linux/Windows Host 17 方法、唯一 `QR_V1` 和 host record version 均未改。
+- `scripts/test.sh release` 的 105 项发布合同全部通过；Core Rust 固定闭集由 107 更新为 108 个文件，SDK 测试固定
+  闭集由 198 更新为 199 个文件，新增资源合同与全部变更文档/源码/测试摘要均已进入反向门禁。
+- 四个平台生产实现与平台测试已完成源码合同；当前机器未运行 Android instrumented、Apple package、Linux 或 Windows
+  runner，不把源码扫描写成运行通过。按用户明确边界，本步骤没有调用 Flutter 命令，没有安装、下载、启动、停止或
+  配置 Flutter。
+- `native/smoldot/pow/**` 内容 hash 仍为
+  `ced9bcd7af45c48ce0ddd4dd077fff035ff72c00fa84aa42067bb10e072d5999`；CitizenApp、CitizenWallet 均未由本步骤
+  修改。不读取、不迁移、不兼容旧钱包或旧数据库，也没有加入任何 App 业务模型。P1-04/P1-05 仍按计划留给 1.10.4。
+
+#### 1.10.3 通用 API 易用性与错误可观测性完整技术方案
+
+状态：已确认并完成（2026-09-11）。
+
+目标与范围：只处理 1.10.1 的 P2-01 和五端公共错误上下文缺口。现有 22 个稳定错误类别继续作为唯一机器判断；
+新增的阶段和关联信息只描述 SDK 通用操作，不描述 transfer、投票、治理、旅行、订单或任何 App 业务。不得记录或
+返回助记词、password、payload、callData、签名、extrinsic、metadata/storage 内容、账户私有材料或原生地址。
+不改 CitizenApp、CitizenWallet、`native/smoldot/pow/**`，不增加迁移、兼容、alias、wrapper、fallback 或其它 QR 版本。
+
+公开合同选择：新增一项只读 C 结果 getter，而不修改已有 struct 布局、Host vtable、SQLite schema 或 Flutter 方法
+数量。Core 产品符号闭集预计由 116 增至 117；Flutter 方法仍为 62、Apple QR image 为 3、Linux/Windows Host 各为
+17。该变化只在用户确认本步骤后实施。
+
+目录与职责：
+
+- `native/contracts/src/error.rs`、`native/contracts/src/lib.rs`：新增闭集 `FailureStage`，只允许
+  `admission`、`validation`、`authentication`、`persistence`、`provider`、`verification`、`cancellation`、
+  `teardown` 八个通用阶段；`ContractError` 保存稳定 error code、stage 和不含输入字节的诊断文本。没有 App operation
+  或业务 action。
+- `native/engine/src/error.rs` 及钱包、签名、QR、链读取、交易、历史和生命周期入口：在拥有真实语义的边界标注
+  stage，禁止 FFI/平台通过 message 文本猜测。错误传播必须保留原 code/stage；跨层转换不能把 storage/network/
+  authentication/integrity 等折叠为 unavailable。
+- `native/ffi/src/{abi.rs,error.rs,ownership.rs,requests.rs,lib.rs}`、`include/{citizensdk_types.h,citizensdk.h}`：追加
+  `citizensdk_failure_stage_t` 与 `citizensdk_result_get_failure_stage`。已有 `citizensdk_result_info_t` 布局不改；getter
+  只接受当前 owner 的 ready error result，成功 result、错误 owner、未知/释放后 handle 均失败关闭。同步 admission
+  失败由调用入口的已知操作阶段标注，不伪造 request id。
+- `lib/src/api/citizen_sdk_error.dart`、`lib/src/platform/{citizen_sdk_flutter_codec.dart,
+  citizen_sdk_flutter_sessions.dart}`：`CitizenSdkException` 固定包含 code、stage、公开 SDK method 名和可选
+  requestSequence/sessionId。method 名来自 62 方法金标，不接收平台自由文本；异步 completion 使用已有 request sequence
+  关联，不创建第二套追踪 ID。
+- `android/native/src/main/kotlin/org/citizen/sdk/{CitizenSdkError.kt,CitizenSdkOperation.kt,CitizenSdk.kt}`、
+  `darwin/Sources/CitizenSDK/{CitizenSDKError.swift,CitizenSDKOperation.swift,CitizenSDK.swift}`、Linux/Windows
+  `include/citizen_sdk/citizen_sdk_error.hpp` 与 session/codec：投影同一八阶段数值和 operation/request 关联。各平台不得
+  自定义阶段、重编号错误、输出本地路径或把异常对象序列化进持久状态。
+- `native/ffi/tests/{error_contract.rs,request_contract.rs}`、`native/ffi/src/*_tests.rs`：覆盖 22×8 合法/非法映射、同步
+  admission、异步 completion、取消、storage/provider/verification、wrong-owner、释放后 handle、short-buffer 和
+  panic；断言错误文本与结构中没有敏感 fixture 内容。
+- `test/api/**`、`test/platform/**`、Android/Apple/Linux/Windows 对应 error/session 测试：用统一 golden matrix
+  断言相同 code/stage/method/requestSequence；三类 consumer 只根据 code/stage 处理，不需要 SDK 知道其业务。
+- `docs/{C_ABI,DART_API,ARCHITECTURE,SECURITY,MOBILE_PLATFORM,LINUX_PLATFORM,WINDOWS_PLATFORM}.md`、各公开
+  README、本任务卡与 `CHANGELOG.md`：给出每个阶段的准确含义、可否重试边界和禁止记录字段。阶段不是进度事件，
+  不能据此推断交易成功、链 finality 或设备认证结果。
+- `scripts/release.mjs`、`scripts/release.test.mjs`：把 117/62/3/17 闭集、八阶段和五端 golden 固定为反向门禁；拒绝
+  message 解析、自由文本 stage、业务阶段、额外 QR 协议、生产 benchmark hook 与 PoW 漂移。
+
+实施顺序与每步失败向量：
+
+1. 先建立只读矩阵：枚举当前 22 个 code 在 Core/C/Dart/Kotlin/Swift/Linux/Windows 的名称、数值、同步/异步来源；
+   不一致项写成失败测试，不先改生产实现。
+2. 在 contracts/Engine 标注八阶段并保持原 error code；测试同一错误跨 Contract→Engine→FFI 不丢 code/stage，未知
+   数值返回 integrity，不回显原输入。
+3. 追加单一 C getter 和 C11/C++17 header/owner/short-buffer 测试；已有结果结构、116 个旧符号及 Host vtable 字节布局
+   不改，新增符号只有该 getter。
+4. 自 C 真源向 Dart、Android、Apple、Linux、Windows 薄投影；同步拒绝没有 requestSequence，异步错误必须关联原
+   requestSequence，session 只在实际存在时携带。删除各端重复的 message 猜测和未使用错误映射残留。
+5. 三类 consumer 与 external signer 回归；阶段只能帮助诊断，不能改变重试、签名、广播、历史、QR 单次消费和
+   lifecycle 语义。更新文档/hash，清理残留后输出 1.10.4 完整方案。
+
+关键失败测试：同一 storage/network/authentication/integrity/cancel/timeout 错误跨五端 code 与 stage 完全一致；同步
+非法参数没有伪 request id；异步完成关联原 request sequence；wrong-owner/released result 不能读取 stage；未知 stage
+不能回退为自由文本；任意秘密、payload、callData、signed extrinsic、metadata/storage value 与本机路径均不出现在
+错误对象、日志或事件。任何阶段信息都不能把 InBlock/Finalized 通知解释为执行成功。
+
+回滚边界：可整体回滚 FailureStage、单一 C getter、五端投影、测试、文档与 Release hash；不触及数据库/钱包数据，
+所以没有迁移回滚。若实施发现必须修改已有 struct/vtable、增加第二个公开 getter、引入日志系统或修改
+`native/smoldot/pow/**`，立即停止并重新出方案二次确认。
+
+验收：只通过 `scripts/test.sh cargo --workspace --all-targets --locked`、`scripts/test.sh release`、仓库外
+`scripts/build-native.sh abi-host` 及现有可用的原生平台 runner；Flutter 继续不安装、不下载、不启动或停止，未运行就
+明确保留。最后复核 `git diff --check`、117/62/3/17、C11/C++17、业务词/其它 QR 版本、schema、源码树生成物、三产品
+边界、CitizenWallet diff hash 与 PoW 内容 hash。完成前更新文档/注释/测试/Release hash 并输出 1.10.4 完整方案。
+
+执行结果：
+
+- Contracts、Engine 与 FFI 建立唯一八阶段真源；22 个既有错误码及数值不变。失败 result 保存阶段并只通过新增的
+  `citizensdk_result_get_failure_stage` 读取；成功、空输出、未知或释放后 result 均失败关闭。原
+  `citizensdk_result_info_t`、Host vtable、result kind 与 SQLite schema 没有变化。
+- Dart、Android、Apple、Linux、Windows 已投影同一 code/stage；Flutter 错误固定为
+  `[1, sessionId?, requestSequence?, errorCode, failureStage, method, errorMessage?]` 七项 tuple，method 只能来自现有
+  62 项公开闭集。异步 Core result 的 stage 来自 C getter，不解析 message；同步宿主拒绝使用固定 code→stage 表。
+- 错误对象与注释明确排除助记词、password、payload、callData、签名、signed extrinsic、metadata/storage value、
+  私有材料和本机路径；阶段只用于定位 SDK 通用边界，不表示进度、重试承诺、交易成功或 finality。
+- 公共闭集现为 117 个 Core 产品符号、4 个内部测试符号、3 个 Apple QR image 符号、Linux/Windows 各 17 个 Host
+  符号和五端 62 个 Flutter 方法。唯一二维码协议仍为 `QR_V1`；未加入 App operation、pallet、业务 action、迁移、
+  兼容、alias、wrapper 或 fallback。
+- Rust workspace/所有 target、117 符号、C11/C++17、Release 来源与反向门禁以及仓库外 Release ABI host 构建均由
+  本步骤验收；Flutter 按用户明确边界没有调用、安装、下载、启动、停止或配置，Apple Flutter/移动真机及
+  Linux/Windows 原生 runner 继续如实列为未运行。
+- 本步骤没有修改 CitizenApp、CitizenWallet 或 `native/smoldot/pow/**`。定制 PoW 内容 hash 保持
+  `ced9bcd7af45c48ce0ddd4dd077fff035ff72c00fa84aa42067bb10e072d5999`；源码树未留下 build/target/.build 产物。
+
+#### 1.10.4 第一部分最终合并步骤：性能、持久化、生命周期与发布冻结完整技术方案
+
+状态：已完成并复核（2026-09-11）。原 1.10.5、1.10.6 已全部并入本步骤并取消独立步骤。
+
+合并执行合同：用户确认 1.10.4 后，以一次连续执行完成以下全部内容，中间不再按“性能与持久化”“后台同步与
+生命周期”“完整回归与发布冻结”拆步骤，也不再要求用户逐段确认。内部实施顺序只是同一次执行的依赖顺序，不是
+新的任务卡步骤。只有发现必须修改 `native/smoldot/pow/**`、CitizenWallet、CitizenApp、其它产品，或者实际实现必须
+越过下文已批准的公共合同、数据边界和破坏性操作边界时，才立即暂停并带着准确文件、原因和替代方案沟通。
+
+数据库边界先明确：本步骤所称数据库是 Android、Apple、Linux、Windows 宿主适配器为 CitizenSDK 创建的
+`public-state-v1.sqlite3`，不是 CitizenApp 的业务数据库，也不是 CitizenWallet 的数据库，更不是在 Rust Core 中
+内嵌一套数据库引擎。Rust Core 只依赖 typed store 合同；四个平台当前选择 SQLite 实现该合同。smoldot 自己的
+CitizenChain 状态数据库属于现有上游轻节点能力，本步骤不复制、不替换、不修改。
+
+目标与范围：一次关闭基线 P1-04“execution history 单 BLOB 导致 O(N) 编解码/整包重写”、P1-05“逻辑 retention
+不回收 SQLite 物理空间”和 P2-01“操作级资源测量精度不足”；同时关闭 SDK 可由确定性测试证明的 P2-02
+生命周期合同缺口，验证 start/stop/close/reopen、宿主前后台驱动、断网/恢复、finalized 订阅重建、交易 watch
+中断后的持久恢复、取消、迟到回调和关闭排空；最后完成第一部分全量回归、证据登记和发布候选冻结。SDK 仍只保存
+自身提交交易的通用 execution 事实；索引和淘汰只允许使用 executionId、通用状态、时间、数量和字节，不得出现
+目的账户、金额、备注、方向、pallet、action、投票、治理、旅行、订单或任何 App 业务字段。不改 CitizenApp、
+CitizenWallet、`native/smoldot/pow/**`，不增加迁移、兼容、双读、双写、alias、wrapper、fallback 或其它 QR 协议。
+
+“后台同步”边界：它是 SDK 组合内已经存在的轻节点同步、finalized 订阅、通用 execution reconciliation 和链数据库
+快照调度，不是操作系统保证常驻的后台任务，也不是某个 App 的业务同步器。App 仍负责按自己的前后台策略调用公开
+start/stop/close；SDK 不接收广场、投票、治理、旅行、订单等业务生命周期，不新增 App 专用前后台 API。Stopped、
+StartFailed 和 Disposed 继续是单向生命周期；所谓 reopen 是宿主关闭旧实例、创建新实例并从 SDK 自有持久状态恢复，
+不是把已停止实例偷偷重新启动。
+
+发布冻结边界：本步骤冻结的是 CitizenSDK 第一部分的源码、公共合同、平台投影、测试证据和 Release hash，不提交、
+不推送、不发布包、不触发未经明确安排的远程 runner，也不拿源码扫描冒充未运行的真机/异系统结果。Flutter 继续
+绝对不安装、不下载、不升级、不配置、不启动、不停止，也不调用任何 Flutter 命令；已有 Flutter 安装或缓存同样不动。
+
+必要合同变化与确认边界：要真正消除 Core 的整包 load/CAS，必须把当前 Host public-store 中两个 whole-history
+callback 替换为通用索引读取和原子 mutation callback；只在 SQLite 层拆行而仍让 Core收发整包 BLOB 不能关闭
+P1-04。因此本步骤会修改公开 header 中 `citizensdk_host_public_store_v1_t` 的宿主侧 C 集成布局和 history callback
+类型；它属于平台宿主 ABI，不是应用业务 API。App-facing API、Flutter 方法、result kind 或产品函数均不增加，
+117/62/3/17 函数闭集保持。CitizenSDK 1.0 尚未发布，旧
+whole-BLOB callback 与旧 history codec 直接删除，不保留兼容入口。SQLite 也只接受新的精确 schema：不读取、不
+转换、不迁移旧 whole-BLOB 行；已有开发数据库必须由调用方清除后重新创建，SDK 不自动扫描或搬运。该 Host struct/
+schema 变化只有在用户确认本步骤后实施；若要求保持它们逐字节不变，则 P1-04 只能保留，不能伪称已优化。
+
+生命周期合同不新增 App-facing 方法或第二套状态机：继续使用现有 start、stop、close、lifecycle、sync status、
+capability/event 和通用 history 接口。只允许修正 Engine/FFI/平台内部的 generation fence、取消、排空、订阅重建、
+持久 open execution 恢复和回调顺序；117 个 Core 产品函数、62 个 Flutter 方法、3 个 Apple QR image 函数、
+Linux/Windows 各 17 个 Host 函数保持不变。若测试证明确实必须新增或删除公共函数/方法、改变 App-facing DTO、
+改变唯一 `QR_V1`，或修改上游/PoW 才能正确实现，则不在本步骤擅自扩大，按合并执行合同暂停说明。
+
+目录与职责：
+
+- `native/contracts/src/store/transaction_history.rs`、`native/contracts/src/lib.rs`：以
+  `TransactionHistoryIndex`、`TransactionHistoryCursor`、`TransactionHistoryMutation` 替换 whole-state store 合同。
+  typed store 只提供：读取 revision/总数/总 weight/open 数量与 weight、按 executionId 读取、按稳定游标分页、读取
+  最旧 retention-terminal 候选、按 expected revision 原子提交 upsert/delete 集合。每条记录仍保存完整恢复材料；
+  公开 `TransactionHistoryPage/Record` 字段不变。
+- `native/engine/src/transaction_history.rs`、`native/engine/src/{transaction_prepare.rs,engine.rs}`：启动与恢复只读取
+  Pending/InBlock 等 open 记录；单次状态更新只加载目标记录，历史页面最多加载公开 limit 条，容量不足时只分页取
+  最旧终态候选。Core 对宿主索引元数据与解码后 record 逐项交叉验证；同一 CAS revision 原子提交目标 upsert、终态
+  删除和新汇总，继续保证 pending-before-broadcast、open 不驱逐、exact finalized proof 和单账户在途约束。
+- `native/engine/src/{engine.rs,chain_monitor.rs,finalized_history_runtime.rs,transaction_execution.rs,state_import.rs}`：把性能
+  改造后的逐记录历史接入唯一 lifecycle generation 和 monitor cancellation。start 成功后只恢复 open execution；
+  stop/close 先关闭新 admission，再取消 provider 等待、停止 monitor、排空已进入的 store CAS/订阅，最后停止 provider
+  和销毁 Engine。断线、Retracted、Dropped、FinalityTimeout、流结束或取消不得伪造失败/成功终态，也不得删除
+  Pending/InBlock；新实例 reopen 后从持久记录与最新 verified finalized head 继续通用 reconciliation，绝不重新签名。
+- `native/smoldot/provider/src/{client.rs,legacy.rs,verified_chain_client.rs}`：只调用已有 smoldot start/stop、同步状态、
+  finalized subscription、transaction submit/watch、chain database export/import 和网络内部重连能力；SDK 适配层仅修正
+  订阅资源结束后的有界重订阅、错误投影和排空，不实现 P2P、共识、交易池、数据库或第二套网络重连器。任何必须改动
+  `native/smoldot/pow/**` 的发现都属于二次确认门禁，不在本步骤执行。
+- `native/ffi/src/{abi.rs,host_providers.rs,host_codec.rs,host_codec_tests.rs}`、
+  `include/citizensdk_types.h`：删除 whole-history load/CAS callback，加入固定宽度的通用 history index/query/mutation
+  callback、严格数组/short-buffer/owner/operation completion 合同及逐记录 codec。Host 不解码 callData、extrinsic、
+  签名或业务字节；Core 验证回传的 executionId、状态、时间和 weight 与 record 一致。公开函数总数不变。
+- `native/ffi/src/{runtime.rs,chain_monitor.rs,composition.rs,requests.rs,events.rs,lib.rs}`：维持单一 SDK-owned monitor；固定
+  start 成功后服务启动、失败收敛、显式 stop、destroy 和 reopen 的线性顺序。finalized stream 结束后按 1/2/4/8/16/30
+  秒封顶重订阅，成功通知后重置退避；普通通知、historyChanged 和 lifecycle/capability 事件仍走已有有界队列。
+  关闭期间不接纳新请求，不从回调线程执行阻塞控制，不丢弃已进入宿主事务的 future，所有线程和订阅必须可监督 join。
+- `android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkPublicStore.kt`、
+  `darwin/Sources/CitizenSDK/CitizenSDKPublicStore.swift`、`linux/src/citizen_sdk_public_store.cc`、
+  `windows/src/citizen_sdk_public_store.cc`：把 history 从 `singleton_records` 单 BLOB 改为一行 meta 加按 executionId
+  分行的 opaque record 表；索引只含 `created_at_millis`、`updated_at_millis`、`retention_terminal`、`durable_weight`
+  等通用字段。expected revision 检查、删除、upsert、汇总更新在一个 SQLite `IMMEDIATE` 事务中完成，任何一步失败
+  全部回滚。四个平台 SQL、排序、索引和 PRAGMA 完全一致。
+- 四个平台 SQLite open/schema 文件：新建空库时在建表前固定 `auto_vacuum=INCREMENTAL` 并验证实际值。终态淘汰提交
+  后，仅由现有串行 store owner 在 freelist 同时超过 16 页和数据库页数 25% 时执行最多 128 页的
+  `incremental_vacuum`，随后执行受监督 WAL checkpoint；不运行无界 full `VACUUM`，不增加后台线程/定时器，不在
+  wallet、签名或 provider 锁内回收。checkpoint/vacuum 失败返回 persistence stage，已提交数据仍以重开验证决定，
+  不能删除或伪造 execution。
+- `lib/src/platform/{citizen_sdk_flutter_sessions.dart,citizen_sdk_flutter_codec.dart}`、Android
+  `CitizenSdk.kt`/`CitizenSdkFlutterSessions.kt`/`internal/CitizenSdkRequestRouter.kt`、Apple
+  `CitizenSDK.swift`/`CitizenSdkFlutterSessions.swift`、Linux/Windows `citizen_sdk_lifecycle.*`、
+  `citizen_sdk_flutter_sessions.*`、`citizen_sdk_host_bridge.*`：只投影同一 Core lifecycle、request sequence、事件和
+  failure stage；平台前后台只能决定何时调用同一 start/stop/close，不得自行维护链高度、重连计时器、交易 watch 或
+  历史真源。close 的可恢复 Busy 必须保留实例可用，进入 teardown-only 后只允许重试 close，不得回到运行状态。
+- `native/engine/tests/baseline_resource_contract.rs` 与新增 `native/engine/tests/transaction_history_scaling_contract.rs`：
+  记录 0/1/100/1,000 条下的 load/page/update 编解码字节、store 调用、wall time 和峰值分配；预热后至少 20 轮，
+  报告中位/P95/max/CV。门禁要求单条状态更新编码字节受单记录上限约束、page 成本受 limit 约束，不随总 N 整包增长；
+  测试计时不进入生产 API。
+- `native/engine/tests/lifecycle_recovery_contract.rs`、
+  `native/smoldot/provider/tests/{baseline_lifecycle_contract.rs,lifecycle_recovery_contract.rs}`、
+  `native/ffi/src/{chain_monitor_tests.rs,composition_tests.rs}`：用确定性的 scripted Provider/Store/clock 覆盖 Created→
+  Starting→Running→Stopped/Disposed、StartFailed、断线重订阅、退避复位、静默链、通知突发、stop/close 竞态、取消、
+  迟到 completion、host CAS 尚未返回、旧 generation 结果和 reopen 恢复。scripted Provider 只模拟合同失败向量，不
+  复制 smoldot 实现；真实 smoldot 仍由 provider 层既有合同测试验证。
+- Android/Apple/Linux/Windows store tests：覆盖 0/1/100/1,000 行数据库增长和重开、1,000→1 retention 后 freelist/
+  物理文件收敛、多页游标、重复时间的 executionId tie-break、并发 CAS、删除/upsert/meta 任一步失败回滚、磁盘满、
+  损坏 record、checkpoint/vacuum 失败与关闭竞态。未在本机运行的平台继续标为待 runner，不用源码扫描冒充。
+- Android/Apple/Linux/Windows lifecycle/session tests：共享同一状态转换和事件 golden，覆盖快速前台→后台→前台驱动
+  下的 stop/close/new-open、重复调用、start 失败、请求完成与 stop 交错、event queue 满、回调内 close、宿主 operation
+  orphan、实例替换和 reopen 后旧 session/request 事件隔离。平台测试不得新增自动常驻后台服务，也不得把 UI
+  lifecycle 写入 Core 持久状态。
+- `test/consumers/**`、`test/api/**`、`test/platform/**`：三类 consumer 与 external signer 继续只组合六类通用能力；
+  增加 lifecycle/history fake 合同，证明 CitizenApp-shaped、途遇/第三方-shaped 业务在 stop/reopen 后只通过公开
+  execution/history 事实恢复，SDK 不认识其业务字段。Flutter 工具链相关测试仅登记已有证据或待运行状态，本步骤不
+  调用 Flutter。
+- `docs/audits/SDK_BASELINE_1_10_1.md` 增补优化后的同机对照；新增
+  `docs/audits/SDK_PART1_RELEASE_FREEZE_1_10_4.md` 作为第一部分唯一冻结报告，逐项记录 P1-04/P1-05/P2-01/P2-02
+  的关闭证据、命令、机器环境、实测/模拟/源码事实分类、未运行平台和残余风险；禁止把未跑结果写成通过。
+- `docs/{ARCHITECTURE,SECURITY,C_ABI,DART_API,MOBILE_PLATFORM,LINUX_PLATFORM,WINDOWS_PLATFORM,
+  NATIVE_PACKAGING,SOURCE_PROVENANCE,WALLET_MODEL}.md`、根/平台/native README、本任务卡和 `CHANGELOG.md`：同步说明
+  store 结构、原子性、物理回收、生命周期、断线恢复、watch 持久语义、关闭顺序和“不迁移/不兼容”边界。文档不得
+  把宿主 SQLite 写成 Core 内嵌数据库，不得把后台同步写成 OS 常驻保证，也不得把 InBlock/Finalized 通知写成执行成功。
+- `scripts/release.mjs`、`scripts/release.test.mjs`：固定新 Host struct 布局、SQL/schema/index/PRAGMA、117/62/3/17、
+  operation-level 基线来源、lifecycle/event golden、三类 consumer、external signer 和四端一致性；反向拒绝
+  whole-history callback/codec、旧表双读、业务列、平台私有同步器/watch、生命周期分叉、其它 QR 协议、生产
+  benchmark hook、完整 `VACUUM`、PoW 漂移和源码树数据库/构建产物。Release manifest/hash 只在所有本机可执行门禁
+  通过后更新，随后再次从干净的仓库外构建目录复验，避免用旧产物计算 hash。
+
+实施顺序与失败向量：
+
+1. 先把 1.10.1 的 0/1/100/1,000 whole-BLOB 基线固化为失败测试，并新增“更新第 500 条时不得编码其余 999 条”、
+   “limit=100 不得加载 1,000 条”和“retention 后文件应逐次收敛”的目标门禁；先不改生产实现。
+2. 替换 Contracts/Engine store 形状和逐记录 codec；在内存 fake 上证明 revision CAS、stable cursor、open 恢复、
+   terminal 淘汰、总 weight 和 pending-before-broadcast 不变量，再改 FFI callback。不得通过缓存整包 state 绕过测试。
+3. 四个平台建立完全相同的新 schema 和事务实现；旧 whole-BLOB callback、codec、SQL、测试 fixture 和文档直接删除。
+   不加 schema 探测转换、旧行导入、双读或 fallback；旧开发库碰到 schema 不符必须明确失败关闭。
+4. 加入有阈值、有单次页数上限的物理回收；先注入 checkpoint/vacuum/磁盘满/崩溃点，证明 mutation 原子性和重开
+   结果，再测 1,000→1 多次正常写入后的文件收敛。回收不得延迟 Core completion 到无界时间。
+5. 在同一 release 构建与预热规则下复测 operation-level 编码/复制/存储指标；只据同机前后对照报告改善，不设跨机器
+   绝对耗时承诺。这里不中止步骤、不输出下一子步骤，继续进入生命周期实现与验证。
+6. 先冻结 lifecycle/monitor golden：用 scripted Provider/Store/clock 写出断线、重连、通知突发、静默、start failure、
+   stop、close、取消、迟到结果和 reopen 的失败测试；逐项标出哪些是 SDK adapter 行为、哪些由上游 smoldot 提供，
+   禁止为了通过测试把上游实现复制进 SDK。
+7. 在 Engine 与 FFI 修正测试暴露的通用生命周期问题：所有异步操作绑定 session/request/generation；start 只有在
+   provider 身份和 verified finalized head 验证后进入 Running；monitor 只消费现有 finalized 订阅并有界重订阅；
+   watch 中断保留 durable open record；stop/close 严格执行 admission→cancel→join/drain→provider stop→Engine dispose。
+8. 让 Android、Apple、Linux、Windows 与 Dart session 共享同一转换和事件顺序；删除重复同步器、平台私有重连状态、
+   dead callback 和失效 whole-BLOB 残留。模拟前后台只调用公开 start/stop/close/new-open，不增加后台 service、daemon、
+   work manager、定时任务或 App 业务 hook。
+9. 完成全量回归：先跑受影响 crate/host/store/lifecycle/consumer 定向测试，再跑 Rust workspace、Release、C11/C++17、
+   仓库外 ABI build 和本机现有可用原生 runner。真实网络只允许无密钥、无交易广播的 bounded sync/read smoke；
+   submit/watch/reconnect 用确定性 provider 合同或明确配置的隔离测试链验证，绝不拿用户钱包或 CitizenChain 真实资产
+   做测试。任何环境缺失如实登记，不安装 Flutter、不临时下载工具、不触发未安排的远程 runner。
+10. 在所有本机可执行门禁通过后，更新全部注释、README、架构/安全/平台文档、基线对照、冻结报告、manifest 和
+    Release SHA-256；再从新的仓库外构建目录复验 hash/符号/headers。清理 dead code、旧 callback/codec/SQL/fixture、
+    仓库外临时数据库与构建物（精确移动到废纸篓，不碰任何用户数据或工具链缓存），确认源码树无生成物后将 1.10
+    和第一部分标记完成，并直接在任务卡写入和输出第二部分 2.1 的完整技术方案。
+
+关键失败测试：单条 upsert/delete 的 Core 编码与宿主写入不包含其它记录；页面和恢复查询都有硬上限；游标在相同
+时间戳、删除和并发状态变化下不重复/不遗漏；旧 revision 的 mutation 零写入；删除、upsert 或 meta 更新任一步失败
+全部回滚；Pending/InBlock 永不因 retention 或 vacuum 丢失；restart 仍能使用原 signed extrinsic 恢复且不重新签名；
+损坏索引与 record 不一致返回 integrity/verification，不回显内容；磁盘满与 checkpoint/vacuum 失败返回
+storage/persistence；1,000→1 后逻辑行立即正确，物理文件在固定的有界回收次数内下降。
+
+生命周期关键失败测试：重复 start/stop/close、Stopped/StartFailed 实例重启、start 完成越过 generation、provider 身份
+或 finalized 锚错误、断线时 stream error/结束、指数退避达到 30 秒上限、重订阅成功复位、静默链不忙轮询、通知突发
+不突破队列、请求/事件乱序、event queue 满、取消恰逢 provider completion、stop 恰逢 history mutation、host operation
+orphan、回调线程内 close、close Busy 后实例继续可用、teardown-only 重试、旧实例事件进入新 session、reopen 丢失
+Pending/InBlock、重复签名、重复并发 watch、错误地把 Ready/Broadcast/InBlock/Finalized 通知当作执行成功，全部必须由
+失败测试拦截。只有 exact canonical body、同 index System outcome 和 finalized proof 才能写执行终态。
+
+通用性与发布关键失败测试：reference、CitizenApp-shaped、third-party-shaped、external signer 四类消费者在同一公共
+合同上通过；任一生产目录出现 Square/Vote/Legislation/Proposal/Governance、booking/order、destination/amount/
+remark/direction/pallet/action 等业务 schema，任一兼容/迁移/旧库读取路径，任一 `QR_V1` 之外协议，任一平台私有
+链同步器/交易观察器，任一 CitizenWallet 依赖或 `native/smoldot/pow/**` hash 漂移，任一公开闭集 117/62/3/17 变化，
+以及源码树遗留数据库、build/target/.build 或打包临时物，均使冻结失败。
+
+回滚边界：本步骤是一个合并变更集，只允许在源码候选层整体回滚新 typed store、Host callback 布局、四端 schema、
+逐记录 codec、回收策略、lifecycle/monitor 修正、测试、文档和 Release hash；不能只回滚 schema 而保留新 callback，
+也不能只回滚 lifecycle fence 而保留依赖它的 monitor。由于明确不实现迁移/兼容，回滚不读取、转换或承诺恢复任一旧
+开发数据库；本步骤也不删除任何用户数据库。执行中的测试数据库和构建目录必须是新建的仓库外明确路径，清理时只
+移动该次创建且已核对的精确目录到废纸篓。
+
+若实施中发现必须修改 App-facing 交易/历史 DTO、增加业务字段、改变 117/62/3/17 闭集、改动
+`native/smoldot/pow/**`、复制上游网络/数据库/交易能力、修改 CitizenApp/CitizenWallet、保留旧 whole-BLOB 路径、
+增加迁移/兼容、执行无界文件重建、安装或操纵 Flutter，立即停止并按合并执行合同报告，不以“第一部分要完成”为由
+越权。普通编译错误、测试失败或本方案内的实现调整不算新增步骤，继续修复到门禁通过。
+
+验收命令与环境边界：所有 Rust 测试只通过 `scripts/test.sh cargo ...`，先定向运行 contracts/engine/ffi/provider，最终
+运行 `scripts/test.sh cargo --workspace --all-targets --locked`；Release 使用 `scripts/test.sh release`；C ABI 使用明确
+仓库外 `CITIZENSDK_WORK_DIR`/`CITIZENSDK_NATIVE_OUTPUT_DIR` 执行 `scripts/build-native.sh abi-host`，并对公开 header 做
+C11/C++17 consumer 编译。只运行当前机器已经具备依赖且不会下载工具的 Apple/Android/Linux/Windows runner；缺失
+Java、NDK、Apple framework、Linux/Windows 主机或真机时，在冻结报告逐项标为“未运行/发布前门禁”，禁止自动安装、
+禁止触发远程任务、禁止以 Release 源码扫描冒充 native runner。任何 `flutter` 命令都不运行，也不改 Flutter 安装、
+缓存、进程或配置。
+
+量化验收：0/1/100/1,000 条均记录数据库逻辑 bytes、主文件/WAL/SHM bytes、freelist/page count 和 reopen
+median/P95/max/CV；1,000 条中更新任一记录不得编码/读取其余 999 条，history page 成本只受 limit（公开最大 100）
+约束，open recovery 只受 open record 数约束；1,000→1 后逻辑行立即正确且物理文件在文档固定的有限次 128-page
+incremental vacuum/checkpoint 内下降。数值只与同机 1.10.1 基线比较，不承诺跨机器毫秒 SLA，不为测量增加生产 hook。
+
+生命周期验收：同一 golden 在 Core/FFI/Dart/Kotlin/Swift/Linux/Windows 投影一致；start/stop/close/new-open 全状态、
+断网与恢复、subscription 重建、watch 保留与恢复、取消、背压、乱序、迟到回调、host transaction 排空和事件顺序
+全部通过确定性测试。可用网络环境仅做无密钥 sync/read smoke；没有隔离测试链和测试资金时绝不广播真实交易，
+submit/watch/reconnect 由真实 provider API 的本地合同与 scripted failure vector 共同覆盖，报告明确证据类型。
+
+冻结验收：Host struct 精确布局和新 schema/index/PRAGMA 四端一致，117 个 Core 产品函数、4 个内部测试函数、3 个
+Apple QR image 函数、Linux/Windows 各 17 个 Host 函数和 62 个 Flutter 方法保持闭集；三类 consumer、external
+signer、C11/C++17、错误 22 类/8 阶段/7 字段、唯一 `QR_V1` 全部纳入 Release 反向门禁。最终复核无 whole-BLOB、
+旧 schema、迁移/兼容/业务模型、第二套同步/watch、生产 benchmark、完整 `VACUUM`、源码树数据库/生成物；
+CitizenApp、CitizenWallet、其它产品和 `native/smoldot/pow/**` 内容 hash 不变，`git diff --check` 通过。
+
+完成定义：上述实现、所有本机可执行门禁、文档/注释/hash、残留清理和冻结报告一次完成后，1.10.4、1.10 和第一部分
+同时标记完成，不再存在 1.10.5/1.10.6。因本机缺少环境而未运行的原生 runner 只作为实际发布前外部门禁留在冻结
+报告，不再拆出 SDK 实现步骤，也绝不宣称通过；随后直接输出第二部分 2.1 完整技术方案。本方案已获用户确认并按上述合同执行完成。
+
+完成记录（2026-09-11）：
+
+- Contracts/Engine 已删除 whole-history state 合同，改为 `TransactionHistoryIndex/Cursor/Mutation`、按 executionId
+  读取和最多 100 条有界分页。状态更新只读取目标 record；1,000 条中的单条 mutation 实测 store 调用为
+  index=1、record=1、page=0、write=1。`TXR1` 每条记录仍包含完整通用恢复材料，`THQ1/THB1/THM1`
+  描述与 opaque record 由 Core 交叉验证。
+- Host public-store 的旧 history load/CAS callback 直接替换为 query/mutate；C struct 仍为 72 bytes，字段偏移保持
+  56/64，产品函数闭集不变。旧 callback、codec、schema 读取入口为零，不存在 alias、wrapper、fallback、迁移、
+  兼容、双读或双写。
+- Android、Apple、Linux、Windows 统一 public schema v2：`transaction_history_meta`、逐 execution record 和
+  newest/retention/reconcile 三个索引；只含 executionId、时间、通用终态标志、资源 weight 与 opaque Core record。
+  expected revision、终态 deletes、upserts、meta 在同一事务提交，open execution 禁止删除。新库建表前固定
+  incremental auto-vacuum；只在 freelist >16 且超过总页数 25% 时单次回收最多 128 页并监督 checkpoint，绝不
+  执行 full `VACUUM`。旧 v1/漂移 schema 明确拒绝且不删除数据库。
+- Apple 同 SQL 实际仓库外测量：0/1/100/1,000 行主库为 45,056/45,056/208,896/1,630,208 bytes；20 次重开
+  median 为 0.875/0.582/0.521/0.524 ms；1,000 条终态经十个有界 mutation 收敛为 1 条后主库回到 45,056
+  bytes、11 pages、freelist=0。完整 median/P95/max/CV、逻辑 bytes 与 WAL/SHM 见
+  `docs/audits/SDK_BASELINE_1_10_1.md` 第 11 节。
+- finalized stream error 与结束现在都会废弃失效订阅，adapter 按 1/2/4/8/16/30 秒封顶重订阅，成功通知复位；
+  网络/P2P/共识/交易池/watch/链数据库继续直接复用既有 smoldot provider，没有复制上游实现或修改 PoW。
+- `scripts/test.sh cargo --workspace --all-targets --locked` 全量通过；FFI 当前 117 项单元测试全部通过。
+  `scripts/test.sh release` 107/107 通过。仓库外 `scripts/build-native.sh abi-host` Release 构建与产品 ABI、C11/C++17
+  consumer 验收通过。Apple public store 通过本机 Swift 6.4 类型检查和实际 SQLite 测量；Android JNI 使用已安装
+  NDK 28.2 C++17 `-Wall -Wextra -Werror` 语法检查通过，Kotlin store 子集使用已安装 Android Studio JBR/Kotlin 与
+  Android 36 jar 编译通过；Linux public-store C++17 严格语法检查通过。
+- Android Gradle/AAR、移动真机、Linux runner、Windows runner 和真实网络交易没有环境证据，已在
+  `docs/audits/SDK_PART1_RELEASE_FREEZE_1_10_4.md` 标为发布前外部门禁，未用源码扫描冒充通过。Flutter 全程没有
+  调用、安装、下载、升级、配置、启动、停止或清理缓存。
+- 本步骤没有修改 CitizenApp、CitizenWallet、其它产品或 `native/smoldot/pow/**`；定制 PoW 内容 hash 继续为
+  `ced9bcd7af45c48ce0ddd4dd077fff035ff72c00fa84aa42067bb10e072d5999`。SDK 生产 schema 不含目的账户、金额、
+  备注、方向、业务 pallet/action、广场、投票、治理、旅行或订单字段。
+
+第一部分状态：1.1—1.10 全部完成；CitizenSDK 通用底层能力源码候选冻结。下一执行点为第二部分 2.1；未确认
+2.1 技术方案前不修改 CitizenApp。
 
 ## 四、第二部分：CitizenApp 业务层与旧底座剥离
 
-第二部分只修改 CitizenApp，以第一部分已经通过多消费者验收的通用 SDK 合同为前提。期间允许旧底座作为
-开发期实现维持构建，但业务代码必须逐步只依赖 App 内部端口；这不属于用户数据兼容。发现 SDK 缺能力时，
-必须回到第一部分按通用能力单独出方案，禁止直接为 CitizenApp 增加专用 SDK 方法。
+第二部分只修改 CitizenApp，以第一部分已经通过多消费者验收的通用 SDK 合同为前提。禁止建立 legacy、adapter、
+wrapper、alias、fallback、双实现、双路由、双读或双写等过渡层；每个获确认步骤都直接修改唯一生产路径，并在同一
+变更中删除被替换入口。发现 SDK 缺能力时，必须回到第一部分按通用能力单独出方案，禁止直接为 CitizenApp 增加
+专用 SDK 方法。
 
 ### 2.1 建立 App 区块链端口与目录边界
 
-状态：未开始。
+状态：已按“无 legacy/adapter/兼容层、单一生产路径、原子替换并同步删除”更新完整技术方案；待用户确认，未执行。
 
-- 建立钱包、通用签名 intent、链读取、opaque callData 交易和通用历史端口。
-- 业务模块只依赖端口，不直接引用 smoldot、NativeSr25519、WalletManager 私钥能力或 SignedExtrinsicBuilder。
-- 冻结 App 业务层保留目录、业务 DTO/action/payload/storage codec 清单和旧底座待删除清单；端口形状必须可
-  由通用 SDK 实现，不能反向要求 SDK 理解 App 业务类型。
+目标：只在 `/Users/rhett/GMB/citizenapp` 建立 CitizenApp 自己的依赖倒置边界。此步不接入 CitizenSDK 依赖，
+不读取、迁移、转换或兼容用户数据，也不建立任何旧底座转发层。`lib/chain` 只定义最终 models、ports 与客户端
+`ChainServices` 组合；没有 production default、nullable fallback、旧实现 factory 或临时实现目录。现有
+`WalletManager`、`SmoldotClientManager`、`ChainRpc`、`NativeSr25519`、`SignedExtrinsicBuilder`、`ChainTxMonitor`、
+`SecureSeedStore` 的生产引用在本步精确冻结，随后 2.2—2.5 各自直接改造唯一调用路径并同步删除被替换入口，不经
+adapter 过渡。端口形状必须能由第一部分已冻结的通用 CitizenSDK 逐项实现，不能出现广场、投票、立法、提案、
+治理、旅行、订单等 SDK 专用要求。
+
+#### 2.1 目录设计与职责注释
+
+- `lib/chain/models/account.dart`：App 底座中立的账户 ID、SS58、名称、hot/cold、默认项、目录 revision；
+  不含助记词、seed、private key、Vault 引用、CitizenSDK 类型或旧 Isar 钱包实体。
+- `lib/chain/models/signing.dart`：opaque payload、`raw/substrateSigningPayload/blake2Domain` transform、唯一
+  external `qrV1` transport、完成/待外签/取消结果；`opaqueAction` 仍只是 App 提供的不透明 u16，不登记业务 action。
+- `lib/chain/models/chain.dart`：best/finalized block ref、sync status、runtime context、header/body、storage
+  bytes、账户余额/nonce/fee 等 App 中立值；不加入任意 JSON-RPC method 或业务 storage key。
+- `lib/chain/models/transaction.dart`：opaque callData preparation、冷热 execution、pool/finalized 结果和
+  SDK 自身 execution history page/record 的 App 中立投影；不含 destination、amount、remark、direction、业务
+  pallet/event。当前 `lib/transaction/ports/transaction_executor.dart` 的通用 execution fact 合并到这里后删除原文件，
+  不留 re-export wrapper。
+- `lib/chain/ports/wallet_port.dart`：公开账户目录、创建/用户重新输入助记词导入、追加账户、冷公钥导入、
+  重排、默认账户授权、改名、删除和原生安全私钥查看端口；不包含 CID、设备数据钥或 `k=6` 用途钥。
+- `lib/chain/ports/signing_port.dart`：通用 sign/begin/consume/cancel/verify 端口，只接收上面的中立 signing
+  model；业务服务在端口外构造 payload 和审阅文案。
+- `lib/chain/ports/chain_port.dart`：固定链身份、同步状态、best/finalized、安全块解析、header/body/runtime、
+  storage 单项/批量、System.Events、余额/nonce/fee 端口；业务 key 与 SCALE 解码继续留在现有业务目录。
+- `lib/chain/ports/transaction_port.dart`：prepare/cancel/execute/consume-cold-response/cancel-execution，只接收
+  sourceAccountId 与 opaque callData；不允许 caller nonce、完整 SigningPayload 或 signed extrinsic 出端口。
+- `lib/chain/ports/history_port.dart`：SDK 自身 execution page/sync/event invalidation 端口，与
+  `lib/transaction/history/**` 的 CitizenApp 业务流水明确分离。
+- `lib/chain/ports/lifecycle_port.dart`：open/start/stop/close、capability/lifecycle/event 快照的 App 中立端口；
+  不增加 OS 常驻后台、App 业务同步或第二套重连状态机。
+- `lib/chain/composition/chain_services.dart`：客户端内部一次性持有上述六类端口的不可变依赖集合；根启动代码
+  在第三部分获得完整 CitizenSDK 实现后显式创建并注入；构造参数全部 required，没有默认实例、空实现、旧实现
+  factory、service locator 或 fallback。本步的 production 不构造不完整 `ChainServices`，测试只用完整 fake 验证合同。
+- `lib/security/**`、`lib/citizen/**`、`lib/8964/**`、`lib/votingengine/**`、`lib/my/**`、`lib/chat/**`：继续拥有
+  CID、设备子钥、账户数据钥、`k=6` 用途钥、广场、投票、立法、提案、治理和聊天等业务实现。它们可依赖
+  `lib/chain/ports/**`，反向依赖禁止。
+- `lib/transaction/history/{data,chain,application,presentation}/**`：继续保存 CitizenApp 的目的账户、金额、备注、
+  收发方向、业务 event 解码、Isar 数据与交易 Tab；其中链读取改依赖 `chain_port`，execution 关联改依赖
+  `history_port`，这些业务模型绝不移入 SDK 或 `lib/chain/models/transaction.dart`。
+- `lib/transaction/onchain-transaction/citizenchain_transfer_call_encoder.dart` 及现有各业务 codec：继续由 App 编码
+  RuntimeCall；最终 `Uint8List` 才进入 `transaction_port`。
+- `lib/chain/README.md`：记录依赖方向、允许/禁止字段、单一生产路径、无迁移/无兼容和 2.2—3.6 直接替换/删除
+  路线；明确禁止创建 `legacy/`、`adapter/` 或任何临时转发目录。`test/chain/**` 保存永久端口、导入闭集和 fake
+  consumer 测试。
+
+#### 2.1 分步实施顺序
+
+1. 只读冻结当前引用清单：用 `rg` 生成并人工分类生产引用，分别登记钱包事实、App 业务安全钥、链读取、业务
+   RuntimeCall 编码、交易构造/提交、watch/历史和生命周期。输出“永久保留业务目录”“2.2—2.5 直接改造并删除的
+   旧底座入口”“第三部分 SDK 原子替换点”三张清单；不把测试引用误算成生产完成度。
+2. 先写失败合同：`test/chain/port_model_contract_test.dart` 证明端口模型防御复制、enum/上限和冷热同形；
+   `test/chain/business_boundary_test.dart` 证明 Square/Vote/Governance/第三方形状的 payload/callData 只作为
+   opaque bytes 穿过 fake；`test/chain/import_boundary_test.dart` 禁止业务目录直接 import 旧底座、CitizenSDK
+   或任何业务模型反向进入 `lib/chain`。
+3. 建立 `models` 与六类 `ports`。只使用 Dart 标准值（String、int/BigInt、Uint8List、List、Stream）；所有 bytes
+   构造时复制、集合不可变，错误只保留 code/stage/message，不携带助记词、秘密、payload、callData、签名、
+   extrinsic、metadata/storage 内容或路径。端口注释逐项标明 SDK 能力映射和 App 业务禁区。
+4. 把现有 `lib/transaction/ports/{transaction_executor.dart,finalized_chain_reader.dart}` 的有效中立模型/接口移动并
+   合并到新目录；更新全部调用和测试后删除旧文件，不保留 export alias、wrapper 或兼容 import。
+5. 建立 `ChainServices` 最终客户端组合类型：六个端口全部为 required final 字段，只允许完整构造；本步不向生产
+   `main.dart` 注入 fake、旧底座或空实现，也不建立全局 singleton。第三部分接入时一次性用真实 CitizenSDK 实现
+   构造，构造失败直接失败关闭，不回退旧实现。
+6. 本步只切换已经存在且本来就以抽象端口工作的
+   `lib/transaction/history/application/wallet_transaction_history_service.dart` 与相关测试到新最终 import；其它生产
+   业务调用点不伪造临时实现，而由 2.2—2.5 在各自步骤中直接切换唯一路径并同时删除对应旧入口。页面展示、目的
+   账户/金额/备注/方向和业务 event decoder 保持原目录/职责。
+7. 清理未使用 import、重复 DTO、旧 `lib/transaction/ports` 和临时 TODO；完善所有 public/internal 注释和
+   `lib/chain/README.md`。反向扫描确认不存在 `lib/chain/legacy`、`lib/chain/adapter`、旧 import re-export、默认
+   fallback、双路由或兼容入口；无迁移、兼容、双读、双写、CitizenWallet 或 CitizenSDK 源码修改。
+
+#### 2.1 测试与验收门禁
+
+- 钱包端口覆盖 absent、hot/cold 混合目录、revision 冲突、默认账户授权 pending/completed、用户取消和秘密零返回；
+  端口没有助记词 getter，也没有旧钱包导入/转换方法。
+- 签名端口覆盖 raw/Substrate/domain transform、hot 完成、cold `qrV1` pending/consume、expiry/cancel、错账户/错
+  payload hash；增加新业务只改变 opaque fixture，不改变端口。
+- 链端口覆盖 lifecycle 未运行、best/finalized 区分、exact block、runtime/storage batch、System.Events、余额/nonce/
+  fee、错误阶段；fake 不实现任意 RPC。
+- 交易/历史端口覆盖 prepare/cancel、热执行、冷执行待扫码/回扫、Pending/InBlock/PoolRejected/Finalized、分页
+  1/100/101、sync 和 historyChanged；业务历史 DTO 不出 `lib/transaction/history`。
+- 本步对 `WalletManager`、`SmoldotClientManager`、`ChainRpc`、`NativeSr25519`、`SignedExtrinsicBuilder`、
+  `ChainTxMonitor`、`SecureSeedStore` 建立精确 production 引用基线；2.2—2.5 的验收必须逐项归零对应业务引用，
+  不能用转发类隐藏。`lib/chain/**` 自本步起永远不得引用这些旧实现。
+- `lib/chain/**` 与其 tests 不 import `package:citizen_sdk`；`pubspec.yaml` 本步不增加 CitizenSDK 依赖。CitizenApp
+  业务词不得进入端口类名、方法名、enum 或通用持久字段。
+- 全仓不存在 `lib/chain/legacy/**`、`lib/chain/adapter/**`、名称含 Legacy/Compat 的链实现、旧端口 re-export、
+  deprecated wrapper、nullable/default port、运行时 fallback 或同时选择新旧实现的分支。
+- 本步骤不读取、转换、迁移或删除用户钱包/交易数据，不改 CitizenWallet/CitizenSDK/PoW，不提交、不推送。
+  Flutter 继续不调用、不安装、不下载、不升级、不配置、不启动、不停止，也不处理其缓存；当前机器能执行的非
+  Flutter 静态/源码合同才记为通过，依赖 Flutter 的 analyze/test 如实列为未运行，不伪造结果。
+
+执行完成定义：上述最终 models/ports/`ChainServices`、已有抽象消费者 import 切换、测试、注释、文档和残留清理
+全部完成，且临时适配/兼容/双路径扫描为零；旧底座引用形成不可放宽的准确基线，并输出 2.2“拆分 WalletManager”
+的直接改造/同步删除方案后，2.1 才可标记完成。用户确认本方案前不执行 CitizenApp 修改。
 
 ### 2.2 拆分 WalletManager
 
@@ -1087,7 +1917,8 @@ signed extrinsic；CitizenApp 只接收删除前复制出的 App 业务实现和
 
 - 广场、身份、订阅、投票、立法、提案、多签等业务查询改为调用链读取端口。
 - 业务 storage key 和 SCALE 解码保留在原业务目录。
-- 隔离并准备删除 SmoldotClientManager、ChainRpc 传输层和 App 链资产生命周期。
+- 业务调用切换到链端口后，旧直接入口在同一步删除；不得用 wrapper 保留。仍作为该端口唯一当前实现的
+  SmoldotClientManager/ChainRpc 内部清单精确冻结，第三部分用 SDK 实现替换时与旧实现同一变更删除。
 
 ### 2.4 剥离签名和交易构造依赖
 
@@ -1118,8 +1949,10 @@ signed extrinsic；CitizenApp 只接收删除前复制出的 App 业务实现和
 
 ## 五、第三部分：CitizenSDK 接入 CitizenApp
 
-第三部分只把 CitizenApp 端口绑定到已经冻结的通用 CitizenSDK；正常接入不得修改 SDK 生产 API。若确有
-基础能力缺口，停止接入并回到第一部分按“其它 App 也可使用”的合同重新提案。
+第三部分只把 CitizenApp 端口绑定到已经冻结的通用 CitizenSDK；正常接入不得修改 SDK 生产 API。禁止建立
+CitizenSDK adapter 与旧实现并存、运行时选择、fallback、wrapper、迁移或兼容路径：每一类端口接入都在同一
+获确认变更中切换全部调用、删除对应旧实现和依赖，只留下一个生产路径。若确有基础能力缺口，停止接入并回到
+第一部分按“其它 App 也可使用”的合同重新提案。
 
 ### 3.1 SDK 依赖与唯一运行时
 
@@ -1127,7 +1960,8 @@ signed extrinsic；CitizenApp 只接收删除前复制出的 App 业务实现和
 
 - 增加正式 CitizenSDK 依赖和 App 内唯一 runtime owner。
 - 对齐 Flutter/Dart 版本、平台插件注册、生命周期、能力事件和 stop-before-close。
-- 禁止 SDK 轻节点与 App 旧 smoldot 同时运行。
+- `ChainServices` 只能由完整 CitizenSDK 端口实现构造；接入同一步删除旧 runtime 构造和启动入口，禁止 SDK
+  轻节点与 App 旧 smoldot 同时存在于生产依赖图，而不只是禁止同时运行。
 
 ### 3.2 钱包与账户页面接入
 
@@ -1135,7 +1969,7 @@ signed extrinsic；CitizenApp 只接收删除前复制出的 App 业务实现和
 
 - WalletGate、创建/导入、账户列表、默认账户、改名、删除、私钥安全查看全部使用 SDK。
 - 热钱包由用户重新输入助记词；冷账户由用户重新输入或扫描公钥。
-- 不读取 CitizenApp 旧钱包表和旧金库。
+- 同一步删除已被 SDK 替换的旧链钱包/金库实现和调用；不读取 CitizenApp 旧钱包表和旧金库，不保留旧入口。
 
 ### 3.3 业务链读取接入
 
@@ -1144,6 +1978,7 @@ signed extrinsic；CitizenApp 只接收删除前复制出的 App 业务实现和
 - 将第二部分的链读取端口绑定到 SDK 通用 finalized/storage/metadata 原语。
 - 验证广场、身份、订阅、投票、立法、提案、多签和资产读取结果。
 - storage key、SCALE 业务解码、组合查询和展示逻辑全部位于 App；SDK 不新增这些业务查询。
+- 全部业务读取切换成功的同一变更删除 App 自带 smoldot、ChainRpc 传输和链资产生命周期，不延后到最终清理。
 
 ### 3.4 热签、冷签与交易接入
 
@@ -1153,6 +1988,8 @@ signed extrinsic；CitizenApp 只接收删除前复制出的 App 业务实现和
 - 完成热账户本机签名交易闭环，以及冷账户导入、App 展示请求、CitizenWallet 扫码、App 回扫、SDK
   transport 验签和提交的完整闭环。
 - CitizenWallet 零修改。
+- 同一步删除 NativeSr25519、SignedExtrinsicBuilder、直接 nonce/runtime/submit/watch 和旧冷热签名入口；不存在
+  新旧签名或交易实现选择分支。
 
 ### 3.5 历史、事件与应用生命周期接入
 
@@ -1161,12 +1998,14 @@ signed extrinsic；CitizenApp 只接收删除前复制出的 App 业务实现和
 - 页面使用 SDK history/events/capabilities。
 - 接入启动、后台、恢复、退出、数据擦除和失败重试流程。
 - 旧交易记录不迁移、不双写、不兼容读取。
+- 同一步删除已被 SDK execution/history 替换的旧 ChainTxMonitor 和提交确认路径；CitizenApp 业务历史目录保留。
 
-### 3.6 删除旧底座与最终验收
+### 3.6 残留归零与最终验收
 
 状态：未开始。
 
-- 删除 App 自带 smoldot、sr25519、硬件钱包金库、完整交易构造器、提交器、监控器和不再使用的依赖/资产/平台构建配置。
+- 本步只做残留归零和发布验收，不把任何主要旧底座删除拖延到这里；若仍发现 App 自带 smoldot、sr25519、旧链
+  钱包金库、完整交易构造器、提交器、监控器或其依赖/资产/平台配置，说明前置原子替换未完成并直接失败。
 - 全仓确认 App 对 SmoldotClientManager、NativeSr25519、SignedExtrinsicBuilder 和旧 SecureSeedStore 的生产引用为零。
 - 完成静态分析、单元测试、集成测试、真机冷热钱包流程和发布构建；同时重跑 SDK reference/第三方 consumer，
   证明 CitizenApp 接入没有把 SDK 收窄为专用实现。
@@ -1183,12 +2022,34 @@ signed extrinsic；CitizenApp 只接收删除前复制出的 App 业务实现和
 - 已复核：1.3 新增能力符合通用 SDK 标准；固定 action allowlist 已删除，CitizenWallet 仍为独立外部签名器。
 - 已完成并复核：第 1.4 步“轻节点与安全链读取等价能力”；Core/C ABI/Dart/五端只公开验证后的通用链事实，
   未加入业务查询、任意 RPC、迁移或兼容层。
-- 已登记：SDK 早期遗留的业务化 QR UserTransfer/bank_cid_number 和 CitizenApp 历史语义由 1.5、1.7、1.8
-  分别提供通用替代并清理，不能进入最终通用性验收。
+- 已完成：SDK 早期遗留的业务化 QR UserTransfer/bank_cid_number 和 CitizenApp 历史语义已经由 1.5、1.7、1.8
+  分别提供通用替代并清理，不再进入最终通用性验收。
 - 已完成并复核：第 1.5 步“不透明 callData 的通用交易构造”；`prepareTransaction(sourceAccountId,
   callData)` 和 `cancelPreparedTransaction(preparationId)` 已贯通 Core、C ABI、Dart 与五端，SDK 只处理不透明
   RuntimeCall 和链协议事实，不实现任何 App 业务。
 - 已完成并复核：第 1.6 步“热钱包与冷钱包通用交易闭环”；热账户由 SDK 内部强认证签名，冷账户只走既有
   `QR_V1`，两者共同进入通用 pending-before-broadcast、准确 finalized 证明与原字节恢复状态机。C ABI/Flutter
   闭集分别为 121/64，CitizenApp 与 CitizenWallet 零修改。
-- 当前待确认：第 1.7 步“通用交易观察与历史”完整技术方案；未确认前不执行。
+- 已完成并复核：第 1.7 步“通用交易观察与历史”；SDK 仅保存自身提交的通用 execution 事实，App 专用的目的
+  账户、金额、备注、方向、业务 pallet/event 和页面模型已经归位 CitizenApp，不迁移、不兼容、不双写。当前
+  步骤当时的 C ABI/Flutter 闭集为 117/63，CitizenWallet 与定制 PoW 上游均未修改。
+- 已完成并复核：第 1.8 步“现存业务耦合清理与通用性反向门禁”；UserTransfer、bank CID、金额、币种、备注及
+  专用业务二维码编码/审阅投影已经从 SDK 生产面删除，历史 kind `4` 永久为空洞，`QR_V1` 仍是唯一协议。
+  当前 C ABI/Flutter 精确闭集为 116/62，CitizenApp、CitizenWallet 与定制 PoW 上游均未修改。
+- 已完成：第 1.9 步通用实现、三类消费者、独立 external signer、Rust/Flutter/Release、ABI 与 Android 本地验收；
+  Apple Core 三个 slice 已通过。Apple Flutter adapter/Apple tests 按“不得操作 Flutter 下载安装”的最新要求保留
+  待验收；未提交、未推送、未触发同源远程 runner，也不伪造 Linux/Windows/移动真机结果。
+- 已完成：第 1.10.1 步“基线与问题分级”；生产代码/API/ABI/schema/协议零修改，P0=0、P1=5、P2=2，
+  Flutter 按明确要求未操作，CitizenApp、CitizenWallet 与定制 PoW 上游均未被本步骤修改。
+- 已完成并复核：第 1.10.2 步“安全与资源边界”；只关闭持久 runtime cache 无界、history 总量不可编码和
+  runtime metadata 双重上限三项 P1。Core 64 MiB 功能上限未降低，持久 cache 固定 64 条和 8 MiB 完整记录，
+  history 固定 31 MiB durable weight；无迁移、兼容、业务模型、其它 QR 版本、CitizenWallet 或 PoW 改动。
+- 已完成并复核：第 1.10.3 步“通用 API 易用性与错误可观测性”；22 个错误码保持原数值，新增八项通用
+  failure stage 和唯一只读 result getter，五端 Flutter 错误统一为绑定 62 项公开 method 的七项 tuple。当前闭集为
+  117/62/3/17；无业务模型、迁移、兼容、其它 QR 协议、CitizenWallet 或 PoW 改动，Flutter 按明确要求未操作。
+- 已完成并复核：第 1.10.4 步“性能、持久化、生命周期与发布冻结”；whole-history BLOB 已由逐 execution
+  index/query/mutation 替换，四端 schema v2 与有界回收完成，adapter 订阅退避修正，Rust workspace、Release
+  107/107 和仓库外 ABI host 通过。第一部分 1.1—1.10 全部完成；Flutter 未运行或操作，CitizenApp、
+  CitizenWallet 和定制 PoW 未修改。
+- 当前待确认：第二部分第 2.1 步“建立 App 区块链端口与目录边界”完整技术方案。确认前只保留任务卡方案，
+  不修改 CitizenApp；确认后严格按 2.1 一次执行，完成后更新文档/注释/测试、清理残留并直接输出 2.2 方案。

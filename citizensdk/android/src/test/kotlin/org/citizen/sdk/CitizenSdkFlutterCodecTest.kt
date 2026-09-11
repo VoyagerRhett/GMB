@@ -164,7 +164,7 @@ class CitizenSdkFlutterCodecTest {
                 "consumePreparedTransactionQrResponse", "cancelPreparedTransactionExecution",
                 "getTransactionHistory", "syncTransactionHistory", "qrParse", "qrCreateSignRequest",
                 "qrConsumeSignResponse", "qrCancelSignRequest",
-                "qrEncodeAccountId", "qrEncodeUserTransfer", "qrDecodeLuminance", "qrEncode", "qrScan", "signQrRequest",
+                "qrEncodeAccountId", "qrDecodeLuminance", "qrEncode", "qrScan", "signQrRequest",
             ),
             CitizenSdkFlutterCodec.methods,
         )
@@ -253,8 +253,6 @@ class CitizenSdkFlutterCodecTest {
         requests["qrConsumeSignResponse"] = listOf(1, "session-1", 1L, "{}")
         requests["qrCancelSignRequest"] = listOf(1, "session-1", 1L, "abcdefghijklmnop")
         requests["qrEncodeAccountId"] = listOf(1, "session-1", 1L, account)
-        requests["qrEncodeUserTransfer"] = listOf(1, "session-1", 1L, "abcdefghijklmnop", 10L,
-            account, "1", "CNY", "", "bank-1")
         requests["qrDecodeLuminance"] = listOf(1, "session-1", 1L, byteArrayOf(0), 1, 1, 1)
         requests["qrEncode"] = listOf(1, "session-1", 1L, "{}", 4)
 
@@ -407,7 +405,8 @@ class CitizenSdkFlutterCodecTest {
             "invalid",
             "session-1",
             4,
+            "getStorage",
         )
-        assertEquals(listOf(1, "session-1", 4L, 1, "invalid"), details)
+        assertEquals(listOf(1, "session-1", 4L, 1, 2, "getStorage", "invalid"), details)
     }
 }

@@ -85,3 +85,21 @@ fn database_schedule_is_one_minute_and_retries_without_forgetting_success() {
     assert!(schedule.should_save(10, [2; 32]));
     assert!(!schedule.should_save(10, [1; 32]));
 }
+
+#[test]
+fn finalized_resubscription_backoff_caps_at_thirty_seconds_and_success_resets_it() {
+    use crate::chain_monitor::FinalizedRetry;
+    let started = std::time::Instant::now();
+    let mut retry = FinalizedRetry::new(started);
+    assert!(retry.due(started));
+    for (elapsed, expected_delay) in [(0, 2), (1, 4), (3, 8), (7, 16), (15, 30), (31, 30)] {
+        let now = started + Duration::from_secs(elapsed);
+        retry.failed(now);
+        assert_eq!(retry.delay(), Duration::from_secs(expected_delay));
+        assert!(!retry.due(now));
+    }
+    let recovered = started + Duration::from_secs(100);
+    retry.succeeded(recovered);
+    assert_eq!(retry.delay(), Duration::from_secs(1));
+    assert!(retry.due(recovered));
+}

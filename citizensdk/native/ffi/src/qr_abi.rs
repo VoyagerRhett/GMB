@@ -21,7 +21,7 @@ mod enabled {
     use citizen_sdk_engine::EngineError;
     use citizen_sdk_qr::{
         parse, AccountIdCode, QrClock, QrCode, QrError, QrErrorCode, QrSessionStore, SignRequest,
-        SignResponse, SystemQrClock, UserTransfer, MAX_QR_JSON_BYTES, MAX_QR_TEXT_BYTES,
+        SignResponse, SystemQrClock, MAX_QR_JSON_BYTES, MAX_QR_TEXT_BYTES,
     };
     use futures_util::FutureExt;
     use std::{
@@ -79,9 +79,7 @@ mod enabled {
     fn map_qr_error(error: QrError) -> FfiError {
         let code = match error.code() {
             QrErrorCode::InvalidFormat | QrErrorCode::InvalidField => CitizenSdkErrorCode::Decode,
-            QrErrorCode::UnsupportedKind | QrErrorCode::UnsupportedAction => {
-                CitizenSdkErrorCode::Unsupported
-            }
+            QrErrorCode::UnsupportedKind => CitizenSdkErrorCode::Unsupported,
             QrErrorCode::Expired => CitizenSdkErrorCode::Timeout,
             QrErrorCode::MismatchedRequest
             | QrErrorCode::MismatchedAccount
@@ -696,46 +694,6 @@ mod enabled {
         })
     }
 
-    #[no_mangle]
-    #[allow(clippy::too_many_arguments)]
-    pub unsafe extern "C" fn citizensdk_qr_encode_user_transfer(
-        handle: CitizenSdkHandle,
-        request_id: CitizenSdkBytesView,
-        expires_at: u64,
-        account_id: *const CitizenSdkAccountId,
-        amount: CitizenSdkBytesView,
-        symbol: CitizenSdkBytesView,
-        memo: CitizenSdkBytesView,
-        bank_cid_number: CitizenSdkBytesView,
-        output: *mut u8,
-        output_capacity: u64,
-        out_required: *mut u64,
-    ) -> i32 {
-        ffi_status(|| {
-            runtime_with(handle, Modules::QR)?;
-            if account_id.is_null() {
-                return Err(FfiError::invalid("account_id 不能为空"));
-            }
-            let utf8 = |view, name, maximum| unsafe {
-                String::from_utf8(copy_view(view, name, maximum)?)
-                    .map_err(|_| FfiError::invalid(format!("{name} 必须是 UTF-8")))
-            };
-            let value = UserTransfer {
-                request_id: utf8(request_id, "request_id", 128)?,
-                expires_at,
-                account_id: AccountId32::from_bytes(ptr::read(account_id).bytes),
-                amount: utf8(amount, "amount", 64)?,
-                symbol: utf8(symbol, "symbol", 16)?,
-                memo: utf8(memo, "memo", 256)?,
-                bank_cid_number: utf8(bank_cid_number, "bank_cid_number", 32)?,
-            };
-            let text = value.encode().map_err(map_qr_error)?;
-            // 与扫描路径同一时钟/过期门，不能生成已失效的收款二维码。
-            parse(&text).map_err(map_qr_error)?;
-            copy_to_host(text.as_bytes(), output, output_capacity, out_required)
-        })
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -935,5 +893,3 @@ qr_unavailable!(citizensdk_qr_consume_sign_response(handle: CitizenSdkHandle, te
 qr_unavailable!(citizensdk_qr_cancel_sign_request(handle: CitizenSdkHandle, request: CitizenSdkBytesView, cancelled: *mut u8));
 #[cfg(not(feature = "qr"))]
 qr_unavailable!(citizensdk_qr_encode_account_id(handle: CitizenSdkHandle, account: *const CitizenSdkAccountId, output: *mut u8, capacity: u64, required: *mut u64));
-#[cfg(not(feature = "qr"))]
-qr_unavailable!(citizensdk_qr_encode_user_transfer(handle: CitizenSdkHandle, request: CitizenSdkBytesView, expires: u64, account: *const CitizenSdkAccountId, amount: CitizenSdkBytesView, symbol: CitizenSdkBytesView, memo: CitizenSdkBytesView, bank: CitizenSdkBytesView, output: *mut u8, capacity: u64, required: *mut u64));

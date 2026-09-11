@@ -4,9 +4,12 @@
 默认 full。先调用统一模块校验，再仅创建所选服务的资源；chain 未选不加载链资产或创建链数据库，
 history 未选不初始化历史，wallet/signing 才使用配套 secure store/Vault。SigningService
 仅使用同宿主已有 SDK 安全账户归属资料，首次 provision 仍须钱包安全流程，秘密不导出。
-纯验签无需实例、钱包、金库或链；Flutter 五端共用 63 方法，open 仅 `[1, modules]`，
+纯验签无需实例、钱包、金库或链；Flutter 五端共用 62 方法，open 仅 `[1, modules]`，
 `verifySignature` 请求仅 `[1, accountId, signature, payload]`、响应仅 `[1, bool]`，
 不建立 session 或事件订阅。运行期模块选择不裁剪现有正式 full 包及链资产。
+Android public store 的 history 为 schema v2：`transaction_history_meta` 加逐 execution 行，
+JNI 只转发 `THQ1`/`THM1`。新库在建表前固定 incremental auto-vacuum；旧 schema 直接拒绝。
+本次没有运行 Flutter，也没有安装、下载、配置、启动或停止 Flutter。
 Android 相机层只向 JNI 交付 8 位亮度帧；识别与生成唯一进入 SDK 内 ZXing-C++ 3.1.1，
 协议解析和扫码签名会话唯一进入 Rust QR 模块。QR-only 不初始化钱包、Vault 或轻节点。
 本次第 2 步仅更新源码、注释、合同和测试，尚未执行新的真实构建、平台测试或硬件验收；下文旧分步运行记录保留为历史证据，不代表本次变更已验证。

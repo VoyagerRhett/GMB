@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // AGP提供内置Kotlin；Flutter插件在Android插件之后应用。
@@ -7,7 +9,7 @@ plugins {
 val flutterProductRoot = System.getenv("TATA_CONSOLE_FLUTTER_ROOT")
     ?.let { file(it) }
     ?: rootProject.projectDir.parentFile
-val flutterBuildProperties = java.util.Properties().apply {
+val flutterBuildProperties = Properties().apply {
     flutterProductRoot.resolve("android/local.properties").inputStream().use { load(it) }
 }
 val productVersionCode = flutterBuildProperties.getProperty("flutter.versionCode", "1").toInt()
@@ -16,13 +18,16 @@ val productVersionName = flutterBuildProperties.getProperty("flutter.versionName
 android {
     namespace = "com.crcfrcn.citizenapp"
     compileSdk = 36
-    ndkVersion = flutter.ndkVersion
+    ndkVersion = "28.2.13676358"
     // 设备测试必须挂到正式 Release 变体，禁止为验收生成影子 Debug 应用。
     testBuildType = "release"
 
     // TataConsole本机编译只从中央工作目录打包Rust库，产品仓库不得保留生成的jniLibs。
     System.getenv("TATA_CONSOLE_NATIVE_ANDROID_DIR")?.takeIf { it.isNotBlank() }?.let { nativeDir ->
-        sourceSets.getByName("main").jniLibs.setSrcDirs(listOf(nativeDir))
+        sourceSets.getByName("main").jniLibs.directories.apply {
+            clear()
+            add(nativeDir)
+        }
     }
 
     compileOptions {
@@ -33,8 +38,8 @@ android {
     defaultConfig {
         // Google Play 永久应用标识与 Kotlin namespace 保持一致，禁止恢复不可用旧包名。
         applicationId = "com.crcfrcn.citizenapp"
-        minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
+        minSdk = 24
+        targetSdk = 36
         versionCode = productVersionCode
         versionName = productVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

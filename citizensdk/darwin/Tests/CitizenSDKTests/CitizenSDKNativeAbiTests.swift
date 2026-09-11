@@ -99,7 +99,7 @@ final class CitizenSDKNativeAbiTests: XCTestCase {
                 $0.trimmingCharacters(in: .whitespacesAndNewlines)
             }
         })
-        XCTAssertEqual(names.count, 121)
+        XCTAssertEqual(names.count, 116)
         XCTAssertTrue(names.isSuperset(of: ["citizensdk_review_qr_sign_request", "citizensdk_sign_qr_request", "citizensdk_result_copy_qr"]))
         XCTAssertFalse(names.contains("citizensdk_qr_signing_bytes"))
         XCTAssertFalse(names.contains("citizensdk_qr_create_sign_response"))

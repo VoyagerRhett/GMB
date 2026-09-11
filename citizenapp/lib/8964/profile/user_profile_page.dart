@@ -87,7 +87,7 @@ class UserProfilePage extends StatefulWidget {
   final MembershipDisplayDecision initialMembershipDecision;
   final SquareMembershipState? initialMembershipState;
 
-  /// 私聊入口，测试可注入 spy；默认走正式 CitizenChatSdk。
+  /// 私聊入口，测试可注入 spy；默认走正式 TataChatSDK。
   final DirectChatOpener? onOpenDirectChat;
 
   @override
@@ -195,8 +195,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
     final target = targetAccountId?.trim() ?? '';
     if (target.isEmpty) return;
     // 浏览者身份账户来自本机当前默认账户上下文，不为普通主页读取链。
-    final loadViewer =
-        widget.viewerAccountLoader ??
+    final loadViewer = widget.viewerAccountLoader ??
         () async => CurrentUserContext.instance.accountId();
     try {
       final viewer = (await loadViewer())?.trim() ?? '';
@@ -310,8 +309,8 @@ class _UserProfilePageState extends State<UserProfilePage> {
         : current.followers + 1;
     final nextMutualFollowing = current.isFollowedBy
         ? (wasFollowing
-              ? (current.mutualFollowing > 0 ? current.mutualFollowing - 1 : 0)
-              : current.mutualFollowing + 1)
+            ? (current.mutualFollowing > 0 ? current.mutualFollowing - 1 : 0)
+            : current.mutualFollowing + 1)
         : current.mutualFollowing;
     // 乐观更新。
     setState(() {
@@ -536,8 +535,9 @@ class _UserProfilePageState extends State<UserProfilePage> {
 
   String? _mediaUrl(String? objectKey, {CitizenProfile? profile}) =>
       objectKey == null
-      ? null
-      : _api.mediaUrl(objectKey, updatedAt: (profile ?? _profile)?.updatedAt);
+          ? null
+          : _api.mediaUrl(objectKey,
+              updatedAt: (profile ?? _profile)?.updatedAt);
 
   Map<String, String>? get _mediaHeaders => _session == null
       ? null
@@ -562,8 +562,8 @@ class _UserProfilePageState extends State<UserProfilePage> {
       fit: BoxFit.cover,
       frameBuilder: (context, child, frame, syncLoaded) =>
           syncLoaded || frame != null
-          ? child
-          : const ColoredBox(color: AppTheme.surfaceMuted),
+              ? child
+              : const ColoredBox(color: AppTheme.surfaceMuted),
       errorBuilder: (_, __, ___) =>
           const ColoredBox(color: AppTheme.surfaceMuted),
     );
@@ -672,8 +672,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
 
   @override
   Widget build(BuildContext context) {
-    final expandedHeight =
-        _bannerHeight +
+    final expandedHeight = _bannerHeight +
         ProfileCategoryTabs.height +
         ProfileHeaderCard.requiredHeight(context, bio: _profile?.bio ?? '');
     return DefaultTabController(

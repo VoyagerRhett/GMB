@@ -84,6 +84,15 @@ chain/history 才需要 public store，wallet/signing 才需要配套 secure sto
 Apple 的分离 typed public/secure SQLite 与五端遵守同一合同；Secure Enclave 仅保护
 generation-scoped KEK，不执行 sr25519。
 
+钱包 profile/密文仍在 secure store，不能与第 1.10.4 的 public history schema v2 合并。
+history 的逐 execution SQLite 行只含通用恢复记录和索引字段；它既不迁移旧钱包，也不改变用户
+通过 SDK 安全界面重新输入助记词恢复热钱包、通过公民钱包 `QR_V1` 冷签的既有产品边界。
+
+多消费者验收中的钱包输入仍只有 SDK 安全界面创建/导入 12、18、24 词，以及公开账户冷导入。
+各消费 App 不读取旧产品钱包，也不要求 SDK 迁移或兼容旧数据；用户需要恢复热钱包时自行在
+SDK 界面重新输入助记词。通用 external signer fixture 只依赖公开签名/QR 接口，不依赖任何
+独立钱包产品实现。
+
 Linux 第 7.1 步 Host 使用同一 `citizensdk_create_with_host` 和同一 Rust 钱包状态机，并以
 分离的 public/secure SQLite 与 TPM 2.0 generation-scoped KEK 实现平台合同。它不复制派生、
 provisioning、cleanup 或签名逻辑。该步只提交源码与合同测试，没有运行 Linux 编译/测试，

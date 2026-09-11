@@ -111,8 +111,8 @@ final class CitizenSDKApiContractTests: XCTestCase {
                 XCTAssertEqual(services.secret_vault != nil, modules.usesSecrets)
                 if let store = services.public_store {
                     XCTAssertNotNil(store.pointee.chain_database_load)
-                    XCTAssertEqual(store.pointee.transaction_history_load != nil, modules.contains(.history))
-                    XCTAssertEqual(store.pointee.transaction_history_compare_and_swap != nil, modules.contains(.history))
+                    XCTAssertEqual(store.pointee.transaction_history_query != nil, modules.contains(.history))
+                    XCTAssertEqual(store.pointee.transaction_history_mutate != nil, modules.contains(.history))
                 }
             }
         }

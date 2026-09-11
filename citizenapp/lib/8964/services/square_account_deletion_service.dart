@@ -3,6 +3,7 @@ import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/8964/services/square_post_store.dart';
 import 'package:citizenapp/chat/tatachat_sdk_adapter.dart';
 import 'package:citizenapp/wallet/core/device_subkey.dart';
+import 'package:tatachat_sdk/tatachat_sdk.dart';
 
 /// 注销用户编排：签名验删服务端全部数据 → 尽最大努力清理全部本地残留。
 ///
@@ -25,20 +26,20 @@ class SquareAccountDeletionService {
     CitizenProfileCache? profileCache,
     CitizenProfileMediaCache? profileMediaCache,
     DeviceSubkey? deviceSubkey,
-    CitizenChatSdk? chatRuntime,
+    ChatSdk? chatRuntime,
     SquareLocalPostBulkDeletionStore? localPostStore,
-  }) : _api = apiClient ?? SquareApiClient(),
-       _profileCache = profileCache ?? const CitizenProfileCache(),
-       _profileMediaCache = profileMediaCache ?? CitizenProfileMediaCache(),
-       _deviceSubkey = deviceSubkey ?? DeviceSubkey(),
-       _chatRuntime = chatRuntime ?? CitizenChatSdk.instance,
-       _localPostStore = localPostStore ?? const SquarePostStore();
+  })  : _api = apiClient ?? SquareApiClient(),
+        _profileCache = profileCache ?? const CitizenProfileCache(),
+        _profileMediaCache = profileMediaCache ?? CitizenProfileMediaCache(),
+        _deviceSubkey = deviceSubkey ?? DeviceSubkey(),
+        _chatRuntime = chatRuntime ?? citizenChatRuntime,
+        _localPostStore = localPostStore ?? const SquarePostStore();
 
   final SquareApiClient _api;
   final CitizenProfileCache _profileCache;
   final CitizenProfileMediaCache _profileMediaCache;
   final DeviceSubkey _deviceSubkey;
-  final CitizenChatSdk _chatRuntime;
+  final ChatSdk _chatRuntime;
   final SquareLocalPostBulkDeletionStore _localPostStore;
 
   /// [signAction] 对 signing_message(0x1D) 摘要用 sr25519 主钥签名（弹生物识别）。
@@ -68,8 +69,8 @@ class SquareAccountDeletionService {
     await attempt('会话缓存', () async => _api.clearSession(accountId));
     await attempt(
       '私信历史',
-      () => _chatRuntime.clearAllForCidNumber(
-        cidNumber: cidNumber,
+      () => _chatRuntime.clearAllForUserId(
+        userId: cidNumber,
         accountId: accountId,
       ),
     );

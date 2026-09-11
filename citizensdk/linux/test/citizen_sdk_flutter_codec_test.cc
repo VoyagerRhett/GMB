@@ -83,12 +83,12 @@ void test_method_closure_and_requests() {
       Method::get_transaction_history, Method::sync_transaction_history,
       Method::qr_parse, Method::qr_create_sign_request,
       Method::qr_consume_sign_response, Method::qr_cancel_sign_request,
-      Method::qr_encode_account_id, Method::qr_encode_user_transfer,
+      Method::qr_encode_account_id,
       Method::qr_decode_luminance, Method::qr_encode, Method::qr_scan, Method::sign_qr_request,
   };
   std::set<std::string> names;
   for (Method method : all) names.insert(citizen_sdk::flutter::method_name(method));
-  assert(names.size() == 63 && names.count("open") == 1 &&
+  assert(names.size() == 62 && names.count("open") == 1 &&
          names.count("getTransactionHistory") == 1);
 
   assert(decode("open", list({Value::integer(1), Value::integer(63)})).modules == 63);
@@ -344,8 +344,11 @@ void test_envelopes_and_decimal() {
          "340282366920938463463374607431768211455");
   const auto envelope = response("s", 7, list({Value::string("running")}));
   assert(as_list(envelope).size() == 4 && as_string(as_list(envelope)[1]) == "s");
-  const auto failure = error_details(CITIZENSDK_ERROR_BUSY, "busy", "s", 7);
-  assert(as_list(failure).size() == 5 && as_string(as_list(failure)[4]) == "busy");
+  const auto failure = error_details(CITIZENSDK_ERROR_BUSY, "busy", "s", 7, "getStorage");
+  assert(as_list(failure).size() == 7 && as_integer(as_list(failure)[4]) ==
+         CITIZENSDK_FAILURE_STAGE_ADMISSION &&
+         as_string(as_list(failure)[5]) == "getStorage" &&
+         as_string(as_list(failure)[6]) == "busy");
   assert(std::string(error_name(CITIZENSDK_ERROR_BUSY)) == "busy");
 }
 

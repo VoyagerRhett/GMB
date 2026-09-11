@@ -195,4 +195,13 @@ describe('ChatServer short-lived access', () => {
       code: 'chat_server_not_configured',
     });
   });
+
+  it('rejects a missing ChatServer deployment URL', async () => {
+    const { env, request } = await setup(activeMembership());
+    delete env.CHAT_SERVER_URL;
+    await expect(issueChatServerAccess(request, env)).rejects.toMatchObject({
+      status: 503,
+      code: 'chat_server_not_configured',
+    });
+  });
 });

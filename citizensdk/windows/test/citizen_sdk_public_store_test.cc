@@ -1,5 +1,6 @@
 // 来源：Linux public store 用例；Windows DACL/HANDLE/锁差异显式适配。验证 public store 忠实实现根 ABI 的 revision CAS 与 domain 隔离。
 #include <cassert>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -23,6 +24,49 @@
 #endif
 
 namespace {
+
+using TestBytes = citizen_sdk::windows::Bytes;
+
+void append_u32(TestBytes &bytes, uint32_t value) {
+  for (int shift = 0; shift < 32; shift += 8) bytes.push_back(static_cast<uint8_t>(value >> shift));
+}
+void append_u64(TestBytes &bytes, uint64_t value) {
+  for (int shift = 0; shift < 64; shift += 8) bytes.push_back(static_cast<uint8_t>(value >> shift));
+}
+TestBytes history_index_query() {
+  TestBytes bytes{'T', 'H', 'Q', '1', 1};
+  append_u64(bytes, std::numeric_limits<uint64_t>::max());
+  append_u32(bytes, 0); bytes.insert(bytes.end(), 16, 0); bytes.push_back(0);
+  append_u64(bytes, 0); bytes.insert(bytes.end(), 16, 0);
+  return bytes;
+}
+TestBytes history_record_query(uint64_t revision, uint8_t identity) {
+  TestBytes bytes{'T', 'H', 'Q', '1', 2};
+  append_u64(bytes, revision); append_u32(bytes, 1);
+  bytes.push_back(identity); bytes.insert(bytes.end(), 15, 0); bytes.push_back(0);
+  append_u64(bytes, 0); bytes.insert(bytes.end(), 16, 0);
+  return bytes;
+}
+TestBytes history_mutation(uint64_t expected, uint8_t identity,
+                           const TestBytes &record) {
+  const uint64_t weight = std::max<uint64_t>(1, record.size());
+  TestBytes bytes{'T', 'H', 'M', '1'};
+  append_u64(bytes, expected + 1); append_u32(bytes, 1); append_u64(bytes, weight);
+  append_u32(bytes, 1); append_u64(bytes, weight);
+  append_u32(bytes, 0); append_u32(bytes, 1);
+  bytes.push_back(identity); bytes.insert(bytes.end(), 15, 0);
+  append_u64(bytes, 1); append_u64(bytes, 1); append_u64(bytes, weight);
+  bytes.push_back(0); bytes.push_back(0); append_u32(bytes, static_cast<uint32_t>(record.size()));
+  bytes.insert(bytes.end(), record.begin(), record.end());
+  return bytes;
+}
+TestBytes history_record_payload(const TestBytes &batch) {
+  assert(batch.size() >= 87 && std::equal(batch.begin(), batch.begin() + 4, "THB1"));
+  uint32_t count = 0;
+  for (int shift = 0; shift < 32; shift += 8) count |= uint32_t(batch[83 + shift / 8]) << shift;
+  assert(batch.size() == 87U + count);
+  return TestBytes(batch.begin() + 87, batch.end());
+}
 
 void make_private(const std::filesystem::path &path) {
   citizen_sdk::windows::Directory created(path);
@@ -103,6 +147,20 @@ void execute_sql(const std::filesystem::path &database, const char *sql) {
   assert(handle != nullptr);
   char *message = nullptr;
   assert(sqlite3_exec(handle, "PRAGMA journal_mode=DELETE", nullptr, nullptr, nullptr) == SQLITE_OK);
+  const int code = sqlite3_exec(handle, sql, nullptr, nullptr, &message);
+  if (message != nullptr) sqlite3_free(message);
+  assert(code == SQLITE_OK);
+  assert(sqlite3_close_v2(handle) == SQLITE_OK);
+}
+
+void execute_live_sql(const std::filesystem::path &database, const char *sql) {
+  sqlite3 *handle = nullptr;
+  assert(sqlite3_open_v2(database.u8string().c_str(), &handle,
+                         SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX |
+                             SQLITE_OPEN_PRIVATECACHE,
+                         nullptr) == SQLITE_OK);
+  assert(handle != nullptr);
+  char *message = nullptr;
   const int code = sqlite3_exec(handle, sql, nullptr, nullptr, &message);
   if (message != nullptr) sqlite3_free(message);
   assert(code == SQLITE_OK);
@@ -353,10 +411,12 @@ int wmain(int argc, wchar_t **argv) {
     assert(store.chain_database_compare_and_swap(std::numeric_limits<uint64_t>::max(), Bytes{}).error_code ==
            CITIZENSDK_ERROR_CONFLICT);
 
-    const auto history =
-        store.transaction_history_compare_and_swap(0, Bytes{4, 5});
+    const auto history = store.transaction_history_mutate(
+        0, history_mutation(0, 4, Bytes{4, 5}));
     assert(history.revision == 1);
-    assert((store.transaction_history_load().record == Bytes{4, 5}));
+    assert((history_record_payload(store.transaction_history_query(
+        history_record_query(1, 4)).record) == Bytes{4, 5}));
+    assert(store.transaction_history_query(history_index_query()).revision == 1);
     assert((store.chain_database_load().record == Bytes{1, 2}));
 
     std::array<uint8_t, 32> hash{};
@@ -368,6 +428,49 @@ int wmain(int argc, wchar_t **argv) {
     assert((cached.record == Bytes{6, 7}));
     store.runtime_cache_delete(hash);
     assert(!store.runtime_cache_load(hash).present);
+
+    for (uint8_t index = 0; index < 80; ++index) {
+      std::array<uint8_t, 32> candidate_hash{};
+      candidate_hash[31] = index;
+      store.runtime_cache_store(candidate_hash, Bytes{index});
+    }
+    for (uint8_t index = 0; index < 80; ++index) {
+      std::array<uint8_t, 32> candidate_hash{};
+      candidate_hash[31] = index;
+      assert(store.runtime_cache_load(candidate_hash).present == (index >= 16));
+    }
+    // REPLACE promotes an existing key to newest and must not grow the table.
+    std::array<uint8_t, 32> promoted{};
+    promoted[31] = 16;
+    store.runtime_cache_store(promoted, Bytes{99});
+    std::array<uint8_t, 32> newest{};
+    newest[31] = 80;
+    store.runtime_cache_store(newest, Bytes{80});
+    std::array<uint8_t, 32> evicted{};
+    evicted[31] = 17;
+    assert(store.runtime_cache_load(promoted).present);
+    assert(!store.runtime_cache_load(evicted).present);
+    assert(store.runtime_cache_load(newest).present);
+
+    execute_live_sql(directory / "public-state-v1.sqlite3",
+                     "CREATE TRIGGER runtime_cache_prune_failure BEFORE "
+                     "DELETE ON runtime_cache BEGIN SELECT RAISE(ABORT, "
+                     "'test prune failure'); END");
+    std::array<uint8_t, 32> rejected{};
+    rejected[31] = 81;
+    bool prune_failed = false;
+    try {
+      store.runtime_cache_store(rejected, Bytes{81});
+    } catch (const HostError &error) {
+      prune_failed = error.code() == CITIZENSDK_ERROR_STORAGE;
+    }
+    assert(prune_failed);
+    std::array<uint8_t, 32> retained{};
+    retained[31] = 18;
+    assert(!store.runtime_cache_load(rejected).present);
+    assert(store.runtime_cache_load(retained).present);
+    execute_live_sql(directory / "public-state-v1.sqlite3",
+                     "DROP TRIGGER runtime_cache_prune_failure");
 
     verify_private(directory, "public-state-v1.sqlite3");
     verify_private(directory, "public-state-v1.sqlite3-wal");
@@ -438,14 +541,16 @@ int wmain(int argc, wchar_t **argv) {
     std::error_code rename_error;
     std::filesystem::rename(bound_state, bound_identity, rename_error);
     assert(rename_error);
-    const auto persisted = store.transaction_history_compare_and_swap(0, Bytes{22});
+    const auto persisted = store.transaction_history_mutate(
+        0, history_mutation(0, 22, Bytes{22}));
     assert(persisted.error_code == CITIZENSDK_OK && persisted.revision == 1);
   }
   std::filesystem::rename(bound_state, bound_identity);
   {
     PublicStore store(bound_identity);
     assert((store.chain_database_load().record == Bytes{21}));
-    assert((store.transaction_history_load().record == Bytes{22}));
+    assert((history_record_payload(store.transaction_history_query(
+        history_record_query(1, 22)).record) == Bytes{22}));
   }
 
   const auto wrong_schema = temporary.path() / "wrong-public-schema";
@@ -513,8 +618,10 @@ int wmain(int argc, wchar_t **argv) {
     assert(first.chain_database_load().revision == 80);
     // 单次事务超过首个 32 KiB WAL-index 页，覆盖 64 KiB 系统映射粒度。
     const Bytes large(20 * 1024 * 1024, 31);
-    assert(first.transaction_history_compare_and_swap(0, large).error_code == CITIZENSDK_OK);
-    assert(second.transaction_history_load().record == large);
+    assert(first.transaction_history_mutate(
+        0, history_mutation(0, 31, large)).error_code == CITIZENSDK_OK);
+    assert(history_record_payload(second.transaction_history_query(
+        history_record_query(1, 31)).record) == large);
   }
   const auto cross_process = temporary.path() / "cross-process";
   {
@@ -570,7 +677,7 @@ int wmain(int argc, wchar_t **argv) {
   const auto initialize_transaction =
       sqlite_source.find("execute_checked(\"BEGIN IMMEDIATE\")", configure);
   const auto initialize_version =
-      sqlite_source.find("execute_checked(\"PRAGMA user_version=1\")",
+      sqlite_source.find("const std::string version_sql =",
                          initialize_transaction);
   const auto initialize_schema =
       sqlite_source.find("verify_schema(database, schema)",

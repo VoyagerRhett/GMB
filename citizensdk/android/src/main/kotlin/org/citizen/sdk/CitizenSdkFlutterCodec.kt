@@ -48,7 +48,7 @@ internal object CitizenSdkFlutterCodec {
         "cancelPreparedTransactionExecution", "getTransactionHistory",
         "syncTransactionHistory",
         "qrParse", "qrCreateSignRequest", "qrConsumeSignResponse", "qrCancelSignRequest", "qrEncodeAccountId",
-        "qrEncodeUserTransfer", "qrDecodeLuminance", "qrEncode", "qrScan", "signQrRequest",
+        "qrDecodeLuminance", "qrEncode", "qrScan", "signQrRequest",
     )
 
     sealed interface Request {
@@ -213,7 +213,39 @@ internal object CitizenSdkFlutterCodec {
         override val message: String,
         val sessionId: String? = null,
         val requestSequence: Long? = null,
+        val stage: CitizenSdkFailureStage = CitizenSdkFailureStage.fromErrorCode(
+            CitizenSdkErrorCode.fromValue(errorCode),
+        ),
     ) : IllegalArgumentException(message)
+
+    fun requestMethod(request: Request): String = when (request) {
+        is Request.Open -> "open"
+        is Request.VerifySignature -> "verifySignature"
+        is Request.Empty -> request.method
+        is Request.Account -> request.method
+        is Request.Balances -> "getAccountBalances"
+        is Request.BlockNumber -> "getFinalizedBlockAt"
+        is Request.ResolveBlock -> "resolveFinalizedBlock"
+        is Request.Block -> request.method
+        is Request.Storage -> "getStorage"
+        is Request.StorageBatch -> "getStorageBatch"
+        is Request.ImportState -> "importState"
+        is Request.CreateWallet -> "createWallet"
+        is Request.AddWalletAccounts -> "addWalletAccounts"
+        is Request.RenameWalletAccount -> request.method
+        is Request.ColdSs58 -> "importColdAccountSs58"
+        is Request.ReorderWalletAccounts -> "reorderWalletAccountsWithoutDefaultChange"
+        is Request.SignWalletPayload -> "signWalletPayload"
+        is Request.BeginSigning -> "beginSigning"
+        is Request.ExternalSignature -> request.method
+        is Request.CancelSigning -> "cancelSigning"
+        is Request.BeginDefaultAccountChange -> "beginDefaultAccountChange"
+        is Request.PrepareTransaction -> "prepareTransaction"
+        is Request.CancelPreparedTransaction -> "cancelPreparedTransaction"
+        is Request.TransactionExecution -> request.method
+        is Request.TransactionHistory -> request.method
+        is Request.Qr -> request.method
+    }
 
     /** open 与公开验签无会话；其他请求保留版本、会话、序号和固定字段位置。 */
     fun decode(method: String, rawArguments: Any?): Request {
@@ -529,19 +561,6 @@ internal object CitizenSdkFlutterCodec {
                     length(4)
                     Request.Qr(method, sessionId, sequence, listOf(hash32(tuple[3])))
                 }
-                "qrEncodeUserTransfer" -> {
-                    length(10)
-                    val requestId = string(tuple[3], "requestId", 16, 128)
-                    val expiresAt = exactLong(tuple[4], "expiresAt")
-                    if (expiresAt <= 0) badRequest("expiresAt must be positive", sessionId, sequence)
-                    val amount = utf8Text(tuple[6], "amount", 1, 64)
-                    val symbol = utf8Text(tuple[7], "symbol", 1, 16)
-                    val memo = utf8Text(tuple[8], "memo", 0, 256)
-                    val bank = utf8Text(tuple[9], "bankCidNumber", 1, 32)
-                    Request.Qr(method, sessionId, sequence, listOf(
-                        requestId, expiresAt, hash32(tuple[5]), amount, symbol, memo, bank,
-                    ))
-                }
                 "qrDecodeLuminance" -> {
                     length(7)
                     val pixels = bytes(tuple[3], "luminance", false, MAXIMUM_QR_IMAGE_BYTES)
@@ -565,7 +584,14 @@ internal object CitizenSdkFlutterCodec {
             }
         } catch (error: ContractFailure) {
             if (error.sessionId != null) throw error
-            throw ContractFailure(error.stableName, error.errorCode, error.message, sessionId, sequence)
+            throw ContractFailure(
+                error.stableName,
+                error.errorCode,
+                error.message,
+                sessionId,
+                sequence,
+                error.stage,
+            )
         }
     }
 
@@ -580,13 +606,26 @@ internal object CitizenSdkFlutterCodec {
         return listOf(PROTOCOL_VERSION, sessionId, eventSequence, type, payload)
     }
 
-    /** [1, sessionId?, requestSequence?, errorCode, errorMessage?]. */
+    /** [1, sessionId?, requestSequence?, errorCode, failureStage, method, errorMessage?]. */
     fun errorDetails(
         code: CitizenSdkErrorCode,
         message: String?,
         sessionId: String?,
         requestSequence: Long?,
-    ): List<Any?> = listOf(PROTOCOL_VERSION, sessionId, requestSequence, code.value, message)
+        method: String,
+        stage: CitizenSdkFailureStage = CitizenSdkFailureStage.fromErrorCode(code),
+    ): List<Any?> {
+        require(method in methods) { "error method must be public" }
+        return listOf(
+            PROTOCOL_VERSION,
+            sessionId,
+            requestSequence,
+            code.value,
+            stage.value,
+            method,
+            message,
+        )
+    }
 
     fun errorName(code: CitizenSdkErrorCode): String = when (code) {
         CitizenSdkErrorCode.OK -> "ok"

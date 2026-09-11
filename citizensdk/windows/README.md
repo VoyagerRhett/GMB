@@ -4,6 +4,9 @@
 `citizensdk_host_create_with_modules` 进入同一装配逻辑。既有 C Host ABI v1 的
 `enable_wallet` 布局与含义保持，不能把其内存重解释为模块位；显式入口检查它与安全资源选择一致。
 Rust 先验证模块，chain/history 才创建 public store，wallet/signing 才创建配套 secure store/Vault；
+Windows public store 与 Linux 保持相同 schema v2 和 `THQ1`/`THM1` 合同：history 按 execution
+分行、mutation 原子更新 meta，不保留 whole-BLOB 或迁移路径；物理回收单次最多 128 页。本机
+不是 Windows runner，未把源码检查记为运行通过。
 签名-only 不开放钱包 UI，只使用同宿主既有 SDK 安全账户，首次建立仍须钱包流程。
 现有正式包装仍为 full 并含链资产，运行期未选链不加载资产或创建链数据库。
 第4步新增独立 qr=32，full=63。Windows 只将亮度帧交给 SDK 内唯一 ZXing-C++ 3.1.1 图像层，
@@ -82,14 +85,14 @@ SDK 认证窗口可临时获得焦点；认证窗口再次失焦会取消，晚�
 验收尚未完成。生成私有头仅通过 `CITIZENSDK_INTERNAL_INCLUDE_DIR` 给内部目标使用，不安装。
 
 第 1.4 步新增 12 个通用安全链读取方法。Windows codec/session 仅把固定 tuple 投影到同一
-121 项 Core ABI，并校验准确块、optional bytes、body 顺序、累计资源上限和 import finalized
+117 项 Core ABI，并校验准确块、optional bytes、body 顺序、累计资源上限和 import finalized
 回执；不通过 WinHTTP/Win32 建立旁路网络，不解码任何宿主业务 SCALE。
 
 ## Flutter 适配源码
 
 `citizen_sdk_plugin` 通过官方 `flutter`、`flutter_wrapper_plugin` 连接包内同版
 `CitizenSDK::Host/Core`，不重新编译核心。使用官方 StandardMethodCodec 和已有双 channel、
-63 方法；钱包交互只接本目录现有 Win32 安全流程。无会话 verifySignature 在环境/Host 创建前
+62 方法；钱包交互只接本目录现有 Win32 安全流程。无会话 verifySignature 在环境/Host 创建前
 直接调用公共 Core；Dart 使用静态 CitizenSigning.verify，无需 open 或事件订阅。
 
 Windows 宿主须在顶层 CMake 引入 generated_plugins.cmake 之前声明一次：

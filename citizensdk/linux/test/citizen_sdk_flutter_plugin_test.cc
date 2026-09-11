@@ -340,10 +340,12 @@ void pending_detach_contract(GMainContext *context, bool engine_gone) {
          "citizensdk.invalidState");
   const auto details = csf::from_fl_value(fl_method_error_response_get_details(error_reply));
   const auto &fields = std::get<csf::Value::List>(details.data);
-  assert(fields.size() == 5);
+  assert(fields.size() == 7);
   assert(std::get<std::string>(fields.at(1).data) == session);
   assert(std::get<int64_t>(fields.at(2).data) == 1);
   assert(std::get<int64_t>(fields.at(3).data) == CITIZENSDK_ERROR_INVALID_STATE);
+  assert(std::get<int64_t>(fields.at(4).data) == CITIZENSDK_FAILURE_STAGE_ADMISSION);
+  assert(std::get<std::string>(fields.at(5).data) == "getCapabilities");
   if (!engine_gone) {
     assert(registrar->messenger->handlers->at(csf::kMethodChannel).callback ==
            replacement_handler);

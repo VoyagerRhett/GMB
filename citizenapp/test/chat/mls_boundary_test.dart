@@ -211,7 +211,7 @@ void main() {
         crypto: ChatCrypto(CitizenChatStorageKeyProvider(walletManager)),
       );
       await store.activateBindingFence(source);
-      final runtime = CitizenChatSdk(
+      final runtime = createCitizenChatRuntime(
         store: store,
         walletManager: walletManager,
         documentsDirectoryProvider: () async => deviceDirectory,

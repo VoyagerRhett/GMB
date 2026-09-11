@@ -6,7 +6,8 @@ internal class CitizenSDKSQLite {
     private let lock = NSRecursiveLock()
     private var database: OpaquePointer?
 
-    init(directory: URL, fileName: String, schema: [String], secure: Bool) throws {
+    init(directory: URL, fileName: String, schema: [String], secure: Bool,
+         schemaVersion: Int64 = 1, incrementalVacuum: Bool = false) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
@@ -30,11 +31,81 @@ internal class CitizenSDKSQLite {
         }
         database = opened
         do {
+            func scalar(_ sql: String) throws -> Int64 {
+                let statement = try Self.prepare(opened, sql)
+                defer { sqlite3_finalize(statement) }
+                guard try Self.stepRowOrDone(statement),
+                      sqlite3_column_type(statement, 0) == SQLITE_INTEGER else {
+                    throw CitizenSDKError(.storage, "CitizenSDK SQLite scalar is unavailable")
+                }
+                return sqlite3_column_int64(statement, 0)
+            }
+            let version = try scalar("PRAGMA user_version")
+            let objects = try scalar("SELECT count(*) FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'")
+            let initialize = version == 0 && objects == 0
+            guard initialize || version == schemaVersion else {
+                throw CitizenSDKError(.integrity,
+                                      "CitizenSDK database schema is unsupported; clear the old development database")
+            }
+            if initialize {
+                if incrementalVacuum { try Self.execute(opened, "PRAGMA auto_vacuum=INCREMENTAL") }
+                try Self.execute(opened, "BEGIN IMMEDIATE")
+                do {
+                    for statement in schema { try Self.execute(opened, statement) }
+                    try Self.execute(opened, "PRAGMA user_version=\(schemaVersion)")
+                    try Self.execute(opened, "COMMIT")
+                } catch {
+                    try? Self.execute(opened, "ROLLBACK")
+                    throw error
+                }
+            }
+            let actualObjectCount = try scalar(
+                "SELECT count(*) FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'")
+            guard actualObjectCount == schema.count else {
+                throw CitizenSDKError(.integrity,
+                                      "CitizenSDK SQLite schema contains unexpected objects")
+            }
+            func canonical(_ value: String) -> String {
+                value.lowercased()
+                    .replacingOccurrences(of: "\\s+", with: "",
+                                          options: .regularExpression)
+                    .replacingOccurrences(of: "ifnotexists", with: "")
+            }
+            for expectedSQL in schema {
+                let tablePrefix = "CREATE TABLE IF NOT EXISTS "
+                let indexPrefix = "CREATE INDEX IF NOT EXISTS "
+                let isTable = expectedSQL.hasPrefix(tablePrefix)
+                let prefix = isTable ? tablePrefix : indexPrefix
+                guard isTable || expectedSQL.hasPrefix(indexPrefix) else {
+                    throw CitizenSDKError(.internalFailure,
+                                          "CitizenSDK embedded SQLite schema is malformed")
+                }
+                let tail = expectedSQL.dropFirst(prefix.count)
+                let delimiter: Character = isTable ? "(" : " "
+                guard let end = tail.firstIndex(of: delimiter) else {
+                    throw CitizenSDKError(.internalFailure,
+                                          "CitizenSDK embedded SQLite object name is malformed")
+                }
+                let name = String(tail[..<end]).trimmingCharacters(in: .whitespaces)
+                let query = try Self.prepare(opened,
+                    "SELECT sql FROM sqlite_master WHERE type = ? AND name = ?")
+                defer { sqlite3_finalize(query) }
+                try Self.bind(query, 1, isTable ? "table" : "index")
+                try Self.bind(query, 2, name)
+                guard try Self.stepRowOrDone(query),
+                      let rawSQL = sqlite3_column_text(query, 0),
+                      canonical(String(cString: rawSQL)) == canonical(expectedSQL) else {
+                    throw CitizenSDKError(.integrity,
+                                          "CitizenSDK SQLite schema differs from its fixed contract")
+                }
+            }
+            guard try scalar("PRAGMA auto_vacuum") == (incrementalVacuum ? 2 : 0) else {
+                throw CitizenSDKError(.integrity, "CitizenSDK SQLite auto-vacuum policy differs")
+            }
             try execute("PRAGMA journal_mode=WAL")
             try execute("PRAGMA synchronous=FULL")
             try execute("PRAGMA foreign_keys=ON")
             try execute("PRAGMA busy_timeout=5000")
-            for statement in schema { try execute(statement) }
             #if os(iOS)
             try? FileManager.default.setAttributes(
                 [.protectionKey: secure ? FileProtectionType.complete : FileProtectionType.completeUntilFirstUserAuthentication],

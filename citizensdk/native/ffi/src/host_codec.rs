@@ -17,9 +17,11 @@ use citizen_sdk_contracts::{
     DispatchFailure, EncryptedSecretBlobSnapshot, EncryptedSecretBlobState,
     EncryptedSecretEnvelope, ExecutionConclusion, ExportedChainState, FinalizedBlockRef, Hash32,
     Hash32Bytes, HistoryTransactionStatus, ModuleDispatchFailure, RuntimeContext, RuntimeVersion,
-    SecretKind, SecretOwner, SecretRef, TransactionHistoryState, VaultGeneration, VerifiedBlockRef,
-    WalletAccount, WalletCleanupPlan, WalletOrigin, WalletProfile, WalletProvisioningPlan,
-    WalletState, MAX_COLD_WALLET_ACCOUNTS, MAX_WALLET_ACCOUNT_INDEX,
+    SecretKind, SecretOwner, SecretRef, TransactionExecutionId, TransactionExecutionRecord,
+    TransactionHistoryCursor, TransactionHistoryIndex, TransactionHistoryMutation,
+    TransactionHistoryQueryKind, VaultGeneration, VerifiedBlockRef, WalletAccount,
+    WalletCleanupPlan, WalletOrigin, WalletProfile, WalletProvisioningPlan, WalletState,
+    MAX_COLD_WALLET_ACCOUNTS, MAX_PERSISTED_RUNTIME_METADATA_BYTES, MAX_WALLET_ACCOUNT_INDEX,
 };
 
 const HOST_RECORD_MAGIC: [u8; 4] = *b"CSHR";
@@ -33,7 +35,7 @@ const TYPED_PAYLOAD_VERSION: u16 = 1;
 /// 钱包目录加入仅公钥冷账户和统一顺序后直接使用新格式；不读取 v1 热钱包记录。
 const WALLET_TYPED_PAYLOAD_VERSION: u16 = 2;
 const MAX_CHAIN_ID_BYTES: usize = 128;
-const MAX_RUNTIME_METADATA_BYTES: usize = 8 * 1024 * 1024;
+const RUNTIME_CONTEXT_FIXED_TYPED_BYTES: usize = 55;
 const MAX_WALLET_ACCOUNTS: usize = MAX_WALLET_ACCOUNT_INDEX as usize + 1;
 const MAX_ORDERED_WALLET_ACCOUNTS: usize = MAX_WALLET_ACCOUNTS + MAX_COLD_WALLET_ACCOUNTS;
 const MAX_WALLET_NAME_BYTES: usize = 120;
@@ -64,9 +66,11 @@ impl HostRecordDomain {
             // The verified light-client database is currently capped at 256
             // KiB by Engine.  The envelope allows bounded schema overhead.
             Self::ChainDatabase => 512 * 1024,
-            // Runtime metadata is public but may be materially larger than a
-            // single storage value.
-            Self::RuntimeCache => 8 * 1024 * 1024,
+            // 四个平台的 SQLite store 都把完整 record 限制为 8 MiB；这里扣除
+            // host envelope，让 codec 的 encoded 上限与真实持久化边界一致。
+            Self::RuntimeCache => {
+                MAX_PERSISTED_RUNTIME_METADATA_BYTES + RUNTIME_CONTEXT_FIXED_TYPED_BYTES
+            }
             // Hot and public-only cold account descriptors plus lifecycle
             // plans remain bounded independently of history growth.
             Self::WalletProfile => 1024 * 1024,
@@ -395,11 +399,17 @@ pub fn decode_chain_database_snapshot(
 }
 
 pub fn encode_runtime_context(context: &RuntimeContext) -> Result<Vec<u8>, HostCodecError> {
+    if context.metadata().len() > MAX_PERSISTED_RUNTIME_METADATA_BYTES {
+        return Err(HostCodecError::new(
+            HostCodecErrorKind::PayloadTooLarge,
+            "runtime metadata exceeds the persistent cache capacity",
+        ));
+    }
     encode_typed(HostRecordDomain::RuntimeCache, |writer| {
         encode_block(writer, context.block());
         writer.u32(context.version().spec_version());
         writer.u32(context.version().transaction_version());
-        writer.bytes(context.metadata(), MAX_RUNTIME_METADATA_BYTES)
+        writer.bytes(context.metadata(), MAX_PERSISTED_RUNTIME_METADATA_BYTES)
     })
 }
 
@@ -407,7 +417,7 @@ pub fn decode_runtime_context(encoded: &[u8]) -> Result<RuntimeContext, HostCode
     decode_typed(HostRecordDomain::RuntimeCache, encoded, |reader| {
         let block = decode_block(reader)?;
         let version = RuntimeVersion::new(reader.u32()?, reader.u32()?);
-        let metadata = reader.bytes(MAX_RUNTIME_METADATA_BYTES)?;
+        let metadata = reader.bytes(MAX_PERSISTED_RUNTIME_METADATA_BYTES)?;
         RuntimeContext::try_new(block, version, metadata)
             .map_err(|_| model_integrity("persisted runtime context is invalid"))
     })
@@ -711,47 +721,31 @@ fn decode_finalized_block(
         .map_err(|_| model_integrity("persisted block is not finalized"))
 }
 
-pub fn encode_transaction_history_state(
-    state: &TransactionHistoryState,
+pub fn encode_transaction_execution_record(
+    record: &TransactionExecutionRecord,
 ) -> Result<Vec<u8>, HostCodecError> {
     encode_typed(HostRecordDomain::TransactionHistory, |writer| {
-        writer.fixed(b"TXH1");
-        writer.u64(state.revision());
-        writer.count(
-            state.executions().len(),
-            citizen_sdk_contracts::MAX_TRANSACTION_HISTORY_RECORDS,
-        )?;
-        for execution in state.executions() {
-            encode_transaction_execution_record(writer, execution)?;
-        }
-        Ok(())
+        writer.fixed(b"TXR1");
+        encode_transaction_execution_record_fields(writer, record)
     })
 }
 
-pub fn decode_transaction_history_state(
+pub fn decode_transaction_execution_record(
     encoded: &[u8],
-) -> Result<TransactionHistoryState, HostCodecError> {
+) -> Result<TransactionExecutionRecord, HostCodecError> {
     decode_typed(HostRecordDomain::TransactionHistory, encoded, |reader| {
-        if reader.fixed::<4>()? != *b"TXH1" {
+        if reader.fixed::<4>()? != *b"TXR1" {
             return Err(model_integrity(
-                "persisted transaction history is not the execution-only schema",
+                "persisted transaction execution is not the per-record schema",
             ));
         }
-        let revision = reader.u64()?;
-        let execution_count =
-            reader.count(citizen_sdk_contracts::MAX_TRANSACTION_HISTORY_RECORDS)?;
-        let mut executions = Vec::with_capacity(execution_count);
-        for _ in 0..execution_count {
-            executions.push(decode_transaction_execution_record(reader)?);
-        }
-        TransactionHistoryState::try_new(revision, executions)
-            .map_err(|_| model_integrity("persisted transaction history is invalid"))
+        decode_transaction_execution_record_fields(reader)
     })
 }
 
-fn encode_transaction_execution_record(
+fn encode_transaction_execution_record_fields(
     writer: &mut TypedWriter,
-    record: &citizen_sdk_contracts::TransactionExecutionRecord,
+    record: &TransactionExecutionRecord,
 ) -> Result<(), HostCodecError> {
     writer.fixed(record.execution_id().as_bytes());
     writer.fixed(record.account_id().as_bytes());
@@ -776,10 +770,10 @@ fn encode_transaction_execution_record(
     Ok(())
 }
 
-fn decode_transaction_execution_record(
+fn decode_transaction_execution_record_fields(
     reader: &mut TypedReader<'_>,
-) -> Result<citizen_sdk_contracts::TransactionExecutionRecord, HostCodecError> {
-    let execution_id = citizen_sdk_contracts::TransactionExecutionId::try_new(reader.fixed()?)
+) -> Result<TransactionExecutionRecord, HostCodecError> {
+    let execution_id = TransactionExecutionId::try_new(reader.fixed()?)
         .map_err(|_| model_integrity("persisted execution id is invalid"))?;
     let account_id = AccountId32::from_bytes(reader.fixed()?);
     let call_data_hash = Hash32::from_bytes(reader.fixed()?);
@@ -796,7 +790,7 @@ fn decode_transaction_execution_record(
     let status = decode_history_status(reader)?;
     let created = reader.u64()?;
     let updated = reader.u64()?;
-    citizen_sdk_contracts::TransactionExecutionRecord::try_new(
+    TransactionExecutionRecord::try_new(
         execution_id,
         account_id,
         call_data_hash,
@@ -812,6 +806,280 @@ fn decode_transaction_execution_record(
         updated,
     )
     .map_err(|_| model_integrity("persisted generic transaction execution is invalid"))
+}
+
+/// Decoded host query result. The host indexes only generic timestamps,
+/// terminal flags and resource weight; every descriptor is cross-checked
+/// against the integrity-protected opaque Core record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransactionHistoryHostBatch {
+    index: TransactionHistoryIndex,
+    records: Vec<TransactionExecutionRecord>,
+    has_more: bool,
+}
+
+impl TransactionHistoryHostBatch {
+    pub const fn index(&self) -> TransactionHistoryIndex {
+        self.index
+    }
+    pub fn records(&self) -> &[TransactionExecutionRecord] {
+        &self.records
+    }
+    pub const fn has_more(&self) -> bool {
+        self.has_more
+    }
+}
+
+pub fn encode_transaction_history_index_query() -> Vec<u8> {
+    encode_transaction_history_query(1, u64::MAX, None, None, 0)
+}
+
+pub fn encode_transaction_history_record_query(
+    expected_revision: u64,
+    execution_id: TransactionExecutionId,
+) -> Vec<u8> {
+    encode_transaction_history_query(2, expected_revision, Some(execution_id), None, 1)
+}
+
+pub fn encode_transaction_history_page_query(
+    expected_revision: u64,
+    kind: TransactionHistoryQueryKind,
+    before: Option<TransactionHistoryCursor>,
+    limit: usize,
+) -> Result<Vec<u8>, HostCodecError> {
+    if !(1..=citizen_sdk_contracts::MAX_TRANSACTION_HISTORY_PAGE_SIZE).contains(&limit) {
+        return Err(model_integrity("history query limit is outside 1..100"));
+    }
+    let wire_kind = match kind {
+        TransactionHistoryQueryKind::Newest => 3,
+        TransactionHistoryQueryKind::OldestRetentionTerminal => 4,
+        TransactionHistoryQueryKind::OldestReconcilable => 5,
+    };
+    Ok(encode_transaction_history_query(
+        wire_kind,
+        expected_revision,
+        None,
+        before,
+        u32::try_from(limit).expect("history page limit is at most 100"),
+    ))
+}
+
+fn encode_transaction_history_query(
+    kind: u8,
+    expected_revision: u64,
+    execution_id: Option<TransactionExecutionId>,
+    before: Option<TransactionHistoryCursor>,
+    limit: u32,
+) -> Vec<u8> {
+    let mut writer = TypedWriter::new();
+    writer.fixed(b"THQ1");
+    writer.u8(kind);
+    writer.u64(expected_revision);
+    writer.u32(limit);
+    writer.fixed(
+        execution_id
+            .map(|value| *value.as_bytes())
+            .unwrap_or([0; 16])
+            .as_slice(),
+    );
+    writer.bool(before.is_some());
+    writer.u64(before.map_or(0, |cursor| cursor.created_at_millis()));
+    writer.fixed(
+        before
+            .map(|cursor| *cursor.execution_id().as_bytes())
+            .unwrap_or([0; 16])
+            .as_slice(),
+    );
+    writer.bytes
+}
+
+pub fn encode_transaction_history_mutation(
+    mutation: &TransactionHistoryMutation,
+) -> Result<Vec<u8>, HostCodecError> {
+    let mut writer = TypedWriter::new();
+    writer.fixed(b"THM1");
+    encode_history_index(&mut writer, mutation.next_index())?;
+    writer.count(
+        mutation.deletes().len(),
+        citizen_sdk_contracts::MAX_TRANSACTION_HISTORY_RECORDS,
+    )?;
+    for execution_id in mutation.deletes() {
+        writer.fixed(execution_id.as_bytes());
+    }
+    writer.count(
+        mutation.upserts().len(),
+        citizen_sdk_contracts::MAX_TRANSACTION_HISTORY_PAGE_SIZE,
+    )?;
+    for record in mutation.upserts() {
+        encode_history_descriptor(&mut writer, record)?;
+    }
+    if writer.bytes.len() > HostRecordDomain::TransactionHistory.max_payload_bytes() {
+        return Err(HostCodecError::new(
+            HostCodecErrorKind::PayloadTooLarge,
+            "history mutation exceeds the host wire limit",
+        ));
+    }
+    Ok(writer.bytes)
+}
+
+#[allow(dead_code)] // Production hosts emit this wire value; Rust uses it for conformance vectors.
+pub fn encode_transaction_history_host_batch(
+    index: TransactionHistoryIndex,
+    records: &[TransactionExecutionRecord],
+    has_more: bool,
+) -> Result<Vec<u8>, HostCodecError> {
+    let mut writer = TypedWriter::new();
+    writer.fixed(b"THB1");
+    encode_history_index(&mut writer, index)?;
+    writer.bool(has_more);
+    writer.count(
+        records.len(),
+        citizen_sdk_contracts::MAX_TRANSACTION_HISTORY_PAGE_SIZE,
+    )?;
+    for record in records {
+        encode_history_descriptor(&mut writer, record)?;
+    }
+    if writer.bytes.len() > HostRecordDomain::TransactionHistory.max_payload_bytes() {
+        return Err(HostCodecError::new(
+            HostCodecErrorKind::PayloadTooLarge,
+            "history query response exceeds the host wire limit",
+        ));
+    }
+    Ok(writer.bytes)
+}
+
+pub fn decode_transaction_history_host_batch(
+    encoded: &[u8],
+) -> Result<TransactionHistoryHostBatch, HostCodecError> {
+    if encoded.len() > HostRecordDomain::TransactionHistory.max_payload_bytes() {
+        return Err(HostCodecError::new(
+            HostCodecErrorKind::PayloadTooLarge,
+            "history query response exceeds the host wire limit",
+        ));
+    }
+    let mut reader = TypedReader::new(encoded);
+    if reader.fixed::<4>()? != *b"THB1" {
+        return Err(model_integrity("history query response magic is invalid"));
+    }
+    let index = decode_history_index(&mut reader)?;
+    let has_more = reader.bool()?;
+    let count = reader.count(citizen_sdk_contracts::MAX_TRANSACTION_HISTORY_PAGE_SIZE)?;
+    let mut records = Vec::with_capacity(count);
+    for _ in 0..count {
+        records.push(decode_history_descriptor(&mut reader)?);
+    }
+    reader.finish()?;
+    if records.len() > index.record_count() || (records.is_empty() && has_more) {
+        return Err(model_integrity("history query response count is invalid"));
+    }
+    Ok(TransactionHistoryHostBatch {
+        index,
+        records,
+        has_more,
+    })
+}
+
+fn encode_history_index(
+    writer: &mut TypedWriter,
+    index: TransactionHistoryIndex,
+) -> Result<(), HostCodecError> {
+    writer.u64(index.revision());
+    writer.u32(u32::try_from(index.record_count()).map_err(|_| {
+        HostCodecError::new(
+            HostCodecErrorKind::PayloadTooLarge,
+            "history record count cannot be represented",
+        )
+    })?);
+    writer.u64(u64::try_from(index.durable_weight_bytes()).map_err(|_| {
+        HostCodecError::new(
+            HostCodecErrorKind::PayloadTooLarge,
+            "history durable weight cannot be represented",
+        )
+    })?);
+    writer.u32(u32::try_from(index.open_count()).map_err(|_| {
+        HostCodecError::new(
+            HostCodecErrorKind::PayloadTooLarge,
+            "history open count cannot be represented",
+        )
+    })?);
+    writer.u64(u64::try_from(index.open_weight_bytes()).map_err(|_| {
+        HostCodecError::new(
+            HostCodecErrorKind::PayloadTooLarge,
+            "history open weight cannot be represented",
+        )
+    })?);
+    Ok(())
+}
+
+fn decode_history_index(
+    reader: &mut TypedReader<'_>,
+) -> Result<TransactionHistoryIndex, HostCodecError> {
+    let revision = reader.u64()?;
+    let record_count = usize::try_from(reader.u32()?)
+        .map_err(|_| model_integrity("history record count exceeds this platform"))?;
+    let durable_weight = usize::try_from(reader.u64()?)
+        .map_err(|_| model_integrity("history durable weight exceeds this platform"))?;
+    let open_count = usize::try_from(reader.u32()?)
+        .map_err(|_| model_integrity("history open count exceeds this platform"))?;
+    let open_weight = usize::try_from(reader.u64()?)
+        .map_err(|_| model_integrity("history open weight exceeds this platform"))?;
+    TransactionHistoryIndex::try_new(
+        revision,
+        record_count,
+        durable_weight,
+        open_count,
+        open_weight,
+    )
+    .map_err(|_| model_integrity("history index is invalid"))
+}
+
+fn encode_history_descriptor(
+    writer: &mut TypedWriter,
+    record: &TransactionExecutionRecord,
+) -> Result<(), HostCodecError> {
+    writer.fixed(record.execution_id().as_bytes());
+    writer.u64(record.created_at_millis());
+    writer.u64(record.updated_at_millis());
+    writer.u64(u64::try_from(record.durable_weight_bytes()).map_err(|_| {
+        HostCodecError::new(
+            HostCodecErrorKind::PayloadTooLarge,
+            "history record weight cannot be represented",
+        )
+    })?);
+    writer.bool(record.status().is_retention_terminal());
+    writer.bool(record.status().is_chain_terminal());
+    let encoded = encode_transaction_execution_record(record)?;
+    writer.bytes(
+        &encoded,
+        HostRecordDomain::TransactionHistory.max_encoded_record_bytes(),
+    )
+}
+
+fn decode_history_descriptor(
+    reader: &mut TypedReader<'_>,
+) -> Result<TransactionExecutionRecord, HostCodecError> {
+    let execution_id = TransactionExecutionId::try_new(reader.fixed()?)
+        .map_err(|_| model_integrity("history descriptor execution id is invalid"))?;
+    let created = reader.u64()?;
+    let updated = reader.u64()?;
+    let weight = usize::try_from(reader.u64()?)
+        .map_err(|_| model_integrity("history descriptor weight exceeds this platform"))?;
+    let retention_terminal = reader.bool()?;
+    let chain_terminal = reader.bool()?;
+    let encoded = reader.bytes(HostRecordDomain::TransactionHistory.max_encoded_record_bytes())?;
+    let record = decode_transaction_execution_record(&encoded)?;
+    if record.execution_id() != execution_id
+        || record.created_at_millis() != created
+        || record.updated_at_millis() != updated
+        || record.durable_weight_bytes() != weight
+        || record.status().is_retention_terminal() != retention_terminal
+        || record.status().is_chain_terminal() != chain_terminal
+    {
+        return Err(model_integrity(
+            "history descriptor disagrees with its opaque record",
+        ));
+    }
+    Ok(record)
 }
 
 fn encode_history_status(

@@ -32,7 +32,7 @@ macOS `arm64` differential-test host artifact and never a product runtime.
   snapshot; the returned account, hash and height are rechecked. This Runtime
   value is not pool-aware, so durable same-account Pending/InBlock single-flight
   prevents a second local transaction from reusing it.
-- `WalletService` implements English BIP-39 12/24-word create/import,
+- `WalletService` implements English BIP-39 12/18/24-word create/import,
   `//0..//1989` derivation, add/rename/activate/delete, usability verification,
   and cleanup replay. Public profile CAS and exact
   generation/owner/operation identities are persisted before secret writes;
@@ -59,6 +59,10 @@ macOS `arm64` differential-test host artifact and never a product runtime.
   pool rejections; provider errors, stream end, `Dropped`, `Retracted` and
   timeout retain durable Pending/InBlock state. No transfer/event business
   projection or account-wide chain scan is implemented here.
+
+Step 1.9 adds no Engine branch. Reference, CitizenApp-shaped and third-party-shaped consumers feed
+the same typed services with unrelated opaque bytes, while a generic QR_V1 signer uses the same signing
+contract. Consumer business codecs remain under `test/consumers/` and are forbidden from this crate.
 
 `native/ffi::ProductComposition` 按已验证 modules 装配同一实现，不为平台或组合复制算法。
 仅 chain 构造 smoldot provider、链数据库与 runtime cache，history 仅在被选择时初始化；

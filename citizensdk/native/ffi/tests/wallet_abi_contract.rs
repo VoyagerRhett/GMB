@@ -70,9 +70,9 @@ fn base_wallet_and_qr_exports_are_exact_and_disjoint() {
     let old = rust_exports(include_str!("../src/lib.rs"));
     let wallet = rust_exports(include_str!("../src/wallet_abi.rs"));
     let qr = rust_exports(include_str!("../src/qr_abi.rs"));
-    assert_eq!(old.len(), 49);
+    assert_eq!(old.len(), 50);
     assert_eq!(wallet.len(), 48);
-    assert_eq!(qr.len(), 9);
+    assert_eq!(qr.len(), 8);
     assert!(old.is_disjoint(&wallet));
     assert!(old.is_disjoint(&qr));
     assert!(wallet.is_disjoint(&qr));

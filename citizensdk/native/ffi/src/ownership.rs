@@ -63,7 +63,8 @@ use citizen_sdk_engine::BestFeeSnapshot;
 
 use crate::{
     abi::{
-        CitizenSdkErrorCode, CitizenSdkResultHandle, CitizenSdkResultInfo, CitizenSdkResultKind,
+        CitizenSdkErrorCode, CitizenSdkFailureStage, CitizenSdkResultHandle, CitizenSdkResultInfo,
+        CitizenSdkResultKind,
     },
     error::{FfiError, FfiResult},
 };
@@ -195,6 +196,8 @@ pub struct OwnedResult {
     pub owner: u64,
     pub code: CitizenSdkErrorCode,
     pub message: String,
+    /// Present only for failed results; successful result metadata stays layout-compatible.
+    pub failure_stage: Option<CitizenSdkFailureStage>,
     pub payload: ResultPayload,
 }
 
@@ -204,6 +207,7 @@ impl OwnedResult {
             owner,
             code: CitizenSdkErrorCode::Ok,
             message: String::new(),
+            failure_stage: None,
             payload,
         }
     }
@@ -213,6 +217,7 @@ impl OwnedResult {
             owner,
             code: error.code,
             message: error.message,
+            failure_stage: Some(error.stage),
             payload: ResultPayload::Empty,
         }
     }

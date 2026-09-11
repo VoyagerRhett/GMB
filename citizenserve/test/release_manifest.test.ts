@@ -120,6 +120,14 @@ describe('CitizenServe Cloudflare Release 候选', () => {
     expect(
       first.manifest.files.find(({ path }: { path: string }) => path === 'schema/download.sql')?.sha256,
     ).toMatch(/^[0-9a-f]{64}$/);
+    const releaseConfiguration = readFileSync(
+      join(first.outputPath, 'wrangler.toml'),
+      'utf8',
+    );
+    expect(releaseConfiguration).toContain(
+      'CHAT_SERVER_URL = "https://chat.crcfrcn.com"',
+    );
+    expect(releaseConfiguration).not.toContain('/auth/tatachatserver/access');
   });
 
   test('规范 tar.gz 归档可重复生成并安全解包复核', () => {

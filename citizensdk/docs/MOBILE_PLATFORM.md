@@ -32,16 +32,16 @@ MethodChannel  citizen/sdk/core/v1
 EventChannel   citizen/sdk/events/v1
 ```
 
-Linux adapter 源码也只使用这两个 channel 和相同 63 方法 tuple；无会话验签是五端共享方法，
+Linux adapter 源码也只使用这两个 channel 和相同 62 方法 tuple；无会话验签是五端共享方法，
 不增加 Map 旁路或 Linux 专用 Dart API。第 7.4 步公开入口使用同版已安装 Host/Core；跨平台实测仍
 由后续统一 GitHub CI 增量缓存、Release 全量构建承担，保持同一产品版本与 ABI。
 
-Windows adapter 源码也复用这两个 channel 和全部 63 方法；五份绑定各自的权威常量/方法表
+Windows adapter 源码也复用这两个 channel 和全部 62 方法；五份绑定各自的权威常量/方法表
 独立对拍同一金标。Windows 不带入 GLib 实现，也不增加移动端参数或业务功能；其本地身份、
 路径和 HWND 只在原生环境层取得。第 8.4 步注册官方 Windows 插件，不增加新的协议或
 产品业务；注册源码不代表已在 Hosted 发布。
 
-协议共 63 个方法。第 1.6 步新增准备执行、QR_V1 响应消费和 execution 取消三个方法；第 1.5 步新增
+协议共 62 个方法。第 1.6 步新增准备执行、QR_V1 响应消费和 execution 取消三个方法；第 1.5 步新增
 通用交易准备和显式取消两个方法；第 1.4 步新增 12 个通用安全链读取方法；此前新增的 5 个通用签名/默认账户
 授权方法、6 个统一钱包方法与既有 10 个 QR
 方法在五端名称、字段位置、上限和错误映射完全相同。平台层只投影 Core，不解释 opaque payload/action。
@@ -51,6 +51,10 @@ tuple；没有 `Map` 兼容旁路。request sequence 在接纳时严格连续，
 不能进入新 sink。Android 同笔交易的 bind 前后进度统一进入单派发者 FIFO，较晚事件不能
 越过尚在 drain 的早期事件；Apple Flutter 字节参数只接受 `FlutterStandardTypedData.uint8`，
 Int32/Int64/浮点 typed data 即使底层长度合适也会失败关闭。
+
+错误固定为 `[1, sessionId?, requestSequence?, errorCode, failureStage, method,
+errorMessage?]` 七项 tuple。同步拒绝不伪造 requestSequence；异步完成精确回显原序号。
+Android/Apple 只投影 C 真源的八阶段，未知阶段或非 62 项 method 失败关闭。
 
 通用链读取方法为 `getSyncStatus`、`getBestHead`、`getFinalizedBlockAt`、
 `resolveFinalizedBlock`、`getBlockHeader`、`getBlockBody`、`getRuntimeContext`、`getStorage`、
@@ -179,6 +183,14 @@ Apple host 把可重建链数据库、runtime cache 与交易公开事实放入 
 profile、加密秘密信封和 Vault 引用放入 typed secure SQLite；两者都使用具名 record contract、
 持久 revision CAS 与写后回读，不提供任意键值逃生口。iOS 文件保护等级按数据域区分；macOS
 使用相同 schema 与原子语义。
+
+Android 与 Apple 的 `runtime_cache_store` 在原有 SQLite 事务内同时写入并按 rowid FIFO 裁剪，
+提交后最多保留最新 64 个准确 block hash；REPLACE 会把该 hash 提升为最新项。完整记录上限仍为
+8 MiB，超过其 metadata 容量但符合 64 MiB Core 合同的 runtime context 只留内存，不调用宿主
+store。history 使用全新且唯一的 public schema v2：一行通用 meta、按 executionId 分行的 opaque
+record，以及 newest/retention/reconcile 三个索引。`THQ1` 查询受 100 条硬上限，`THM1` 在同一
+事务内提交删除、upsert 和汇总；不含目的账户、金额、备注、方向或业务 pallet。旧 schema 不迁移、
+不兼容。终态删除后的增量回收每次最多 128 页，不建立后台线程，也不运行 full `VACUUM`。
 
 Apple 默认根为 `Application Support/<application_id>/citizensdk/v1/{public,secure}`，
 application_id 来自宿主 `Bundle.main.bundleIdentifier`，不是 SDK framework 标识。

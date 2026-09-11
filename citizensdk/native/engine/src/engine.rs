@@ -8,7 +8,8 @@ use std::{
 use citizen_sdk_contracts::{
     store::{
         ChainDatabaseSnapshot, ChainDatabaseStore, EncryptedSecretBlobStore, RuntimeCacheStore,
-        TransactionHistoryState, TransactionHistoryStore, WalletProfileStore,
+        TransactionHistoryIndex, TransactionHistoryStore, WalletProfileStore,
+        MAX_PERSISTED_RUNTIME_METADATA_BYTES,
     },
     AccountId32, AccountNonce, AccountNonceSource, CapabilityName, CapabilityReason,
     CapabilitySnapshot, ChainSigner, ChainSyncStatus, ContractErrorCode,
@@ -832,9 +833,17 @@ impl CitizenEngine {
                         "transaction execution outlived its Engine generation",
                     ));
                 }
+                let sign_mode = self.wallet_account_sign_mode(source).await?;
+                self.history_service_from_components()?
+                    .preflight_execution_before_signing(
+                        source,
+                        prepared.call_data().len(),
+                        prepared.signed_extrinsic_len(),
+                    )
+                    .await?;
                 let execution_id = next_transaction_execution_id(&self.transaction_executions)?;
                 let intent = prepared.signing_intent()?;
-                match self.wallet_account_sign_mode(source).await? {
+                match sign_mode {
                     Some(WalletSignMode::Hot) => {
                         let completion = self.sign_wallet_intent(intent).await?;
                         if completion.account_id() != source
@@ -1549,7 +1558,7 @@ impl CitizenEngine {
 
     /// Reconciles at most 32 non-terminal SDK executions against finalized chain evidence.
     #[cfg(feature = "chain")]
-    pub fn sync_transaction_history(&self) -> EngineFuture<'_, TransactionHistoryState> {
+    pub fn sync_transaction_history(&self) -> EngineFuture<'_, TransactionHistoryIndex> {
         let preparation = self.prepare_finalized_history_runtime(&[
             CapabilityName::ChainRead,
             CapabilityName::History,
@@ -1809,9 +1818,30 @@ impl CitizenEngine {
                 .map_err(|_| EngineError::StatePoisoned)?
                 .begin(block)?;
 
+            // 内存 cache 能承载完整 Core 合同允许的 metadata，也是超过宿主持久记录容量时
+            // 的唯一缓存层。不能为了持久 cache 的性能上限降低链读取能力。
+            let memory_cached = {
+                let contexts = self
+                    .runtime_contexts
+                    .lock()
+                    .map_err(|_| EngineError::StatePoisoned)?;
+                contexts.get(block).cloned()
+            };
+            if let Some(cached) = memory_cached {
+                return self
+                    .runtime_contexts
+                    .lock()
+                    .map_err(|_| EngineError::StatePoisoned)?
+                    .complete(request, cached);
+            }
+
             if let Some(store) = self.components.runtime_cache() {
                 let cached = store.load(block.hash()).await.map_err(EngineError::from)?;
-                if let Some(cached) = cached {
+                // 持久 cache 是可重建的性能层。宿主若返回超出其合同容量的旧/异常记录，
+                // 不让它阻塞 provider 读取，也不在这里执行迁移或兼容逻辑。
+                if let Some(cached) = cached.filter(|context| {
+                    context.metadata().len() <= MAX_PERSISTED_RUNTIME_METADATA_BYTES
+                }) {
                     return self
                         .runtime_contexts
                         .lock()
@@ -1831,11 +1861,13 @@ impl CitizenEngine {
                 .lock()
                 .map_err(|_| EngineError::StatePoisoned)?
                 .complete(request, context)?;
-            if let Some(store) = self.components.runtime_cache() {
-                store
-                    .store(context.clone())
-                    .await
-                    .map_err(EngineError::from)?;
+            if context.metadata().len() <= MAX_PERSISTED_RUNTIME_METADATA_BYTES {
+                if let Some(store) = self.components.runtime_cache() {
+                    store
+                        .store(context.clone())
+                        .await
+                        .map_err(EngineError::from)?;
+                }
             }
             Ok(context)
         })
@@ -2780,12 +2812,12 @@ impl CitizenEngine {
                 CapabilityName::TransactionSubmit,
                 CapabilityName::TransactionVerify,
             ])?;
-            let local = self.history_service_from_components()?.load().await?;
+            let (local, reconcilable) = self
+                .history_service_from_components()?
+                .open_batch(1)
+                .await?;
             guard.ensure_current()?;
-            let has_reconcilable = local
-                .executions()
-                .iter()
-                .any(|record| !record.status().is_chain_terminal());
+            let has_reconcilable = !reconcilable.is_empty();
             let (mut positions, mut rebroadcasted, chain_revision, should_sync) = {
                 let monitor = self
                     .chain_monitor
@@ -2824,17 +2856,7 @@ impl CitizenEngine {
                 local
             };
             guard.ensure_current()?;
-            let pending_count = history
-                .executions()
-                .iter()
-                .filter(|record| {
-                    matches!(
-                        record.status(),
-                        citizen_sdk_contracts::HistoryTransactionStatus::Pending
-                            | citizen_sdk_contracts::HistoryTransactionStatus::InBlock { .. }
-                    )
-                })
-                .count();
+            let pending_count = history.open_count();
             let mut monitor = self
                 .chain_monitor
                 .lock()

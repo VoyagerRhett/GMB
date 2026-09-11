@@ -130,20 +130,23 @@ citizensdk_error_code_t runtime_delete(void *context, uint64_t operation_id,
     return CITIZENSDK_OK; } catch (...) { return map_exception(); }
 }
 
-citizensdk_error_code_t history_load(void *context, uint64_t operation_id,
-    void *sdk_context, citizensdk_host_record_completion_v1_t completion) {
-  if (completion == nullptr) return CITIZENSDK_ERROR_INVALID_ARGUMENT;
-  try { complete_record(operation_id, sdk_context, completion,
-                        host(context).history_load()); return CITIZENSDK_OK; }
-  catch (...) { return map_exception(); }
-}
-
-citizensdk_error_code_t history_cas(void *context, uint64_t operation_id,
-    uint64_t expected, citizensdk_bytes_view_t candidate, void *sdk_context,
+citizensdk_error_code_t history_query(void *context, uint64_t operation_id,
+    citizensdk_bytes_view_t query, void *sdk_context,
     citizensdk_host_record_completion_v1_t completion) {
   if (completion == nullptr) return CITIZENSDK_ERROR_INVALID_ARGUMENT;
   try { complete_record(operation_id, sdk_context, completion,
-      host(context).history_cas(expected, copy_view(candidate,
+      host(context).history_query(copy_view(query,
+          input_limits::kTransactionHistoryQueryBytes,
+          "transaction history query has invalid size"))); return CITIZENSDK_OK; }
+  catch (...) { return map_exception(); }
+}
+
+citizensdk_error_code_t history_mutate(void *context, uint64_t operation_id,
+    uint64_t expected, citizensdk_bytes_view_t mutation, void *sdk_context,
+    citizensdk_host_record_completion_v1_t completion) {
+  if (completion == nullptr) return CITIZENSDK_ERROR_INVALID_ARGUMENT;
+  try { complete_record(operation_id, sdk_context, completion,
+      host(context).history_mutate(expected, copy_view(mutation,
           input_limits::kMaximumTransactionHistoryBytes, "transaction history is too large")));
     return CITIZENSDK_OK; } catch (...) { return map_exception(); }
 }
@@ -293,7 +296,7 @@ void HostBridge::configure_vtables() noexcept {
   public_vtable_ = {sizeof(public_vtable_), 1, this, ::citizen_sdk::windows::chain_load,
     ::citizen_sdk::windows::chain_cas, ::citizen_sdk::windows::runtime_load,
     ::citizen_sdk::windows::runtime_store, ::citizen_sdk::windows::runtime_delete,
-    ::citizen_sdk::windows::history_load, ::citizen_sdk::windows::history_cas};
+    ::citizen_sdk::windows::history_query, ::citizen_sdk::windows::history_mutate};
   // 每组回调必须完整或完全缺席；不可用模块不发布可触达的资源。
   if ((modules_ & CITIZENSDK_MODULE_CHAIN) == 0) {
     public_vtable_.chain_database_load = nullptr;
@@ -303,8 +306,8 @@ void HostBridge::configure_vtables() noexcept {
     public_vtable_.runtime_cache_delete = nullptr;
   }
   if ((modules_ & CITIZENSDK_MODULE_HISTORY) == 0) {
-    public_vtable_.transaction_history_load = nullptr;
-    public_vtable_.transaction_history_compare_and_swap = nullptr;
+    public_vtable_.transaction_history_query = nullptr;
+    public_vtable_.transaction_history_mutate = nullptr;
   }
   secure_vtable_ = {sizeof(secure_vtable_), 1, this,
     ::citizen_sdk::windows::profile_load, ::citizen_sdk::windows::profile_cas,
@@ -756,13 +759,12 @@ void HostBridge::runtime_store(const std::array<uint8_t, 32> &hash,
 void HostBridge::runtime_delete(const std::array<uint8_t, 32> &hash) {
   service_call([&] { public_store_->runtime_cache_delete(hash); });
 }
-HostRecord HostBridge::history_load() {
-  return service_call([&] { return public_store_->transaction_history_load(); });
+HostRecord HostBridge::history_query(const Bytes &query) {
+  return service_call([&] { return public_store_->transaction_history_query(query); });
 }
-HostRecord HostBridge::history_cas(uint64_t expected, const Bytes &candidate) {
+HostRecord HostBridge::history_mutate(uint64_t expected, const Bytes &mutation) {
   return service_call([&] {
-    return public_store_->transaction_history_compare_and_swap(expected,
-                                                               candidate);
+    return public_store_->transaction_history_mutate(expected, mutation);
   });
 }
 HostRecord HostBridge::profile_load() {

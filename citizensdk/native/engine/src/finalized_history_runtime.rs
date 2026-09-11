@@ -12,7 +12,7 @@ use std::{
 
 use citizen_sdk_contracts::{
     validated_finalized_block_range_len, ChainSigner, ContractErrorCode, ExecutionConclusion,
-    HistoryTransactionStatus, SignedExtrinsic, TransactionExecutionId, TransactionHistoryState,
+    HistoryTransactionStatus, SignedExtrinsic, TransactionExecutionId, TransactionHistoryIndex,
     VerifiedChainClient, MAX_FINALIZED_BLOCKS_PER_BATCH, MAX_TRANSACTION_HISTORY_SYNC_BATCH,
 };
 
@@ -73,9 +73,9 @@ impl FinalizedHistoryRuntime {
         rebroadcasted: &mut BTreeSet<TransactionExecutionId>,
         signer: &dyn ChainSigner,
         guard: &dyn FinalizedHistoryRunGuard,
-    ) -> Result<TransactionHistoryState, EngineError> {
+    ) -> Result<TransactionHistoryIndex, EngineError> {
         guard.ensure_current()?;
-        let candidates = self
+        let (initial_index, candidates) = self
             .history
             .open_batch(MAX_TRANSACTION_HISTORY_SYNC_BATCH)
             .await?;
@@ -87,7 +87,7 @@ impl FinalizedHistoryRuntime {
         positions.retain(|id, _| candidate_ids.contains(id));
         rebroadcasted.retain(|id| candidate_ids.contains(id));
         if candidates.is_empty() {
-            return self.history.load().await;
+            return Ok(initial_index);
         }
 
         let finalized_head =
@@ -135,7 +135,7 @@ impl FinalizedHistoryRuntime {
             }
         }
 
-        let state = self.history.load().await?;
+        let state = self.history.index().await?;
         guard.ensure_current()?;
         if !reached_head {
             return Ok(state);
@@ -143,13 +143,20 @@ impl FinalizedHistoryRuntime {
 
         let identity =
             cancellable_chain(verified_identity(self.chain_client.as_ref()), guard).await??;
-        for record in state.executions().iter().filter(|record| {
-            candidate_ids.contains(&record.execution_id())
-                && matches!(
-                    record.status(),
-                    HistoryTransactionStatus::Pending | HistoryTransactionStatus::InBlock { .. }
-                )
-        }) {
+        for execution_id in &candidate_ids {
+            let record = match self.history.require_execution_snapshot(*execution_id).await {
+                Ok((_, record)) => record,
+                Err(error) if error.contract_code() == Some(ContractErrorCode::NotFound) => {
+                    continue
+                }
+                Err(error) => return Err(error),
+            };
+            if !matches!(
+                record.status(),
+                HistoryTransactionStatus::Pending | HistoryTransactionStatus::InBlock { .. }
+            ) {
+                continue;
+            }
             if rebroadcasted.contains(&record.execution_id()) {
                 continue;
             }
@@ -159,7 +166,7 @@ impl FinalizedHistoryRuntime {
                 guard,
             )
             .await??;
-            validate_persisted_transaction_execution(record, &identity, &runtime, signer).await?;
+            validate_persisted_transaction_execution(&record, &identity, &runtime, signer).await?;
             if signed_extrinsic_hash(&runtime, record.signed_extrinsic())?
                 != record.transaction_hash()
             {
@@ -179,7 +186,7 @@ impl FinalizedHistoryRuntime {
             }
             rebroadcasted.insert(record.execution_id());
         }
-        self.history.load().await
+        self.history.index().await
     }
 
     async fn reconcile_block(
@@ -212,10 +219,17 @@ impl FinalizedHistoryRuntime {
             let extrinsic = SignedExtrinsic::try_new(bytes.clone())?;
             decoded_body.push((signed_extrinsic_hash(&runtime, &extrinsic)?, extrinsic));
         }
-        let snapshot = self.history.load().await?;
-        for record in snapshot.executions().iter().filter(|record| {
-            candidates.contains(&record.execution_id()) && !record.status().is_chain_terminal()
-        }) {
+        for execution_id in candidates {
+            let record = match self.history.require_execution_snapshot(*execution_id).await {
+                Ok((_, record)) => record,
+                Err(error) if error.contract_code() == Some(ContractErrorCode::NotFound) => {
+                    continue
+                }
+                Err(error) => return Err(error),
+            };
+            if record.status().is_chain_terminal() {
+                continue;
+            }
             let matches = decoded_body
                 .iter()
                 .enumerate()

@@ -53,12 +53,14 @@ public final class CitizenSdkPlugin: NSObject, @preconcurrency FlutterPlugin {
                 code: "citizensdk.\(CitizenSdkFlutterCodec.errorName(failure.code))",
                 message: failure.message,
                 details: CitizenSdkFlutterCodec.error(failure.code, failure.message,
-                                                      session: failure.session, sequence: failure.sequence)
+                                                      session: failure.session, sequence: failure.sequence,
+                                                      method: call.method, stage: failure.stage)
             ))
         } catch {
             result(FlutterError(code: "citizensdk.internal", message: "CitizenSDK Flutter request decoding failed",
                                 details: CitizenSdkFlutterCodec.error(.internalFailure,
-                                    "CitizenSDK Flutter request decoding failed", session: nil, sequence: nil)))
+                                    "CitizenSDK Flutter request decoding failed", session: nil, sequence: nil,
+                                    method: call.method)))
         }
     }
 

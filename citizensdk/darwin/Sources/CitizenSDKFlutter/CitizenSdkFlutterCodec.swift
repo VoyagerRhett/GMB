@@ -30,7 +30,7 @@ internal enum CitizenSdkFlutterCodec {
         "executePreparedTransaction", "consumePreparedTransactionQrResponse",
         "cancelPreparedTransactionExecution", "getTransactionHistory", "syncTransactionHistory",
         "qrParse", "qrCreateSignRequest", "qrConsumeSignResponse", "qrCancelSignRequest", "qrEncodeAccountId",
-        "qrEncodeUserTransfer", "qrDecodeLuminance", "qrEncode", "qrScan", "signQrRequest",
+        "qrDecodeLuminance", "qrEncode", "qrScan", "signQrRequest",
     ]
 
     enum Request {
@@ -101,6 +101,33 @@ internal enum CitizenSdkFlutterCodec {
                  let .importState(_, value, _): return value
             }
         }
+        var method: String {
+            switch self {
+            case .open: return "open"
+            case .verify: return "verifySignature"
+            case let .empty(method, _, _), let .account(method, _, _, _),
+                 let .block(method, _, _, _), let .rename(method, _, _, _, _),
+                 let .externalSignature(method, _, _, _, _),
+                 let .transactionExecution(method, _, _, _, _),
+                 let .transactionHistory(method, _, _, _, _), let .qr(method, _, _, _): return method
+            case .balances: return "getAccountBalances"
+            case .blockNumber: return "getFinalizedBlockAt"
+            case .resolveBlock: return "resolveFinalizedBlock"
+            case .storage: return "getStorage"
+            case .storageBatch: return "getStorageBatch"
+            case .importState: return "importState"
+            case .create: return "createWallet"
+            case .addAccounts: return "addWalletAccounts"
+            case .coldSS58: return "importColdAccountSs58"
+            case .reorder: return "reorderWalletAccountsWithoutDefaultChange"
+            case .sign: return "signWalletPayload"
+            case .beginSigning: return "beginSigning"
+            case .cancelSigning: return "cancelSigning"
+            case .beginDefaultChange: return "beginDefaultAccountChange"
+            case .prepareTransaction: return "prepareTransaction"
+            case .cancelPreparedTransaction: return "cancelPreparedTransaction"
+            }
+        }
     }
 
     struct ContractFailure: Error {
@@ -108,6 +135,16 @@ internal enum CitizenSdkFlutterCodec {
         let message: String
         let session: String?
         let sequence: Int64?
+        let stage: CitizenSDKFailureStage
+
+        init(code: CitizenSDKErrorCode, message: String, session: String? = nil,
+             sequence: Int64? = nil, stage: CitizenSDKFailureStage? = nil) {
+            self.code = code
+            self.message = message
+            self.session = session
+            self.sequence = sequence
+            self.stage = stage ?? .defaultStage(for: code)
+        }
     }
 
     static func decode(method: String, arguments: Any?) throws -> Request {
@@ -381,15 +418,6 @@ internal enum CitizenSdkFlutterCodec {
                 try length(4)
                 return .qr(method: method, session: session, sequence: sequence,
                            fields: [try hash32(tuple[3])])
-            case "qrEncodeUserTransfer":
-                try length(10)
-                let expires = try integer(tuple[4], "expiresAt")
-                guard expires > 0 else { throw failure(.invalidArgument, "expiresAt must be positive") }
-                return .qr(method: method, session: session, sequence: sequence, fields: [
-                    try string(tuple[3], "requestID", 16...128), expires, try hash32(tuple[5]),
-                    try utf8Text(tuple[6], "amount", 1...64), try utf8Text(tuple[7], "symbol", 1...16),
-                    try utf8Text(tuple[8], "memo", 0...256), try utf8Text(tuple[9], "bankCIDNumber", 1...32),
-                ])
             case "qrDecodeLuminance":
                 try length(7)
                 let pixels = try bytes(tuple[3], maximum: 16 * 1_024 * 1_024)
@@ -412,9 +440,11 @@ internal enum CitizenSdkFlutterCodec {
             }
         } catch let error as ContractFailure {
             throw ContractFailure(code: error.code, message: error.message,
-                                  session: error.session ?? session, sequence: error.sequence ?? sequence)
+                                  session: error.session ?? session, sequence: error.sequence ?? sequence,
+                                  stage: error.stage)
         } catch let error as CitizenSDKError {
-            throw ContractFailure(code: error.code, message: error.message, session: session, sequence: sequence)
+            throw ContractFailure(code: error.code, message: error.message, session: session,
+                                  sequence: sequence, stage: error.stage)
         } catch {
             throw ContractFailure(code: .invalidArgument, message: "Invalid CitizenSDK request",
                                   session: session, sequence: sequence)
@@ -432,8 +462,12 @@ internal enum CitizenSdkFlutterCodec {
         return [version, session, sequence, type, payload]
     }
     static func error(_ code: CitizenSDKErrorCode, _ message: String,
-                      session: String?, sequence: Int64?) -> [Any?] {
-        [version, session, sequence, Int64(code.rawValue), message]
+                      session: String?, sequence: Int64?, method: String,
+                      stage: CitizenSDKFailureStage? = nil) -> [Any?] {
+        precondition(methods.contains(method))
+        let failureStage = stage ?? .defaultStage(for: code)
+        return [version, session, sequence, Int64(code.rawValue),
+                Int64(failureStage.rawValue), method, message]
     }
 
     static func errorName(_ code: CitizenSDKErrorCode) -> String {

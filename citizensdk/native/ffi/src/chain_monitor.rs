@@ -21,6 +21,37 @@ pub(crate) struct DatabaseRefresh {
     next: Instant,
     saved: Option<FinalizedBlockRef>,
 }
+
+/// Deterministic adapter-only resubscription schedule. Networking and peer
+/// reconnection remain entirely inside the existing smoldot provider.
+pub(crate) struct FinalizedRetry {
+    next: Instant,
+    delay: Duration,
+}
+impl FinalizedRetry {
+    const MAX_DELAY: Duration = Duration::from_secs(30);
+    pub(crate) fn new(now: Instant) -> Self {
+        Self {
+            next: now,
+            delay: Duration::from_secs(1),
+        }
+    }
+    pub(crate) fn due(&self, now: Instant) -> bool {
+        now >= self.next
+    }
+    pub(crate) fn failed(&mut self, now: Instant) {
+        self.next = now + self.delay;
+        self.delay = (self.delay * 2).min(Self::MAX_DELAY);
+    }
+    pub(crate) fn succeeded(&mut self, now: Instant) {
+        self.next = now;
+        self.delay = Duration::from_secs(1);
+    }
+    #[cfg(test)]
+    pub(crate) const fn delay(&self) -> Duration {
+        self.delay
+    }
+}
 impl DatabaseRefresh {
     const INTERVAL: Duration = Duration::from_secs(60);
     pub(crate) fn new(now: Instant) -> Self {
@@ -61,8 +92,7 @@ impl ChainMonitor {
                 };
                 drop(owner);
                 let mut subscription = Some(provider.subscribe_finalized_heads());
-                let mut retry_at = Instant::now();
-                let mut retry_delay = Duration::from_secs(1);
+                let mut retry = FinalizedRetry::new(Instant::now());
                 let mut history_dirty = false;
                 let mut database = DatabaseRefresh::new(Instant::now());
                 loop {
@@ -77,22 +107,22 @@ impl ChainMonitor {
                         break;
                     };
                     // 只消费已就绪的通知，不创建网络轮询；有界周期同时负责钱包变更和失败后重试。
-                    if subscription.is_none() && Instant::now() >= retry_at {
+                    if subscription.is_none() && retry.due(Instant::now()) {
                         subscription = Some(provider.subscribe_finalized_heads());
                     }
                     if let Some(stream) = subscription.as_mut() {
                         match stream.next().now_or_never() {
                             Some(Some(Ok(_))) => {
-                                retry_delay = Duration::from_secs(1);
+                                retry.succeeded(Instant::now());
                                 let _ = owner.engine().invalidate_chain_read_cache();
                             }
-                            Some(None) => {
-                                // 仅资源真正结束才重新调用既有订阅 API；不是 P2P 重连实现。
+                            Some(Some(Err(_))) | Some(None) => {
+                                // 错误项和资源结束都使本条 stream 失效；仅重订阅
+                                // provider 已有 API，不复制 P2P 或网络重连器。
                                 subscription = None;
-                                retry_at = Instant::now() + retry_delay;
-                                retry_delay = (retry_delay * 2).min(Duration::from_secs(30));
+                                retry.failed(Instant::now());
                             }
-                            Some(Some(Err(_))) | None => {}
+                            None => {}
                         }
                     }
                     if wallet {

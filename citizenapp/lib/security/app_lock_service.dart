@@ -14,7 +14,6 @@ import '../8964/compose/drafts/compose_draft_media.dart';
 import '../8964/profile/services/citizen_profile_cache.dart';
 import '../isar/social_isar.dart';
 import 'package:tatachat_sdk/tatachat_sdk.dart';
-import 'package:citizenapp/chat/tatachat_sdk_adapter.dart';
 import '../isar/app_isar.dart';
 import '../isar/user_isar.dart';
 import '../isar/wallet_isar.dart';
@@ -26,7 +25,7 @@ import 'secure_storage.dart';
 /// [failures] 会保留每个失败数据域，调用方不得把部分擦除当成成功退出。
 class AppDataWipeException implements Exception {
   AppDataWipeException(List<String> failures)
-    : failures = List<String>.unmodifiable(failures);
+      : failures = List<String>.unmodifiable(failures);
 
   final List<String> failures;
 
@@ -76,7 +75,7 @@ class AppLockService {
   static const Duration lockDuration = Duration(hours: 24);
   static const Duration _wipeStepTimeout = Duration(seconds: 6);
   static Future<AppPinVerificationResult> Function(String)?
-  _debugVerifyPinForTest;
+      _debugVerifyPinForTest;
   static Future<bool> Function()? _debugIsLockedForTest;
   static Future<void> Function()? _debugRemovePinForTest;
   static Future<void> Function()? _debugWipeAllDataForTest;
@@ -333,7 +332,7 @@ class AppLockService {
   /// 新进程只有在无 marker，或上一进程已完整擦除后才允许启动。
   ///
   /// pending 会无 PIN 重试全量擦除；无论重试成功还是失败，当前
-  /// 进程都只能显示擦除终态并退出，不得继续构造 CitizenChatSdk。
+  /// 进程都只能显示擦除终态并退出，不得继续构造 ChatSdk。
   static Future<AppDataWipeStartupResult> recoverPersistentWipeAtStartup({
     Future<void> Function()? debugDeleteSecureStorage,
     Future<void> Function()? debugClearSharedPreferences,
@@ -347,17 +346,17 @@ class AppLockService {
     try {
       // 普通启动只验证擦除门闩；没有 marker 时不得等待正常 Chat 后台收件，
       // 否则 FCM/APNs 唤醒与用户冷启动重叠会被误判成数据安全故障。
-      final initialState = await CitizenChatSdk.readPersistentAppDataWipeState(
+      final initialState = await ChatRuntimeCore.readPersistentAppDataWipeState(
         documentsDirectoryProvider: debugChatDocumentsDirectoryProvider,
       );
       if (initialState == ChatPersistentWipeState.none) {
         return AppDataWipeStartupResult.ready;
       }
-      return await CitizenChatSdk.runStartupPreflight(
+      return await ChatRuntimeCore.runStartupPreflight(
         // barrier 覆盖 CID artifact 清理、wipe marker 判定与完整恢复，不能在
         // 中间释放后让后台 isolate 插入新 lease。
         operation: () async {
-          final state = await CitizenChatSdk.readPersistentAppDataWipeState(
+          final state = await ChatRuntimeCore.readPersistentAppDataWipeState(
             documentsDirectoryProvider: debugChatDocumentsDirectoryProvider,
           );
           switch (state) {
@@ -365,7 +364,7 @@ class AppLockService {
               return AppDataWipeStartupResult.ready;
             case ChatPersistentWipeState.complete:
               try {
-                await CitizenChatSdk.clearCompletedPersistentAppDataWipe(
+                await ChatRuntimeCore.clearCompletedPersistentAppDataWipe(
                   documentsDirectoryProvider:
                       debugChatDocumentsDirectoryProvider,
                 );
@@ -411,7 +410,7 @@ class AppLockService {
       return debugLatch();
     }
     if (debugChatDocumentsDirectoryProvider != null) _requireFlutterTest();
-    return CitizenChatSdk.beginPersistentAppDataWipe(
+    return ChatRuntimeCore.beginPersistentAppDataWipe(
       documentsDirectoryProvider: debugChatDocumentsDirectoryProvider,
     ).timeout(_wipeStepTimeout);
   }
@@ -419,7 +418,7 @@ class AppLockService {
   // 数据清空
   /// 清空全部应用数据：各业务 Isar DB、Chat 文件树、SecureStorage 与偏好设置。
   ///
-  /// 第一阶段先同步终止 CitizenChatSdk 与各业务 Isar 生产者，并有界等待其收口；
+  /// 第一阶段先同步终止 ChatSdk 与各业务 Isar 生产者，并有界等待其收口；
   /// 第二阶段才最终清理 SecureStorage 与 SharedPreferences。任一域失败
   /// 也不会阻止后续域尝试，但绝不返回成功。Chat 文件域只允许删除
   /// Documents 下的 `chat/` 子树，跨 isolate marker 保留到进程退出。
@@ -453,7 +452,7 @@ class AppLockService {
     var persistentGateReady = false;
     Object? persistentGateError;
     try {
-      await CitizenChatSdk.beginPersistentAppDataWipe(
+      await ChatRuntimeCore.beginPersistentAppDataWipe(
         documentsDirectoryProvider: debugChatDocumentsDirectoryProvider,
       ).timeout(_wipeStepTimeout);
       persistentGateReady = true;
@@ -466,7 +465,7 @@ class AppLockService {
     // cold-open/delete，因此各业务域仍逐项处理并准确归因失败。
     await _attemptWipe(
       'ChatFiles',
-      () => CitizenChatSdk.closeAndDeleteLocalFiles(
+      () => ChatRuntimeCore.closeAndDeleteLocalFiles(
         documentsDirectoryProvider: debugChatDocumentsDirectoryProvider,
       ),
       failures,
@@ -488,7 +487,7 @@ class AppLockService {
     // 删除平台安全存储，避免把一次迟到的成功错误降级成跳过密钥清理。
     if (!persistentGateReady) {
       try {
-        final state = await CitizenChatSdk.readPersistentAppDataWipeState(
+        final state = await ChatRuntimeCore.readPersistentAppDataWipeState(
           documentsDirectoryProvider: debugChatDocumentsDirectoryProvider,
         ).timeout(_wipeStepTimeout);
         persistentGateReady = state != ChatPersistentWipeState.none;
@@ -559,7 +558,7 @@ class AppLockService {
     if (failures.isEmpty) {
       await _attemptWipe(
         '持久擦除完成态',
-        () => CitizenChatSdk.markPersistentAppDataWipeComplete(
+        () => ChatRuntimeCore.markPersistentAppDataWipeComplete(
           documentsDirectoryProvider: debugChatDocumentsDirectoryProvider,
         ),
         failures,

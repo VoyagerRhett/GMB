@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Miniflare } from 'miniflare';
+import type { Miniflare } from 'miniflare';
 import type { Env } from '../src/types';
 import { routeRequest } from '../src/routes';
 import { citizenchainDownloadRoute } from '../src/downloads/citizenchain';
+import { createTestMiniflare } from './miniflare';
 
 interface CitizenChainPublicationInteropFixture {
   contract_version: number;
@@ -32,11 +33,8 @@ let miniflare: Miniflare;
 let env: Env;
 
 beforeEach(async () => {
-  miniflare = new Miniflare({
-    modules: true,
-    script: 'export default { fetch() { return new Response("test"); } }',
-    compatibilityDate: '2026-07-29',
-    d1Databases: ['DB', 'CITIZENCHAIN_DOWNLOAD_DB'],
+  miniflare = createTestMiniflare({
+    d1Bindings: ['DB', 'CITIZENCHAIN_DOWNLOAD_DB'],
   });
   env = await miniflare.getBindings<Env>();
   (env as Env & { CITIZENCHAIN_DOWNLOAD_PUBLISH_SECRET: string })

@@ -1,5 +1,5 @@
 {
-  "name": "citizenchatserver-workers",
+  "name": "citizenchatserver",
   "main": "worker/shim.mjs",
   "compatibility_date": "2026-08-30",
   "workers_dev": false,
@@ -9,26 +9,26 @@
   ],
   "d1_databases": [
     {
-      "binding": "TATACHATSERVER_DB",
-      "database_name": "citizenchatserver-d1"
+      "binding": "D1",
+      "database_name": "citizenchatserver"
     }
   ],
   "r2_buckets": [
     {
-      "binding": "TATACHATSERVER_ATTACHMENTS",
-      "bucket_name": "citizenchatserver-r2"
+      "binding": "R2",
+      "bucket_name": "citizenchatserver"
     }
   ],
   "durable_objects": {
     "bindings": [
       {
-        "name": "TATACHATSERVER_REALTIME",
-        "class_name": "TataChatRealtime"
+        "name": "DO",
+        "class_name": "DO"
       }
     ]
   },
   "exports": {
-    "TataChatRealtime": {
+    "DO": {
       "type": "durable-object",
       "storage": "sqlite"
     }
@@ -37,12 +37,12 @@
     "crons": ["* * * * *"]
   },
   "vars": {
-    "TATACHATSERVER_IOS_APP_ID": "ios.citizenapp",
-    "TATACHATSERVER_ANDROID_APP_ID": "com.crcfrcn.citizenapp",
-    "TATACHATSERVER_AUTH_ISSUER": "https://www.crcfrcn.com",
-    "TATACHATSERVER_AUTH_AUDIENCE": "citizenchatserver",
-    "TATACHATSERVER_MAX_ATTACHMENT_BYTES": "5368709120",
-    "TATACHATSERVER_APNS_ALLOWED_TOPICS": "ios.citizenapp",
-    "TATACHATSERVER_APNS_SANDBOX": "false"
+    "CHATSERVER_IOS_APP_ID": "ios.citizenapp",
+    "CHATSERVER_ANDROID_APP_ID": "com.crcfrcn.citizenapp",
+    "CHATSERVER_AUTH_ISSUER": "https://www.crcfrcn.com",
+    "CHATSERVER_AUTH_AUDIENCE": "citizenchatserver",
+    "CHATSERVER_MAX_ATTACHMENT_BYTES": "5368709120",
+    "CHATSERVER_APNS_ALLOWED_TOPICS": "ios.citizenapp",
+    "CHATSERVER_APNS_SANDBOX": "false"
   }
 }

@@ -30,9 +30,11 @@ final class CitizenSDKPublicStoreTests: XCTestCase {
         let second = try CitizenSDKPublicStore(directory: secondRoot.appendingPathComponent("public"))
         defer { first.close(); second.close() }
         _ = try first.chainDatabaseCAS(expected: 0, candidate: Data([1]))
-        _ = try first.transactionHistoryCAS(expected: 0, candidate: Data([2]))
+        _ = try first.transactionHistoryMutate(expected: 0,
+                                               bytes: historyMutation(identity: 2, record: Data([2])))
         XCTAssertFalse(try second.chainDatabaseLoad().present)
-        XCTAssertFalse(try second.transactionHistoryLoad().present)
+        XCTAssertEqual(try second.transactionHistoryQuery(historyIndexQuery()).revision, 0)
+        XCTAssertEqual(try first.transactionHistoryQuery(historyIndexQuery()).revision, 1)
         _ = try second.chainDatabaseCAS(expected: 0, candidate: Data([3]))
         XCTAssertEqual(try first.chainDatabaseLoad().record, Data([1]))
         XCTAssertEqual(try second.chainDatabaseLoad().record, Data([3]))
@@ -57,6 +59,40 @@ final class CitizenSDKPublicStoreTests: XCTestCase {
         XCTAssertFalse(try store.runtimeCacheLoad(hash: hash).present)
     }
 
+    func testRuntimeCacheAtomicallyRetainsLatestSixtyFourWrites() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try CitizenSDKPublicStore(directory: directory)
+        defer { store.close() }
+
+        for index in 0..<80 {
+            try store.runtimeCacheStore(hash: blockHash(index), candidate: Data([UInt8(index)]))
+        }
+        for index in 0..<80 {
+            XCTAssertEqual(try store.runtimeCacheLoad(hash: blockHash(index)).present, index >= 16)
+        }
+
+        // REPLACE promotes the existing key to newest without creating a 65th row.
+        try store.runtimeCacheStore(hash: blockHash(16), candidate: Data([99]))
+        try store.runtimeCacheStore(hash: blockHash(80), candidate: Data([80]))
+        XCTAssertTrue(try store.runtimeCacheLoad(hash: blockHash(16)).present)
+        XCTAssertFalse(try store.runtimeCacheLoad(hash: blockHash(17)).present)
+        XCTAssertTrue(try store.runtimeCacheLoad(hash: blockHash(80)).present)
+
+        let database = directory.appendingPathComponent("public-state-v1.sqlite3")
+        try executeSQL(
+            database,
+            "CREATE TRIGGER runtime_cache_prune_failure BEFORE DELETE ON runtime_cache " +
+                "BEGIN SELECT RAISE(ABORT, 'test prune failure'); END"
+        )
+        XCTAssertThrowsError(
+            try store.runtimeCacheStore(hash: blockHash(81), candidate: Data([81]))
+        )
+        XCTAssertFalse(try store.runtimeCacheLoad(hash: blockHash(81)).present)
+        XCTAssertTrue(try store.runtimeCacheLoad(hash: blockHash(18)).present)
+        try executeSQL(database, "DROP TRIGGER runtime_cache_prune_failure")
+    }
+
     func testSQLiteFailureCodesNeverMeanAbsent() throws {
         for code in [SQLITE_BUSY, SQLITE_ERROR, SQLITE_CORRUPT] {
             XCTAssertThrowsError(try CitizenSDKSQLite.classifyStepCode(code)) { error in
@@ -71,7 +107,42 @@ final class CitizenSDKPublicStoreTests: XCTestCase {
         FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
     }
 
+    private func blockHash(_ index: Int) -> Data {
+        var bytes = Data(repeating: 0, count: 32)
+        bytes[31] = UInt8(index)
+        return bytes
+    }
+
+    private func historyIndexQuery() -> Data {
+        var bytes = Data("THQ1".utf8); bytes.append(1)
+        append(UInt64.max, to: &bytes); append(UInt32(0), to: &bytes)
+        bytes.append(Data(repeating: 0, count: 16)); bytes.append(0)
+        append(UInt64(0), to: &bytes); bytes.append(Data(repeating: 0, count: 16))
+        return bytes
+    }
+
+    private func historyMutation(identity: UInt8, record: Data) -> Data {
+        let weight = UInt64(max(1, record.count))
+        var bytes = Data("THM1".utf8)
+        append(UInt64(1), to: &bytes); append(UInt32(1), to: &bytes); append(weight, to: &bytes)
+        append(UInt32(1), to: &bytes); append(weight, to: &bytes)
+        append(UInt32(0), to: &bytes); append(UInt32(1), to: &bytes)
+        bytes.append(identity); bytes.append(Data(repeating: 0, count: 15))
+        append(UInt64(1), to: &bytes); append(UInt64(1), to: &bytes); append(weight, to: &bytes)
+        bytes.append(0); bytes.append(0); append(UInt32(record.count), to: &bytes); bytes.append(record)
+        return bytes
+    }
+
+    private func append<T: FixedWidthInteger>(_ value: T, to data: inout Data) {
+        var little = value.littleEndian
+        withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
+    }
+
     private func corruptRevision(_ file: URL, _ sql: String) throws {
+        try executeSQL(file, sql)
+    }
+
+    private func executeSQL(_ file: URL, _ sql: String) throws {
         var database: OpaquePointer?
         XCTAssertEqual(sqlite3_open_v2(file.path, &database, SQLITE_OPEN_READWRITE, nil), SQLITE_OK)
         guard let database else { return XCTFail("SQLite fixture did not open") }

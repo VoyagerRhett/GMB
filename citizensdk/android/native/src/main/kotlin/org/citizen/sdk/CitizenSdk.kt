@@ -400,14 +400,6 @@ class CitizenSdk private constructor(
     fun qrEncodeAccountId(accountId: ByteArray): String =
         synchronized(lifecycleGate) { requireOpen(); native.qrEncodeAccountId(accountId.requireSize(32, "accountId")) }
 
-    fun qrEncodeUserTransfer(
-        requestId: String, expiresAt: Long, accountId: ByteArray, amount: String,
-        symbol: String, memo: String, bankCidNumber: String,
-    ): String = synchronized(lifecycleGate) {
-        requireOpen()
-        native.qrEncodeUserTransfer(requestId, expiresAt, accountId.requireSize(32, "accountId"), amount, symbol, memo, bankCidNumber)
-    }
-
     fun qrDecodeLuminance(data: ByteArray, width: Int, height: Int, rowStride: Int): CitizenQrDocument =
         synchronized(lifecycleGate) {
             requireOpen(); requireQrModule()

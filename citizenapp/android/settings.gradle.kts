@@ -22,10 +22,6 @@ pluginManagement {
     }
 }
 
-plugins {
-    id("com.android.application") version "9.0.1" apply false
-}
-
 // Flutter/Pub在当前产品根生成插件元数据；Gradle始终从本产品真实android根启动，
 // 因此不会再把跨根符号链接设置脚本当成另一个Gradle根。
 val flutterProjectRoot = System.getenv("TATA_CONSOLE_FLUTTER_ROOT")

@@ -448,7 +448,7 @@ typedef ChatDownloadAttachmentFactory = CitizenChatDownloadAttachmentCallback?
 /// 聊天页加号菜单 5 个动作的可注入入口。
 ///
 /// 默认全为 null，各动作走真实实现；测试整体替换后即可断言路由，
-/// 而不会真的拉起相机、建群页或通讯录（它们会触发 Isar / CitizenChatSdk / 相机）。
+/// 而不会真的拉起相机、建群页或通讯录（它们会触发 Isar / ChatSdk / 相机）。
 class ChatEntryOpeners {
   const ChatEntryOpeners({
     this.openScan,
@@ -514,7 +514,7 @@ class ChatTab extends StatefulWidget {
   final ChatSendMediaFactory? sendMediaFactory;
   final ChatDownloadAttachmentFactory? downloadAttachmentFactory;
   final ChatSyncFactory? syncFactory;
-  final CitizenChatSdk? runtime;
+  final ChatSdk? runtime;
   final ValueListenable<int>? selectedTab;
   final int tabIndex;
 
@@ -1786,7 +1786,7 @@ class _ChatSearchPageState extends State<ChatSearchPage> {
 class GroupCreatePage extends StatefulWidget {
   const GroupCreatePage({super.key, this.runtime, this.contactService});
 
-  final CitizenChatSdk? runtime;
+  final ChatSdk? runtime;
   final UserContactService? contactService;
 
   @override
@@ -1797,8 +1797,7 @@ class _GroupCreatePageState extends State<GroupCreatePage> {
   final TextEditingController _nameController = TextEditingController();
   late final UserContactService _contactService =
       widget.contactService ?? UserContactService();
-  late final CitizenChatSdk _runtime =
-      widget.runtime ?? CitizenChatSdk.instance;
+  late final ChatSdk _runtime = widget.runtime ?? citizenChatRuntime;
 
   List<UserContact> _contacts = const <UserContact>[];
   final Set<String> _selected = <String>{};
@@ -1914,7 +1913,7 @@ class GroupManagePage extends StatefulWidget {
   });
 
   final String groupId;
-  final CitizenChatSdk? runtime;
+  final ChatSdk? runtime;
   final ChatStore? store;
   final String? cidNumber;
 
@@ -1923,8 +1922,7 @@ class GroupManagePage extends StatefulWidget {
 }
 
 class _GroupManagePageState extends State<GroupManagePage> {
-  late final CitizenChatSdk _runtime =
-      widget.runtime ?? CitizenChatSdk.instance;
+  late final ChatSdk _runtime = widget.runtime ?? citizenChatRuntime;
   late final ChatStore _store = widget.store ?? ChatStore();
 
   ChatGroup? _group;
@@ -2097,7 +2095,7 @@ Future<void> openGroupChat(
   }
   await ChatConversationRoutes.openGroup(
     context,
-    sdk: CitizenChatSdk.instance,
+    sdk: citizenChatRuntime,
     host: _citizenConversationHost(
       peerUserId: groupId,
       title: title,
@@ -2145,7 +2143,7 @@ Future<void> openDirectChat(
   }
   await ChatConversationRoutes.openDirect(
     context,
-    sdk: CitizenChatSdk.instance,
+    sdk: citizenChatRuntime,
     host: _citizenConversationHost(
       peerUserId: peerUserId,
       title: title,

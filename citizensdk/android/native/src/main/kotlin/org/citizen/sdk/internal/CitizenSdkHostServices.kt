@@ -17,7 +17,9 @@ internal class CitizenSdkHostServices(context: Context, private val modules: Int
     private val usesSecrets = modules and (CitizenSdkModules.WALLET or CitizenSdkModules.SIGNING) != 0
     private val root by lazy { File(context.noBackupFilesDir, "citizensdk/v1") }
     private val publicStoreDelegate = lazy {
-        check(modules and CitizenSdkModules.CHAIN != 0) { "chain store is not selected" }
+        check(modules and (CitizenSdkModules.CHAIN or CitizenSdkModules.HISTORY) != 0) {
+            "public store is not selected"
+        }
         CitizenSdkPublicStore(File(root, "public"))
     }
     private val secureStoreDelegate = lazy {
@@ -88,13 +90,13 @@ internal class CitizenSdkHostServices(context: Context, private val modules: Int
     }
 
     @Suppress("unused")
-    fun transactionHistoryLoad(): CitizenSdkHostRecord =
-        protect(CitizenSdkHostDomain.TRANSACTION_HISTORY) { publicStore.transactionHistoryLoad() }
+    fun transactionHistoryQuery(query: ByteArray): CitizenSdkHostRecord =
+        protect(CitizenSdkHostDomain.TRANSACTION_HISTORY) { publicStore.transactionHistoryQuery(query) }
 
     @Suppress("unused")
-    fun transactionHistoryCompareAndSwap(expectedRevision: Long, candidate: ByteArray): CitizenSdkHostRecord =
+    fun transactionHistoryMutate(expectedRevision: Long, mutation: ByteArray): CitizenSdkHostRecord =
         protect(CitizenSdkHostDomain.TRANSACTION_HISTORY) {
-            publicStore.transactionHistoryCompareAndSwap(expectedRevision, candidate)
+            publicStore.transactionHistoryMutate(expectedRevision, mutation)
         }
 
     @Suppress("unused")
@@ -210,6 +212,8 @@ internal class CitizenSdkHostServices(context: Context, private val modules: Int
     private inline fun protect(domain: Int, block: () -> CitizenSdkHostRecord): CitizenSdkHostRecord =
         try {
             block()
+        } catch (error: CitizenSdkHistoryFailure) {
+            CitizenSdkHostRecord.failure(domain, error.errorCode)
         } catch (_: Throwable) {
             CitizenSdkHostRecord.failure(domain, CitizenSdkErrorCode.STORAGE.value)
         }

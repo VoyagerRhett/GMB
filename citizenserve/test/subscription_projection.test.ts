@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { Miniflare } from 'miniflare';
+import type { Miniflare } from 'miniflare';
 
 import { decodeSquarePostSubscriptionEvents } from '../src/chain/square_post_event';
 import type { ChainSubscriptionState } from '../src/chain/subscription';
@@ -11,6 +11,7 @@ import {
 } from '../src/membership/subscription_projection';
 import { bytesToHex, concatBytes, hexToBytes, scaleCompact, u64Le } from '../src/shared/signing_message';
 import type { Env, SubscriptionProjectionCursorRow } from '../src/types';
+import { createTestMiniflare } from './miniflare';
 
 const SUBSCRIBER_CID = 'CN220-CTZN2-198805200-2026';
 const CREATOR_CID = 'CN220-CTZN2-198805201-2026';
@@ -56,12 +57,9 @@ describe('SquarePost 官方订阅事件解码', () => {
 
 describe('finalized 订阅统一游标', () => {
   beforeEach(async () => {
-    miniflare = new Miniflare({
-      modules: true,
-      script: 'export default { fetch() { return new Response("test"); } }',
-      compatibilityDate: '2026-07-29',
-      d1Databases: ['DB'],
-      bindings: {
+    miniflare = createTestMiniflare({
+      d1Bindings: ['DB'],
+      textBindings: {
         CHAIN_URL: 'https://chain.test',
         CHAIN_ID: 'client-id',
         CHAIN_SECRET: 'client-secret',

@@ -40,10 +40,12 @@ final class FlutterCitizenSdkPlatform implements CitizenSdkPlatform {
     try {
       return await _methodChannel.invokeMethod<Object?>(method, arguments);
     } on PlatformException catch (error) {
-      throw _codec.decodePlatformException(error);
+      throw _codec.decodePlatformException(error, expectedMethod: method);
     } on MissingPluginException catch (error) {
       throw CitizenSdkException(
         code: CitizenSdkErrorCode.unsupported,
+        stage: CitizenSdkFailureStage.admission,
+        method: method,
         message: error.message ?? 'CitizenSDK Flutter binding 未安装',
       );
     }

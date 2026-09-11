@@ -28,19 +28,21 @@ String chatUserErrorMessage(
       'cid_not_bound' => '当前默认账户尚未注册公民号，无法使用聊天',
       'device_not_registered' ||
       'chat_device_not_registered' ||
-      'invalid_signature' => '聊天设备身份尚未就绪，请重试',
+      'invalid_signature' =>
+        '聊天设备身份尚未就绪，请重试',
       'cid_binding_changed' => '当前登录用户已切换，请重新进入聊天',
       'missing_session' ||
       'invalid_session' ||
-      'session_expired' => '聊天会话已失效，请重试',
+      'session_expired' =>
+        '聊天会话已失效，请重试',
       'chat_membership_required' ||
       'membership_required' ||
-      'chat_disabled' => '当前账户尚未开通聊天会员权益',
+      'chat_disabled' =>
+        '当前账户尚未开通聊天会员权益',
       'chat_server_not_configured' => '聊天服务尚未配置',
-      _ =>
-        error.statusCode == null || error.statusCode! >= 500
-            ? '聊天服务暂时无法连接，请稍后重试'
-            : fallback,
+      _ => error.statusCode == null || error.statusCode! >= 500
+          ? '聊天服务暂时无法连接，请稍后重试'
+          : fallback,
     };
   }
   return chatSdkUserErrorMessage(error, fallback: fallback);
@@ -86,11 +88,11 @@ extension CitizenChatConversationPreviewFields on ChatConversationPreview {
 
 extension CitizenChatDataBindingMapping on AccountDataBinding {
   sdk.ChatDataBinding toChatDataBinding() => sdk.ChatDataBinding(
-    keyDomain: genesisHash,
-    userId: cidNumber,
-    bindingRevision: bindingRevision,
-    accountId: accountId,
-  );
+        keyDomain: genesisHash,
+        userId: cidNumber,
+        bindingRevision: bindingRevision,
+        accountId: accountId,
+      );
 }
 
 extension CitizenChatDeviceFields on ChatDevice {
@@ -115,7 +117,8 @@ String cidNumberFromMemberIdentity(String identity) =>
 List<String> cidNumbersFromMemberIdentities(
   Iterable<String> identities, {
   String? excludeCidNumber,
-}) => userIdsFromMemberIdentities(identities, excludeUserId: excludeCidNumber);
+}) =>
+    userIdsFromMemberIdentities(identities, excludeUserId: excludeCidNumber);
 
 extension CitizenChatStoredMessageFields on ChatStoredMessage {
   String get senderCidNumber => senderUserId;
@@ -144,12 +147,11 @@ extension CitizenChatGroupFields on ChatGroup {
 }
 
 /// CitizenApp 登录挑战签名适配；CID 只存在于本产品边界。
-typedef ChatLoginSigner =
-    Future<String> Function({
-      required String cidNumber,
-      required String accountId,
-      required Uint8List loginMessage,
-    });
+typedef ChatLoginSigner = Future<String> Function({
+  required String cidNumber,
+  required String accountId,
+  required Uint8List loginMessage,
+});
 
 typedef ChatPushTokenProvider = Future<sdk.ChatPushToken> Function();
 
@@ -205,29 +207,35 @@ final class CitizenChatStorageKeyProvider
   Future<List<Uint8List>> readDataKeysForBinding(
     sdk.ChatDataBinding binding,
     List<({sdk.ChatStorageKeyPurpose purpose, String? context})> requests,
-  ) => walletManager.readDataKeysForBinding(
-    toCitizenBinding(binding),
-    requests
-        .map(
-          (request) =>
-              (purpose: _purpose(request.purpose), context: request.context),
-        )
-        .toList(growable: false),
-  );
+  ) =>
+      walletManager.readDataKeysForBinding(
+        toCitizenBinding(binding),
+        requests
+            .map(
+              (request) => (
+                purpose: _purpose(request.purpose),
+                context: request.context
+              ),
+            )
+            .toList(growable: false),
+      );
 
   @override
   Future<List<Uint8List>> deriveDataKeysForBindingHandover(
     sdk.ChatDataBinding binding,
     List<({sdk.ChatStorageKeyPurpose purpose, String? context})> requests,
-  ) => walletManager.deriveDataKeysForBindingHandover(
-    toCitizenBinding(binding),
-    requests
-        .map(
-          (request) =>
-              (purpose: _purpose(request.purpose), context: request.context),
-        )
-        .toList(growable: false),
-  );
+  ) =>
+      walletManager.deriveDataKeysForBindingHandover(
+        toCitizenBinding(binding),
+        requests
+            .map(
+              (request) => (
+                purpose: _purpose(request.purpose),
+                context: request.context
+              ),
+            )
+            .toList(growable: false),
+      );
 }
 
 /// CitizenApp 身份、会员、Firebase 与 CitizenServe 的唯一宿主适配。
@@ -445,148 +453,82 @@ final class CitizenChatRuntimeHost implements sdk.ChatRuntimeHost {
   }
 }
 
-/// CitizenApp 只注入产品默认依赖和 CID 命名，实例生命周期与运行编排统一由 SDK 持有。
-class CitizenChatSdk extends sdk.ChatSdk {
-  static CitizenChatSdk? _instance;
+sdk.ChatSdk? _citizenChatRuntime;
 
-  /// 前台产品只持有这一个 SDK 实例；后台 isolate 仍创建自己的接收实例。
-  static CitizenChatSdk get instance => _instance ??= CitizenChatSdk();
+/// CitizenApp 前台共享的唯一 TataChatSDK 实例。
+///
+/// 产品层只负责组合身份、会员、推送与签名依赖；聊天状态、
+/// 协议与生命周期始终由 [sdk.ChatSdk] 自身持有。
+sdk.ChatSdk get citizenChatRuntime =>
+    _citizenChatRuntime ??= createCitizenChatRuntime();
 
-  CitizenChatSdk({
-    sdk.ChatStore? store,
-    WalletManager? walletManager,
-    SharedPreferences? preferences,
-    SquareApiClient? squareApiClient,
-    ChatLoginSigner? loginSigner,
-    DeviceSubkey? deviceSubkey,
-    sdk.MlsStateStoreFactory? stateStoreFactory,
-    MlsGroupCrypto Function(ChatDevice identity, MlsStateStore stateStore)?
-    cryptoFactory,
-    sdk.ChatServiceTransportFactory? transportFactory,
-    ChatPushService? pushService,
-    ChatPushTokenProvider? pushTokenProvider,
-    CurrentUserContext? currentUserContext,
-    ChainBootstrapApi? bootstrapApi,
-    Future<Directory> Function()? documentsDirectoryProvider,
-    bool receiveOnly = false,
-  }) : this._(
-         host: _createHost(
-           walletManager: walletManager,
-           squareApiClient: squareApiClient,
-           loginSigner: loginSigner,
-           deviceSubkey: deviceSubkey,
-           pushService: pushService,
-           pushTokenProvider: pushTokenProvider,
-           currentUserContext: currentUserContext,
-           bootstrapApi: bootstrapApi,
-         ),
-         store: store,
-         preferences: preferences,
-         stateStoreFactory: stateStoreFactory,
-         cryptoFactory: cryptoFactory,
-         documentsDirectoryProvider: documentsDirectoryProvider,
-         transportFactory: transportFactory,
-         receiveOnly: receiveOnly,
-       );
-
-  static sdk.ChatRuntimeHost _createHost({
-    WalletManager? walletManager,
-    SquareApiClient? squareApiClient,
-    ChatLoginSigner? loginSigner,
-    DeviceSubkey? deviceSubkey,
-    ChatPushService? pushService,
-    ChatPushTokenProvider? pushTokenProvider,
-    CurrentUserContext? currentUserContext,
-    ChainBootstrapApi? bootstrapApi,
-  }) {
-    final manager = walletManager ?? WalletManager();
-    final push =
-        pushService ?? ChatPushService(tokenProvider: pushTokenProvider);
-    final host = CitizenChatRuntimeHost(
-      walletManager: manager,
-      currentUserContext:
-          currentUserContext ??
-          (walletManager == null
-              ? CurrentUserContext.instance
-              : CurrentUserContext(walletManager: manager)),
-      bootstrapApi: bootstrapApi ?? ChainBootstrapApi(),
-      squareApiClient: squareApiClient ?? SquareApiClient(),
-      deviceSubkey: deviceSubkey ?? DeviceSubkey(),
-      pushService: push,
-      loginSigner: loginSigner,
+/// 使用 CitizenApp 产品依赖创建真实的 [sdk.ChatSdk]。
+///
+/// 前台通常使用 [citizenChatRuntime]；后台 isolate 和测试可通过本工厂
+/// 创建独立实例，不会产生第二套 SDK 类型。
+sdk.ChatSdk createCitizenChatRuntime({
+  sdk.ChatStore? store,
+  WalletManager? walletManager,
+  SharedPreferences? preferences,
+  SquareApiClient? squareApiClient,
+  ChatLoginSigner? loginSigner,
+  DeviceSubkey? deviceSubkey,
+  sdk.MlsStateStoreFactory? stateStoreFactory,
+  MlsGroupCrypto Function(ChatDevice identity, MlsStateStore stateStore)?
+      cryptoFactory,
+  sdk.ChatServiceTransportFactory? transportFactory,
+  ChatPushService? pushService,
+  ChatPushTokenProvider? pushTokenProvider,
+  CurrentUserContext? currentUserContext,
+  ChainBootstrapApi? bootstrapApi,
+  Future<Directory> Function()? documentsDirectoryProvider,
+  bool receiveOnly = false,
+}) =>
+    sdk.ChatSdk(
+      host: createCitizenChatRuntimeHost(
+        walletManager: walletManager,
+        squareApiClient: squareApiClient,
+        loginSigner: loginSigner,
+        deviceSubkey: deviceSubkey,
+        pushService: pushService,
+        pushTokenProvider: pushTokenProvider,
+        currentUserContext: currentUserContext,
+        bootstrapApi: bootstrapApi,
+      ),
+      store: store,
+      preferences: preferences,
+      stateStoreFactory: stateStoreFactory,
+      cryptoFactory: cryptoFactory,
+      documentsDirectoryProvider: documentsDirectoryProvider,
+      transportFactory: transportFactory,
+      receiveOnly: receiveOnly,
     );
-    sdk.ChatCrypto.defaultKeyProvider = host.keyProvider;
-    return host;
-  }
 
-  CitizenChatSdk._({
-    required super.host,
-    required super.store,
-    required super.preferences,
-    required super.stateStoreFactory,
-    required super.cryptoFactory,
-    required super.documentsDirectoryProvider,
-    required super.transportFactory,
-    required super.receiveOnly,
-  });
-
-  Future<String?> readCidNumber() => readUserId();
-
-  Future<void> clearAllForCidNumber({
-    required String cidNumber,
-    required String accountId,
-  }) => clearAllForUserId(userId: cidNumber, accountId: accountId);
-
-  static String directConversationId(String leftCid, String rightCid) =>
-      sdk.ChatRuntimeCore.directConversationId(leftCid, rightCid);
-
-  static Future<void> recoverStartupArtifacts({
-    Future<Directory> Function()? documentsDirectoryProvider,
-  }) => sdk.ChatRuntimeCore.recoverStartupArtifacts(
-    documentsDirectoryProvider: documentsDirectoryProvider,
+/// 构造 SDK 需要的 CitizenApp 产品宿主，仅供组合与测试注入。
+sdk.ChatRuntimeHost createCitizenChatRuntimeHost({
+  WalletManager? walletManager,
+  SquareApiClient? squareApiClient,
+  ChatLoginSigner? loginSigner,
+  DeviceSubkey? deviceSubkey,
+  ChatPushService? pushService,
+  ChatPushTokenProvider? pushTokenProvider,
+  CurrentUserContext? currentUserContext,
+  ChainBootstrapApi? bootstrapApi,
+}) {
+  final manager = walletManager ?? WalletManager();
+  final push = pushService ?? ChatPushService(tokenProvider: pushTokenProvider);
+  final host = CitizenChatRuntimeHost(
+    walletManager: manager,
+    currentUserContext: currentUserContext ??
+        (walletManager == null
+            ? CurrentUserContext.instance
+            : CurrentUserContext(walletManager: manager)),
+    bootstrapApi: bootstrapApi ?? ChainBootstrapApi(),
+    squareApiClient: squareApiClient ?? SquareApiClient(),
+    deviceSubkey: deviceSubkey ?? DeviceSubkey(),
+    pushService: push,
+    loginSigner: loginSigner,
   );
-
-  static Future<void> purgePlainAttachmentsWithoutAccount({
-    Future<Directory> Function()? documentsDirectoryProvider,
-  }) => sdk.ChatRuntimeCore.purgePlainAttachmentsWithoutAccount(
-    documentsDirectoryProvider: documentsDirectoryProvider,
-  );
-
-  static Future<void> beginPersistentAppDataWipe({
-    Future<Directory> Function()? documentsDirectoryProvider,
-  }) => sdk.ChatRuntimeCore.beginPersistentAppDataWipe(
-    documentsDirectoryProvider: documentsDirectoryProvider,
-  );
-
-  static Future<sdk.ChatPersistentWipeState> readPersistentAppDataWipeState({
-    Future<Directory> Function()? documentsDirectoryProvider,
-  }) => sdk.ChatRuntimeCore.readPersistentAppDataWipeState(
-    documentsDirectoryProvider: documentsDirectoryProvider,
-  );
-
-  static Future<T> runStartupPreflight<T>({
-    required Future<T> Function() operation,
-    Future<Directory> Function()? documentsDirectoryProvider,
-  }) => sdk.ChatRuntimeCore.runStartupPreflight<T>(
-    operation: operation,
-    documentsDirectoryProvider: documentsDirectoryProvider,
-  );
-
-  static Future<void> clearCompletedPersistentAppDataWipe({
-    Future<Directory> Function()? documentsDirectoryProvider,
-  }) => sdk.ChatRuntimeCore.clearCompletedPersistentAppDataWipe(
-    documentsDirectoryProvider: documentsDirectoryProvider,
-  );
-
-  static Future<void> closeAndDeleteLocalFiles({
-    Future<Directory> Function()? documentsDirectoryProvider,
-  }) => sdk.ChatRuntimeCore.closeAndDeleteLocalFiles(
-    documentsDirectoryProvider: documentsDirectoryProvider,
-  );
-
-  static Future<void> markPersistentAppDataWipeComplete({
-    Future<Directory> Function()? documentsDirectoryProvider,
-  }) => sdk.ChatRuntimeCore.markPersistentAppDataWipeComplete(
-    documentsDirectoryProvider: documentsDirectoryProvider,
-  );
+  sdk.ChatCrypto.defaultKeyProvider = host.keyProvider;
+  return host;
 }

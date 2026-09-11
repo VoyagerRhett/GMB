@@ -299,6 +299,7 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
                     "CitizenSDK event subscription tuple is invalid",
                     null,
                     null,
+                    "open",
                 ),
             )
             return
@@ -312,6 +313,7 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
                     "CitizenSDK event subscription is already active",
                     null,
                     null,
+                    "open",
                 ),
             )
             return
@@ -623,12 +625,6 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
         "qrConsumeSignResponse" -> listOf(sdk.qrConsumeSignResponse(request.fields[0] as String))
         "qrCancelSignRequest" -> listOf(sdk.qrCancelSignRequest(request.fields[0] as String))
         "qrEncodeAccountId" -> listOf(sdk.qrEncodeAccountId(request.fields[0] as ByteArray))
-        "qrEncodeUserTransfer" -> listOf(sdk.qrEncodeUserTransfer(
-            request.fields[0] as String, request.fields[1] as Long,
-            request.fields[2] as ByteArray, request.fields[3] as String,
-            request.fields[4] as String, request.fields[5] as String,
-            request.fields[6] as String,
-        ))
         "qrDecodeLuminance" -> listOf(sdk.qrDecodeLuminance(
             request.fields[0] as ByteArray, (request.fields[1] as Long).toInt(),
             (request.fields[2] as Long).toInt(), (request.fields[3] as Long).toInt(),
@@ -778,6 +774,7 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
             is CitizenSdkFlutterCodec.ContractFailure -> CitizenSdkException(
                 CitizenSdkErrorCode.fromValue(cause.errorCode),
                 cause.message,
+                stage = cause.stage,
             )
             is IllegalArgumentException -> CitizenSdkException(
                 CitizenSdkErrorCode.INVALID_ARGUMENT,
@@ -789,7 +786,13 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
             )
             else -> CitizenSdkException(CitizenSdkErrorCode.INTERNAL, "CitizenSDK host failure")
         }
-        fail(result, sdkError.code, sdkError.message ?: "CitizenSDK failure", request)
+        fail(
+            result,
+            sdkError.code,
+            sdkError.message ?: "CitizenSDK failure",
+            request,
+            sdkError.stage,
+        )
     }
 
     private fun fail(
@@ -797,6 +800,7 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
         code: CitizenSdkErrorCode,
         message: String,
         request: CitizenSdkFlutterCodec.Request,
+        stage: CitizenSdkFailureStage = CitizenSdkFailureStage.fromErrorCode(code),
     ) = result.error(
         "citizensdk.${CitizenSdkFlutterCodec.errorName(code)}",
         message,
@@ -805,6 +809,8 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
             message,
             request.sessionId,
             if (request is CitizenSdkFlutterCodec.Request.SessionRequest) request.requestSequence else null,
+            CitizenSdkFlutterCodec.requestMethod(request),
+            stage,
         ),
     )
 
