@@ -1,11 +1,13 @@
 # GitHub要求的仓库固定入口；全部产品流程由 TATA/tataconsole/flows 直接实现。
 name: GMB · 全仓门禁
+run-name: ${{ inputs.run_title }} · ${{ inputs.local_task_id }}
 
 on:
   workflow_dispatch:
     inputs:
       pipeline: { description: 分组流水线文件路径, required: true, type: string }
       run_title: { description: 塔塔控制台展示标题, required: true, type: string }
+      local_task_id: { description: 塔塔控制台九位本机任务编号, required: true, type: string }
       lease_id: { description: TATA 私有流程租约标识, required: false, type: string }
       proof: { description: TATA 私有流程租约公开证明, required: false, type: string }
       base_sha: { description: 本机全仓门禁通过的准确起始提交, required: false, type: string }
@@ -79,6 +81,7 @@ jobs:
           FLOW_COMMIT_SHA: ${{ secrets[format('TATA_FLOW_COMMIT_SHA_{0}', inputs.lease_id)] }}
           FLOW_BUNDLE_KEY: ${{ secrets[format('TATA_FLOW_BUNDLE_KEY_{0}', inputs.lease_id)] }}
           FLOW_PIPELINE: ${{ inputs.pipeline }}
+          FLOW_LOCAL_TASK_ID: ${{ inputs.local_task_id }}
           FLOW_HEAD_SHA: ${{ inputs.source_sha }}
           GITHUB_LOCKED_SHA: ${{ github.sha }}
         run: |
@@ -93,7 +96,8 @@ jobs:
           const key = process.env.FLOW_BUNDLE_KEY || '';
           const proof = process.env.FLOW_LEASE_PROOF || '';
           const productPipeline = /^gmb\.[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*\.(ci|release)$/.test(pipeline);
-          if (!/^[0-9A-F]{24}$/.test(lease) || secretLease !== lease
+          if (!/^[1-9][0-9]{8}$/.test(process.env.FLOW_LOCAL_TASK_ID || '')
+            || !/^[0-9A-F]{24}$/.test(lease) || secretLease !== lease
             || !/^[0-9a-f]{40}$/.test(source) || (!repositoryGate && !productPipeline)
             || (repositoryGate && (!/^[0-9a-f]{40}$/.test(head) || head !== process.env.GITHUB_LOCKED_SHA))
             || !/^[A-Za-z0-9_-]{43}$/.test(key) || !/^[0-9a-f]{64}$/.test(proof)) {

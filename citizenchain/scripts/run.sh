@@ -105,7 +105,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"   # citizenchain/
 GMB_REPOSITORY_ROOT="$(dirname "$REPO_ROOT")"
 TATA_CONSOLE_CACHE_DIR="${TATA_CONSOLE_CACHE_DIR:-${TMPDIR:-/tmp}/citizenchain-macos}"
-BUILD_WORK_DIR="${TATA_CONSOLE_BUILD_CACHE_DIR:-$TATA_CONSOLE_CACHE_DIR/build}"
+BUILD_WORK_DIR="${TATA_CONSOLE_BUILD_CACHE_DIR:-$TATA_CONSOLE_CACHE_DIR/work}"
 TATA_CONSOLE_DEPENDENCY_CACHE_DIR="${TATA_CONSOLE_DEPENDENCY_CACHE_DIR:-$TATA_CONSOLE_CACHE_DIR/dependencies}"
 TARGET_DIR="$BUILD_WORK_DIR/cargo-target"
 export CARGO_TARGET_DIR="$TARGET_DIR"
@@ -116,7 +116,9 @@ PACKAGE_RESOURCES="$TATA_CONSOLE_CACHE_DIR/resources"
 # 统一提交；此处绝不直写 target。
 ARTIFACT_DIR="$TATA_CONSOLE_CACHE_DIR"
 
-# 产品自行使用当前环境中的工具，并按自己的锁文件准备依赖。
+# 产品自行使用当前环境中的工具，并按自己的锁文件在中央Build流程视图准备依赖。
+source "${TATA_ROOT:?缺少 TATA_ROOT}/tataconsole/flows/local/build-common.sh"
+build_initialize build gmb citizenchain-node macos "$REPO_ROOT"
 source "$GMB_REPOSITORY_ROOT/citizenchain/scripts/prepare-toolchain.sh"
 
 # 本机Build脚本只使用当前工作区源码构建 runtime WASM，禁止接受外部 WASM 覆盖。

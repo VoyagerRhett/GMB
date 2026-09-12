@@ -5,8 +5,8 @@ set -euo pipefail
 
 PREPARE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GMB_REPOSITORY_ROOT="$(cd "$PREPARE_SCRIPT_DIR/../.." && pwd)"
-NODE_FRONTEND_PROJECT="$GMB_REPOSITORY_ROOT/citizenchain/node/frontend"
-ONCHINA_FRONTEND_PROJECT="$GMB_REPOSITORY_ROOT/citizenchain/onchina/frontend"
+NODE_FRONTEND_SOURCE="$GMB_REPOSITORY_ROOT/citizenchain/node/frontend"
+ONCHINA_FRONTEND_SOURCE="$GMB_REPOSITORY_ROOT/citizenchain/onchina/frontend"
 
 if [[ -n "${TATA_CONSOLE_DEPENDENCY_CACHE_DIR:-}" ]]; then
   export npm_config_cache="$TATA_CONSOLE_DEPENDENCY_CACHE_DIR/npm"
@@ -14,12 +14,18 @@ if [[ -n "${TATA_CONSOLE_DEPENDENCY_CACHE_DIR:-}" ]]; then
 fi
 export npm_config_audit=false npm_config_fund=false
 
-for project in \
-  "$GMB_REPOSITORY_ROOT/citizenchain/crates/scanner-react" \
-  "$NODE_FRONTEND_PROJECT" \
-  "$ONCHINA_FRONTEND_PROJECT"; do
-  echo "==> 准备产品依赖：${project#"$GMB_REPOSITORY_ROOT/"}"
-  (cd "$project" && npm ci --no-audit --no-fund)
-done
+declare -F build_prepare_node_project >/dev/null \
+  || { echo '公民链Build缺少塔塔中央Node工程视图' >&2; exit 1; }
+
+echo '==> 准备产品依赖：citizenchain/crates/scanner-react'
+build_prepare_node_project "$GMB_REPOSITORY_ROOT/citizenchain/crates/scanner-react"
+SCANNER_REACT_PROJECT="$BUILD_NODE_PROJECT"
+echo '==> 准备产品依赖：citizenchain/node/frontend'
+build_prepare_node_project "$NODE_FRONTEND_SOURCE"
+NODE_FRONTEND_PROJECT="$BUILD_NODE_PROJECT"
+echo '==> 准备产品依赖：citizenchain/onchina/frontend'
+build_prepare_node_project "$ONCHINA_FRONTEND_SOURCE"
+ONCHINA_FRONTEND_PROJECT="$BUILD_NODE_PROJECT"
+export SCANNER_REACT_PROJECT NODE_FRONTEND_PROJECT ONCHINA_FRONTEND_PROJECT
 
 echo '==> 公民链产品工具和依赖已就绪'
