@@ -1,5 +1,5 @@
 # 本仓唯一GitHub入口；每个Job只启动其准确产品流程文件，入口不承载跨仓实现。
-name: GMB · 塔塔流程
+name: GMB · 塔塔门禁
 run-name: "${{ inputs.run_title }} · ${{ inputs.local_task_id }}"
 'on':
   workflow_dispatch:
@@ -117,9 +117,9 @@ jobs:
     - name: 执行GMB独立塔塔门禁
       shell: bash
       env:
-        TATA_CONSOLE_SOURCE_ROOT: "$GITHUB_WORKSPACE/.tata-flow/tataconsole"
-        TATA_WORKSPACE_ROOT: "$GITHUB_WORKSPACE/.tata-flow"
-        TATA_CONSOLE_CACHE_DIR: "$RUNNER_TEMP/gmb-repository-gate"
+        TATA_CONSOLE_SOURCE_ROOT: "${{ github.workspace }}/.tata-flow/tataconsole"
+        TATA_WORKSPACE_ROOT: "${{ github.workspace }}/.tata-flow"
+        TATA_CONSOLE_CACHE_DIR: "${{ runner.temp }}/gmb-repository-gate"
       run: node "$GITHUB_WORKSPACE/.tata-flow/tataconsole/flows/gmb/repository-gate.mjs" remote "$GITHUB_WORKSPACE" "${{ inputs.base_sha }}" "${{ inputs.source_sha }}" repository-contracts
     if: "${{ inputs.pipeline == 'repository' }}"
     needs: validate_pipeline
@@ -150,9 +150,9 @@ jobs:
     - name: 执行GMB独立塔塔门禁
       shell: bash
       env:
-        TATA_CONSOLE_SOURCE_ROOT: "$GITHUB_WORKSPACE/.tata-flow/tataconsole"
-        TATA_WORKSPACE_ROOT: "$GITHUB_WORKSPACE/.tata-flow"
-        TATA_CONSOLE_CACHE_DIR: "$RUNNER_TEMP/gmb-repository-gate"
+        TATA_CONSOLE_SOURCE_ROOT: "${{ github.workspace }}/.tata-flow/tataconsole"
+        TATA_WORKSPACE_ROOT: "${{ github.workspace }}/.tata-flow"
+        TATA_CONSOLE_CACHE_DIR: "${{ runner.temp }}/gmb-repository-gate"
       run: node "$GITHUB_WORKSPACE/.tata-flow/tataconsole/flows/gmb/repository-gate.mjs" remote "$GITHUB_WORKSPACE" "${{ inputs.base_sha }}" "${{ inputs.source_sha }}" dependency-contracts
     if: "${{ inputs.pipeline == 'repository' }}"
     needs: validate_pipeline
@@ -183,9 +183,9 @@ jobs:
     - name: 执行GMB独立塔塔门禁
       shell: bash
       env:
-        TATA_CONSOLE_SOURCE_ROOT: "$GITHUB_WORKSPACE/.tata-flow/tataconsole"
-        TATA_WORKSPACE_ROOT: "$GITHUB_WORKSPACE/.tata-flow"
-        TATA_CONSOLE_CACHE_DIR: "$RUNNER_TEMP/gmb-repository-gate"
+        TATA_CONSOLE_SOURCE_ROOT: "${{ github.workspace }}/.tata-flow/tataconsole"
+        TATA_WORKSPACE_ROOT: "${{ github.workspace }}/.tata-flow"
+        TATA_CONSOLE_CACHE_DIR: "${{ runner.temp }}/gmb-repository-gate"
       run: node "$GITHUB_WORKSPACE/.tata-flow/tataconsole/flows/gmb/repository-gate.mjs" remote "$GITHUB_WORKSPACE" "${{ inputs.base_sha }}" "${{ inputs.source_sha }}" cross-platform-contracts
     if: "${{ inputs.pipeline == 'repository' }}"
     needs: validate_pipeline
@@ -216,9 +216,9 @@ jobs:
     - name: 执行GMB独立塔塔门禁
       shell: bash
       env:
-        TATA_CONSOLE_SOURCE_ROOT: "$GITHUB_WORKSPACE/.tata-flow/tataconsole"
-        TATA_WORKSPACE_ROOT: "$GITHUB_WORKSPACE/.tata-flow"
-        TATA_CONSOLE_CACHE_DIR: "$RUNNER_TEMP/gmb-repository-gate"
+        TATA_CONSOLE_SOURCE_ROOT: "${{ github.workspace }}/.tata-flow/tataconsole"
+        TATA_WORKSPACE_ROOT: "${{ github.workspace }}/.tata-flow"
+        TATA_CONSOLE_CACHE_DIR: "${{ runner.temp }}/gmb-repository-gate"
       run: node "$GITHUB_WORKSPACE/.tata-flow/tataconsole/flows/gmb/repository-gate.mjs" remote "$GITHUB_WORKSPACE" "${{ inputs.base_sha }}" "${{ inputs.source_sha }}" shared-contracts
     if: "${{ inputs.pipeline == 'repository' }}"
     needs: validate_pipeline
@@ -241,7 +241,7 @@ jobs:
         const headers={Accept:"application/vnd.github+json",Authorization:`Bearer ${process.env.GH_TOKEN}`,"User-Agent":"TataConsole"};
         const get=async u=>{const r=await fetch(`https://api.github.com/${u}`,{headers});if(!r.ok)throw Error(`GitHub ${r.status}`);return r.json()};
         const main=await get(`repos/${repo}/commits/main`);if(main.sha!==sha)throw Error("CI源码不是当前main");
-        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 全仓门禁 · "));if(rows.length<100)break}
+        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 塔塔门禁 · "));if(rows.length<100)break}
         found.sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)||Number(b.id)-Number(a.id));if(String(found[0]?.id)!==expected)throw Error("本仓最新GitHub塔塔门禁未成功");
         NODE
     if: "${{ inputs.pipeline == 'gmb.citizenapp.android.ci' }}"
@@ -733,7 +733,7 @@ jobs:
         const headers={Accept:"application/vnd.github+json",Authorization:`Bearer ${process.env.GH_TOKEN}`,"User-Agent":"TataConsole"};
         const get=async u=>{const r=await fetch(`https://api.github.com/${u}`,{headers});if(!r.ok)throw Error(`GitHub ${r.status}`);return r.json()};
         const main=await get(`repos/${repo}/commits/main`);if(main.sha!==sha)throw Error("CI源码不是当前main");
-        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 全仓门禁 · "));if(rows.length<100)break}
+        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 塔塔门禁 · "));if(rows.length<100)break}
         found.sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)||Number(b.id)-Number(a.id));if(String(found[0]?.id)!==expected)throw Error("本仓最新GitHub塔塔门禁未成功");
         NODE
     if: "${{ inputs.pipeline == 'gmb.citizenapp.ios.ci' }}"
@@ -1203,7 +1203,7 @@ jobs:
         const headers={Accept:"application/vnd.github+json",Authorization:`Bearer ${process.env.GH_TOKEN}`,"User-Agent":"TataConsole"};
         const get=async u=>{const r=await fetch(`https://api.github.com/${u}`,{headers});if(!r.ok)throw Error(`GitHub ${r.status}`);return r.json()};
         const main=await get(`repos/${repo}/commits/main`);if(main.sha!==sha)throw Error("CI源码不是当前main");
-        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 全仓门禁 · "));if(rows.length<100)break}
+        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 塔塔门禁 · "));if(rows.length<100)break}
         found.sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)||Number(b.id)-Number(a.id));if(String(found[0]?.id)!==expected)throw Error("本仓最新GitHub塔塔门禁未成功");
         NODE
     if: "${{ inputs.pipeline == 'gmb.citizenchain-node.linux-amd.ci' }}"
@@ -1771,7 +1771,7 @@ jobs:
         const headers={Accept:"application/vnd.github+json",Authorization:`Bearer ${process.env.GH_TOKEN}`,"User-Agent":"TataConsole"};
         const get=async u=>{const r=await fetch(`https://api.github.com/${u}`,{headers});if(!r.ok)throw Error(`GitHub ${r.status}`);return r.json()};
         const main=await get(`repos/${repo}/commits/main`);if(main.sha!==sha)throw Error("CI源码不是当前main");
-        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 全仓门禁 · "));if(rows.length<100)break}
+        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 塔塔门禁 · "));if(rows.length<100)break}
         found.sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)||Number(b.id)-Number(a.id));if(String(found[0]?.id)!==expected)throw Error("本仓最新GitHub塔塔门禁未成功");
         NODE
     if: "${{ inputs.pipeline == 'gmb.citizenchain-node.linux-arm.ci' }}"
@@ -2339,7 +2339,7 @@ jobs:
         const headers={Accept:"application/vnd.github+json",Authorization:`Bearer ${process.env.GH_TOKEN}`,"User-Agent":"TataConsole"};
         const get=async u=>{const r=await fetch(`https://api.github.com/${u}`,{headers});if(!r.ok)throw Error(`GitHub ${r.status}`);return r.json()};
         const main=await get(`repos/${repo}/commits/main`);if(main.sha!==sha)throw Error("CI源码不是当前main");
-        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 全仓门禁 · "));if(rows.length<100)break}
+        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 塔塔门禁 · "));if(rows.length<100)break}
         found.sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)||Number(b.id)-Number(a.id));if(String(found[0]?.id)!==expected)throw Error("本仓最新GitHub塔塔门禁未成功");
         NODE
     if: "${{ inputs.pipeline == 'gmb.citizenchain-node.macos.ci' }}"
@@ -2917,7 +2917,7 @@ jobs:
         const headers={Accept:"application/vnd.github+json",Authorization:`Bearer ${process.env.GH_TOKEN}`,"User-Agent":"TataConsole"};
         const get=async u=>{const r=await fetch(`https://api.github.com/${u}`,{headers});if(!r.ok)throw Error(`GitHub ${r.status}`);return r.json()};
         const main=await get(`repos/${repo}/commits/main`);if(main.sha!==sha)throw Error("CI源码不是当前main");
-        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 全仓门禁 · "));if(rows.length<100)break}
+        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 塔塔门禁 · "));if(rows.length<100)break}
         found.sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)||Number(b.id)-Number(a.id));if(String(found[0]?.id)!==expected)throw Error("本仓最新GitHub塔塔门禁未成功");
         NODE
     if: "${{ inputs.pipeline == 'gmb.citizenchain-node.windows.ci' }}"
@@ -3480,7 +3480,7 @@ jobs:
         const headers={Accept:"application/vnd.github+json",Authorization:`Bearer ${process.env.GH_TOKEN}`,"User-Agent":"TataConsole"};
         const get=async u=>{const r=await fetch(`https://api.github.com/${u}`,{headers});if(!r.ok)throw Error(`GitHub ${r.status}`);return r.json()};
         const main=await get(`repos/${repo}/commits/main`);if(main.sha!==sha)throw Error("CI源码不是当前main");
-        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 全仓门禁 · "));if(rows.length<100)break}
+        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 塔塔门禁 · "));if(rows.length<100)break}
         found.sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)||Number(b.id)-Number(a.id));if(String(found[0]?.id)!==expected)throw Error("本仓最新GitHub塔塔门禁未成功");
         NODE
     if: "${{ inputs.pipeline == 'gmb.citizenchain-runtime.wasm.ci' }}"
@@ -3794,7 +3794,7 @@ jobs:
         const headers={Accept:"application/vnd.github+json",Authorization:`Bearer ${process.env.GH_TOKEN}`,"User-Agent":"TataConsole"};
         const get=async u=>{const r=await fetch(`https://api.github.com/${u}`,{headers});if(!r.ok)throw Error(`GitHub ${r.status}`);return r.json()};
         const main=await get(`repos/${repo}/commits/main`);if(main.sha!==sha)throw Error("CI源码不是当前main");
-        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 全仓门禁 · "));if(rows.length<100)break}
+        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 塔塔门禁 · "));if(rows.length<100)break}
         found.sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)||Number(b.id)-Number(a.id));if(String(found[0]?.id)!==expected)throw Error("本仓最新GitHub塔塔门禁未成功");
         NODE
     if: "${{ inputs.pipeline == 'gmb.citizenchatserver.cloudflare.ci' }}"
@@ -3981,7 +3981,7 @@ jobs:
         const headers={Accept:"application/vnd.github+json",Authorization:`Bearer ${process.env.GH_TOKEN}`,"User-Agent":"TataConsole"};
         const get=async u=>{const r=await fetch(`https://api.github.com/${u}`,{headers});if(!r.ok)throw Error(`GitHub ${r.status}`);return r.json()};
         const main=await get(`repos/${repo}/commits/main`);if(main.sha!==sha)throw Error("CI源码不是当前main");
-        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 全仓门禁 · "));if(rows.length<100)break}
+        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 塔塔门禁 · "));if(rows.length<100)break}
         found.sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)||Number(b.id)-Number(a.id));if(String(found[0]?.id)!==expected)throw Error("本仓最新GitHub塔塔门禁未成功");
         NODE
     if: "${{ inputs.pipeline == 'gmb.citizensdk.sdk.ci' }}"
@@ -8178,7 +8178,7 @@ jobs:
         const headers={Accept:"application/vnd.github+json",Authorization:`Bearer ${process.env.GH_TOKEN}`,"User-Agent":"TataConsole"};
         const get=async u=>{const r=await fetch(`https://api.github.com/${u}`,{headers});if(!r.ok)throw Error(`GitHub ${r.status}`);return r.json()};
         const main=await get(`repos/${repo}/commits/main`);if(main.sha!==sha)throw Error("CI源码不是当前main");
-        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 全仓门禁 · "));if(rows.length<100)break}
+        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 塔塔门禁 · "));if(rows.length<100)break}
         found.sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)||Number(b.id)-Number(a.id));if(String(found[0]?.id)!==expected)throw Error("本仓最新GitHub塔塔门禁未成功");
         NODE
     if: "${{ inputs.pipeline == 'gmb.citizenserve.cloudflare.ci' }}"
@@ -8457,7 +8457,7 @@ jobs:
         const headers={Accept:"application/vnd.github+json",Authorization:`Bearer ${process.env.GH_TOKEN}`,"User-Agent":"TataConsole"};
         const get=async u=>{const r=await fetch(`https://api.github.com/${u}`,{headers});if(!r.ok)throw Error(`GitHub ${r.status}`);return r.json()};
         const main=await get(`repos/${repo}/commits/main`);if(main.sha!==sha)throw Error("CI源码不是当前main");
-        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 全仓门禁 · "));if(rows.length<100)break}
+        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 塔塔门禁 · "));if(rows.length<100)break}
         found.sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)||Number(b.id)-Number(a.id));if(String(found[0]?.id)!==expected)throw Error("本仓最新GitHub塔塔门禁未成功");
         NODE
     if: "${{ inputs.pipeline == 'gmb.citizenwallet.android.ci' }}"
@@ -8804,7 +8804,7 @@ jobs:
         const headers={Accept:"application/vnd.github+json",Authorization:`Bearer ${process.env.GH_TOKEN}`,"User-Agent":"TataConsole"};
         const get=async u=>{const r=await fetch(`https://api.github.com/${u}`,{headers});if(!r.ok)throw Error(`GitHub ${r.status}`);return r.json()};
         const main=await get(`repos/${repo}/commits/main`);if(main.sha!==sha)throw Error("CI源码不是当前main");
-        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 全仓门禁 · "));if(rows.length<100)break}
+        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 塔塔门禁 · "));if(rows.length<100)break}
         found.sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)||Number(b.id)-Number(a.id));if(String(found[0]?.id)!==expected)throw Error("本仓最新GitHub塔塔门禁未成功");
         NODE
     if: "${{ inputs.pipeline == 'gmb.citizenwallet.ios.ci' }}"
@@ -9298,7 +9298,7 @@ jobs:
         const headers={Accept:"application/vnd.github+json",Authorization:`Bearer ${process.env.GH_TOKEN}`,"User-Agent":"TataConsole"};
         const get=async u=>{const r=await fetch(`https://api.github.com/${u}`,{headers});if(!r.ok)throw Error(`GitHub ${r.status}`);return r.json()};
         const main=await get(`repos/${repo}/commits/main`);if(main.sha!==sha)throw Error("CI源码不是当前main");
-        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 全仓门禁 · "));if(rows.length<100)break}
+        let found=[];for(let page=1;page<=1000&&!found.length;page++){const x=await get(`repos/${repo}/actions/workflows/repository.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=${page}`),rows=x.workflow_runs||[];found=rows.filter(r=>r.head_sha===sha&&r.status==="completed"&&r.conclusion==="success"&&String(r.display_title||"").startsWith("GMB · 塔塔门禁 · "));if(rows.length<100)break}
         found.sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)||Number(b.id)-Number(a.id));if(String(found[0]?.id)!==expected)throw Error("本仓最新GitHub塔塔门禁未成功");
         NODE
     if: "${{ inputs.pipeline == 'gmb.citizenweb.web.ci' }}"
