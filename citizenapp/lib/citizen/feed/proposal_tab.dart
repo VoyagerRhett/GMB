@@ -2,7 +2,8 @@ import 'dart:async';
 import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
-import 'package:citizenapp/log/app_log.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
+import 'package:provider/provider.dart';
 import 'package:citizenapp/citizen/institution/institution.dart';
 import 'package:citizenapp/citizen/institution/institution_accounts.dart';
 import 'package:citizenapp/citizen/institution/institution_repository.dart';
@@ -11,9 +12,8 @@ import 'package:citizenapp/citizen/shared/institution_manage_detail_page.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/widgets/pressable_card.dart';
 import 'package:citizenapp/ui/widgets/shimmer_loading.dart';
-import 'package:citizenapp/rpc/chain_event_subscription.dart';
-import 'package:citizenapp/rpc/smoldot_client.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/services/institution_admin_service.dart';
+import 'package:citizenapp/citizen/proposal/admins-change/services/admin_activation_service.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_cache.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_context.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_local_store.dart';
@@ -21,7 +21,10 @@ import 'package:citizenapp/citizen/proposal/runtime-upgrade/runtime_upgrade_deta
 import 'package:citizenapp/citizen/shared/proposal/proposal_models.dart';
 import 'package:citizenapp/citizen/shared/institution_info.dart';
 import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_proposal_adapter.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_service.dart';
+import 'package:citizenapp/citizen/proposal/runtime-upgrade/runtime_upgrade_service.dart';
+import 'package:citizenapp/citizen/shared/proposal/proposal_query_service.dart';
+import 'package:citizenapp/votingengine/internal-vote/internal_vote_query_service.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 公民 tab「提案」统一列表:默认公共机构 + 当前钱包订阅公权机构,按 ID 倒序。
@@ -63,18 +66,16 @@ class _ProposalViewState extends State<ProposalTab> {
     'PRS',
   };
 
-  final MultisigTransferProposalFeed _multisigTransferFeed =
-      MultisigTransferProposalFeed();
-  final InstitutionAdminService _adminService = InstitutionAdminService();
-  final ProposalContextResolver _contextResolver = ProposalContextResolver();
-  final VoteChecker _voteChecker = VoteChecker();
+  late final MultisigTransferProposalFeed _multisigTransferFeed;
+  late final InstitutionAdminService _adminService;
+  late final ProposalContextResolver _contextResolver;
+  late final VoteChecker _voteChecker;
   final ScrollController _scrollController = ScrollController();
   final InstitutionRepository _institutionRepo = InstitutionRepository();
-  final WalletManager _walletManager = WalletManager();
+  late final CitizenSdkWallet _wallet;
+  bool _dependenciesReady = false;
 
-  // 轻节点新区块订阅
-  ChainEventSubscription? _subscription;
-  StreamSubscription<ChainEvent>? _eventSub;
+  StreamSubscription<CitizenSdkEvent>? _eventSub;
 
   // 分页状态
   bool _loading = true;
@@ -104,48 +105,57 @@ class _ProposalViewState extends State<ProposalTab> {
   void initState() {
     super.initState();
     _scrollController.addListener(_onScroll);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    final sdk = context.read<CitizenSdk>();
+    _wallet = sdk.wallet;
+    final multisigService = MultisigTransferService(
+      chain: sdk.chain,
+      transactions: sdk.transactions,
+    );
+    _multisigTransferFeed = MultisigTransferProposalFeed(
+      service: multisigService,
+    );
+    _adminService = InstitutionAdminService(chain: sdk.chain);
+    final activationService = ActivationService(adminService: _adminService);
+    _contextResolver = ProposalContextResolver(
+      wallet: _wallet,
+      adminService: _adminService,
+      activationService: activationService,
+    );
+    final proposalQuery = ProposalQueryService(chain: sdk.chain);
+    _voteChecker = VoteChecker(
+      internalVoteService: InternalVoteQueryService(chain: sdk.chain),
+      runtimeService: RuntimeUpgradeService(
+        chain: sdk.chain,
+        transactions: sdk.transactions,
+      ),
+      proposalQueryService: proposalQuery,
+    );
+    _dependenciesReady = true;
     if (_isFlutterTest) {
       // App 启动 widget test 只验证首屏结构，不验证隐藏提案页的轻节点订阅。
-      // 测试环境没有真实 smoldot 链路，继续加载链上提案会让 pumpAndSettle 等不到稳定帧。
+      // 组件测试不启动真实 CitizenSDK 链 session，隐藏页不发起链读。
       _loading = false;
       return;
     }
     _loadFirstPage();
-    _startChainSubscription();
+    _eventSub = sdk.events.listen((event) {
+      if (event is CitizenSdkFinalizedBlockChanged) {
+        _checkForNewProposals();
+      }
+    });
   }
 
   @override
   void dispose() {
     _scrollController.dispose();
     _eventSub?.cancel();
-    _subscription?.disconnect();
     super.dispose();
-  }
-
-  // ──── 轻节点订阅 ────
-
-  void _startChainSubscription() {
-    final subscription = ChainEventSubscription();
-    _subscription = subscription;
-    _eventSub = subscription.events.listen((event) {
-      if (event.type == ChainEventType.newBlock) {
-        _checkForNewProposals();
-      }
-    });
-    unawaited(_connectChainSubscription(subscription));
-  }
-
-  Future<void> _connectChainSubscription(
-    ChainEventSubscription subscription,
-  ) async {
-    final connected = await subscription.connect();
-    if (!mounted || !identical(_subscription, subscription)) {
-      subscription.disconnect();
-      return;
-    }
-    if (!connected) {
-      AppLog.d('[ProposalTab] 链事件订阅连接失败');
-    }
   }
 
   Future<void> _checkForNewProposals() async {
@@ -205,8 +215,12 @@ class _ProposalViewState extends State<ProposalTab> {
     final defaultInstitutions = await _institutionRepo
         .listByCodes(_defaultProposalCodes)
         .catchError((_) => <Institution>[]);
-    final activeWallet =
-        await _walletManager.getWallet().catchError((_) => null);
+    CitizenWalletStateAccount? activeWallet;
+    try {
+      activeWallet = (await _wallet.getState()).defaultAccount;
+    } on Object {
+      activeWallet = null;
+    }
     final subscribedInstitutions = activeWallet == null
         ? <Institution>[]
         : await _institutionRepo
@@ -328,7 +342,7 @@ class _ProposalViewState extends State<ProposalTab> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = SmoldotClientManager.instance.buildUserFacingError(e);
+        _error = '提案链状态暂时不可用';
         _loading = false;
       });
       widget.onPendingVoteCountChanged?.call(0);

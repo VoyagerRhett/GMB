@@ -1,7 +1,12 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:citizenapp/security/native_account_crypto.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
+import 'package:crypto/crypto.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+import 'package:citizenapp/security/secure_storage.dart';
 
 /// 当前钱包账户派生的私有数据密钥用途域。
 ///
@@ -404,42 +409,41 @@ class AccountDataBindingStore {
       source.accountId != target.accountId;
 }
 
-/// 唯一私有数据密钥派生器。
+/// CitizenApp 私有数据密钥域构造器。
 ///
-/// 输入密钥只能是 CID 当前绑定钱包账户的 child mini-secret。创世、CID、绑定版本、
-/// `account_id` 和用途共同参与 HKDF；因此同账户换设备可重建，同 CID 换绑到新账户后
-/// 不能直接解密换绑前当前账户的历史私有密文。返回值只允许在内存中短期使用。
+/// App 只计算公开 salt/info；账户 secret 与 HKDF-SHA256 始终留在 CitizenSDK 金库。
+/// 创世、CID、绑定版本、`account_id` 和用途继续逐字节保持原有业务合同。
 abstract final class AccountDataKeyDeriver {
   static Future<Uint8List> derive({
-    required List<int> accountSecret,
+    required CitizenSdkWallet wallet,
     required AccountDataBinding binding,
     required LocalKeyPurpose purpose,
     String? context,
   }) async {
     binding.validate();
-    if (accountSecret.length != 32) {
-      throw AccountDataKeyException(
-        '钱包账户私钥长度无效：期望 32 字节，实际 ${accountSecret.length}',
-      );
-    }
-    return NativeAccountCrypto.deriveKey(
-      accountSecret: accountSecret,
-      genesisHash: _hex32(binding.genesisHash),
-      cidNumber: binding.cidNumber,
-      bindingRevision: binding.bindingRevision,
-      accountId: _hex32(binding.accountId),
-      purpose: purpose.domain,
-      context: context ?? '',
+    final saltMaterial = utf8.encode(
+      'citizenapp.account-data/binding|${binding.genesisHash}|'
+      '${binding.cidNumber}|${binding.bindingRevision}|${binding.accountId}',
     );
-  }
-
-  static Uint8List _hex32(String value) => Uint8List.fromList(
-        List<int>.generate(
-          32,
-          (index) => int.parse(value.substring(2 + index * 2, 4 + index * 2),
-              radix: 16),
-        ),
+    final salt = Uint8List.fromList(sha256.convert(saltMaterial).bytes);
+    final info = Uint8List.fromList(
+      utf8.encode(context == null || context.isEmpty
+          ? purpose.domain
+          : '${purpose.domain}/$context'),
+    );
+    try {
+      return await wallet.deriveApplicationKey(
+        accountId: binding.accountId,
+        salt: salt,
+        info: info,
       );
+    } on CitizenSdkException catch (error) {
+      throw AccountDataKeyException(error.message);
+    } finally {
+      salt.fillRange(0, salt.length, 0);
+      info.fillRange(0, info.length, 0);
+    }
+  }
 }
 
 class AccountDataKeyException implements Exception {
@@ -461,4 +465,54 @@ abstract interface class LocalKeyBlobStore {
     required String? expected,
     String? next,
   });
+}
+
+/// CitizenApp 公开绑定与设备密文的唯一安全存储适配。
+///
+/// compare-and-set 只用于同进程换绑 intent；序列门确保 read/compare/write 不交错。
+/// 旧 WalletIsar 记录不会被读取或转换。
+final class SecureStorageLocalKeyBlobStore implements LocalKeyBlobStore {
+  SecureStorageLocalKeyBlobStore([FlutterSecureStorage? storage])
+      : _storage = storage ?? appSecureStorage;
+
+  final FlutterSecureStorage _storage;
+  static Future<void> _tail = Future<void>.value();
+
+  @override
+  Future<String?> read(String key) => _storage.read(key: key);
+
+  @override
+  Future<void> write(String key, String value) =>
+      _storage.write(key: key, value: value);
+
+  @override
+  Future<void> delete(String key) => _storage.delete(key: key);
+
+  @override
+  Future<bool> compareAndSet(
+    String key, {
+    required String? expected,
+    String? next,
+  }) => _exclusive(() async {
+    final current = await _storage.read(key: key);
+    if (current != expected) return false;
+    if (next == null) {
+      await _storage.delete(key: key);
+    } else {
+      await _storage.write(key: key, value: next);
+    }
+    return true;
+  });
+
+  static Future<T> _exclusive<T>(Future<T> Function() operation) async {
+    final previous = _tail;
+    final done = Completer<void>();
+    _tail = done.future;
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      done.complete();
+    }
+  }
 }

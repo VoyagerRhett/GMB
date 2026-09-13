@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:provider/provider.dart';
 
 import 'package:citizenapp/8964/profile/models/citizen_profile.dart';
 import 'package:citizenapp/8964/profile/models/profile_presentation.dart';
@@ -69,6 +70,7 @@ class _CitizenProfileEditPageState extends State<CitizenProfileEditPage> {
   _PendingImage? _pendingBanner;
   SquareSession? _session;
   bool _saving = false;
+  bool _dependenciesReady = false;
 
   @override
   void initState() {
@@ -76,7 +78,6 @@ class _CitizenProfileEditPageState extends State<CitizenProfileEditPage> {
     _api = widget.api ?? CitizenProfileApi();
     _cache = widget.cache ?? const CitizenProfileCache();
     _mediaCache = widget.mediaCache ?? CitizenProfileMediaCache();
-    _sessionProvider = widget.sessionProvider ?? SquareSessionProvider.instance;
     _assetService = widget.assetService ?? ProfileAssetService();
     _imagePicker = widget.imagePicker ?? ImagePicker();
     // 公开昵称只从资料真源预填；空资料使用稳定默认昵称，不读取本机钱包标签。
@@ -84,6 +85,15 @@ class _CitizenProfileEditPageState extends State<CitizenProfileEditPage> {
         TextEditingController(text: widget.initialProfile?.displayName ?? '');
     _bioController =
         TextEditingController(text: widget.initialProfile?.bio ?? '');
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    _sessionProvider =
+        widget.sessionProvider ?? context.read<SquareSessionProvider>();
+    _dependenciesReady = true;
     _loadSession();
   }
 

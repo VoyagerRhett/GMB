@@ -6,7 +6,7 @@
 // 同步到 Isar。因此从详情页跳转进入管理员子页时,Isar 必然已包含该多签
 // 当前活跃创建提案的 entity(若存在),无需再次调链上 prefix iteration。
 //
-// 这避开了 smoldot 对 `state_getKeys` 翻页支持的不确定性,并且查询成本是
+// 这避免了无边界整表扫描，并且查询成本是
 // O(1) 级 Isar 索引读取。
 
 import 'package:isar_community/isar.dart';

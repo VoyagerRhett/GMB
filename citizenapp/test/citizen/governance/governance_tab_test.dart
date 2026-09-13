@@ -21,11 +21,11 @@ import '../../support/isar_test_env.dart';
 
 /// 构造统一机构(helper 纯函数测试用)。
 Institution _inst(String name, String cid, String code) => Institution(
-      cidNumber: cid,
-      cidFullName: name,
-      cidShortName: name,
-      institutionCode: code,
-    );
+  cidNumber: cid,
+  cidFullName: name,
+  cidShortName: name,
+  institutionCode: code,
+);
 
 PublicInstitutionDto _dto(String name, String cid, String code) =>
     PublicInstitutionDto.fromJson(<String, dynamic>{
@@ -40,7 +40,7 @@ PublicInstitutionDto _dto(String name, String cid, String code) =>
 
 class _PendingInstitutionRepository extends InstitutionRepository {
   _PendingInstitutionRepository(PublicInstitutionRepository directory)
-      : super(directory: directory);
+    : super(directory: directory);
 
   final Completer<List<Institution>> completer = Completer<List<Institution>>();
 
@@ -51,18 +51,16 @@ class _PendingInstitutionRepository extends InstitutionRepository {
 
 class _FakeGovernanceInstitutionOrderStore
     extends GovernanceInstitutionOrderStore {
-  _FakeGovernanceInstitutionOrderStore({
-    this.councils = const <String>[],
-  });
+  _FakeGovernanceInstitutionOrderStore({this.councils = const <String>[]});
 
   List<String> councils;
   List<String> banks = const <String>[];
 
   @override
   Future<GovernanceInstitutionOrder> read() async => GovernanceInstitutionOrder(
-        provincialCouncilCidNumbers: councils,
-        provincialBankCidNumbers: banks,
-      );
+    provincialCouncilCidNumbers: councils,
+    provincialBankCidNumbers: banks,
+  );
 
   @override
   Future<void> writeProvincialCouncilCidNumbers(List<String> cidNumbers) async {
@@ -81,14 +79,11 @@ Future<InstitutionRepository> _buildRepo({
   required List<({String name, String cid})> banks,
 }) async {
   final store = FakePublicInstitutionStore();
-  await store.upsertInstitutions(
-    [
-      _dto('国家储备委员会', 'nrc', 'NRC'),
-      for (final c in councils) _dto(c.name, c.cid, 'PRC'),
-      for (final b in banks) _dto(b.name, b.cid, 'PRB'),
-    ],
-    catalogVersion: 'v',
-  );
+  await store.upsertInstitutions([
+    _dto('国家储备委员会', 'nrc', 'NRC'),
+    for (final c in councils) _dto(c.name, c.cid, 'PRC'),
+    for (final b in banks) _dto(b.name, b.cid, 'PRB'),
+  ], catalogVersion: 'v');
   return InstitutionRepository(
     directory: PublicInstitutionRepository(store: store),
   );
@@ -132,10 +127,7 @@ void main() {
       (name: '乙省储委会', cid: 'prc-b'),
       (name: '丙省储委会', cid: 'prc-c'),
     ];
-    banks = const [
-      (name: '甲省储行', cid: 'prb-a'),
-      (name: '乙省储行', cid: 'prb-b'),
-    ];
+    banks = const [(name: '甲省储行', cid: 'prb-a'), (name: '乙省储行', cid: 'prb-b')];
   });
 
   test('applyGovernanceInstitutionOrder 使用本机顺序并把新增机构补到末尾', () {
@@ -144,10 +136,12 @@ void main() {
       _inst('乙省储委会', 'prc-b', 'PRC'),
       _inst('丙省储委会', 'prc-c', 'PRC'),
     ];
-    final ordered = applyGovernanceInstitutionOrder(
-      source,
-      const ['prc-b', 'missing', 'prc-a', 'prc-b'],
-    );
+    final ordered = applyGovernanceInstitutionOrder(source, const [
+      'prc-b',
+      'missing',
+      'prc-a',
+      'prc-b',
+    ]);
     expect(ordered.map((i) => i.cidNumber), ['prc-b', 'prc-a', 'prc-c']);
   });
 
@@ -157,7 +151,7 @@ void main() {
         home: SizedBox(
           width: 390,
           height: 844,
-          child: CitizenTabPage(),
+          child: CitizenTabPage(proposalContent: SizedBox.shrink()),
         ),
       ),
     );
@@ -232,8 +226,9 @@ void main() {
   testWidgets('白皮书与国家储委会位于同一行且等宽等高', (tester) async {
     await _pumpPage(tester, councils: councils, banks: banks);
 
-    final whitepaper =
-        find.byKey(const ValueKey<String>('citizen-whitepaper-card'));
+    final whitepaper = find.byKey(
+      const ValueKey<String>('citizen-whitepaper-card'),
+    );
     final national = find.byKey(const ValueKey('governance_national_card_nrc'));
     expect(whitepaper, findsOneWidget);
     expect(find.text('《公民链白皮书》'), findsOneWidget);
@@ -245,9 +240,7 @@ void main() {
     expect(whitepaperTitle.softWrap, isFalse);
     final titleFittedBox = tester.widget<FittedBox>(
       find.ancestor(
-        of: find.byKey(
-          const ValueKey<String>('citizen-whitepaper-title'),
-        ),
+        of: find.byKey(const ValueKey<String>('citizen-whitepaper-title')),
         matching: find.byType(FittedBox),
       ),
     );
@@ -257,10 +250,7 @@ void main() {
       tester.getTopLeft(whitepaper).dy,
       closeTo(tester.getTopLeft(national).dy, 0.01),
     );
-    expect(
-      tester.getSize(whitepaper),
-      tester.getSize(national),
-    );
+    expect(tester.getSize(whitepaper), tester.getSize(national));
     expect(tester.getSize(whitepaper).height, inInclusiveRange(57, 66));
     final nationalIcon = find.descendant(
       of: national,
@@ -278,9 +268,7 @@ void main() {
       tester,
       councils: councils,
       banks: banks,
-      whitepaperPageBuilder: (_) => const Scaffold(
-        body: Text('白皮书阅读页'),
-      ),
+      whitepaperPageBuilder: (_) => const Scaffold(body: Text('白皮书阅读页')),
     );
 
     await tester.tap(
@@ -291,10 +279,7 @@ void main() {
   });
 
   test('白皮书 WebView 只允许官网唯一主文档导航', () {
-    expect(
-      isCitizenWhitepaperNavigationAllowed(citizenWhitepaperUrl),
-      isTrue,
-    );
+    expect(isCitizenWhitepaperNavigationAllowed(citizenWhitepaperUrl), isTrue);
     expect(
       isCitizenWhitepaperNavigationAllowed(
         '$citizenWhitepaperUrl#node-configuration',
@@ -353,9 +338,7 @@ void main() {
       greaterThan(
         tester
             .getBottomRight(
-              find.byKey(
-                const ValueKey('governance-institution-scroll-view'),
-              ),
+              find.byKey(const ValueKey('governance-institution-scroll-view')),
             )
             .dy,
       ),
@@ -365,14 +348,10 @@ void main() {
   testWidgets('320 宽度和放大字体下两张顶部卡保持等高且不溢出', (tester) async {
     tester.platformDispatcher.textScaleFactorTestValue = 1.3;
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
-    await _pumpPage(
-      tester,
-      councils: councils,
-      banks: banks,
-      width: 320,
+    await _pumpPage(tester, councils: councils, banks: banks, width: 320);
+    final whitepaper = find.byKey(
+      const ValueKey<String>('citizen-whitepaper-card'),
     );
-    final whitepaper =
-        find.byKey(const ValueKey<String>('citizen-whitepaper-card'));
     final national = find.byKey(const ValueKey('governance_national_card_nrc'));
     expect(tester.getSize(whitepaper), tester.getSize(national));
     expect(tester.getTopLeft(whitepaper).dx, greaterThanOrEqualTo(0));
@@ -430,9 +409,7 @@ void main() {
     );
 
     await tester.tap(
-      find.byKey(
-        const ValueKey('governance_section_toggle_provincialCouncil'),
-      ),
+      find.byKey(const ValueKey('governance_section_toggle_provincialCouncil')),
     );
     await tester.pumpAndSettle();
     expect(find.text('甲省储委会'), findsNothing);
@@ -447,9 +424,7 @@ void main() {
     );
 
     await tester.tap(
-      find.byKey(
-        const ValueKey('governance_section_toggle_provincialBank'),
-      ),
+      find.byKey(const ValueKey('governance_section_toggle_provincialBank')),
     );
     await tester.pumpAndSettle();
     expect(find.text('甲省储委会'), findsNothing);
@@ -483,9 +458,7 @@ void main() {
     );
 
     await tester.tap(
-      find.byKey(
-        const ValueKey('governance_section_toggle_provincialCouncil'),
-      ),
+      find.byKey(const ValueKey('governance_section_toggle_provincialCouncil')),
     );
     await tester.pumpAndSettle();
     expect(find.text('甲省储委会'), findsOneWidget);
@@ -519,14 +492,11 @@ void main() {
       43,
       (index) => (name: '第${index + 1}省储行', cid: 'prb-$index'),
     );
-    await _pumpPage(
-      tester,
-      councils: manyCouncils,
-      banks: manyBanks,
-    );
+    await _pumpPage(tester, councils: manyCouncils, banks: manyBanks);
 
-    final whitepaper =
-        find.byKey(const ValueKey<String>('citizen-whitepaper-card'));
+    final whitepaper = find.byKey(
+      const ValueKey<String>('citizen-whitepaper-card'),
+    );
     final national = find.byKey(const ValueKey('governance_national_card_nrc'));
     final councilHeader = find.text('省储委会（43）');
     final bankHeader = find.text('省储行（43）');
@@ -545,24 +515,19 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(
-      <double>[
-        tester.getTopLeft(whitepaper).dy,
-        tester.getTopLeft(national).dy,
-        tester.getTopLeft(councilHeader).dy,
-        tester.getTopLeft(bankHeader).dy,
-      ],
-      fixedTop,
-    );
+    expect(<double>[
+      tester.getTopLeft(whitepaper).dy,
+      tester.getTopLeft(national).dy,
+      tester.getTopLeft(councilHeader).dy,
+      tester.getTopLeft(bankHeader).dy,
+    ], fixedTop);
     expect(
       tester.getTopLeft(firstCouncilCard).dy,
       lessThan(firstCouncilCardTop),
     );
 
     await tester.tap(
-      find.byKey(
-        const ValueKey('governance_section_toggle_provincialBank'),
-      ),
+      find.byKey(const ValueKey('governance_section_toggle_provincialBank')),
     );
     await tester.pumpAndSettle();
     expect(find.text('第1省储委会'), findsNothing);
@@ -581,15 +546,12 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(
-      <double>[
-        tester.getTopLeft(whitepaper).dy,
-        tester.getTopLeft(national).dy,
-        tester.getTopLeft(councilHeader).dy,
-        tester.getTopLeft(bankHeader).dy,
-      ],
-      fixedBankTop,
-    );
+    expect(<double>[
+      tester.getTopLeft(whitepaper).dy,
+      tester.getTopLeft(national).dy,
+      tester.getTopLeft(councilHeader).dy,
+      tester.getTopLeft(bankHeader).dy,
+    ], fixedBankTop);
     expect(tester.getTopLeft(firstBankCard).dy, lessThan(firstBankCardTop));
   });
 
@@ -616,8 +578,9 @@ void main() {
       banks: banks,
       orderStore: orderStore,
     );
-    final gesture =
-        await tester.startGesture(tester.getCenter(find.text('甲省储委会')));
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.text('甲省储委会')),
+    );
     await tester.pump(kLongPressTimeout + const Duration(milliseconds: 120));
     await gesture.moveTo(tester.getCenter(find.text('乙省储委会')));
     await tester.pump();

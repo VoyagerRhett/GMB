@@ -15,13 +15,13 @@ import 'citizen_qr.dart';
 import 'citizen_sdk_error.dart';
 import 'citizen_sdk_events.dart';
 import 'citizen_transactions.dart';
-import 'citizen_wallet.dart';
+import 'citizen_sdk_wallet.dart';
 
 /// CitizenSDK 的唯一 Dart/Flutter 公共门面。
 final class CitizenSdk {
   CitizenSdk._(this._session, CitizenSdkFlutterCodec codec)
     : chain = _CitizenChain(_session, codec),
-      wallet = _CitizenWallet(_session, codec),
+      wallet = _CitizenSdkWallet(_session, codec),
       signing = _CitizenSigning(_session, codec),
       qr = _CitizenQr(_session),
       transactions = _CitizenTransactions(_session, codec),
@@ -69,7 +69,7 @@ final class CitizenSdk {
   final CitizenChain chain;
 
   /// 设备本地热钱包和账户管理，不包含公开签名门面。
-  final CitizenWallet wallet;
+  final CitizenSdkWallet wallet;
 
   /// 独立签名能力；私钥只经设备安全金库受控使用。纯验签使用 [CitizenSigning.verify]。
   final CitizenSigning signing;
@@ -233,6 +233,62 @@ final class _CitizenChain implements CitizenChain {
   }
 
   @override
+  Future<List<Uint8List>> getStorageKeysPaged(
+    CitizenBlockRef finalizedBlock,
+    Uint8List prefix, {
+    Uint8List? startKey,
+    int limit = 1000,
+  }) async {
+    final value = await _session.invoke(
+      'getStorageKeysPaged',
+      fields: <Object?>[
+        _codec.encodeBlock(finalizedBlock),
+        Uint8List.fromList(prefix),
+        startKey == null ? null : Uint8List.fromList(startKey),
+        limit,
+      ],
+    );
+    final keys = (value[0]! as List<Object?>)
+        .map((item) => Uint8List.fromList(item! as Uint8List).asUnmodifiableView())
+        .toList(growable: false);
+    if (keys.length > limit) {
+      throw const CitizenSdkException(
+        code: CitizenSdkErrorCode.integrity,
+        message: 'storage keys page 返回数量超过请求 limit',
+      );
+    }
+    for (var index = 0; index < keys.length; index += 1) {
+      final key = keys[index];
+      if (!_startsWithBytes(key, prefix) ||
+          (startKey != null && _compareBytes(key, startKey) <= 0) ||
+          (index > 0 && _compareBytes(keys[index - 1], key) >= 0)) {
+        throw const CitizenSdkException(
+          code: CitizenSdkErrorCode.integrity,
+          message: 'storage keys page 与请求前缀、游标或顺序不一致',
+        );
+      }
+    }
+    return List<Uint8List>.unmodifiable(keys);
+  }
+
+  @override
+  Future<Uint8List> callRuntimeApi(
+    CitizenBlockRef block,
+    String method,
+    Uint8List arguments,
+  ) async {
+    final value = await _session.invoke(
+      'callRuntimeApi',
+      fields: <Object?>[
+        _codec.encodeBlock(block),
+        method,
+        Uint8List.fromList(arguments),
+      ],
+    );
+    return Uint8List.fromList(value[0]! as Uint8List).asUnmodifiableView();
+  }
+
+  @override
   Future<Uint8List?> getSystemEvents(CitizenBlockRef finalizedBlock) async {
     final value = await _session.invoke(
       'getSystemEvents',
@@ -332,8 +388,8 @@ final class _CitizenChain implements CitizenChain {
   }
 }
 
-final class _CitizenWallet implements CitizenWallet {
-  const _CitizenWallet(this._session, this._codec);
+final class _CitizenSdkWallet implements CitizenSdkWallet {
+  const _CitizenSdkWallet(this._session, this._codec);
 
   final CitizenSdkFlutterSession _session;
   final CitizenSdkFlutterCodec _codec;
@@ -517,6 +573,42 @@ final class _CitizenWallet implements CitizenWallet {
   Future<CitizenWalletProfile?> reconcileCleanup() async {
     final value = await _session.invoke('reconcileWalletCleanup');
     return _codec.decodeWalletProfile(value[0]);
+  }
+
+  @override
+  Future<Uint8List> deriveApplicationKey({
+    required String accountId,
+    required Uint8List salt,
+    required Uint8List info,
+  }) async {
+    if (salt.length != 32 || info.isEmpty || info.length > 256) {
+      throw const CitizenSdkException(
+        code: CitizenSdkErrorCode.invalidArgument,
+        message: '应用派生钥要求 32 字节 salt 和 1..256 字节 info',
+      );
+    }
+    final saltCopy = Uint8List.fromList(salt);
+    final infoCopy = Uint8List.fromList(info);
+    try {
+      final value = await _session.invoke(
+        'deriveApplicationKey',
+        fields: <Object?>[accountId, saltCopy, infoCopy],
+      );
+      final nativeCopy = value[0]! as Uint8List;
+      final result = Uint8List.fromList(nativeCopy);
+      nativeCopy.fillRange(0, nativeCopy.length, 0);
+      if (result.length != 32) {
+        result.fillRange(0, result.length, 0);
+        throw const CitizenSdkException(
+          code: CitizenSdkErrorCode.decode,
+          message: '应用派生钥结果必须是 32 字节',
+        );
+      }
+      return result;
+    } finally {
+      saltCopy.fillRange(0, saltCopy.length, 0);
+      infoCopy.fillRange(0, infoCopy.length, 0);
+    }
   }
 
   CitizenWalletProfile _requireProfile(Object? raw, String operation) {
@@ -848,6 +940,23 @@ bool _bytesEqual(Uint8List left, Uint8List right) {
     difference |= left[index] ^ right[index];
   }
   return difference == 0;
+}
+
+bool _startsWithBytes(Uint8List value, Uint8List prefix) {
+  if (value.length < prefix.length) return false;
+  for (var index = 0; index < prefix.length; index += 1) {
+    if (value[index] != prefix[index]) return false;
+  }
+  return true;
+}
+
+int _compareBytes(Uint8List left, Uint8List right) {
+  final shared = left.length < right.length ? left.length : right.length;
+  for (var index = 0; index < shared; index += 1) {
+    final difference = left[index] - right[index];
+    if (difference != 0) return difference;
+  }
+  return left.length - right.length;
 }
 
 final class _CitizenHistory implements CitizenHistory {

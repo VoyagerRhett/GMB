@@ -94,6 +94,7 @@ impl ChainMonitor {
                 let mut subscription = Some(provider.subscribe_finalized_heads());
                 let mut retry = FinalizedRetry::new(Instant::now());
                 let mut history_dirty = false;
+                let mut finalized_dirty = None;
                 let mut database = DatabaseRefresh::new(Instant::now());
                 loop {
                     if *signal
@@ -112,9 +113,10 @@ impl ChainMonitor {
                     }
                     if let Some(stream) = subscription.as_mut() {
                         match stream.next().now_or_never() {
-                            Some(Some(Ok(_))) => {
+                            Some(Some(Ok(finalized))) => {
                                 retry.succeeded(Instant::now());
                                 let _ = owner.engine().invalidate_chain_read_cache();
+                                finalized_dirty = Some(finalized);
                             }
                             Some(Some(Err(_))) | Some(None) => {
                                 // 错误项和资源结束都使本条 stream 失效；仅重订阅
@@ -123,6 +125,11 @@ impl ChainMonitor {
                                 retry.failed(Instant::now());
                             }
                             None => {}
+                        }
+                    }
+                    if let Some(finalized) = finalized_dirty {
+                        if owner.publish_finalized_block_changed(finalized).is_ok() {
+                            finalized_dirty = None;
                         }
                     }
                     if wallet {

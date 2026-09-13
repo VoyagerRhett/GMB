@@ -1,17 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
 
 import 'package:citizenapp/citizen/cid/cid_generator.dart';
 import 'package:citizenapp/my/myid/widgets/register_identity_sheet.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart' show Account;
-
-Account _account({int index = 0, String? id}) => Account(
-      masterId:
-          '0x0000000000000000000000000000000000000000000000000000000000000001',
+CitizenWalletStateAccount _account({int index = 0, String? id}) =>
+    CitizenWalletStateAccount(
+      signMode: CitizenWalletSignMode.hot,
+      walletIndex: 0,
       accountIndex: index,
       accountId: id ?? '0x${index.toRadixString(16).padLeft(64, '0')}',
       ss58Address: 'w5BekTimvtfYZvFpkDzy7ypqUntPgTbjRFCt9weR8vMgf7o8E',
-      accountName: '账户$index',
+      name: '账户$index',
+      createdAtMillis: BigInt.zero,
+      isDefault: index == 0,
     );
 
 void main() {
@@ -19,7 +21,7 @@ void main() {
   Future<void> openSheet(
     WidgetTester tester,
     void Function(RegisterChoice?) sink, {
-    List<Account>? accounts,
+    List<CitizenWalletStateAccount>? accounts,
   }) async {
     await tester.pumpWidget(
       MaterialApp(

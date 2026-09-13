@@ -10,7 +10,6 @@ import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/citizen/shared/admin_account_storage_codec.dart';
 import 'package:citizenapp/citizen/shared/admin_accounts_scan_service.dart';
 import 'package:citizenapp/isar/wallet_isar.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
 
 import 'personal_manage_service.dart';
 
@@ -43,10 +42,8 @@ class PersonalManageDiscoveryStats {
 
 class PersonalManageDiscoveryService {
   PersonalManageDiscoveryService({
-    ChainRpc? chainRpc,
-    PersonalManageService? personalManageService,
-  }) : _personalManage =
-            personalManageService ?? PersonalManageService(chainRpc: chainRpc);
+    required PersonalManageService personalManageService,
+  }) : _personalManage = personalManageService;
 
   final PersonalManageService _personalManage;
 

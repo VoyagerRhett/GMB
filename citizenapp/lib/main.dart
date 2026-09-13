@@ -1,40 +1,46 @@
 import 'dart:async';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:citizenapp/log/app_log.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:local_auth/local_auth.dart';
+import 'package:provider/provider.dart';
 import 'package:tatachat_sdk/tatachat_sdk.dart' as sdk;
 import 'package:citizenapp/8964/square_tab_page.dart';
 import 'package:citizenapp/citizen/citizen_tab_page.dart';
 import 'package:citizenapp/chat/chat_product_configuration.dart';
 import 'package:citizenapp/chat/tatachat_sdk_adapter.dart';
 import 'package:citizenapp/chat/chat_entry.dart';
-import 'package:citizenapp/rpc/smoldot_client.dart';
 import 'package:citizenapp/security/app_lock_service.dart';
 import 'package:citizenapp/security/emergency_wipe_platform.dart';
 import 'package:citizenapp/security/pin_input_page.dart';
 import 'package:citizenapp/security/secure_storage.dart';
 import 'package:citizenapp/transaction/transaction_tab_page.dart';
+import 'package:citizenapp/transaction/history/wallet_transaction_history_service.dart';
 import 'package:citizenapp/my/util/screenshot_guard.dart';
 import 'package:citizenapp/my/user/user.dart';
+import 'package:citizenapp/my/myid/current_user_context.dart';
+import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
 import 'package:citizenapp/isar/user_isar.dart';
 import 'package:citizenapp/security/app_permission_gate.dart';
 import 'package:citizenapp/update/app_update.dart';
 import 'package:citizenapp/update/update_badge.dart';
 import 'package:citizenapp/8964/services/device_subkey_registrar.dart';
+import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/8964/pages/square_turnstile_page.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
 import 'package:citizenapp/qr/qr_protocols.dart';
 import 'package:citizenapp/security/local_data_key.dart';
 import 'package:citizenapp/security/account_data_key_provision.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/qr/bodies/account_data_key_response_body.dart';
 import 'package:citizenapp/qr/envelope.dart';
-import 'package:citizenapp/signer/qr_signer.dart';
-import 'package:citizenapp/wallet/core/default_account_service.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/signer/app_business_qr_codec.dart';
+import 'package:citizenapp/signer/signing.dart'
+    show kGmbSignDomain, kOpSignSquareDeviceBind;
 import 'package:citizenapp/wallet/wallet_gate.dart';
 
 import 'ui/app_theme.dart';
@@ -46,10 +52,68 @@ final appNavigatorKey = GlobalKey<NavigatorState>();
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // CitizenApp 只打开一个完整 CitizenSDK session。钱包、签名、QR_V1、
+  // 轻节点、交易与 execution history 共用同一个 Engine generation。
+  final citizenSdk = await CitizenSdk.open(modules: CitizenSdkModules.full);
+  final registrar = DeviceSubkeyRegistrar(
+    turnstileToken: () => acquireDeviceBindingTurnstileToken(
+      isUiReady: () => appNavigatorKey.currentState != null,
+      present: () {
+        final navigator = appNavigatorKey.currentState;
+        if (navigator == null) return Future<String?>.value();
+        return navigator.push<String>(
+          MaterialPageRoute(builder: (_) => const SquareTurnstilePage()),
+        );
+      },
+    ),
+  );
+  final accountSecurity = AccountSecurityService(
+    wallet: citizenSdk.wallet,
+    signing: citizenSdk.signing,
+    subkeyRegistrar: registrar.register,
+    coldDeviceBindingSigner:
+        ({
+          required binding,
+          required payload,
+          required signingMessage,
+          required devicePublicKey,
+          required issuedAtMillis,
+        }) => _signColdDeviceBinding(
+          wallet: citizenSdk.wallet,
+          signing: citizenSdk.signing,
+          binding: binding,
+          payload: payload,
+          signingMessage: signingMessage,
+          devicePublicKey: devicePublicKey,
+          issuedAtMillis: issuedAtMillis,
+        ),
+    coldAccountDataKeyProvider: ({required binding, required requests}) =>
+        _provideColdAccountDataKeys(
+          wallet: citizenSdk.wallet,
+          binding: binding,
+          requests: requests,
+        ),
+  );
+  final currentUserContext = CurrentUserContext(
+    wallet: citizenSdk.wallet,
+    accountSecurity: accountSecurity,
+  );
+  final finalizedIdentityResolver = FinalizedIdentityResolver(
+    wallet: citizenSdk.wallet,
+    chain: citizenSdk.chain,
+  );
+  final squareSessionProvider = SquareSessionProvider(
+    accountSecurity: accountSecurity,
+    currentUserContext: currentUserContext,
+  );
+
   // 任何 ChatSdk、钱包页或 PIN 门禁构造前先处理跨重启擦除门闩。
   // pending 不依赖已被平台阶段删除的 PIN，直接继续全量擦除；
   // 当前进程无论成败都只允许重试或退出，禁止恢复业务运行态。
-  var wipeStartupResult = await AppLockService.recoverPersistentWipeAtStartup();
+  var wipeStartupResult = await AppLockService.recoverPersistentWipeAtStartup(
+    wallet: citizenSdk.wallet,
+    accountSecurity: accountSecurity,
+  );
   // Documents 暂时不可用时先在业务初始化前有界复查；只有连续失败才进入
   // 安全阻断页，不能要求用户通过强退重开代替正常的启动恢复。
   if (wipeStartupResult == AppDataWipeStartupResult.preflightBlocked) {
@@ -59,39 +123,49 @@ Future<void> main() async {
       const Duration(milliseconds: 900),
     ]) {
       await Future<void>.delayed(delay);
-      wipeStartupResult = await AppLockService.recoverPersistentWipeAtStartup();
+      wipeStartupResult = await AppLockService.recoverPersistentWipeAtStartup(
+        wallet: citizenSdk.wallet,
+        accountSecurity: accountSecurity,
+      );
       if (wipeStartupResult != AppDataWipeStartupResult.preflightBlocked) {
         break;
       }
     }
   }
   if (wipeStartupResult != AppDataWipeStartupResult.ready) {
-    runApp(_DataWipeRecoveryApp(initialResult: wipeStartupResult));
+    runApp(
+      _DataWipeRecoveryApp(
+        initialResult: wipeStartupResult,
+        sdk: citizenSdk,
+        accountSecurity: accountSecurity,
+      ),
+    );
     return;
   }
 
-  // 只有持久擦除门闩与上一进程 CID lease 都完成安全预检后，才允许注册
-  // 会构造 ChatSdk 的后台入口；preflightBlocked 进程绝不启动任何业务生产者。
-  FirebaseMessaging.onBackgroundMessage(chatRuntimeBackgroundHandler);
+  // 擦除门闩通过后才启动 SDK 唯一轻节点。启动失败保留 SDK
+  // startFailed 事实并继续进入 App，交易顶栏按现有不可用状态呈现；
+  // 禁止回退到 CitizenApp 旧轻节点。
+  try {
+    await citizenSdk.start();
+  } on Object catch (error, stackTrace) {
+    AppLog.d('[CitizenSDK] 唯一轻节点启动失败: $error\n$stackTrace');
+  }
+  final transactionHistory = WalletTransactionHistoryService(
+    history: citizenSdk.history,
+    chain: citizenSdk.chain,
+    wallet: citizenSdk.wallet,
+    events: citizenSdk.events,
+  );
+  try {
+    await transactionHistory.start();
+  } on Object catch (error, stackTrace) {
+    AppLog.d('[TransactionHistory] 初始同步失败: $error\n$stackTrace');
+  }
 
-  // 注入 P-256 设备子钥登记钩子（8964 层实现，避免 wallet/core 反向依赖）。已有子钥
-  // 直接静默使用；只有实际业务确认缺钥时才鉴权一次生成，不在钱包创建或页面门禁触发。
-  DeviceSubkeyRegistrar.turnstileTokenProvider =
-      () => acquireDeviceBindingTurnstileToken(
-            // 冷启动会话可能早于 MaterialApp 首帧；必须等根导航器就绪，禁止把空 token
-            // 发送给正式 Worker 后再把 403 伪装成通用设备认证失败。
-            isUiReady: () => appNavigatorKey.currentState != null,
-            present: () {
-              final navigator = appNavigatorKey.currentState;
-              if (navigator == null) return Future<String?>.value();
-              return navigator.push<String>(
-                MaterialPageRoute(builder: (_) => const SquareTurnstilePage()),
-              );
-            },
-          );
-  WalletManager.subkeyRegistrar = DeviceSubkeyRegistrar().register;
-  WalletManager.coldDeviceBindingSigner = _signColdDeviceBinding;
-  WalletManager.coldAccountDataKeyProvider = _provideColdAccountDataKeys;
+  // 只有持久擦除门闩、上一进程 CID lease 和 SDK 启动尝试完成后，
+  // 才允许注册会构造 ChatSdk 的后台入口。
+  FirebaseMessaging.onBackgroundMessage(chatRuntimeBackgroundHandler);
 
   // 诊断 — 把所有 framework / widget 静默吞掉的异常都打到 logcat。
   // 默认 ErrorWidget 在某些场景下表现为空白方块（白屏），这里换成显眼的红框 + 文字。
@@ -133,18 +207,29 @@ Future<void> main() async {
     ),
   );
 
-  // 先销毁可能残留的旧实例（hot restart 场景）。
-  // 防止 Rust tokio 线程持有已删除的 Dart FFI 回调导致 SIGABRT。
-  await SmoldotClientManager.instance.dispose();
-
-  runApp(const CitizenApp());
+  runApp(
+    CitizenApp(
+      sdk: citizenSdk,
+      accountSecurity: accountSecurity,
+      currentUserContext: currentUserContext,
+      finalizedIdentityResolver: finalizedIdentityResolver,
+      squareSessionProvider: squareSessionProvider,
+      transactionHistory: transactionHistory,
+    ),
+  );
 }
 
 /// 持久 pending marker 的唯一启动终态：不构造任何业务页面。
 class _DataWipeRecoveryApp extends StatelessWidget {
-  const _DataWipeRecoveryApp({required this.initialResult});
+  const _DataWipeRecoveryApp({
+    required this.initialResult,
+    required this.sdk,
+    required this.accountSecurity,
+  });
 
   final AppDataWipeStartupResult initialResult;
+  final CitizenSdk sdk;
+  final AccountSecurityService accountSecurity;
 
   @override
   Widget build(BuildContext context) {
@@ -152,15 +237,25 @@ class _DataWipeRecoveryApp extends StatelessWidget {
       title: '公民',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
-      home: _DataWipeRecoveryPage(initialResult: initialResult),
+      home: _DataWipeRecoveryPage(
+        initialResult: initialResult,
+        sdk: sdk,
+        accountSecurity: accountSecurity,
+      ),
     );
   }
 }
 
 class _DataWipeRecoveryPage extends StatefulWidget {
-  const _DataWipeRecoveryPage({required this.initialResult});
+  const _DataWipeRecoveryPage({
+    required this.initialResult,
+    required this.sdk,
+    required this.accountSecurity,
+  });
 
   final AppDataWipeStartupResult initialResult;
+  final CitizenSdk sdk;
+  final AccountSecurityService accountSecurity;
 
   @override
   State<_DataWipeRecoveryPage> createState() => _DataWipeRecoveryPageState();
@@ -190,7 +285,10 @@ class _DataWipeRecoveryPageState extends State<_DataWipeRecoveryPage> {
     await EmergencyWipePlatform.beginProtectedExecution();
     while (mounted) {
       try {
-        await AppLockService.wipeAllData();
+        await AppLockService.wipeAllData(
+          wallet: widget.sdk.wallet,
+          accountSecurity: widget.accountSecurity,
+        );
         if (!mounted) return;
         setState(() => _result = AppDataWipeStartupResult.dataWiped);
         await EmergencyWipePlatform.finishProtectedExecution();
@@ -252,116 +350,109 @@ class _DataWipeRecoveryPageState extends State<_DataWipeRecoveryPage> {
 
 /// 当前默认账户是冷账户时，用 CitizenWallet 扫码签署既有 0x1C 设备绑定摘要。
 Future<String> _signColdDeviceBinding({
+  required CitizenSdkWallet wallet,
+  required CitizenSigning signing,
   required AccountDataBinding binding,
   required Uint8List payload,
   required Uint8List signingMessage,
   required String devicePublicKey,
   required int issuedAtMillis,
 }) async {
-  final account = await DefaultAccountService().getDefaultAccount();
+  final account = (await wallet.getState()).defaultAccount;
   if (account == null ||
-      !account.isColdAccount ||
+      account.signMode != CitizenWalletSignMode.cold ||
       account.accountId != binding.accountId ||
       !RegExp(r'^04[0-9a-f]{128}$').hasMatch(devicePublicKey)) {
-    throw const WalletAuthException('当前默认账户不是该 CID 的冷钱包账户');
+    throw const AccountSecurityException('当前默认账户不是该 CID 的冷钱包账户');
   }
-  final navigator = appNavigatorKey.currentState;
-  if (navigator == null) {
-    throw const WalletAuthException('当前页面无法发起冷钱包设备绑定签名');
+  final context = appNavigatorKey.currentContext;
+  if (context == null) {
+    throw const AccountSecurityException('当前页面无法发起冷钱包设备绑定签名');
   }
-  final signer = QrSigner();
-  final request = signer.buildRequest(
-    requestId: QrSigner.generateRequestId(prefix: 'device-bind-'),
-    signerPublicKey: binding.accountId,
-    payloadHex: '0x${_lowerHex(payload)}',
+  if (!context.mounted) {
+    throw const AccountSecurityException('当前页面已经关闭');
+  }
+  final signature = await signCitizenPayload(
+    signing: signing,
+    context: context,
+    accountId: binding.accountId,
+    payload: payload,
     action: QrActions.squareDeviceBind,
-    nowEpochSeconds: issuedAtMillis ~/ 1000,
-    ttlSeconds: 120,
-  );
-  final response = await navigator.push<SignResponseEnvelope>(
-    MaterialPageRoute(
-      builder: (_) => QrSignSessionPage(
-        request: request,
-        requestJson: signer.encodeRequest(request),
-        expectedSignerPublicKey: binding.accountId,
-      ),
+    transform: CitizenSigningTransform.blake2Domain(
+      Uint8List.fromList(<int>[...kGmbSignDomain, kOpSignSquareDeviceBind]),
     ),
   );
-  if (response == null) {
-    throw const WalletAuthException('冷钱包设备绑定签名已取消');
-  }
-  final current = await DefaultAccountService().getDefaultAccount();
+  final current = (await wallet.getState()).defaultAccount;
   if (current == null ||
-      !current.isColdAccount ||
+      current.signMode != CitizenWalletSignMode.cold ||
       current.accountId != binding.accountId ||
-      response.id != request.id ||
-      response.body.signerPublicKeyHex != binding.accountId ||
-      !QrSigner.verifySr25519Signature(
-        signerPublicKeyHex: binding.accountId,
-        signatureHex: response.body.signatureHex,
-        message: signingMessage,
+      !await CitizenSigning.verify(
+        accountId: binding.accountId,
+        signature: signature,
+        payload: signingMessage,
       )) {
-    throw const WalletAuthException('冷钱包设备绑定签名无效');
+    throw const AccountSecurityException('冷钱包设备绑定签名无效');
   }
-  return response.body.signatureHex;
+  return '0x${_lowerHex(signature)}';
 }
 
 /// 冷账户真实缺少用途钥时，使用一次性 X25519 会话从 CitizenWallet 加密领取。
 Future<List<Uint8List>> _provideColdAccountDataKeys({
+  required CitizenSdkWallet wallet,
   required AccountDataBinding binding,
   required List<({LocalKeyPurpose purpose, String? context})> requests,
 }) async {
-  final account = await DefaultAccountService().getDefaultAccount();
+  final account = (await wallet.getState()).defaultAccount;
   if (account == null ||
-      !account.isColdAccount ||
+      account.signMode != CitizenWalletSignMode.cold ||
       account.accountId != binding.accountId) {
-    throw const WalletAuthException('当前默认账户不是该 CID 的冷钱包账户');
+    throw const AccountSecurityException('当前默认账户不是该 CID 的冷钱包账户');
   }
   final navigator = appNavigatorKey.currentState;
   if (navigator == null) {
-    throw const WalletAuthException('当前页面无法发起冷钱包用途钥请求');
+    throw const AccountSecurityException('当前页面无法发起冷钱包用途钥请求');
   }
   final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-  final session = AccountDataKeyProvisionSession.create(
+  final session = await AccountDataKeyProvisionSession.create(
     binding: binding,
     requests: requests,
     expiresAt: now + 120,
   );
   try {
-    final signer = QrSigner();
+    final signer = AppBusinessQrCodec();
     final request = signer.buildRequest(
-      requestId: QrSigner.generateRequestId(prefix: 'data-key-'),
+      requestId: AppBusinessQrCodec.generateRequestId(prefix: 'data-key-'),
       signerPublicKey: binding.accountId,
       payloadHex: '0x${_lowerHex(session.payload)}',
       action: QrActions.accountDataKeyProvision,
       nowEpochSeconds: now,
       ttlSeconds: 120,
     );
-    final response =
-        await navigator.push<QrEnvelope<AccountDataKeyResponseBody>>(
-      MaterialPageRoute(
-        builder: (_) => QrSignSessionPage(
-          request: request,
-          requestJson: signer.encodeRequest(request),
-          expectedSignerPublicKey: binding.accountId,
-          responseKind: QrKind.accountDataKeyResponse,
-        ),
-      ),
-    );
+    final response = await navigator
+        .push<QrEnvelope<AccountDataKeyResponseBody>>(
+          MaterialPageRoute(
+            builder: (_) => QrSignSessionPage(
+              request: request,
+              requestJson: signer.encodeRequest(request),
+              expectedSignerPublicKey: binding.accountId,
+              responseKind: QrKind.accountDataKeyResponse,
+            ),
+          ),
+        );
     if (response == null) {
-      throw const WalletAuthException('冷钱包用途钥提供已取消');
+      throw const AccountSecurityException('冷钱包用途钥提供已取消');
     }
-    final current = await DefaultAccountService().getDefaultAccount();
+    final current = (await wallet.getState()).defaultAccount;
     if (current == null ||
-        !current.isColdAccount ||
+        current.signMode != CitizenWalletSignMode.cold ||
         current.accountId != binding.accountId ||
         response.id != request.id ||
         response.expiresAt != request.expiresAt) {
-      throw const WalletAuthException('冷钱包用途钥响应会话已失效');
+      throw const AccountSecurityException('冷钱包用途钥响应会话已失效');
     }
-    return session.open(response.body);
+    return await session.open(response.body);
   } on AccountDataKeyException catch (error) {
-    throw WalletAuthException(error.message);
+    throw AccountSecurityException(error.message);
   } finally {
     session.dispose();
   }
@@ -370,22 +461,95 @@ Future<List<Uint8List>> _provideColdAccountDataKeys({
 String _lowerHex(List<int> bytes) =>
     bytes.map((value) => value.toRadixString(16).padLeft(2, '0')).join();
 
-class CitizenApp extends StatelessWidget {
-  const CitizenApp({super.key});
+class CitizenApp extends StatefulWidget {
+  const CitizenApp({
+    super.key,
+    required this.sdk,
+    required this.accountSecurity,
+    required this.currentUserContext,
+    required this.finalizedIdentityResolver,
+    required this.squareSessionProvider,
+    required this.transactionHistory,
+  });
+
+  final CitizenSdk sdk;
+  final AccountSecurityService accountSecurity;
+  final CurrentUserContext currentUserContext;
+  final FinalizedIdentityResolver finalizedIdentityResolver;
+  final SquareSessionProvider squareSessionProvider;
+  final WalletTransactionHistoryService transactionHistory;
+
+  @override
+  State<CitizenApp> createState() => _CitizenAppState();
+}
+
+class _CitizenAppState extends State<CitizenApp> {
+  @override
+  void dispose() {
+    widget.accountSecurity.dispose();
+    unawaited(_closeCitizenSdk(widget.sdk, widget.transactionHistory));
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      navigatorKey: appNavigatorKey,
-      title: '公民',
-      debugShowCheckedModeBanner: false,
-      theme: AppTheme.lightTheme,
-      // 只根据完整逻辑视口注入动态 UI 主题；不覆盖 MediaQuery，
-      // 因此系统文字倍率、SafeArea、键盘和手势区仍保持原生语义。
-      builder: (context, child) =>
-          Theme(data: AppTheme.lightThemeFor(context), child: child!),
-      home: const _AppLockGate(),
+    return MultiProvider(
+      providers: [
+        Provider<CitizenSdk>.value(value: widget.sdk),
+        Provider<AccountSecurityService>.value(value: widget.accountSecurity),
+        Provider<CurrentUserContext>.value(value: widget.currentUserContext),
+        Provider<FinalizedIdentityResolver>.value(
+          value: widget.finalizedIdentityResolver,
+        ),
+        Provider<SquareSessionProvider>.value(
+          value: widget.squareSessionProvider,
+        ),
+        Provider<WalletTransactionHistoryService>.value(
+          value: widget.transactionHistory,
+        ),
+        Provider<sdk.ChatSdk>(
+          create: (_) => createCitizenChatRuntime(
+            accountSecurity: widget.accountSecurity,
+            currentUserContext: widget.currentUserContext,
+          ),
+          dispose: (_, runtime) => unawaited(runtime.close()),
+        ),
+      ],
+      child: MaterialApp(
+        navigatorKey: appNavigatorKey,
+        title: '公民',
+        debugShowCheckedModeBanner: false,
+        theme: AppTheme.lightTheme,
+        // 只根据完整逻辑视口注入动态 UI 主题；不覆盖 MediaQuery。
+        builder: (context, child) =>
+            Theme(data: AppTheme.lightThemeFor(context), child: child!),
+        home: const _AppLockGate(),
+      ),
     );
+  }
+}
+
+/// 按 CitizenSDK 的 checkpoint 合同先停止唯一轻节点，再释放 session。
+///
+/// App 生命周期回调不能等待 Future，因此调用方使用 [unawaited]；
+/// 本函数内仍保证 stop 与 close 顺序，不用 close 绕过节点持久化。
+Future<void> _closeCitizenSdk(
+  CitizenSdk sdk,
+  WalletTransactionHistoryService transactionHistory,
+) async {
+  await transactionHistory.stop();
+  try {
+    if (sdk.lifecycle == CitizenSdkLifecycle.running) {
+      await sdk.stop();
+    }
+  } on Object catch (error, stackTrace) {
+    AppLog.d('[CitizenSDK] 轻节点停止失败: $error\n$stackTrace');
+    return;
+  }
+  try {
+    await sdk.close();
+  } on Object catch (error, stackTrace) {
+    AppLog.d('[CitizenSDK] session 关闭失败: $error\n$stackTrace');
   }
 }
 
@@ -680,9 +844,10 @@ class _HomeTabGateState extends State<HomeTabGate> {
       _error = null;
     });
     try {
-      final openChat = await (widget.preferenceReader ??
-              UserIsar.instance.readOpenChatOnLaunch)()
-          .timeout(_readTimeout);
+      final openChat =
+          await (widget.preferenceReader ??
+                  UserIsar.instance.readOpenChatOnLaunch)()
+              .timeout(_readTimeout);
       if (!mounted || generation != _generation) return;
       setState(() => _initialTabIndex = openChat ? 2 : 0);
     } catch (_) {
@@ -762,8 +927,9 @@ class AppShell extends StatefulWidget {
   /// 「我的」顶部是照片，使用浅色图标；其余四个主 Tab 都是浅色背景，必须使用深色
   /// 图标。子路由的 AppBar 仍可用更靠前的 AnnotatedRegion 覆盖本样式。
   static SystemUiOverlayStyle systemUiOverlayStyleForTab(int tabIndex) {
-    final statusStyle =
-        tabIndex == 4 ? SystemUiOverlayStyle.light : SystemUiOverlayStyle.dark;
+    final statusStyle = tabIndex == 4
+        ? SystemUiOverlayStyle.light
+        : SystemUiOverlayStyle.dark;
     return statusStyle.copyWith(
       statusBarColor: Colors.transparent,
       systemNavigationBarColor: AppTheme.surfaceCard,
@@ -788,7 +954,7 @@ class _AppShellState extends State<AppShell> {
   /// Chat 运行态只在用户首次打开聊天 Tab 时创建。广场、用户、钱包或公民页启动
   /// 不得因为构造 ChatSdk 而进入 Chat 的文件、密钥或网络生命周期。
   sdk.ChatSdk get _chatRuntimeForTab => _chatRuntime ??=
-      (widget.chatRuntimeFactory ?? () => citizenChatRuntime)();
+      (widget.chatRuntimeFactory ?? () => context.read<sdk.ChatSdk>())();
 
   @override
   void initState() {

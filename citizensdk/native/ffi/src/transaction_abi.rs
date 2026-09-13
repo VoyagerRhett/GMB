@@ -490,13 +490,12 @@ pub unsafe extern "C" fn citizensdk_transaction_execution_consume_qr_response(
                             &worker_session_id,
                             &response,
                         )
-                        .map_err(|error| {
+                        .inspect_err(|_| {
                             let _ = crate::qr_abi::cancel_unified_signing_session(
                                 runtime.handle(),
                                 &worker_session_id,
                             );
                             let _ = runtime.engine().cancel_transaction_execution(id);
-                            error
                         })?;
                         let request_cancellation = request_cancellation.ok_or_else(|| {
                             FfiError::internal(
@@ -1016,9 +1015,16 @@ fn transaction_history_status(
     }
 }
 
+type TransactionExecutionInfo<'a> = (
+    CitizenSdkTransactionExecutionInfo,
+    &'a [u8],
+    &'a [u8],
+    &'a [u8],
+);
+
 fn transaction_execution_info(
     execution: &TransactionExecutionPayload,
-) -> FfiResult<(CitizenSdkTransactionExecutionInfo, &[u8], &[u8], &[u8])> {
+) -> FfiResult<TransactionExecutionInfo<'_>> {
     match execution {
         TransactionExecutionPayload::ExternalPending(pending) => Ok((
             CitizenSdkTransactionExecutionInfo {

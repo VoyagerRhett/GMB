@@ -388,6 +388,9 @@ mod enabled {
             .is_some_and(|store| store.cancel(session_id)))
     }
 
+    /// # Safety
+    /// `text` 必须在调用期间可读；`out_required` 必须可写。`output` 非空时必须可写
+    /// `output_capacity` 字节，且不能与其它参数非法重叠。
     #[no_mangle]
     pub unsafe extern "C" fn citizensdk_qr_parse(
         handle: CitizenSdkHandle,
@@ -404,6 +407,9 @@ mod enabled {
         })
     }
 
+    /// # Safety
+    /// `signer_account_id` 必须指向可读账户；`review_payload` 必须在调用期间可读；
+    /// `out_required` 及按容量提供的 `output` 必须指向有效可写内存。
     #[no_mangle]
     pub unsafe extern "C" fn citizensdk_qr_create_sign_request(
         handle: CitizenSdkHandle,
@@ -446,6 +452,8 @@ mod enabled {
         })
     }
 
+    /// # Safety
+    /// `text` 必须在同步复制期间可读，`out_request_id` 必须指向可写请求编号。
     #[no_mangle]
     pub unsafe extern "C" fn citizensdk_review_qr_sign_request(
         handle: CitizenSdkHandle,
@@ -509,6 +517,8 @@ mod enabled {
         })
     }
 
+    /// # Safety
+    /// `review_result` 必须是当前实例仍持有的结果句柄，`out_request_id` 必须可写。
     #[no_mangle]
     pub unsafe extern "C" fn citizensdk_sign_qr_request(
         handle: CitizenSdkHandle,
@@ -593,6 +603,8 @@ mod enabled {
         })
     }
 
+    /// # Safety
+    /// `out_required` 必须可写；`output` 非空时必须可写 `output_capacity` 字节。
     #[no_mangle]
     pub unsafe extern "C" fn citizensdk_result_copy_qr(
         result: CitizenSdkResultHandle,
@@ -614,6 +626,8 @@ mod enabled {
         })
     }
 
+    /// # Safety
+    /// `text` 必须在调用期间可读，`out_signature` 必须至少可写 64 字节。
     #[no_mangle]
     pub unsafe extern "C" fn citizensdk_qr_consume_sign_response(
         handle: CitizenSdkHandle,
@@ -652,6 +666,8 @@ mod enabled {
         })
     }
 
+    /// # Safety
+    /// `request_id` 必须在调用期间可读，`out_cancelled` 必须至少可写 1 字节。
     #[no_mangle]
     pub unsafe extern "C" fn citizensdk_qr_cancel_sign_request(
         handle: CitizenSdkHandle,
@@ -672,6 +688,9 @@ mod enabled {
         })
     }
 
+    /// # Safety
+    /// `account_id` 必须指向可读账户；`out_required` 及按容量提供的 `output`
+    /// 必须指向有效可写内存。
     #[no_mangle]
     pub unsafe extern "C" fn citizensdk_qr_encode_account_id(
         handle: CitizenSdkHandle,

@@ -1,10 +1,11 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:citizenapp/log/app_log.dart';
 
-import 'package:citizenapp/rpc/chain_rpc.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/my/util/amount_format.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 钱包详情页主视觉中的链上余额区。
@@ -16,9 +17,16 @@ import 'package:citizenapp/ui/app_layout.dart';
 /// - 加载态:金额位显示「— 元」占位。
 /// - 错误态:金额位显示「查询失败,点击刷新」,点击触发 [refresh()]。
 class WalletOnchainBalanceCard extends StatefulWidget {
-  const WalletOnchainBalanceCard({super.key, required this.wallet});
+  const WalletOnchainBalanceCard({
+    super.key,
+    required this.wallet,
+    this.balanceLoader,
+  });
 
-  final WalletProfile wallet;
+  final CitizenWalletStateAccount wallet;
+
+  /// Widget 测试可注入；正式页面始终从 CitizenSDK finalized 余额接口读取。
+  final Future<CitizenAccountBalance> Function(String accountId)? balanceLoader;
 
   @override
   State<WalletOnchainBalanceCard> createState() =>
@@ -28,8 +36,6 @@ class WalletOnchainBalanceCard extends StatefulWidget {
 /// State 类公开(去掉下划线)是为了支持外层 [GlobalKey] 引用,
 /// 下拉刷新时由 [WalletDetailPage] 通过 key 调 [refresh()]。
 class WalletOnchainBalanceCardState extends State<WalletOnchainBalanceCard> {
-  final ChainRpc _chainRpc = ChainRpc();
-
   /// 查询结果(yuan),null 表示尚未查询或加载中。
   double? _balance;
 
@@ -56,9 +62,11 @@ class WalletOnchainBalanceCardState extends State<WalletOnchainBalanceCard> {
       _hasError = false;
     });
     try {
-      final total = await _chainRpc.fetchFinalizedTotalBalance(
-        widget.wallet.accountId,
-      );
+      final loader =
+          widget.balanceLoader ??
+          context.read<CitizenSdk>().chain.getAccountBalance;
+      final snapshot = await loader(widget.wallet.accountId);
+      final total = snapshot.totalFen.toDouble() / 100;
       if (!mounted) return;
       setState(() {
         _balance = total;

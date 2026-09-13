@@ -1394,7 +1394,9 @@ citizenchain-node-macos-v1.2.3/citizenchain-node-macOS-v1.2.3.dmg"
     // 所有 GitHub 下载地址必须来自现行唯一仓库，不能只检查某条正确地址存在。
     assert_eq!(
         serve_source.matches("https://github.com/").count(),
-        serve_source.matches("https://github.com/VoyagerRhett/GMB/").count(),
+        serve_source
+            .matches("https://github.com/VoyagerRhett/GMB/")
+            .count(),
     );
 
     let swift_source_path =
@@ -1416,7 +1418,9 @@ citizenchain-node-macos-v1.2.3/citizenchain-node-macOS-v1.2.3.dmg"
     }
     assert_eq!(
         swift_source.matches("https://github.com/").count(),
-        swift_source.matches("https://github.com/VoyagerRhett/GMB/").count(),
+        swift_source
+            .matches("https://github.com/VoyagerRhett/GMB/")
+            .count(),
     );
     for forbidden in [
         "\"release_tag\": input.releaseTag",
@@ -1908,9 +1912,10 @@ fn flutter_products_use_shared_scanner_adapter() {
         let pubspec = repo_root.join(product).join("pubspec.yaml");
         let text = fs::read_to_string(&pubspec)
             .unwrap_or_else(|e| panic!("读取 {} 失败: {e}", pubspec.display()));
-        if product != "citizenwallet" && text
-            .lines()
-            .any(|line| line.trim_start().starts_with("mobile_scanner:"))
+        if product != "citizenwallet"
+            && text
+                .lines()
+                .any(|line| line.trim_start().starts_with("mobile_scanner:"))
         {
             violations.push(format!(
                 "{product}/pubspec.yaml: Flutter 产品必须依赖 {product}/packages/scanner-flutter,禁止直连 mobile_scanner"
@@ -1924,7 +1929,9 @@ fn flutter_products_use_shared_scanner_adapter() {
             let text = fs::read_to_string(path)
                 .unwrap_or_else(|e| panic!("读取 {} 失败: {e}", path.display()));
             if text.contains("package:mobile_scanner/mobile_scanner.dart")
-                && !(product == "citizenwallet" && path.ends_with("lib/qr/scanner/mobile_scanner_backend.dart")) {
+                && !(product == "citizenwallet"
+                    && path.ends_with("lib/qr/scanner/mobile_scanner_backend.dart"))
+            {
                 let display = path.strip_prefix(&repo_root).unwrap_or(path).display();
                 violations.push(format!(
                     "{display}: Flutter 产品禁止直接导入 mobile_scanner"
@@ -2086,7 +2093,14 @@ fn product_ci_runs_shared_scanner_gates() {
         let text = fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("读取 {} 失败: {e}", path.display()));
         for required in [
-            &format!("working-directory: {}", if product == "citizenwallet" { product.to_owned() } else { format!("{product}/packages/scanner-flutter") }),
+            &format!(
+                "working-directory: {}",
+                if product == "citizenwallet" {
+                    product.to_owned()
+                } else {
+                    format!("{product}/packages/scanner-flutter")
+                }
+            ),
             "flutter analyze",
             "flutter test",
         ] {

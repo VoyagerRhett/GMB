@@ -1074,6 +1074,65 @@ fn create_add_accounts_usability_and_local_signing_form_one_complete_lifecycle()
 }
 
 #[test]
+fn application_key_is_deterministic_domain_separated_and_rejects_cold_accounts() {
+    use citizen_sdk_contracts::Modules;
+
+    block_on(async {
+        let harness = Harness::new();
+        let (profile, _) = create_confirmed(&harness.service, WalletWordCount::Words12, "").await;
+        let engine = harness.engine(Modules::try_new(Modules::WALLET | Modules::SIGNING).unwrap());
+        let account = profile.master_account_id();
+        let first = engine
+            .derive_application_key(account, [7; 32], b"consumer.example/data".to_vec())
+            .await
+            .unwrap();
+        let repeated = engine
+            .derive_application_key(account, [7; 32], b"consumer.example/data".to_vec())
+            .await
+            .unwrap();
+        let other = engine
+            .derive_application_key(account, [8; 32], b"consumer.example/data".to_vec())
+            .await
+            .unwrap();
+        let first_bytes = first.with_secret(ToOwned::to_owned);
+        let repeated_bytes = repeated.with_secret(ToOwned::to_owned);
+        let other_bytes = other.with_secret(ToOwned::to_owned);
+        assert_eq!(first_bytes.len(), 32);
+        assert_eq!(first_bytes, repeated_bytes);
+        assert_ne!(first_bytes, other_bytes);
+
+        let cold = AccountId32::from_bytes([0xc1; 32]);
+        harness
+            .service
+            .import_cold_account(cold, "独立外部设备")
+            .await
+            .unwrap();
+        assert_contract_code(
+            engine
+                .derive_application_key(cold, [7; 32], vec![1])
+                .await
+                .expect_err("冷账户不得进入本机派生"),
+            ContractErrorCode::Unsupported,
+        );
+        assert_contract_code(
+            engine
+                .derive_application_key(account, [7; 32], Vec::new())
+                .await
+                .expect_err("空 info 必须失败"),
+            ContractErrorCode::InvalidArgument,
+        );
+        assert_contract_code(
+            engine
+                .derive_application_key(account, [7; 32], vec![0; 257])
+                .await
+                .expect_err("超长 info 必须失败"),
+            ContractErrorCode::InvalidArgument,
+        );
+        engine.dispose().unwrap();
+    });
+}
+
+#[test]
 fn import_uses_the_same_verified_account_and_missing_ciphertext_is_not_usable() {
     block_on(async {
         let harness = Harness::new();

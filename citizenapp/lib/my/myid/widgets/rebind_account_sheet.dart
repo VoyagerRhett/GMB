@@ -1,7 +1,9 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'package:flutter/material.dart';
 
 import 'package:citizenapp/ui/app_theme.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart' show Account;
+import 'package:citizen_sdk/citizen_sdk.dart' show CitizenWalletStateAccount;
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 弹出“更换公民号绑定的账户”底部面板：从本地其他账户中挑选新的签名账户。
@@ -10,7 +12,7 @@ import 'package:citizenapp/ui/app_layout.dart';
 /// ([MyIdService.rebindCidTo])承接;目标账户已由调用方过滤掉当前身份账户。
 Future<String?> showRebindAccountSheet(
   BuildContext context, {
-  required List<Account> targets,
+  required List<CitizenWalletStateAccount> targets,
 }) {
   return showModalBottomSheet<String>(
     context: context,
@@ -22,7 +24,7 @@ Future<String?> showRebindAccountSheet(
 class RebindAccountSheet extends StatelessWidget {
   const RebindAccountSheet({super.key, required this.targets});
 
-  final List<Account> targets;
+  final List<CitizenWalletStateAccount> targets;
 
   static String _shortAddress(String value) {
     if (value.length <= 18) return value;
@@ -109,7 +111,7 @@ class _AccountOption extends StatelessWidget {
     required this.onTap,
   });
 
-  final Account account;
+  final CitizenWalletStateAccount account;
   final String shortAddress;
   final VoidCallback onTap;
 
@@ -136,7 +138,7 @@ class _AccountOption extends StatelessWidget {
                     children: [
                       Flexible(
                         child: Text(
-                          account.accountName,
+                          account.name,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(

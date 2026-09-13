@@ -9,15 +9,6 @@ enum QrRouteType {
   /// 收款码 - 一笔收款请求(user_transfer)
   userTransfer,
 
-  /// 账户码 - 账户(account_id_code);钱包没有码,账户才有码
-  accountIdCode,
-
-  /// 交易签名请求(sign_request)
-  signRequest,
-
-  /// 交易签名响应(sign_response)
-  signResponse,
-
   /// 冷钱包账户数据用途钥加密响应(account_data_key_response)
   accountDataKeyResponse,
 
@@ -52,14 +43,18 @@ class QrRouter {
       try {
         final env = QrEnvelope.parse(text);
         final type = switch (env.kind) {
-          QrKind.signRequest => QrRouteType.signRequest,
-          QrKind.signResponse => QrRouteType.signResponse,
+          // 通用签名请求、响应和账户码由 CitizenSDK 解析；App 路由器只识别业务码。
+          QrKind.signRequest || QrKind.signResponse || QrKind.accountIdCode =>
+            QrRouteType.unknown,
           QrKind.userContact => QrRouteType.userContact,
           QrKind.userTransfer => QrRouteType.userTransfer,
-          QrKind.accountIdCode => QrRouteType.accountIdCode,
           QrKind.accountDataKeyResponse => QrRouteType.accountDataKeyResponse,
         };
-        return QrRouteResult(type: type, raw: raw, envelope: env);
+        return QrRouteResult(
+          type: type,
+          raw: raw,
+          envelope: type == QrRouteType.unknown ? null : env,
+        );
       } on FormatException {
         // 非规范 QR_V1 一律拒绝，不进入任何旧格式兜底。
       }

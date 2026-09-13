@@ -13,7 +13,7 @@ void main() {
   });
 
   group('QrRouter QR_V1', () {
-    test('should route login sign_request', () {
+    test('通用 sign_request 不进入 CitizenApp 业务路由', () {
       final raw = jsonEncode({
         'p': QrProtocol.qrV1,
         'k': QrKind.signRequest.code,
@@ -27,8 +27,8 @@ void main() {
         ).toJson(),
       });
       final result = router.route(raw);
-      expect(result.type, QrRouteType.signRequest);
-      expect(result.envelope, isNotNull);
+      expect(result.type, QrRouteType.unknown);
+      expect(result.envelope, isNull);
     });
 
     test('should route user_transfer', () {
@@ -102,7 +102,7 @@ void main() {
       expect(router.route(extra).type, QrRouteType.unknown);
     });
 
-    test('should route sign_request', () {
+    test('链交易 sign_request 不进入 CitizenApp 业务路由', () {
       final raw = jsonEncode({
         'p': QrProtocol.qrV1,
         'k': QrKind.signRequest.code,
@@ -116,7 +116,7 @@ void main() {
         ).toJson(),
       });
       final result = router.route(raw);
-      expect(result.type, QrRouteType.signRequest);
+      expect(result.type, QrRouteType.unknown);
     });
 
     test('should reject removed account scheme', () {
@@ -148,7 +148,7 @@ void main() {
       expect(result.type, QrRouteType.unknown);
     });
 
-    test('should route account_id_code', () {
+    test('通用账户码不进入 CitizenApp 业务路由', () {
       final raw = jsonEncode({
         'p': QrProtocol.qrV1,
         'k': QrKind.accountIdCode.code,
@@ -158,10 +158,8 @@ void main() {
         },
       });
       final result = router.route(raw);
-      expect(result.type, QrRouteType.accountIdCode);
-      expect(result.envelope, isNotNull);
-      expect(result.envelope!.id, isNull);
-      expect(result.envelope!.expiresAt, isNull);
+      expect(result.type, QrRouteType.unknown);
+      expect(result.envelope, isNull);
     });
 
     test('should reject legacy chat_node_pairing payload on k=5', () {

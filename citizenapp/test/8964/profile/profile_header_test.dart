@@ -12,7 +12,6 @@ import 'package:citizenapp/8964/profile/widgets/profile_category_tabs.dart';
 import 'package:citizenapp/8964/profile/widgets/profile_header_card.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/my/membership/subscription_service.dart';
-import 'package:citizenapp/my/myid/current_user_context.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/identity_badge.dart';
 
@@ -22,19 +21,15 @@ const String _profileCidNumber = 'CN001-CTZN-000000001-2026';
 
 /// 身份账户缓存 fake：resolve/accountId 返回 null，让 _resolveOwnAccount 回退成
 /// 「非本人」（行为与迁移前一致）；避免 instance 触发真链读/真 Isar。
-class _NullIdentityCache extends CurrentUserContext {
-  @override
-  Future<CurrentUser?> resolve() async => null;
-  @override
-  Future<String?> accountId() async => null;
-}
-
-class _NullMembershipSnapshotService extends SubscriptionService {
+class _NullMembershipSnapshotService implements SubscriptionService {
   @override
   Future<MembershipDisplaySnapshot?> readDisplaySnapshot(
     String cidNumber,
   ) async =>
       null;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 Widget _wrap({
@@ -68,19 +63,12 @@ Widget _wrap({
       initialMembershipState: initialMembershipState,
       subscriptionService:
           subscriptionService ?? _NullMembershipSnapshotService(),
+      viewerAccountLoader: () async => null,
     ),
   );
 }
 
 void main() {
-  setUp(() {
-    CurrentUserContext.debugInstance = _NullIdentityCache();
-  });
-
-  tearDown(() {
-    CurrentUserContext.resetDebugInstance();
-  });
-
   testWidgets('公开昵称、公民号、三项关系和四类内容计数按身份语义展示', (tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(411, 914);
@@ -673,6 +661,8 @@ void main() {
           api: FakeProfileApi(sampleProfile(displayName: '轻节点')),
           cache: FakeProfileCache(),
           sessionProvider: FakeSessionProvider(fakeSession()),
+          subscriptionService: _NullMembershipSnapshotService(),
+          viewerAccountLoader: () async => null,
           onOpenDirectChat: (context,
               {required peerUserId, required title}) {
             peer = peerUserId;
@@ -701,6 +691,7 @@ void main() {
           api: FakeProfileApi(sampleProfile(displayName: '轻节点')),
           cache: FakeProfileCache(),
           sessionProvider: FakeSessionProvider(fakeSession()),
+          subscriptionService: _NullMembershipSnapshotService(),
           // 浏览者账户 == 主页账户 = 他人视角看自己 → 按钮应置灰。
           viewerAccountLoader: () async => kOwner,
           onOpenDirectChat: (context,

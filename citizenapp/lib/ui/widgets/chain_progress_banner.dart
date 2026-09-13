@@ -1,11 +1,10 @@
 import 'dart:async';
 import 'dart:io' show Platform;
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:citizenapp/log/app_log.dart';
-import 'package:smoldot/smoldot.dart' show LightClientStatusSnapshot;
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/rpc/smoldot_client.dart';
+import 'package:provider/provider.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
@@ -33,11 +32,11 @@ class ChainProgressBanner extends StatefulWidget {
   /// 默认关闭；不可见调用方仍会读取链状态并回传给业务门禁。
   final bool showInlineStatus;
   final Duration pollInterval;
-  final ValueChanged<LightClientStatusSnapshot?>? onProgressChanged;
+  final ValueChanged<CitizenChainSyncStatus?>? onProgressChanged;
   final ValueChanged<String?>? onErrorChanged;
 
-  /// 专项测试注入；生产固定走 [ChainRpc.fetchChainProgress]。
-  final Future<LightClientStatusSnapshot> Function()? progressLoader;
+  /// 专项测试注入；生产直接读取 [CitizenChain.getSyncStatus]。
+  final Future<CitizenChainSyncStatus> Function()? progressLoader;
 
   @override
   State<ChainProgressBanner> createState() => _ChainProgressBannerState();
@@ -45,10 +44,8 @@ class ChainProgressBanner extends StatefulWidget {
 
 class _ChainProgressBannerState extends State<ChainProgressBanner>
     with SingleTickerProviderStateMixin {
-  final ChainRpc _chainRpc = ChainRpc();
-
   late final AnimationController _breathingController;
-  LightClientStatusSnapshot? _progress;
+  CitizenChainSyncStatus? _progress;
   String? _error;
   Timer? _pollTimer;
   String? _lastLoggedProgress;
@@ -100,7 +97,7 @@ class _ChainProgressBannerState extends State<ChainProgressBanner>
 
     try {
       final progress = await (widget.progressLoader?.call() ??
-          _chainRpc.fetchChainProgress());
+          context.read<CitizenSdk>().chain.getSyncStatus());
       if (!mounted) return;
       _logProgressTransition(progress);
       setState(() {
@@ -113,7 +110,7 @@ class _ChainProgressBannerState extends State<ChainProgressBanner>
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = SmoldotClientManager.instance.buildUserFacingError(e);
+        _error = _chainErrorMessage(e);
       });
       widget.onProgressChanged?.call(_progress);
       widget.onErrorChanged?.call(_error);
@@ -133,37 +130,20 @@ class _ChainProgressBannerState extends State<ChainProgressBanner>
     });
   }
 
-  void _logProgressTransition(LightClientStatusSnapshot progress) {
-    final signature = '${progress.syncPhase.wireValue}/'
-        '${progress.isSyncing}/'
+  void _logProgressTransition(CitizenChainSyncStatus progress) {
+    final signature = '${progress.isSyncing}/'
         '${progress.isUsable}/'
-        '${progress.warpRequestCount}/'
-        '${progress.warpReceivedFragmentCount}/'
-        '${progress.warpVerifiedFragmentCount}/'
-        '${progress.warpRejectedFragmentCount}/'
-        '${progress.warpLastFailure?.wireValue}/'
-        '${progress.finalizedBlockNumber}';
+        '${progress.peerCount}/'
+        '${progress.best.number}/'
+        '${progress.finalized.number}';
     if (_lastLoggedProgress == signature) return;
     _lastLoggedProgress = signature;
     AppLog.d(
-      '[SmoldotStatus] phase=${progress.syncPhase.wireValue}, '
-      'syncing=${progress.isSyncing}, '
+      '[CitizenSDK] syncing=${progress.isSyncing}, '
       'usable=${progress.isUsable}, '
-      'source=${progress.startupFinalizedSource?.wireValue}, '
-      'startup=#${progress.startupFinalizedBlockNumber}, '
-      'peer_finalized=#${progress.highestPeerFinalizedBlockNumber}, '
-      'verified=#${progress.currentVerifiedFinalizedBlockNumber}, '
-      'warp_target=#${progress.warpTargetFinalizedBlockNumber}, '
-      'requests=${progress.warpRequestCount}, '
-      'active_fragments=${progress.activeWarpFragmentRequestCount}, '
-      'active_storage=${progress.activeWarpStorageRequestCount}, '
-      'active_call_proof=${progress.activeWarpCallProofRequestCount}, '
-      'received=${progress.warpReceivedFragmentCount}, '
-      'verified=${progress.warpVerifiedFragmentCount}, '
-      'rejected=${progress.warpRejectedFragmentCount}, '
-      'last_failure=${progress.warpLastFailure?.wireValue}, '
-      'best=#${progress.bestBlockNumber}, '
-      'surface_finalized=#${progress.finalizedBlockNumber}',
+      'peers=${progress.peerCount}, '
+      'best=#${progress.best.number}, '
+      'finalized=#${progress.finalized.number}',
     );
   }
 
@@ -180,7 +160,7 @@ class _ChainProgressBannerState extends State<ChainProgressBanner>
   bool get _isTestProcess => Platform.environment.containsKey('FLUTTER_TEST');
 
   ({Color color, String semanticsStatus}) _resolveState({
-    required LightClientStatusSnapshot? progress,
+    required CitizenChainSyncStatus? progress,
     required String? error,
   }) {
     if (error != null) {
@@ -193,11 +173,11 @@ class _ChainProgressBannerState extends State<ChainProgressBanner>
   }
 
   Widget _buildInlineStatus({
-    required LightClientStatusSnapshot? progress,
+    required CitizenChainSyncStatus? progress,
     required String? error,
   }) {
     final state = _resolveState(progress: progress, error: error);
-    final finalizedBlockNumber = progress?.currentVerifiedFinalizedBlockNumber;
+    final finalizedBlockNumber = progress?.finalized.number;
     final detail = '最终区块 ${finalizedBlockNumber ?? '—'}';
 
     return Semantics(
@@ -294,5 +274,12 @@ class _ChainProgressBannerState extends State<ChainProgressBanner>
         ),
       ),
     );
+  }
+
+  String _chainErrorMessage(Object error) {
+    if (error is CitizenSdkException && error.message.isNotEmpty) {
+      return error.message;
+    }
+    return '公民链状态暂时不可用';
   }
 }

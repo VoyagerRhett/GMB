@@ -1,3 +1,4 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:citizenapp/isar/wallet_isar.dart';
@@ -5,35 +6,30 @@ import 'package:citizenapp/my/user/contact_book_page.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/transaction/onchain-transaction/onchain_payment_page.dart';
 import 'package:citizenapp/transaction/personal-manage/personal_account_entry.dart';
-import 'package:citizenapp/transaction/history/data/local_tx_store.dart';
+import 'package:citizenapp/transaction/history/local_tx_store.dart';
 import 'package:citizenapp/transaction/transaction_tab_page.dart';
 import 'package:citizenapp/ui/widgets/chain_progress_banner.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
-import 'package:citizenapp/wallet/core/sign_mode.dart';
 
 const _walletAAccountId =
     '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const _walletBAccountId =
     '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 
-WalletProfile _wallet({
+CitizenWalletStateAccount _wallet({
   required int index,
   required String name,
   required String address,
   required String accountId,
 }) {
-  return WalletProfile(
+  return CitizenWalletStateAccount(
+    signMode: CitizenWalletSignMode.hot,
     walletIndex: index,
-    walletName: name,
-    walletIcon: '',
-    balance: 100,
+    accountIndex: index,
+    name: name,
     ss58Address: address,
     accountId: accountId,
-    alg: 'sr25519',
-    ss58: 2027,
-    createdAtMillis: index,
-    source: 'test',
-    signMode: SignMode.hot,
+    createdAtMillis: BigInt.from(index),
+    isDefault: true,
   );
 }
 
@@ -72,10 +68,19 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets('交易页顶栏显示链状态，入口只剩多签账户卡片，扫码收进收款地址框', (tester) async {
+    ContactPickMode? openedContactMode;
     await tester.pumpWidget(
       MaterialApp(
         theme: AppTheme.lightTheme,
-        home: const TransactionTabPage(),
+        home: TransactionTabPage(
+          currentWalletLoader: () async => null,
+          localRecordsLoader: (_, {limit = 100}) async => const [],
+          balanceLoader: (_) async => 0,
+          contactPageBuilder: (mode) {
+            openedContactMode = mode;
+            return const Scaffold(body: Text('通讯录测试页'));
+          },
+        ),
       ),
     );
     await tester.pump();
@@ -97,23 +102,17 @@ void main() {
     expect(find.textContaining('更新中'), findsNothing);
     expect(find.textContaining('连接失败'), findsNothing);
     expect(
-      find.byKey(
-        const ValueKey<String>('transaction-chain-status-inline'),
-      ),
+      find.byKey(const ValueKey<String>('transaction-chain-status-inline')),
       findsOneWidget,
     );
     final centerGap = tester.getRect(
-      find.byKey(
-        const ValueKey<String>('transaction-chain-status-center-gap'),
-      ),
+      find.byKey(const ValueKey<String>('transaction-chain-status-center-gap')),
     );
     final screenWidth = tester.getSize(find.byType(Scaffold).first).width;
     expect(centerGap.center.dx, closeTo(screenWidth / 2, 0.01));
     // 交易顶栏状态不再使用原卡片中的竖线。
     expect(
-      find.byKey(
-        const ValueKey<String>('transaction-chain-status-divider'),
-      ),
+      find.byKey(const ValueKey<String>('transaction-chain-status-divider')),
       findsNothing,
     );
     // 顶部入口只剩多签账户一张独立卡片：不再是双入口，故也不再有中间竖线。
@@ -136,13 +135,10 @@ void main() {
     expect(find.byTooltip('扫码填入收款地址'), findsOneWidget);
 
     await tester.tap(find.byTooltip('我的通讯录'));
-    await _pumpUntilFound(tester, find.byType(ContactBookPage));
-    final contacts = tester.widget<ContactBookPage>(
-      find.byType(ContactBookPage),
-    );
+    await _pumpUntilFound(tester, find.text('通讯录测试页'));
     // 交易入口只声明“选择收款人”意图，页面不再接收当前付款钱包账户。
-    expect(contacts.mode, ContactPickMode.pickForTransfer);
-    Navigator.of(tester.element(find.byType(ContactBookPage))).pop();
+    expect(openedContactMode, ContactPickMode.pickForTransfer);
+    Navigator.of(tester.element(find.text('通讯录测试页'))).pop();
     await tester.pump(const Duration(milliseconds: 300));
   });
 
@@ -204,9 +200,11 @@ void main() {
         home: OnchainPaymentPanel(
           title: '交易',
           currentWalletLoader: () async => currentWallet,
+          balanceLoader: (_) async => 100,
           localRecordsLoader: (accountId, {limit = 100}) async {
-            final normalizedAccountId =
-                LocalTxStore.requireAccountId(accountId);
+            final normalizedAccountId = LocalTxStore.requireAccountId(
+              accountId,
+            );
             return records
                 .where((record) => record.accountId == normalizedAccountId)
                 .take(limit)
@@ -251,6 +249,7 @@ void main() {
           title: '交易',
           initialToAddress: recipient,
           currentWalletLoader: () async => payer,
+          balanceLoader: (_) async => 100,
           localRecordsLoader: (_, {limit = 100}) async => const [],
         ),
       ),
@@ -302,6 +301,7 @@ void main() {
             walletLoads++;
             return payer;
           },
+          balanceLoader: (_) async => 100,
           localRecordsLoader: (_, {limit = 100}) async {
             recordLoads++;
             return const [];
@@ -314,9 +314,7 @@ void main() {
     // 独立链上支付页只保留后台状态读取；下拉刷新组件仍就位。
     expect(find.byType(ChainProgressBanner), findsOneWidget);
     expect(
-      find.byKey(
-        const ValueKey<String>('transaction-chain-status-inline'),
-      ),
+      find.byKey(const ValueKey<String>('transaction-chain-status-inline')),
       findsNothing,
     );
     expect(find.text('公民链'), findsNothing);
@@ -329,11 +327,13 @@ void main() {
 
     // 下拉触发刷新：余额（currentWalletLoader）+ 本地记录（localRecordsLoader）重载。
     await tester.fling(find.byType(ListView).first, const Offset(0, 300), 1000);
-    for (var i = 0;
-        i < 40 &&
-            (walletLoads <= walletLoadsAfterInit ||
-                recordLoads <= recordLoadsAfterInit);
-        i++) {
+    for (
+      var i = 0;
+      i < 40 &&
+          (walletLoads <= walletLoadsAfterInit ||
+              recordLoads <= recordLoadsAfterInit);
+      i++
+    ) {
       await tester.pump(const Duration(milliseconds: 50));
     }
 

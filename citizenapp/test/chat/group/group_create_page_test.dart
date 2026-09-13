@@ -5,13 +5,15 @@ import 'package:citizenapp/my/user/contact_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-class _PendingContacts extends UserContactService {
-  _PendingContacts() : super(autoSync: false);
+class _PendingContacts implements UserContactService {
 
   final Completer<List<UserContact>> completer = Completer<List<UserContact>>();
 
   @override
   Future<List<UserContact>> getContacts() => completer.future;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 void main() {

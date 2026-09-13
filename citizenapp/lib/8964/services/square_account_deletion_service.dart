@@ -1,8 +1,7 @@
 import 'package:citizenapp/8964/profile/services/citizen_profile_cache.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/8964/services/square_post_store.dart';
-import 'package:citizenapp/chat/tatachat_sdk_adapter.dart';
-import 'package:citizenapp/wallet/core/device_subkey.dart';
+import 'package:citizenapp/security/device_subkey.dart';
 import 'package:tatachat_sdk/tatachat_sdk.dart';
 
 /// 注销用户编排：签名验删服务端全部数据 → 尽最大努力清理全部本地残留。
@@ -22,17 +21,17 @@ class SquareAccountLocalCleanupException implements Exception {
 
 class SquareAccountDeletionService {
   SquareAccountDeletionService({
+    required ChatSdk chatRuntime,
     SquareApiClient? apiClient,
     CitizenProfileCache? profileCache,
     CitizenProfileMediaCache? profileMediaCache,
     DeviceSubkey? deviceSubkey,
-    ChatSdk? chatRuntime,
     SquareLocalPostBulkDeletionStore? localPostStore,
   })  : _api = apiClient ?? SquareApiClient(),
         _profileCache = profileCache ?? const CitizenProfileCache(),
         _profileMediaCache = profileMediaCache ?? CitizenProfileMediaCache(),
         _deviceSubkey = deviceSubkey ?? DeviceSubkey(),
-        _chatRuntime = chatRuntime ?? citizenChatRuntime,
+        _chatRuntime = chatRuntime,
         _localPostStore = localPostStore ?? const SquarePostStore();
 
   final SquareApiClient _api;

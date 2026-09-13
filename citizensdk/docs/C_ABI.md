@@ -1,6 +1,6 @@
 # CitizenSDK C ABI contract
 
-当前闭集为 117 个 Core 函数、Linux/Windows 各 17 个 Host 函数，另有 3 个 ZXing-C++
+当前闭集为 121 个 Core 函数、Linux/Windows 各 17 个 Host 函数，另有 3 个 ZXing-C++
 图像窄包装函数。六模块运行期选择复用
 同一 Rust 装配；旧 ABI v1 结构/数值与默认构造保持。模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
 
@@ -9,7 +9,7 @@
 入队，任何发送都不得持有 enqueue 锁等待宿主回调；结果所有权及一次释放合同不变。
 prepared transaction 恢复复用同一通用执行闭环，不新增 raw extrinsic 返回值或恢复符号。
 
-第 1.9 步不扩张 ABI；第 1.10.3 步只增加一个结果失败阶段 getter。三类业务形状消费者与独立 external signer 共享同一个 117 符号 Core、
+第 1.9 步不扩张 ABI；第 1.10.3 步只增加一个结果失败阶段 getter。本次增加 keys page、Runtime API、应用派生钥及其结果 getter四项。三类业务形状消费者与独立 external signer 共享同一个 121 符号 Core、
 Linux/Windows 各 17 符号 Host 和 Apple 3 符号 QR 图像面。消费者夹具只使用正式根公开入口；
 业务 storage、event 与 RuntimeCall codec 不得进入 C ABI、result kind 或平台 Host。
 
@@ -30,7 +30,7 @@ QR 协议、审阅、签名与结果入口、8 个统一钱包状态/冷账户�
 默认账户授权入口；第 1.4 步再增加同步状态、finalized 块解析、Header/Body、System.Events
 以及对应结果读取 10 个入口；第 1.5 步增加通用交易准备 3 个入口，第 1.6 步增加通用冷热执行
 闭环 4 个入口形成 121 个；第 1.7 步以 4 个通用 execution history 入口替换 8 个业务入口，
-第 1.8 步删除业务二维码编码入口；第 1.10.3 步增加失败阶段 getter 后当前共 117 个。
+第 1.8 步删除业务二维码编码入口；第 1.10.3 步增加失败阶段 getter，本次增加四项通用底层入口后当前共 121 个。
 QR 解析和会话时间由 Core 管理；公开结构通过有界 UTF-8 JSON 复制。
 异步审阅结果由 `citizensdk_review_qr_sign_request` 创建，由 `citizensdk_sign_qr_request`
 一次消费，均使用原结果注册表、事件及释放合同；`citizensdk_result_copy_qr` 只复制公开内容。
@@ -43,7 +43,7 @@ The Step 7.1 Linux C/C++ Host source projection also consumes this exact ABI.
 Its header-only C++ facade does not define another binary contract, and its Host
 library must not re-export or duplicate the Core symbols. Step 7.4 includes
 the official Linux Flutter registration and both LinuxARM/LinuxAMD projections
-in the same-version candidate contract. 当前合同为 117 个 Core 函数、17 个 Host 函数与 3 个 QR 图像函数；
+in the same-version candidate contract. 当前合同为 121 个 Core 函数、17 个 Host 函数与 3 个 QR 图像函数；
 actual platform builds and execution
 remain subject to the later unified GitHub CI/Release validation.
 源码候选合并 27 项同版安装件；Hosted 只增加 12 项 plugin 输入，不携带 Host 私有实现，
@@ -86,6 +86,20 @@ buffer limit is never permission to release an otherwise owned result.
 `citizensdk_result_get_block_header`、`citizensdk_result_get_block_body_info`、
 `citizensdk_result_copy_block_body_extrinsic`。它们与既有 best/finalized head、storage、
 runtime context、state import/export 共用一个 `VerifiedChainClient`，不会建立第二条 RPC 路径。
+
+本次直接投影 smoldot 已有能力，增加 `citizensdk_get_storage_keys_paged` 与
+`citizensdk_call_runtime_api`。前者只接收准确 finalized block、1..4 KiB prefix、可选排他
+start key 和 1..1000 limit，结果复用 `STORAGE_BATCH` 逐项读取且每项必须存在；后者只接收
+准确 verified block、1..128 ASCII `Trait_method` 与最大 1 MiB opaque arguments，结果复用
+必须 present 的 `STORAGE_VALUE`。两者都不开放任意 JSON-RPC method/params，也不解释业务字节。
+
+钱包侧增加 `citizensdk_derive_application_key` 与
+`citizensdk_result_get_application_key`。只允许当前 SDK 热账户在既有设备认证和金库边界内执行
+HKDF-SHA256；salt 恰好 32 字节、info 为 1..256 字节、结果 kind 29 恰好 32 字节。冷账户返回
+unsupported，由独立外部设备提供材料；结果不持久化，不登记宿主业务用途。
+
+事件值 6 为 `CITIZENSDK_EVENT_FINALIZED_BLOCK_CHANGED`，结果句柄只包含一个 kind 1 的 verified
+finalized block，并沿现有有界队列和一次释放合同投影；它复用 chain monitor 唯一订阅。
 
 `CHAIN_SYNC_STATUS`、`BLOCK_HEADER`、`BLOCK_BODY` 依次追加为 result kind 24、25、26；旧值不变。
 Header digest、body extrinsic 和 metadata/database 采用两段读取或逐项读取。调用方必须先取得
@@ -469,7 +483,7 @@ not permit a private-key export, raw signer, or persistent secret callback.
 
 ## Windows 薄 Host（第 8.1 步）
 
-当前为 117 项公开 Core 根符号，既有数值/布局不变；跨库另有精确四项 SDK 内部查看控制。Windows 另固定 17 项 `citizensdk_host_*`，
+当前为 121 项公开 Core 根符号，既有数值/布局不变；跨库另有精确四项 SDK 内部查看控制。Windows 另固定 17 项 `citizensdk_host_*`，
 配置平台 owner 字段为 `void *hwnd`，配置/钱包请求/公开结果分别为 72/32/16 字节。
 Host 独占 Core 所有权；应用不能直接销毁借用 handle 或替换内部事件回调。关闭在 Core
 释放后还要等待 UI 线程确认 HWND 退休，BUSY 时保留完整资源图。根 ABI 不增加秘密旁路。

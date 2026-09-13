@@ -36,7 +36,7 @@ final class RecordingChain extends StrictPublicPort implements CitizenChain {
   }
 }
 
-final class RecordingWallet extends StrictPublicPort implements CitizenWallet {
+final class RecordingWallet extends StrictPublicPort implements CitizenSdkWallet {
   @override
   Future<CitizenWalletState> getState() async => CitizenWalletState(
     revision: BigInt.from(3),

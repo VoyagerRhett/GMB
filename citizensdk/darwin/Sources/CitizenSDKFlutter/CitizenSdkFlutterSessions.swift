@@ -301,6 +301,14 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
         case let .storageBatch(_, _, block, keys): run(session, request, result) {
             [try await session.sdk.storageBatch(block, keys: keys).map(CitizenSdkFlutterCodec.optionalBytes)]
         }
+        case let .storageKeysPage(_, _, block, prefix, startKey, limit):
+            run(session, request, result) {
+                [try await session.sdk.storageKeysPaged(
+                    block, prefix: prefix, startKey: startKey, limit: limit)]
+            }
+        case let .runtimeAPI(_, _, block, method, arguments): run(session, request, result) {
+            [try await session.sdk.callRuntimeAPI(block, method: method, arguments: arguments)]
+        }
         case let .importState(_, _, state): run(session, request, result) {
             try await session.sdk.importState(state); return []
         }
@@ -323,6 +331,10 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
         }
         case let .sign(_, _, accountID, payload): run(session, request, result) {
             [CitizenSdkFlutterCodec.signature(try await session.sdk.signing.sign(accountID: accountID, message: payload))]
+        }
+        case let .deriveApplicationKey(_, _, accountID, salt, info): run(session, request, result) {
+            [try await session.sdk.deriveApplicationKey(
+                accountID: accountID, salt: salt, info: info)]
         }
         case let .beginSigning(_, _, intent): run(session, request, result) {
             [CitizenSdkFlutterCodec.signingOutcome(try await session.sdk.signing.begin(intent))]
@@ -503,6 +515,10 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
         switch event {
         case .historyChanged:
             emit(session, type: "historyChanged", payload: [], expectedGeneration: expectedGeneration)
+        case let .finalizedBlockChanged(_, finalized):
+            emit(session, type: "finalizedBlockChanged",
+                 payload: [CitizenSdkFlutterCodec.block(finalized)],
+                 expectedGeneration: expectedGeneration)
         case let .lifecycleChanged(_, lifecycle):
             emit(session, type: "lifecycleChanged", payload: [CitizenSdkFlutterCodec.lifecycle(lifecycle)],
                  expectedGeneration: expectedGeneration)

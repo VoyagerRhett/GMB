@@ -1,3 +1,6 @@
+import 'package:provider/provider.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:async';
 import 'package:flutter_chat_core/flutter_chat_core.dart';
 import 'package:flutter_chat_ui/flutter_chat_ui.dart';
@@ -20,6 +23,7 @@ import 'package:citizenapp/my/membership/membership_revision.dart';
 import 'package:citizenapp/my/membership/subscription_service.dart';
 import 'package:citizenapp/my/myid/citizen_identity_chain_reader.dart';
 import 'package:citizenapp/my/myid/current_user_context.dart';
+import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
 import 'package:citizenapp/my/myid/register_identity_flow.dart';
 import 'package:citizenapp/my/user/contact_book_page.dart';
 import 'package:citizenapp/my/user/contact_service.dart';
@@ -28,21 +32,21 @@ import 'package:citizenapp/transaction/onchain-transaction/onchain_payment_page.
 import 'package:citizenapp/ui/app_layout.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/widgets/identity_register_guide.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/wallet/widgets/wallet_qr_dialog.dart';
 
-typedef CitizenChatDownloadAttachmentCallback = Future<ChatDownloadedAttachment>
-    Function(
-  String conversationId,
-  String controlPlaintext,
-);
-typedef CitizenChatResolveMediaPathsCallback = Future<Map<String, String>>
-    Function(
-  String conversationId,
-  List<ChatContent> contents,
-);
-typedef ChatResolvePeerAddressCallback = Future<String> Function(
-    String peerUserId);
+typedef CitizenChatDownloadAttachmentCallback =
+    Future<ChatDownloadedAttachment> Function(
+      String conversationId,
+      String controlPlaintext,
+    );
+typedef CitizenChatResolveMediaPathsCallback =
+    Future<Map<String, String>> Function(
+      String conversationId,
+      List<ChatContent> contents,
+    );
+typedef ChatResolvePeerAddressCallback =
+    Future<String> Function(String peerUserId);
 
 /// CitizenApp 的产品宿主薄层；完整会话页面与通用交互由 TataChatSDK 提供。
 class CitizenChatPage extends StatelessWidget {
@@ -127,7 +131,7 @@ class CitizenChatPage extends StatelessWidget {
       onDownloadAttachment: onDownloadAttachment == null
           ? null
           : (controlPlaintext) =>
-              onDownloadAttachment!(conversationId, controlPlaintext),
+                onDownloadAttachment!(conversationId, controlPlaintext),
       onResolveMediaPaths: onResolveMediaPaths == null
           ? null
           : (contents) => onResolveMediaPaths!(conversationId, contents),
@@ -186,7 +190,8 @@ ChatConversationHost _citizenConversationHost({
     mediaLimits: const CitizenChatMediaLimitPolicy(),
     canSend: ChatMediaLimits.chatAuthorizedFor,
     unavailableMessage: (userId) {
-      final resolved = ChatMediaLimits.authorizationResolvedFor(userId) &&
+      final resolved =
+          ChatMediaLimits.authorizationResolvedFor(userId) &&
           ChatMediaLimits.resolvedFor(userId);
       return resolved ? '尚未开通会员，订阅任一会员后即可使用聊天' : '暂时无法验证会员状态，请稍后重试';
     },
@@ -222,8 +227,9 @@ ChatConversationHost _citizenConversationHost({
       if (resolvePeerAddress != null) {
         ss58Address = await resolvePeerAddress(targetUserId);
       } else {
-        final binding = await CitizenIdentityChainReader()
-            .readBindingByCidNumber(targetUserId);
+        final binding = await CitizenIdentityChainReader(
+          chain: context.read<CitizenSdk>().chain,
+        ).readBindingByCidNumber(targetUserId);
         if (binding == null) {
           throw StateError('对方 CID 当前没有有效钱包绑定');
         }
@@ -286,12 +292,12 @@ class _CitizenChatHeaderState extends State<_CitizenChatHeader> {
       widget.profileCache ?? const CitizenProfileCache();
   late final CitizenProfileMediaCache _profileMediaCache =
       widget.profileMediaCache ?? CitizenProfileMediaCache();
-  late final SquareSessionProvider _sessionProvider =
-      widget.sessionProvider ?? SquareSessionProvider.instance;
+  late final SquareSessionProvider? _sessionProvider;
   CitizenProfile? _profile;
   CitizenProfileMediaSnapshot _media = const CitizenProfileMediaSnapshot();
   SquareSession? _session;
   bool _resolved = false;
+  bool _dependenciesReady = false;
 
   @override
   void initState() {
@@ -300,6 +306,15 @@ class _CitizenChatHeaderState extends State<_CitizenChatHeader> {
     _media = widget.initialProfileMedia ?? const CitizenProfileMediaSnapshot();
     _resolved = widget.initialProfile != null;
     CitizenProfileCache.revision.addListener(_onRevision);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    _sessionProvider =
+        widget.sessionProvider ?? context.read<SquareSessionProvider?>();
+    _dependenciesReady = true;
     if (!widget.isGroup) unawaited(_load());
   }
 
@@ -328,8 +343,10 @@ class _CitizenChatHeaderState extends State<_CitizenChatHeader> {
 
   Future<void> _load() async {
     if (_profile == null) await _readCache();
+    final sessionProvider = _sessionProvider;
+    if (sessionProvider == null) return;
     try {
-      final session = await _sessionProvider.ensureSession();
+      final session = await sessionProvider.ensureSession();
       final profile = await _profileApi.fetchProfile(
         widget.peerUserId,
         session: session,
@@ -357,6 +374,7 @@ class _CitizenChatHeaderState extends State<_CitizenChatHeader> {
           isSelf: false,
           initialProfile: _profile,
           initialProfileMedia: _media,
+          sessionProvider: _sessionProvider,
         ),
       ),
     );
@@ -437,13 +455,13 @@ String _shortAccount(String value) {
   return '${value.substring(0, 8)}...${value.substring(value.length - 6)}';
 }
 
-typedef ChatSendTextFactory = ChatSendTextCallback? Function(
-    String peerUserId, String conversationId);
+typedef ChatSendTextFactory =
+    ChatSendTextCallback? Function(String peerUserId, String conversationId);
 typedef ChatSyncFactory = ChatSyncCallback? Function(String peerUserId);
-typedef ChatSendMediaFactory = ChatSendMediaCallback? Function(
-    String peerUserId, String conversationId);
-typedef ChatDownloadAttachmentFactory = CitizenChatDownloadAttachmentCallback?
-    Function(String peerUserId);
+typedef ChatSendMediaFactory =
+    ChatSendMediaCallback? Function(String peerUserId, String conversationId);
+typedef ChatDownloadAttachmentFactory =
+    CitizenChatDownloadAttachmentCallback? Function(String peerUserId);
 
 /// 聊天页加号菜单 5 个动作的可注入入口。
 ///
@@ -475,7 +493,7 @@ class ChatEntryOpeners {
 }
 
 /// 加号菜单单个动作的入口签名；默认钱包等依赖一律由真实实现内部解析，
-/// 注入替身时不触碰 WalletManager / Isar / 相机。
+/// 注入替身时不触碰 CitizenSDK 钱包、Isar 或相机。
 typedef ChatEntryOpener = Future<void> Function(BuildContext context);
 
 /// 公民“聊天”Tab。
@@ -486,7 +504,7 @@ class ChatTab extends StatefulWidget {
   ChatTab({
     super.key,
     ChatStore? store,
-    WalletManager? walletManager,
+    this.wallet,
     this.cidNumber,
     this.accountId,
     this.sendTextFactory,
@@ -503,11 +521,10 @@ class ChatTab extends StatefulWidget {
     this.sessionProvider,
     this.contactService,
     this.subscriptionService,
-  })  : store = store ?? ChatStore(),
-        walletManager = walletManager ?? WalletManager();
+  }) : store = store ?? ChatStore();
 
   final ChatStore store;
-  final WalletManager walletManager;
+  final CitizenSdkWallet? wallet;
   final String? cidNumber;
   final String? accountId;
   final ChatSendTextFactory? sendTextFactory;
@@ -542,12 +559,12 @@ class _ChatTabState extends State<ChatTab> {
       widget.profileCache ?? const CitizenProfileCache();
   late final CitizenProfileMediaCache _profileMediaCache =
       widget.profileMediaCache ?? CitizenProfileMediaCache();
-  late final SquareSessionProvider _sessionProvider =
-      widget.sessionProvider ?? SquareSessionProvider.instance;
-  late final SubscriptionService _subscriptionService =
-      widget.subscriptionService ?? SubscriptionService();
-  late final UserContactService _contactService = widget.contactService ??
-      UserContactService(walletManager: widget.walletManager);
+  SquareSessionProvider? _sessionProvider;
+  SubscriptionService? _subscriptionService;
+  UserContactService? _contactService;
+  CitizenSdkWallet? _wallet;
+  AccountSecurityService? _accountSecurity;
+  bool _dependenciesReady = false;
   final Map<String, CitizenProfile> _peerProfiles = <String, CitizenProfile>{};
   final Map<String, CitizenProfileMediaSnapshot> _peerProfileMedia =
       <String, CitizenProfileMediaSnapshot>{};
@@ -578,9 +595,49 @@ class _ChatTabState extends State<ChatTab> {
     _listController.start(visible: _isTabSelected);
     MembershipRevision.instance.listenable.addListener(_onMembershipChanged);
     widget.selectedTab?.addListener(_onSelectedTabChanged);
-    WalletManager.walletsRevision.addListener(_onWalletsChanged);
     CitizenProfileCache.revision.addListener(_onProfileRevision);
     WidgetsBinding.instance.addPostFrameCallback((_) => _requestCoordinate());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    if (widget.cidNumber != null && widget.accountId != null) {
+      _wallet = widget.wallet;
+      _sessionProvider = widget.sessionProvider;
+      _subscriptionService = widget.subscriptionService;
+      _contactService = widget.contactService;
+      _dependenciesReady = true;
+      return;
+    }
+    final sdk = context.read<CitizenSdk>();
+    final accountSecurity = context.read<AccountSecurityService>();
+    final currentUserContext = context.read<CurrentUserContext>();
+    final identityResolver = context.read<FinalizedIdentityResolver>();
+    _wallet = widget.wallet ?? sdk.wallet;
+    _sessionProvider =
+        widget.sessionProvider ?? context.read<SquareSessionProvider>();
+    _subscriptionService =
+        widget.subscriptionService ??
+        SubscriptionService(
+          wallet: _wallet!,
+          chain: sdk.chain,
+          transactions: sdk.transactions,
+          identityResolver: identityResolver,
+          sessionProvider: _sessionProvider!,
+        );
+    _contactService =
+        widget.contactService ??
+        UserContactService(
+          accountSecurity: accountSecurity,
+          currentUserContext: currentUserContext,
+          sessionProvider: _sessionProvider!,
+          chainReader: CitizenIdentityChainReader(chain: sdk.chain),
+        );
+    _accountSecurity = accountSecurity;
+    accountSecurity.revision.addListener(_onWalletsChanged);
+    _dependenciesReady = true;
   }
 
   @override
@@ -597,7 +654,7 @@ class _ChatTabState extends State<ChatTab> {
   void dispose() {
     MembershipRevision.instance.listenable.removeListener(_onMembershipChanged);
     CitizenProfileCache.revision.removeListener(_onProfileRevision);
-    WalletManager.walletsRevision.removeListener(_onWalletsChanged);
+    _accountSecurity?.revision.removeListener(_onWalletsChanged);
     widget.selectedTab?.removeListener(_onSelectedTabChanged);
     _listController.dispose();
     super.dispose();
@@ -656,13 +713,12 @@ class _ChatTabState extends State<ChatTab> {
 
   List<ChatConversationPreview> _withoutDeletingConversations(
     Iterable<ChatConversationPreview> conversations,
-  ) =>
-      conversations
-          .where(
-            (preview) =>
-                !_conversationDeletesInFlight.contains(preview.conversationId),
-          )
-          .toList(growable: false);
+  ) => conversations
+      .where(
+        (preview) =>
+            !_conversationDeletesInFlight.contains(preview.conversationId),
+      )
+      .toList(growable: false);
 
   Future<void> _reload({bool syncFirst = false}) async {
     if (!_isActive) {
@@ -697,7 +753,7 @@ class _ChatTabState extends State<ChatTab> {
       if (ownerUserId.isEmpty) {
         // 默认账户未注册 CID 是合法状态；禁止回退到其他账户，必须在此
         // 短路。会话存储读取第一步就要解析密钥绑定,对未注册身份必抛
-        // WalletAuthException,catch 成 _error 横幅后会盖住注册引导;轮询/realtime
+        // AccountSecurityException,catch 成 _error 横幅后会盖住注册引导;轮询/realtime
         // 同样是注定失败的空转。渲染层 `_cidNumber.isEmpty` 分支显示统一注册引导。
         _pauseSync();
         return;
@@ -750,19 +806,22 @@ class _ChatTabState extends State<ChatTab> {
     int reloadGeneration,
   ) async {
     if (cidNumber.isEmpty) return;
+    final subscriptionService = _subscriptionService;
+    final sessionProvider = _sessionProvider;
+    if (subscriptionService == null || sessionProvider == null) return;
     // 展示先恢复上一次服务端确认的本地快照，避免每次进入页面先显示无会员；
     // 随后的服务端鉴权仍由 authorizeMembership 在同一登录会话内严格去重一次。
-    await _subscriptionService.readDisplaySnapshot(cidNumber);
+    await subscriptionService.readDisplaySnapshot(cidNumber);
     if (mounted &&
         reloadGeneration == _reloadGeneration &&
         cidNumber == _cidNumber) {
       setState(() {});
     }
     try {
-      final session = _profileSession ?? await _sessionProvider.ensureSession();
+      final session = _profileSession ?? await sessionProvider.ensureSession();
       if (session == null || session.cidNumber.trim() != cidNumber) return;
       _profileSession = session;
-      await _subscriptionService.authorizeMembership(session);
+      await subscriptionService.authorizeMembership(session);
     } on Exception {
       // 展示仍可复用本地快照，但发送授权必须由本次会话的 CitizenServe 结果确认。
       ChatMediaLimits.markAuthorizationUnavailable(cidNumber);
@@ -828,9 +887,11 @@ class _ChatTabState extends State<ChatTab> {
   ) async {
     final ownerUserId = _cidNumber;
     if (ownerUserId.isEmpty) return;
+    final contactService = _contactService;
+    if (contactService == null) return;
     final peers = _directPeerCidNumbers(conversations).toSet();
     try {
-      final contacts = await _contactService.getContacts();
+      final contacts = await contactService.getContacts();
       if (!mounted || _cidNumber != ownerUserId) return;
       final remarks = <String, String>{
         for (final contact in contacts)
@@ -855,14 +916,17 @@ class _ChatTabState extends State<ChatTab> {
   ) async {
     final cidNumbers = _directPeerCidNumbers(conversations).toList();
     if (cidNumbers.isEmpty || !mounted) return;
+    final sessionProvider = _sessionProvider;
+    if (sessionProvider == null) return;
     try {
-      _profileSession ??= await _sessionProvider.ensureSession();
+      _profileSession ??= await sessionProvider.ensureSession();
     } on Exception {
       return;
     }
     for (var offset = 0; offset < cidNumbers.length; offset += 4) {
-      final end =
-          offset + 4 < cidNumbers.length ? offset + 4 : cidNumbers.length;
+      final end = offset + 4 < cidNumbers.length
+          ? offset + 4
+          : cidNumbers.length;
       final batch = cidNumbers.sublist(offset, end);
       await Future.wait(
         batch.map((cidNumber) async {
@@ -976,7 +1040,8 @@ class _ChatTabState extends State<ChatTab> {
         return (cidNumber: current.userId, accountId: current.accountId);
       }
     }
-    final identity = await CurrentUserContext.instance.resolve();
+    if (!mounted) return (cidNumber: '', accountId: '');
+    final identity = await context.read<CurrentUserContext>().resolve();
     return (
       cidNumber: identity?.cidNumber ?? '',
       accountId: identity?.accountId ?? '',
@@ -1093,7 +1158,8 @@ class _ChatTabState extends State<ChatTab> {
   bool _requireChatMembership() {
     if (ChatMediaLimits.chatAuthorizedFor(_cidNumber)) return true;
     setState(() {
-      _error = ChatMediaLimits.authorizationResolvedFor(_cidNumber) &&
+      _error =
+          ChatMediaLimits.authorizationResolvedFor(_cidNumber) &&
               ChatMediaLimits.resolvedFor(_cidNumber)
           ? '尚未开通会员，订阅任一会员后即可使用聊天'
           : '暂时无法验证会员状态，请稍后重试';
@@ -1124,7 +1190,12 @@ class _ChatTabState extends State<ChatTab> {
       await opener(context);
       return;
     }
-    final wallet = await widget.walletManager.getDefaultWallet();
+    final walletPort = _wallet;
+    if (walletPort == null) {
+      setState(() => _error = '请先在「我的 → 我的钱包」添加钱包账户');
+      return;
+    }
+    final wallet = (await walletPort.getState()).defaultAccount;
     if (!mounted) return;
     await openScanDispatchFlow(context: context, paymentWallet: wallet);
   }
@@ -1140,7 +1211,12 @@ class _ChatTabState extends State<ChatTab> {
       await opener(context);
       return;
     }
-    final wallet = await widget.walletManager.getDefaultWallet();
+    final walletPort = _wallet;
+    if (walletPort == null) {
+      setState(() => _error = '请先在「我的 → 我的钱包」添加钱包账户');
+      return;
+    }
+    final wallet = (await walletPort.getState()).defaultAccount;
     if (!mounted) return;
     if (wallet == null) {
       setState(() => _error = '请先在「我的 → 我的钱包」添加钱包账户');
@@ -1149,7 +1225,7 @@ class _ChatTabState extends State<ChatTab> {
     await showWalletQrDialog(
       context,
       accountId: wallet.accountId,
-      accountName: wallet.walletName,
+      accountName: wallet.name,
     );
   }
 
@@ -1193,6 +1269,7 @@ class _ChatTabState extends State<ChatTab> {
           store: widget.store,
           cidNumber: _cidNumber,
           accountId: _accountId,
+          contactService: _contactService,
         ),
       ),
     );
@@ -1223,77 +1300,80 @@ class _ChatTabState extends State<ChatTab> {
               peerUserId: preview.peerUserId,
               title: preview.title,
               store: widget.store,
-              onSendText: widget.sendTextFactory?.call(
+              onSendText:
+                  widget.sendTextFactory?.call(
                     preview.peerUserId,
                     preview.conversationId,
                   ) ??
                   (widget.runtime == null
                       ? null
                       : (text) => widget.runtime!.sendText(
-                            peerUserId: preview.peerUserId,
-                            conversationId: preview.conversationId,
-                            text: text,
-                          )),
-              onSendMedia: widget.sendMediaFactory?.call(
+                          peerUserId: preview.peerUserId,
+                          conversationId: preview.conversationId,
+                          text: text,
+                        )),
+              onSendMedia:
+                  widget.sendMediaFactory?.call(
                     preview.peerUserId,
                     preview.conversationId,
                   ) ??
                   (widget.runtime == null
                       ? null
                       : (media, {onLocalCommitted}) =>
-                          widget.runtime!.sendMedia(
-                            peerUserId: preview.peerUserId,
-                            conversationId: preview.conversationId,
-                            media: media,
-                            onLocalCommitted: onLocalCommitted,
-                          )),
+                            widget.runtime!.sendMedia(
+                              peerUserId: preview.peerUserId,
+                              conversationId: preview.conversationId,
+                              media: media,
+                              onLocalCommitted: onLocalCommitted,
+                            )),
               onSendSticker: widget.runtime == null
                   ? null
                   : (packId, stickerId) => widget.runtime!.sendSticker(
-                        peerUserId: preview.peerUserId,
-                        conversationId: preview.conversationId,
-                        packId: packId,
-                        stickerId: stickerId,
-                      ),
+                      peerUserId: preview.peerUserId,
+                      conversationId: preview.conversationId,
+                      packId: packId,
+                      stickerId: stickerId,
+                    ),
               onResolveMediaPaths: widget.runtime == null
                   ? null
                   : (String conversationId, List<ChatContent> contents) =>
-                      widget.runtime!.resolveCachedMediaPaths(
-                        conversationId: conversationId,
-                        contents: contents,
-                      ),
+                        widget.runtime!.resolveCachedMediaPaths(
+                          conversationId: conversationId,
+                          contents: contents,
+                        ),
               onDownloadAttachment:
                   widget.downloadAttachmentFactory?.call(preview.peerUserId) ??
-                      (widget.runtime == null
-                          ? null
-                          : (String conversationId, String controlPlaintext) =>
-                              widget.runtime!.downloadAttachment(
-                                conversationId: conversationId,
-                                controlPlaintext: controlPlaintext,
-                              )),
-              onSync: widget.syncFactory?.call(preview.peerUserId) ??
+                  (widget.runtime == null
+                      ? null
+                      : (String conversationId, String controlPlaintext) =>
+                            widget.runtime!.downloadAttachment(
+                              conversationId: conversationId,
+                              controlPlaintext: controlPlaintext,
+                            )),
+              onSync:
+                  widget.syncFactory?.call(preview.peerUserId) ??
                   (widget.runtime == null
                       ? null
                       : () => widget.runtime!.retryOutgoing(
-                            conversationId: preview.conversationId,
-                            recipientUserId: preview.peerUserId,
-                          )),
+                          conversationId: preview.conversationId,
+                          recipientUserId: preview.peerUserId,
+                        )),
               onStartRealtime: widget.runtime == null
                   ? null
                   : ({required onNotice, onDisconnected}) =>
-                      widget.runtime!.startRealtimeSync(
-                        onNotice: onNotice,
-                        onDisconnected: onDisconnected,
-                        retryOutgoingOnConnect: false,
-                      ),
+                        widget.runtime!.startRealtimeSync(
+                          onNotice: onNotice,
+                          onDisconnected: onDisconnected,
+                          retryOutgoingOnConnect: false,
+                        ),
               onDeleteConversation: () =>
                   _deleteConversationInBackground(preview.conversationId),
               onMarkRead: widget.runtime == null
                   ? null
                   : (readThroughMillis) => widget.runtime!.markConversationRead(
-                        conversationId: preview.conversationId,
-                        readThroughMillis: readThroughMillis,
-                      ),
+                      conversationId: preview.conversationId,
+                      readThroughMillis: readThroughMillis,
+                    ),
               initialProfile: _peerProfiles[preview.peerUserId],
               initialProfileMedia: _peerProfileMedia[preview.peerUserId],
               profileApi: _profileApi,
@@ -1385,11 +1465,11 @@ class _ChatTabState extends State<ChatTab> {
             style: style,
           )
         : _cidNumber.isEmpty
-            ? IdentityRegisterGuide(
-                description: '注册后即可使用聊天与通讯录。',
-                onRegistered: _requestCoordinate,
-              )
-            : null;
+        ? IdentityRegisterGuide(
+            description: '注册后即可使用聊天与通讯录。',
+            onRegistered: _requestCoordinate,
+          )
+        : null;
     return ChatConversationOverview(
       header: ChatSectionHeader<_ChatEntryAction>(
         onAction: _onEntryAction,
@@ -1498,11 +1578,12 @@ Future<bool> _confirmDeleteConversationList(BuildContext context) async {
 }
 
 /// 群聊打开器；测试可注入替身，正式运行走 [openGroupChat]。
-typedef GroupChatOpener = Future<void> Function(
-  BuildContext context, {
-  required String groupId,
-  required String title,
-});
+typedef GroupChatOpener =
+    Future<void> Function(
+      BuildContext context, {
+      required String groupId,
+      required String title,
+    });
 
 /// 聊天搜索页：一个输入框，三段结果 —— 会话 / 联系人 / 聊天记录。
 ///
@@ -1540,8 +1621,8 @@ class ChatSearchPage extends StatefulWidget {
 
 class _ChatSearchPageState extends State<ChatSearchPage> {
   late final ChatStore _store = widget.store ?? ChatStore();
-  late final UserContactService _contactService =
-      widget.contactService ?? UserContactService();
+  UserContactService? _contactService;
+  bool _dependenciesReady = false;
   final TextEditingController _controller = TextEditingController();
 
   String _accountId = '';
@@ -1562,6 +1643,15 @@ class _ChatSearchPageState extends State<ChatSearchPage> {
   @override
   void initState() {
     super.initState();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    _contactService =
+        widget.contactService ?? _contactServiceFromContextOrNull(context);
+    _dependenciesReady = true;
     unawaited(_load());
   }
 
@@ -1575,7 +1665,7 @@ class _ChatSearchPageState extends State<ChatSearchPage> {
     try {
       final identity = widget.cidNumber != null && widget.accountId != null
           ? null
-          : await CurrentUserContext.instance.resolve();
+          : await context.read<CurrentUserContext>().resolve();
       final accountId = widget.accountId ?? identity?.accountId ?? '';
       final cidNumber = widget.cidNumber ?? identity?.cidNumber ?? '';
       final conversations = await _store.readConversationPreviews(
@@ -1584,7 +1674,8 @@ class _ChatSearchPageState extends State<ChatSearchPage> {
       );
       List<UserContact> contacts;
       try {
-        contacts = await _contactService.getContacts();
+        contacts =
+            await _contactService?.getContacts() ?? const <UserContact>[];
       } on Exception {
         // 通讯录读失败只让「联系人」段为空，不阻塞会话与聊天记录搜索。
         contacts = const <UserContact>[];
@@ -1795,9 +1886,9 @@ class GroupCreatePage extends StatefulWidget {
 
 class _GroupCreatePageState extends State<GroupCreatePage> {
   final TextEditingController _nameController = TextEditingController();
-  late final UserContactService _contactService =
-      widget.contactService ?? UserContactService();
-  late final ChatSdk _runtime = widget.runtime ?? citizenChatRuntime;
+  late final UserContactService _contactService;
+  ChatSdk? _runtime;
+  bool _dependenciesReady = false;
 
   List<UserContact> _contacts = const <UserContact>[];
   final Set<String> _selected = <String>{};
@@ -1809,6 +1900,16 @@ class _GroupCreatePageState extends State<GroupCreatePage> {
   void initState() {
     super.initState();
     _nameController.addListener(() => setState(() {}));
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    _contactService =
+        widget.contactService ?? _contactServiceFromContext(context);
+    _runtime = widget.runtime;
+    _dependenciesReady = true;
     _load();
   }
 
@@ -1848,7 +1949,8 @@ class _GroupCreatePageState extends State<GroupCreatePage> {
       _error = null;
     });
     try {
-      final group = await _runtime.createGroup(
+      final runtime = _runtime ??= context.read<ChatSdk>();
+      final group = await runtime.createGroup(
         name: _nameController.text.trim(),
         inviteeUserIds: _selected.toList(growable: false),
       );
@@ -1922,8 +2024,9 @@ class GroupManagePage extends StatefulWidget {
 }
 
 class _GroupManagePageState extends State<GroupManagePage> {
-  late final ChatSdk _runtime = widget.runtime ?? citizenChatRuntime;
+  ChatSdk? _runtime;
   late final ChatStore _store = widget.store ?? ChatStore();
+  bool _dependenciesReady = false;
 
   ChatGroup? _group;
   String _myCidNumber = '';
@@ -1934,6 +2037,14 @@ class _GroupManagePageState extends State<GroupManagePage> {
   @override
   void initState() {
     super.initState();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    _runtime = widget.runtime ?? context.read<ChatSdk?>();
+    _dependenciesReady = true;
     _load();
   }
 
@@ -1941,7 +2052,7 @@ class _GroupManagePageState extends State<GroupManagePage> {
     try {
       final identity = widget.cidNumber != null
           ? null
-          : await CurrentUserContext.instance.resolve();
+          : await context.read<CurrentUserContext>().resolve();
       final ownerUserId = widget.cidNumber ?? identity?.cidNumber ?? '';
       final group = await _store.readGroup(ownerUserId, widget.groupId);
       if (!mounted) return;
@@ -1960,6 +2071,8 @@ class _GroupManagePageState extends State<GroupManagePage> {
   }
 
   bool get _isAdmin => _group?.adminSet.contains(_myCidNumber) ?? false;
+
+  ChatSdk get _activeRuntime => _runtime ?? (throw StateError('聊天运行实例不可用'));
 
   Future<void> _run(Future<void> Function() action) async {
     if (_busy) return;
@@ -1984,7 +2097,7 @@ class _GroupManagePageState extends State<GroupManagePage> {
     );
     if (name != null && name.isNotEmpty) {
       await _run(
-        () => _runtime.renameGroup(groupId: widget.groupId, name: name),
+        () => _activeRuntime.renameGroup(groupId: widget.groupId, name: name),
       );
     }
   }
@@ -1994,7 +2107,7 @@ class _GroupManagePageState extends State<GroupManagePage> {
     final selected = await _pickContacts(existing);
     if (selected != null && selected.isNotEmpty) {
       await _run(
-        () => _runtime.addGroupMembers(
+        () => _activeRuntime.addGroupMembers(
           groupId: widget.groupId,
           inviteeUserIds: selected,
         ),
@@ -2004,7 +2117,7 @@ class _GroupManagePageState extends State<GroupManagePage> {
 
   Future<void> _leave() async {
     if (await showChatLeaveGroupDialog(context)) {
-      await _run(() => _runtime.leaveGroup(widget.groupId));
+      await _run(() => _activeRuntime.leaveGroup(widget.groupId));
       if (mounted) Navigator.of(context).pop();
     }
   }
@@ -2012,7 +2125,7 @@ class _GroupManagePageState extends State<GroupManagePage> {
   Future<List<String>?> _pickContacts(Set<String> exclude) async {
     List<UserContact> contacts;
     try {
-      contacts = await UserContactService().getContacts();
+      contacts = await _contactServiceFromContext(context).getContacts();
     } catch (_) {
       contacts = const <UserContact>[];
     }
@@ -2045,11 +2158,12 @@ class _GroupManagePageState extends State<GroupManagePage> {
               userId: member.cidNumber,
               displayName: _shortManageContact(member.cidNumber),
               isAdmin: member.isAdmin,
-              canRemove: _isAdmin &&
+              canRemove:
+                  _isAdmin &&
                   member.cidNumber != _myCidNumber &&
                   member.cidNumber != group.creatorCidNumber,
               onRemove: () => _run(
-                () => _runtime.removeGroupMembers(
+                () => _activeRuntime.removeGroupMembers(
                   groupId: widget.groupId,
                   targetUserIds: [member.cidNumber],
                 ),
@@ -2074,6 +2188,28 @@ String _shortManageContact(String address) {
   return '${address.substring(0, 8)}…${address.substring(address.length - 6)}';
 }
 
+UserContactService _contactServiceFromContext(BuildContext context) =>
+    _contactServiceFromContextOrNull(context) ?? (throw StateError('通讯录依赖不可用'));
+
+UserContactService? _contactServiceFromContextOrNull(BuildContext context) {
+  final accountSecurity = context.read<AccountSecurityService?>();
+  final currentUserContext = context.read<CurrentUserContext?>();
+  final sessionProvider = context.read<SquareSessionProvider?>();
+  final sdk = context.read<CitizenSdk?>();
+  if (accountSecurity == null ||
+      currentUserContext == null ||
+      sessionProvider == null ||
+      sdk == null) {
+    return null;
+  }
+  return UserContactService(
+    accountSecurity: accountSecurity,
+    currentUserContext: currentUserContext,
+    sessionProvider: sessionProvider,
+    chainReader: CitizenIdentityChainReader(chain: sdk.chain),
+  );
+}
+
 /// 打开群聊详情；产品身份解析留在 CitizenApp，完整页面链路由 SDK 路由组装。
 Future<void> openGroupChat(
   BuildContext context, {
@@ -2081,7 +2217,7 @@ Future<void> openGroupChat(
   required String title,
   ChatDeleteConversationCallback? onDeleteConversation,
 }) async {
-  final identity = await CurrentUserContext.instance.resolve();
+  final identity = await context.read<CurrentUserContext>().resolve();
   final accountId = identity?.accountId ?? '';
   final currentUserId = identity?.cidNumber ?? '';
   if (!context.mounted) return;
@@ -2095,7 +2231,7 @@ Future<void> openGroupChat(
   }
   await ChatConversationRoutes.openGroup(
     context,
-    sdk: citizenChatRuntime,
+    sdk: context.read<ChatSdk>(),
     host: _citizenConversationHost(
       peerUserId: groupId,
       title: title,
@@ -2109,11 +2245,12 @@ Future<void> openGroupChat(
   );
 }
 
-typedef DirectChatOpener = Future<void> Function(
-  BuildContext context, {
-  required String peerUserId,
-  required String title,
-});
+typedef DirectChatOpener =
+    Future<void> Function(
+      BuildContext context, {
+      required String peerUserId,
+      required String title,
+    });
 
 /// 打开私聊详情；产品身份与自聊门禁留在 CitizenApp，消息链路由 SDK 路由组装。
 Future<void> openDirectChat(
@@ -2121,7 +2258,7 @@ Future<void> openDirectChat(
   required String peerUserId,
   required String title,
 }) async {
-  final identity = await CurrentUserContext.instance.resolve();
+  final identity = await context.read<CurrentUserContext>().resolve();
   final accountId = identity?.accountId ?? '';
   final currentUserId = identity?.cidNumber ?? '';
   if (!context.mounted) return;
@@ -2143,7 +2280,7 @@ Future<void> openDirectChat(
   }
   await ChatConversationRoutes.openDirect(
     context,
-    sdk: citizenChatRuntime,
+    sdk: context.read<ChatSdk>(),
     host: _citizenConversationHost(
       peerUserId: peerUserId,
       title: title,

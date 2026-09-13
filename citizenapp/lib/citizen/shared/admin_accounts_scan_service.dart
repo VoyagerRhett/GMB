@@ -5,16 +5,16 @@
 // 产出已解码条目。调用方必须显式选择要扫描的分类管理员 pallet，个人多签只扫
 // `PersonalAdmins`，钱包管理员标签则扫描公权、私权和个人三类。
 //
-// 扫描走轻节点 smoldot 的**短前缀整表**(prefix = twox128(pallet) || twox128(storage),
+// 扫描直接调用 CitizenChain 的 finalized **短前缀分页**
+// (prefix = twox128(pallet) || twox128(storage),
 // 无嵌长 K1)。
 
 import 'package:flutter/foundation.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizenapp/log/app_log.dart';
 import 'package:polkadart/polkadart.dart' show Hasher;
 import 'package:citizenapp/citizen/proposal/admins-change/models/admin_account.dart';
 import 'package:citizenapp/citizen/shared/admin_account_storage_codec.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/rpc/smoldot_client.dart';
 
 /// 单条已解码的 AdminAccount 记录(地址 + 过滤所需字段)。
 @immutable
@@ -71,15 +71,15 @@ class AdminAccountsScanResult {
 /// 分类管理员 `AdminAccounts` 单次扫描服务。
 class AdminAccountsScanService {
   AdminAccountsScanService({
-    ChainRpc? chainRpc,
+    required CitizenChain chain,
     this.palletNames = const ['PersonalAdmins'],
-  }) : _rpc = chainRpc ?? ChainRpc() {
+  }) : _chain = chain {
     if (palletNames.isEmpty) {
       throw ArgumentError.value(palletNames, 'palletNames', '不能为空');
     }
   }
 
-  final ChainRpc _rpc;
+  final CitizenChain _chain;
 
   /// 本次扫描的分类管理员 pallet；只允许当前链上三张管理员表。
   final List<String> palletNames;
@@ -102,20 +102,21 @@ class AdminAccountsScanService {
   Future<AdminAccountsScanResult> scanAll({
     void Function(int scanned, int? total, int decoded)? onProgress,
   }) async {
-    final allKeys = <String>[];
-    final kindByKey = <String, int>{};
+    final finalized = await _chain.getFinalizedHead();
+    final allKeys = <Uint8List>[];
+    final kinds = <int>[];
     var partialFailure = false;
 
     for (final entry in _adminAccountsPrefixes()) {
-      final prefixHex = entry.prefixHex;
-      String? startKey;
+      Uint8List? startKey;
       while (true) {
-        List<String> page;
+        List<Uint8List> page;
         try {
-          page = await SmoldotClientManager.instance.getKeysPagedFinalized(
-            prefixHex,
-            count: _pageSize,
+          page = await _chain.getStorageKeysPaged(
+            finalized,
+            entry.prefix,
             startKey: startKey,
+            limit: _pageSize,
           );
         } catch (e) {
           AppLog.d('[AdminAccountsScan] getKeysPaged 失败: $e');
@@ -124,9 +125,7 @@ class AdminAccountsScanService {
         }
         if (page.isEmpty) break;
         allKeys.addAll(page);
-        for (final key in page) {
-          kindByKey[key] = entry.kind;
-        }
+        kinds.addAll(List<int>.filled(page.length, entry.kind));
         onProgress?.call(allKeys.length, null, 0);
         if (page.length < _pageSize) break;
         startKey = page.last;
@@ -138,23 +137,22 @@ class AdminAccountsScanService {
       final end = (start + _batchSize).clamp(0, allKeys.length);
       final batchKeys = allKeys.sublist(start, end);
 
-      Map<String, Uint8List?> values;
+      List<Uint8List?> values;
       try {
-        values = await _rpc.fetchStorageBatch(batchKeys);
+        values = await _chain.getStorageBatch(finalized, batchKeys);
       } catch (e) {
         AppLog.d('[AdminAccountsScan] fetchStorageBatch 失败: $e');
         partialFailure = true;
         continue;
       }
 
-      for (final keyHex in batchKeys) {
-        final value = values[keyHex];
+      for (var index = 0; index < batchKeys.length; index++) {
+        final keyBytes = batchKeys[index];
+        final value = values[index];
         if (value == null) continue;
-        final kind = kindByKey[keyHex];
-        if (kind == null) continue;
+        final kind = kinds[start + index];
         final decoded = AdminAccountStorageCodec.tryDecode(value, kind: kind);
         if (decoded == null) continue;
-        final keyBytes = _hexDecode(keyHex);
         if (kind == AdminAccountStorageCodec.kindPersonal) {
           final accountIdBytes =
               AdminAccountStorageCodec.extractPersonalAccountFromKey(keyBytes);
@@ -214,7 +212,7 @@ class AdminAccountsScanService {
   }
 
   /// 每个短 prefix 同时携带 pallet 决定的主体类型，禁止再从 value 猜 kind。
-  List<({String prefixHex, int kind})> _adminAccountsPrefixes() {
+  List<({Uint8List prefix, int kind})> _adminAccountsPrefixes() {
     final invalid =
         palletNames.where((name) => !_allowedPalletNames.contains(name));
     if (invalid.isNotEmpty) {
@@ -227,7 +225,7 @@ class AdminAccountsScanService {
     return palletNames
         .toSet()
         .map((palletName) => (
-              prefixHex: _adminAccountsPrefixHex(palletName),
+              prefix: _adminAccountsPrefix(palletName),
               kind: switch (palletName) {
                 'PublicAdmins' =>
                   AdminAccountStorageCodec.kindPublicInstitution,
@@ -240,24 +238,12 @@ class AdminAccountsScanService {
         .toList(growable: false);
   }
 
-  String _adminAccountsPrefixHex(String palletName) {
+  Uint8List _adminAccountsPrefix(String palletName) {
     final palletHash = Hasher.twoxx128.hashString(palletName);
     final storageHash = Hasher.twoxx128.hashString('AdminAccounts');
     final prefix = Uint8List(palletHash.length + storageHash.length);
     prefix.setAll(0, palletHash);
     prefix.setAll(palletHash.length, storageHash);
-    return '0x${_hexEncode(prefix)}';
+    return prefix;
   }
-
-  static Uint8List _hexDecode(String hex) {
-    final h = hex.startsWith('0x') ? hex.substring(2) : hex;
-    final bytes = Uint8List(h.length ~/ 2);
-    for (var i = 0; i < bytes.length; i++) {
-      bytes[i] = int.parse(h.substring(i * 2, i * 2 + 2), radix: 16);
-    }
-    return bytes;
-  }
-
-  static String _hexEncode(Uint8List bytes) =>
-      bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 }

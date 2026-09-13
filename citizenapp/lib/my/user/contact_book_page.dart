@@ -1,5 +1,8 @@
+import 'package:provider/provider.dart';
+
 import 'dart:async';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
@@ -13,6 +16,7 @@ import 'package:citizenapp/8964/profile/widgets/profile_avatar.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/chat/chat_entry.dart';
 import 'package:citizenapp/my/myid/current_user_context.dart';
+import 'package:citizenapp/my/myid/citizen_identity_chain_reader.dart';
 import 'package:citizenapp/my/myid/register_identity_flow.dart';
 import 'package:citizenapp/my/membership/membership_revision.dart';
 import 'package:citizenapp/my/user/contact_service.dart';
@@ -21,7 +25,7 @@ import 'package:citizenapp/transaction/onchain-transaction/onchain_payment_page.
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 import 'package:citizenapp/ui/widgets/identity_register_guide.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 
 /// 通讯录页使用模式。
 enum ContactPickMode {
@@ -49,6 +53,8 @@ class ContactBookPage extends StatefulWidget {
     this.initialProfiles = const <String, CitizenProfile>{},
     this.directChatOpener,
     this.transferOpener,
+    this.currentUserContext,
+    this.identityRevision,
   });
 
   /// 页面模式:浏览 / 选收款人 / 选私信对象;不改变通讯录所属身份账户。
@@ -60,6 +66,8 @@ class ContactBookPage extends StatefulWidget {
   final SquareSessionProvider? sessionProvider;
   final Map<String, CitizenProfile> initialProfiles;
   final DirectChatOpener? directChatOpener;
+  final CurrentUserContext? currentUserContext;
+  final Listenable? identityRevision;
 
   /// 测试可替换页面打开器；正式运行始终进入现有链上支付页面。
   final Future<void> Function(
@@ -73,16 +81,17 @@ class ContactBookPage extends StatefulWidget {
 }
 
 class _ContactBookPageState extends State<ContactBookPage> {
-  late final UserContactService _service =
-      widget.service ?? UserContactService();
+  late final UserContactService _service;
   late final CitizenProfileApi _profileApi =
       widget.profileApi ?? CitizenProfileApi();
   late final CitizenProfileCache _profileCache =
       widget.profileCache ?? const CitizenProfileCache();
   late final CitizenProfileMediaCache _profileMediaCache =
       widget.profileMediaCache ?? CitizenProfileMediaCache();
-  late final SquareSessionProvider _sessionProvider =
-      widget.sessionProvider ?? SquareSessionProvider.instance;
+  late final SquareSessionProvider _sessionProvider;
+  late final CurrentUserContext _currentUserContext;
+  Listenable? _identityRevision;
+  bool _dependenciesReady = false;
   final TextEditingController _searchController = TextEditingController();
 
   List<UserContact> _contacts = const <UserContact>[];
@@ -110,16 +119,55 @@ class _ContactBookPageState extends State<ContactBookPage> {
     super.initState();
     _profiles.addAll(widget.initialProfiles);
     _resolvedProfileCidNumbers.addAll(widget.initialProfiles.keys);
-    _service.syncState.addListener(_onSyncStateChanged);
-    WalletManager.walletsRevision.addListener(_onIdentityChanged);
     MembershipRevision.instance.listenable.addListener(_onMembershipChanged);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    final injectedService = widget.service;
+    final injectedSession = widget.sessionProvider;
+    final injectedCurrentUser = widget.currentUserContext;
+    if (injectedService != null &&
+        injectedSession != null &&
+        injectedCurrentUser != null) {
+      _service = injectedService;
+      _sessionProvider = injectedSession;
+      _currentUserContext = injectedCurrentUser;
+      _service.syncState.addListener(_onSyncStateChanged);
+      _identityRevision = widget.identityRevision;
+      _identityRevision?.addListener(_onIdentityChanged);
+      _dependenciesReady = true;
+      unawaited(_load());
+      return;
+    }
+    final accountSecurity = context.read<AccountSecurityService>();
+    _sessionProvider =
+        widget.sessionProvider ?? context.read<SquareSessionProvider>();
+    _currentUserContext =
+        widget.currentUserContext ?? context.read<CurrentUserContext>();
+    _service =
+        widget.service ??
+        UserContactService(
+          accountSecurity: accountSecurity,
+          currentUserContext: _currentUserContext,
+          sessionProvider: _sessionProvider,
+          chainReader: CitizenIdentityChainReader(
+            chain: context.read<CitizenSdk>().chain,
+          ),
+        );
+    _service.syncState.addListener(_onSyncStateChanged);
+    _identityRevision = accountSecurity.revision;
+    _identityRevision!.addListener(_onIdentityChanged);
+    _dependenciesReady = true;
     unawaited(_load());
   }
 
   @override
   void dispose() {
     _service.syncState.removeListener(_onSyncStateChanged);
-    WalletManager.walletsRevision.removeListener(_onIdentityChanged);
+    _identityRevision?.removeListener(_onIdentityChanged);
     MembershipRevision.instance.listenable.removeListener(_onMembershipChanged);
     _searchController.dispose();
     super.dispose();
@@ -158,12 +206,12 @@ class _ContactBookPageState extends State<ContactBookPage> {
     final generation = ++_loadGeneration;
     try {
       // 未注册 CID 必须在此短路:通讯录属主 = CID,`getContacts()` 第一步
-      // `_requireIdentityOwner()` 对未注册身份必抛 WalletAuthException,catch 后
+      // `_requireIdentityOwner()` 对未注册身份必抛 AccountSecurityException,catch 后
       // `_contacts` 保持空,渲染会落到「空通讯录」——把"你没注册"显示成"你没有联系人",
       // 与广场当初把权限态伪装成"加载失败"是同一类错误。
       // 本机缓存无绑定时由 ContactService 的 Cloudflare 会话恢复；这里绝不读链，
       // 也绝不扫描其它钱包账户。
-      var identity = await CurrentUserContext.instance.resolve();
+      var identity = await _currentUserContext.resolve();
       if (!mounted || generation != _loadGeneration) return;
       if (identity == null) {
         setState(() {
@@ -176,7 +224,7 @@ class _ContactBookPageState extends State<ContactBookPage> {
       if (!identity.isRegistered) {
         try {
           await _sessionProvider.ensureSession();
-          identity = await CurrentUserContext.instance.resolve();
+          identity = await _currentUserContext.resolve();
         } on SquareApiException catch (error) {
           if (error.errorCode != 'cid_not_bound') rethrow;
         }
@@ -451,6 +499,10 @@ class _ContactBookPageState extends State<ContactBookPage> {
           isSelf: false,
           initialProfile: _profiles[cidNumber],
           initialProfileMedia: _profileMedia[cidNumber],
+          api: _profileApi,
+          cache: _profileCache,
+          mediaCache: _profileMediaCache,
+          sessionProvider: _sessionProvider,
         ),
       ),
     );

@@ -109,6 +109,16 @@ class HostTransport final : public NativeTransport {
         return citizensdk_get_storage_batch_at(sdk, &r.block, keys.data(),
                                                 static_cast<uint32_t>(keys.size()), out);
       }
+      case Method::get_storage_keys_paged: {
+        const citizensdk_bytes_view_t start = r.storage_start_key
+            ? view(*r.storage_start_key) : citizensdk_bytes_view_t{nullptr, 0};
+        return citizensdk_get_storage_keys_paged(
+            sdk, &r.block, view(r.payload), r.storage_start_key ? 1 : 0,
+            start, r.storage_keys_limit, out);
+      }
+      case Method::call_runtime_api:
+        return citizensdk_call_runtime_api(
+            sdk, &r.block, view(r.runtime_api_method), view(r.payload), out);
       case Method::get_system_events:
         return citizensdk_get_system_events_at(sdk, &r.block, out);
       case Method::export_state: return citizensdk_export_state(sdk, out);
@@ -147,6 +157,10 @@ class HostTransport final : public NativeTransport {
       case Method::reconcile_wallet_cleanup: return citizensdk_reconcile_wallet_cleanup(sdk, out);
       case Method::sign_wallet_payload:
         return citizensdk_sign_wallet_payload(sdk, &r.account_id, view(r.payload), out);
+      case Method::derive_application_key:
+        return citizensdk_derive_application_key(
+            sdk, &r.account_id, view(r.application_key_salt),
+            view(r.application_key_info), out);
       case Method::begin_signing:
         return citizensdk_begin_signing(
             sdk, &r.account_id, view(r.payload), r.signing_transform,
@@ -583,6 +597,23 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     const auto expected = snapshot_epoch();
     if (event_value.struct_size < sizeof(event_value) ||
         event_value.abi_version != CITIZENSDK_ABI_VERSION) return;
+    if (event_value.event_type == CITIZENSDK_EVENT_FINALIZED_BLOCK_CHANGED) {
+      if (event_value.request_id != 0 || event_value.result == 0 ||
+          event_value.capability_revision != 0 || event_value.reserved != 0) return;
+      try {
+        Value payload = session->transport->copy_result(
+            Method::get_finalized_head, event_value.result);
+        std::weak_ptr<State> weak = shared_from_this();
+        std::weak_ptr<Session> target = session;
+        schedule([weak, target, expected, payload = std::move(payload)]() mutable {
+          if (const auto state = weak.lock()) if (const auto value = target.lock()) {
+            try { state->emit(value, "finalizedBlockChanged", std::move(payload), expected); }
+            catch (...) {}
+          }
+        });
+      } catch (...) {}
+      return;
+    }
     if (event_value.event_type == CITIZENSDK_EVENT_LIFECYCLE_CHANGED ||
         event_value.event_type == CITIZENSDK_EVENT_CAPABILITIES_CHANGED ||
         event_value.event_type == CITIZENSDK_EVENT_HISTORY_CHANGED) {

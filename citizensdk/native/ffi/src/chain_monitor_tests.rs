@@ -53,6 +53,38 @@ fn history_invalidation_has_zero_payload_and_ordered_sequence() {
 }
 
 #[test]
+fn finalized_notification_owns_one_exact_block_result() {
+    use crate::ownership::{self, OwnedResult, ResultPayload};
+    use citizen_sdk_contracts::{Hash32, VerifiedBlockRef};
+
+    let dispatcher = EventDispatcher::new().unwrap();
+    let (sender, receiver) = mpsc::channel::<CitizenSdkEvent>();
+    dispatcher
+        .set_callback(
+            Some(collect),
+            (&sender as *const mpsc::Sender<CitizenSdkEvent>)
+                .cast_mut()
+                .cast(),
+        )
+        .unwrap();
+    let block = VerifiedBlockRef::finalized(Hash32::from_bytes([0x33; 32]), 44);
+    let result = ownership::insert(OwnedResult::success(8, ResultPayload::Block(block))).unwrap();
+    dispatcher
+        .try_send(CitizenSdkEventType::FinalizedBlockChanged, 0, result, 0)
+        .unwrap();
+    let event = receiver.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(event.event_type, 6);
+    assert_eq!(
+        (event.request_id, event.result, event.capability_revision),
+        (0, result, 0)
+    );
+    let owned = ownership::get(result).unwrap();
+    assert!(matches!(owned.payload, ResultPayload::Block(value) if value == block));
+    ownership::release(result).unwrap();
+    dispatcher.shutdown().unwrap();
+}
+
+#[test]
 fn worker_without_an_owner_stops_without_starting_a_provider() {
     crate::chain_monitor::ChainMonitor::start(Weak::new(), true)
         .unwrap()

@@ -108,6 +108,8 @@ typedef uint32_t citizensdk_event_type_t;
 #define CITIZENSDK_EVENT_LIFECYCLE_CHANGED 4U
 /* Payloadless invalidation; request_id/result/capability_revision/reserved are zero. */
 #define CITIZENSDK_EVENT_HISTORY_CHANGED 5U
+/* Verified finalized block change; result is a BLOCK_REF owned by the receiver. */
+#define CITIZENSDK_EVENT_FINALIZED_BLOCK_CHANGED 6U
 
 typedef uint32_t citizensdk_result_kind_t;
 #define CITIZENSDK_RESULT_EMPTY 0U
@@ -139,6 +141,7 @@ typedef uint32_t citizensdk_result_kind_t;
 #define CITIZENSDK_RESULT_BLOCK_BODY 26U
 #define CITIZENSDK_RESULT_PREPARED_TRANSACTION 27U
 #define CITIZENSDK_RESULT_TRANSACTION_EXECUTION 28U
+#define CITIZENSDK_RESULT_APPLICATION_KEY 29U
 
 typedef uint32_t citizensdk_transaction_execution_status_t;
 #define CITIZENSDK_TRANSACTION_EXECUTION_EXTERNAL_PENDING 1U

@@ -12,6 +12,16 @@ final class CitizenSdkHistoryChanged extends CitizenSdkEvent {
   const CitizenSdkHistoryChanged({required super.sequence});
 }
 
+/// 同一 SDK 轻节点已经验证的新 finalized block。
+final class CitizenSdkFinalizedBlockChanged extends CitizenSdkEvent {
+  const CitizenSdkFinalizedBlockChanged({
+    required super.sequence,
+    required this.finalized,
+  });
+
+  final CitizenBlockRef finalized;
+}
+
 final class CitizenSdkLifecycleChanged extends CitizenSdkEvent {
   const CitizenSdkLifecycleChanged({
     required super.sequence,

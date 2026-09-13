@@ -1,4 +1,6 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
 import 'package:citizenapp/transaction/onchain-topup/onchain_topup_page.dart';
 import 'package:citizenapp/transaction/offchain-transaction/rpc/offchain_clearing_rpc.dart';
@@ -6,7 +8,6 @@ import 'package:citizenapp/transaction/offchain-transaction/services/clearing_ba
 import 'package:citizenapp/transaction/offchain-transaction/pages/petty_wallet_page.dart';
 import 'package:citizenapp/transaction/offchain-transaction/pages/withdraw_page.dart';
 import 'package:citizenapp/my/util/amount_format.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 
@@ -18,7 +19,7 @@ import 'package:citizenapp/ui/app_theme.dart';
 /// - 零钱包:**可点击**进「零钱包详情页」(链下清算行零钱包),需已绑定;页内含充值到零钱包。
 /// - 零钱包余额来自当前绑定清算行快照中的节点端点,通过 `offchain_queryBalance`
 ///   查询;失败时展示节点不可达,不再写死 0.00 元。
-/// - 单钱包多账户下每个账户独立绑定清算行、独立签名(见 `WalletManager.signForAccountId`)。
+/// - 每个 CitizenSDK 账户独立绑定清算行，签名按精确 `account_id` 调用 SDK。
 class WalletActionCard extends StatefulWidget {
   const WalletActionCard({
     super.key,
@@ -72,7 +73,13 @@ class WalletActionCardState extends State<WalletActionCard> {
     }
     try {
       final loader = widget.finalizedBalanceLoader ??
-          (accountId) => ChainRpc().fetchFinalizedTotalBalance(accountId);
+          (accountId) async {
+            final balance = await context
+                .read<CitizenSdk>()
+                .chain
+                .getAccountBalance(accountId);
+            return balance.totalFen.toDouble() / 100;
+          };
       final balance = await loader(widget.accountId);
       if (!mounted) return;
       setState(() {

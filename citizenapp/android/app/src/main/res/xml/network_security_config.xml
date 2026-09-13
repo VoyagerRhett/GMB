@@ -1,12 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
     <!-- 生产全部走 HTTPS / WSS（TLS）：cid、square/chain-bootstrap Worker、
-         GitHub 更新、smoldot 链节点（chainspec bootNodes 均为 /dns4/.../wss）。
+         GitHub 更新和 CitizenSDK 公民链节点。
          默认阻断一切明文流量，防中间人（iOS 侧由默认 ATS 同等阻断）。 -->
     <base-config cleartextTrafficPermitted="false" />
-    <!-- 仅本机开发调试放行明文：dart-define 的 127.0.0.1 端点（RPC/square）、
-         smoldot 本地 bootnode（/ip4/127.0.0.1/.../ws，需 DEV dart-define 才注入）、
-         以及 Android 模拟器映射宿主的 10.0.2.2。生产不会命中这些地址。 -->
+    <!-- 仅本机开发调试放行 dart-define 的 127.0.0.1/localhost 端点
+         与 Android 模拟器宿主映射；生产配置不使用这些地址。 -->
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">127.0.0.1</domain>
         <domain includeSubdomains="false">localhost</domain>

@@ -1,3 +1,5 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'package:citizenapp/log/app_log.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/services/admin_activation_service.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/models/admin_account.dart';
@@ -5,12 +7,10 @@ import 'package:citizenapp/citizen/proposal/admins-change/services/institution_a
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/citizen/shared/institution_info.dart';
 import 'package:citizenapp/citizen/institution/governance_registry.dart';
-import 'package:citizenapp/isar/wallet_isar.dart';
 import 'package:citizenapp/votingengine/internal-vote/internal_vote_query_service.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_models.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_query_service.dart';
 import 'package:citizenapp/citizen/proposal/runtime-upgrade/runtime_upgrade_service.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 
 /// 用户与某个提案的关系上下文。
 ///
@@ -29,7 +29,7 @@ class ProposalContext {
   final InstitutionInfo? institution;
 
   /// 用户在该机构的管理员冷钱包列表。
-  final List<WalletProfile> adminWallets;
+  final List<CitizenWalletStateAccount> adminWallets;
 
   /// 用户角色。
   final ProposalRole role;
@@ -66,19 +66,19 @@ enum ProposalRole {
 /// 共用同一套代码，避免重复且保证一致性。
 class ProposalContextResolver {
   ProposalContextResolver({
-    InstitutionAdminService? adminService,
-    WalletManager? walletManager,
-    ActivationService? activationService,
-  })  : _adminService = adminService ?? InstitutionAdminService(),
-        _walletManager = walletManager ?? WalletManager(),
-        _activationService = activationService ?? ActivationService();
+    required CitizenSdkWallet wallet,
+    required InstitutionAdminService adminService,
+    required ActivationService activationService,
+  })  : _adminService = adminService,
+        _wallet = wallet,
+        _activationService = activationService;
 
   final InstitutionAdminService _adminService;
-  final WalletManager _walletManager;
+  final CitizenSdkWallet _wallet;
   final ActivationService _activationService;
 
   /// 已缓存的钱包列表（同一次会话内复用）。
-  List<WalletProfile>? _wallets;
+  List<CitizenWalletStateAccount>? _wallets;
 
   /// 静态缓存：用户已确认为管理员的机构 cidNumber 集合。
   ///
@@ -165,11 +165,11 @@ class ProposalContextResolver {
         .getActivatedAdmins(identity)
         .catchError((_) => <ActivatedAdmin>[]);
 
-    final matchedWallets = <WalletProfile>[];
+    final matchedWallets = <CitizenWalletStateAccount>[];
 
     // 已激活的管理员 → 在钱包列表中找到对应钱包
     for (final activated in activatedAdmins) {
-      WalletProfile? wallet;
+      CitizenWalletStateAccount? wallet;
       for (final w in wallets) {
         if (_requireAccountId(w.accountId) == activated.accountId) {
           wallet = w;
@@ -256,7 +256,7 @@ class ProposalContextResolver {
           .getActivatedAdmins(identity)
           .catchError((_) => <ActivatedAdmin>[]);
 
-      final matchedWallets = <WalletProfile>[];
+      final matchedWallets = <CitizenWalletStateAccount>[];
       for (final activated in activatedAdmins) {
         for (final w in wallets) {
           if (_requireAccountId(w.accountId) == activated.accountId &&
@@ -283,14 +283,12 @@ class ProposalContextResolver {
   /// 清除钱包缓存（钱包列表变化时调用）。
   void clearWalletCache() => _wallets = null;
   // 内部方法
-  Future<List<WalletProfile>> _getWallets() async {
+  Future<List<CitizenWalletStateAccount>> _getWallets() async {
     try {
-      _wallets ??= await _walletManager.getWallets();
+      _wallets ??= (await _wallet.getState()).accounts;
     } catch (e, st) {
-      // 治理页的链上内容不能因为本地钱包库短暂繁忙而整体加载失败。
-      if (!WalletIsar.instance.isBusyError(e)) {
-        AppLog.d('[ProposalContext] local wallet load failed: $e\n$st');
-      }
+      // 治理页的链上内容不能因为钱包公开目录短暂不可用而整体加载失败。
+      AppLog.d('[ProposalContext] SDK wallet load failed: $e\n$st');
       _wallets = const [];
     }
     return _wallets!;
@@ -318,13 +316,12 @@ class ProposalContextResolver {
 /// 避免不同入口查错存储导致的状态不一致。
 class VoteChecker {
   VoteChecker({
-    InternalVoteQueryService? internalVoteService,
-    RuntimeUpgradeService? runtimeService,
-    ProposalQueryService? proposalQueryService,
-  })  : _internalVoteService =
-            internalVoteService ?? InternalVoteQueryService(),
-        _runtimeService = runtimeService ?? RuntimeUpgradeService(),
-        _proposalQueryService = proposalQueryService ?? ProposalQueryService();
+    required InternalVoteQueryService internalVoteService,
+    required RuntimeUpgradeService runtimeService,
+    required ProposalQueryService proposalQueryService,
+  })  : _internalVoteService = internalVoteService,
+        _runtimeService = runtimeService,
+        _proposalQueryService = proposalQueryService;
 
   final InternalVoteQueryService _internalVoteService;
   final RuntimeUpgradeService _runtimeService;
@@ -415,6 +412,6 @@ class VoteCheckTarget {
   final int proposalId;
   final int kind;
   final int status;
-  final List<WalletProfile> adminWallets;
+  final List<CitizenWalletStateAccount> adminWallets;
   final InstitutionInfo? institution;
 }

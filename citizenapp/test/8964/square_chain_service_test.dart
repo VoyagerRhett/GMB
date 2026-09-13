@@ -1,13 +1,14 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:polkadart/scale_codec.dart' show CompactBigIntCodec;
 
 import 'package:citizenapp/8964/chain/square_chain_service.dart';
 import 'package:citizenapp/8964/models/square_models.dart';
 import 'package:citizenapp/my/myid/citizen_identity_chain_reader.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
+import '../support/fake_citizen_sdk.dart';
 
 void main() {
   test('publish_post call_data 与 runtime 下标和字段顺序一致', () {
@@ -78,6 +79,8 @@ void main() {
 
   test('广场身份使用永久 CID 闭环快照而不是旧 Account-keyed storage', () async {
     final service = SquareChainService(
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
       identityChainReader: _FakeIdentityReader(
         CitizenIdentityChainSnapshot(
           cidNumber: 'CN001-CTZN-000000001-2026',
@@ -96,6 +99,8 @@ void main() {
 
   test('匿名 active CID 保留帖子归属但不升级投票身份', () async {
     final service = SquareChainService(
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
       identityChainReader: _FakeIdentityReader(
         CitizenIdentityChainSnapshot(
           cidNumber: 'CN001-CTZN-000000002-2026',
@@ -116,8 +121,11 @@ void main() {
   });
 
   test('三档平台价格通过一次 finalized storage 批量读取', () async {
-    final rpc = _BatchPriceChainRpc();
-    final service = SquareChainService(chainRpc: rpc);
+    final chain = _BatchPriceChain();
+    final service = SquareChainService(
+      chain: chain,
+      transactions: TestCitizenTransactions(),
+    );
 
     final prices = await service.fetchAllPlatformPrices(forceFresh: true);
 
@@ -126,9 +134,8 @@ void main() {
       'democracy': 99900,
       'spark': 199900,
     });
-    expect(rpc.fetchCount, 1);
-    expect(rpc.requestedKeyCount, 3);
-    expect(rpc.lastForceFresh, isTrue);
+    expect(chain.fetchCount, 1);
+    expect(chain.requestedKeyCount, 3);
   });
 }
 
@@ -162,7 +169,7 @@ Uint8List _votingIdentityBytes({
 }
 
 class _FakeIdentityReader extends CitizenIdentityChainReader {
-  _FakeIdentityReader(this.snapshot);
+  _FakeIdentityReader(this.snapshot) : super(chain: TestCitizenChain());
 
   final CitizenIdentityChainSnapshot? snapshot;
 
@@ -172,24 +179,28 @@ class _FakeIdentityReader extends CitizenIdentityChainReader {
       snapshot;
 }
 
-class _BatchPriceChainRpc extends ChainRpc {
+class _BatchPriceChain extends TestCitizenChain {
   int fetchCount = 0;
   int requestedKeyCount = 0;
-  bool lastForceFresh = false;
 
   @override
-  Future<Map<String, Uint8List?>> fetchStorageBatch(
-    List<String> storageKeyHexList, {
-    bool forceFresh = false,
-  }) async {
+  Future<CitizenBlockRef> getFinalizedHead() async => CitizenBlockRef(
+        hash: '0x${'11' * 32}',
+        number: BigInt.one,
+        finality: CitizenBlockFinality.finalized,
+      );
+
+  @override
+  Future<List<Uint8List?>> getStorageBatch(
+    CitizenBlockRef block,
+    List<Uint8List> keys,
+  ) async {
     fetchCount++;
-    requestedKeyCount = storageKeyHexList.length;
-    lastForceFresh = forceFresh;
+    requestedKeyCount = keys.length;
     const prices = [29900, 99900, 199900];
-    return {
-      for (var index = 0; index < storageKeyHexList.length; index++)
-        storageKeyHexList[index]: _u128(prices[index]),
-    };
+    return <Uint8List?>[
+      for (var index = 0; index < keys.length; index++) _u128(prices[index]),
+    ];
   }
 }
 

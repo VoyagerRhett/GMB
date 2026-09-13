@@ -31,6 +31,7 @@ internal sealed class CitizenSdkNativeResult {
     class Profile(val value: CitizenWalletProfile?) : CitizenSdkNativeResult()
     class Accounts(val value: List<CitizenWalletAccount>) : CitizenSdkNativeResult()
     class Signature(val value: CitizenSignature) : CitizenSdkNativeResult()
+    class ApplicationKey(val value: ByteArray) : CitizenSdkNativeResult()
     class Prepared(@get:JvmSynthetic val token: Long) : CitizenSdkNativeResult()
     class TransactionHistoryPage(val value: CitizenTransactionHistoryPage) : CitizenSdkNativeResult()
     class QrReview(val token: Long, val json: String) : CitizenSdkNativeResult()

@@ -1,10 +1,13 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:typed_data';
 
+import 'package:flutter/widgets.dart' show BuildContext;
 import 'package:citizenapp/my/myid/voting_identity_payload.dart';
+import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
 import 'package:citizenapp/qr/qr_protocols.dart';
-import 'package:citizenapp/signer/qr_signer.dart';
-import 'package:citizenapp/wallet/core/device_subkey.dart' show bytesToHex;
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/signer/app_business_qr_codec.dart';
+import 'package:citizenapp/security/device_subkey.dart' show bytesToHex;
 
 class CitizenIdentitySignException implements Exception {
   const CitizenIdentitySignException(this.message);
@@ -25,24 +28,24 @@ class CitizenIdentitySignPrep {
   final SignRequestEnvelope request;
   final String actionLabel;
   final VotingIdentityConsentPayload decoded;
-  final Account account;
+  final CitizenWalletStateAccount account;
 }
 
 /// 公民签名统一服务：完整解码、请求/载荷/本机钱包三方公钥一致后才允许签名。
 class CitizenIdentitySignService {
-  CitizenIdentitySignService({QrSigner? signer})
-      : _signer = signer ?? QrSigner();
-  final QrSigner _signer;
+  CitizenIdentitySignService({AppBusinessQrCodec? signer})
+      : _signer = signer ?? AppBusinessQrCodec();
+  final AppBusinessQrCodec _signer;
 
   Future<CitizenIdentitySignPrep> prepare(
     String raw,
-    WalletManager walletManager, {
-    Account? requiredAccount,
+    CitizenSdkWallet wallet, {
+    CitizenWalletStateAccount? requiredAccount,
   }) async {
     final SignRequestEnvelope request;
     try {
       request = _signer.parseRequest(raw);
-    } on QrSignException catch (error) {
+    } on AppBusinessQrException catch (error) {
       throw CitizenIdentitySignException(error.message);
     }
     if (request.body.action != QrActions.citizenIdentity) {
@@ -63,7 +66,8 @@ class CitizenIdentitySignService {
       throw const CitizenIdentitySignException('身份载荷钱包与签名请求不一致');
     }
     final account = requiredAccount ??
-        await walletManager.getAccountByAccountId(
+        _findAccount(
+          await wallet.getState(),
           request.body.signerPublicKeyHex.toLowerCase(),
         );
     if (account == null ||
@@ -80,15 +84,19 @@ class CitizenIdentitySignService {
 
   Future<String> sign(
     CitizenIdentitySignPrep prep,
-    WalletManager walletManager,
+    CitizenSigning signing,
+    BuildContext? context,
   ) async {
-    final bytes = QrSigner.signingBytesForHex(
+    final bytes = AppBusinessQrCodec.signingBytesForHex(
       payloadHex: prep.request.body.payloadHex,
       action: prep.request.body.action,
     );
-    final signature = await walletManager.signForAccountId(
-      prep.account.accountId,
-      bytes,
+    final signature = await signCitizenPayload(
+      signing: signing,
+      context: context,
+      accountId: prep.account.accountId,
+      payload: bytes,
+      action: prep.request.body.action,
     );
     return _signer.encodeResponse(_signer.buildResponse(
       request: prep.request,
@@ -101,5 +109,17 @@ class CitizenIdentitySignService {
         ? value.substring(2)
         : value;
     return text.toLowerCase();
+  }
+
+  static CitizenWalletStateAccount? _findAccount(
+    CitizenWalletState state,
+    String accountId,
+  ) {
+    for (final account in state.accounts) {
+      if (_normalizeHex(account.accountId) == _normalizeHex(accountId)) {
+        return account;
+      }
+    }
+    return null;
   }
 }

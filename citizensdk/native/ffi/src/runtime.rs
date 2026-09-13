@@ -744,6 +744,26 @@ impl NativeRuntime {
             .send(CitizenSdkEventType::HistoryChanged, 0, 0, 0)
     }
 
+    pub(crate) fn publish_finalized_block_changed(
+        &self,
+        finalized: citizen_sdk_contracts::FinalizedBlockRef,
+    ) -> FfiResult<()> {
+        let result = ownership::insert(OwnedResult::success(
+            self.handle,
+            ResultPayload::Block(finalized.into()),
+        ))?;
+        self.owned_results.fetch_add(1, Ordering::SeqCst);
+        if let Err(error) =
+            self.dispatcher
+                .try_send(CitizenSdkEventType::FinalizedBlockChanged, 0, result, 0)
+        {
+            let _ = ownership::release(result);
+            self.result_released();
+            return Err(error);
+        }
+        Ok(())
+    }
+
     #[cfg(feature = "chain")]
     pub(crate) fn start_product_services(self: &Arc<Self>) -> FfiResult<()> {
         let mut monitor = self

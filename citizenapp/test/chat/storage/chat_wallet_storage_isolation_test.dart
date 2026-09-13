@@ -10,8 +10,9 @@ import 'package:citizenapp/isar/isar_core_bootstrap.dart';
 import 'package:citizenapp/isar/user_isar.dart';
 import 'package:citizenapp/security/app_lock_service.dart';
 import 'package:citizenapp/security/local_data_key.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/security/pin_input_page.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/my/myid/current_user_context.dart';
 import 'package:citizenapp/isar/wallet_isar.dart';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:fixnum/fixnum.dart';
@@ -57,7 +58,7 @@ const _TestBinding _binding = _TestBinding(
 ///
 /// 返回值虽然是确定测试数据，但队列、数据库打开和读回 marker 都是真实路径；这样
 /// ChatStore 一旦又在 ChatIsar 回调内等待钱包读取，本测试就会在短超时内失败。
-class _WalletIsarReadingManager extends WalletManager {
+class _WalletIsarReadingManager implements AccountSecurityService {
   static const String markerKey = 'test:chat-wallet-storage-isolation';
 
   int bindingReadCount = 0;
@@ -115,6 +116,19 @@ class _WalletIsarReadingManager extends WalletManager {
           .toList(growable: false);
     });
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _UnusedAccountSecurity implements AccountSecurityService {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _UnusedCurrentUserContext implements CurrentUserContext {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 EncryptedMessage _incomingMessage() {
@@ -555,6 +569,9 @@ void main() {
     expect(Isar.getInstance('citizenapp_app'), isNull);
 
     await AppLockService.wipeAllData(
+      wallet: null,
+      accountSecurity: null,
+      debugDeleteCitizenSdkWallet: () async {},
       debugDeleteSecureStorage: () async {},
       debugClearSharedPreferences: () async {},
       debugChatDocumentsDirectoryProvider: () async => chatDocumentsRoot,
@@ -610,6 +627,8 @@ void main() {
     await sibling.writeAsString('outside-chat-root');
 
     final runtime = createCitizenChatRuntime(
+      accountSecurity: _UnusedAccountSecurity(),
+      currentUserContext: _UnusedCurrentUserContext(),
       documentsDirectoryProvider: () async => chatDocumentsRoot,
     );
     await expectLater(
@@ -624,6 +643,9 @@ void main() {
 
     // 进程终态不撤销，但下一次全量擦除必须能重试同一 runtime 与目录。
     await AppLockService.wipeAllData(
+      wallet: null,
+      accountSecurity: null,
+      debugDeleteCitizenSdkWallet: () async {},
       debugDeleteSecureStorage: () async {},
       debugClearSharedPreferences: () async {},
       debugChatDocumentsDirectoryProvider: () async => chatDocumentsRoot,
@@ -637,6 +659,8 @@ void main() {
     );
     expect(
       () => createCitizenChatRuntime(
+        accountSecurity: _UnusedAccountSecurity(),
+        currentUserContext: _UnusedCurrentUserContext(),
         documentsDirectoryProvider: () async => chatDocumentsRoot,
       ),
       throwsA(isA<StateError>()),
@@ -652,6 +676,8 @@ void main() {
 
     var disposeCalls = 0;
     ChatSdk? runtime = createCitizenChatRuntime(
+      accountSecurity: _UnusedAccountSecurity(),
+      currentUserContext: _UnusedCurrentUserContext(),
       documentsDirectoryProvider: () async => chatDocumentsRoot,
     );
     runtime.debugRegisterContextDisposerForTest(() async {
@@ -694,6 +720,8 @@ void main() {
     await initialFile.writeAsBytes(const <int>[1]);
 
     final runtime = createCitizenChatRuntime(
+      accountSecurity: _UnusedAccountSecurity(),
+      currentUserContext: _UnusedCurrentUserContext(),
       documentsDirectoryProvider: () async => chatDocumentsRoot,
     );
     final mutationEntered = Completer<void>();
@@ -709,6 +737,9 @@ void main() {
 
     var wipeCompleted = false;
     final wipe = AppLockService.wipeAllData(
+      wallet: null,
+      accountSecurity: null,
+      debugDeleteCitizenSdkWallet: () async {},
       debugDeleteSecureStorage: () async {},
       debugClearSharedPreferences: () async {},
       debugChatDocumentsDirectoryProvider: () async => chatDocumentsRoot,
@@ -737,6 +768,8 @@ void main() {
     await initial.writeAsBytes(const <int>[1]);
 
     final runtime = createCitizenChatRuntime(
+      accountSecurity: _UnusedAccountSecurity(),
+      currentUserContext: _UnusedCurrentUserContext(),
       documentsDirectoryProvider: () async => chatDocumentsRoot,
     );
     final flightEntered = Completer<void>();
@@ -754,6 +787,9 @@ void main() {
 
     var wipeCompleted = false;
     final wipe = AppLockService.wipeAllData(
+      wallet: null,
+      accountSecurity: null,
+      debugDeleteCitizenSdkWallet: () async {},
       debugDeleteSecureStorage: () async {},
       debugClearSharedPreferences: () async {},
       debugChatDocumentsDirectoryProvider: () async => chatDocumentsRoot,
@@ -777,6 +813,8 @@ void main() {
     await marker.writeAsBytes(const <int>[1]);
 
     final runtime = createCitizenChatRuntime(
+      accountSecurity: _UnusedAccountSecurity(),
+      currentUserContext: _UnusedCurrentUserContext(),
       documentsDirectoryProvider: () async => chatDocumentsRoot,
     );
     var socketStops = 0;
@@ -822,6 +860,8 @@ void main() {
 
   test('后台 handler 在 stop 后仍等待已触发 callback，完成前不得释放运行态', () async {
     final runtime = createCitizenChatRuntime(
+      accountSecurity: _UnusedAccountSecurity(),
+      currentUserContext: _UnusedCurrentUserContext(),
       documentsDirectoryProvider: () async => chatDocumentsRoot,
     );
     final callbackEntered = Completer<void>();
@@ -872,6 +912,9 @@ void main() {
 
     await expectLater(
       AppLockService.wipeAllData(
+        wallet: null,
+        accountSecurity: null,
+        debugDeleteCitizenSdkWallet: () async {},
         debugDeleteSecureStorage: () async {},
         debugClearSharedPreferences: () async {},
         debugChatDocumentsDirectoryProvider: () async => chatDocumentsRoot,
@@ -909,6 +952,9 @@ void main() {
     var sharedPreferencesAttempted = false;
     var wipeCompleted = false;
     final wipe = AppLockService.wipeAllData(
+      wallet: null,
+      accountSecurity: null,
+      debugDeleteCitizenSdkWallet: () async {},
       debugDeleteSecureStorage: () async => secureStorageAttempted = true,
       debugClearSharedPreferences: () async =>
           sharedPreferencesAttempted = true,
@@ -950,6 +996,9 @@ void main() {
     await staleLease.create();
     expect(
       await AppLockService.recoverPersistentWipeAtStartup(
+        wallet: null,
+        accountSecurity: null,
+        debugDeleteCitizenSdkWallet: () async {},
         debugChatDocumentsDirectoryProvider: () async => chatDocumentsRoot,
       ),
       AppDataWipeStartupResult.preflightBlocked,
@@ -958,6 +1007,9 @@ void main() {
     await staleLease.delete();
     expect(
       await AppLockService.recoverPersistentWipeAtStartup(
+        wallet: null,
+        accountSecurity: null,
+        debugDeleteCitizenSdkWallet: () async {},
         debugChatDocumentsDirectoryProvider: () async => chatDocumentsRoot,
       ),
       AppDataWipeStartupResult.ready,
@@ -975,6 +1027,9 @@ void main() {
     var sharedPreferencesCalls = 0;
     expect(
       await AppLockService.recoverPersistentWipeAtStartup(
+        wallet: null,
+        accountSecurity: null,
+        debugDeleteCitizenSdkWallet: () async {},
         debugDeleteSecureStorage: () async => secureStorageCalls += 1,
         debugClearSharedPreferences: () async => sharedPreferencesCalls += 1,
         debugChatDocumentsDirectoryProvider: () async => chatDocumentsRoot,
@@ -1006,6 +1061,9 @@ void main() {
     try {
       expect(
         await AppLockService.recoverPersistentWipeAtStartup(
+          wallet: null,
+          accountSecurity: null,
+          debugDeleteCitizenSdkWallet: () async {},
           debugChatDocumentsDirectoryProvider: () async => chatDocumentsRoot,
         ).timeout(_shortQueueTimeout),
         AppDataWipeStartupResult.ready,
@@ -1036,6 +1094,9 @@ void main() {
 
     expect(
       await AppLockService.recoverPersistentWipeAtStartup(
+        wallet: null,
+        accountSecurity: null,
+        debugDeleteCitizenSdkWallet: () async {},
         debugChatDocumentsDirectoryProvider: () async => chatDocumentsRoot,
       ).timeout(_shortQueueTimeout),
       AppDataWipeStartupResult.ready,
@@ -1069,6 +1130,9 @@ void main() {
       await leaseEntered.future.timeout(_shortQueueTimeout);
       expect(
         await AppLockService.recoverPersistentWipeAtStartup(
+          wallet: null,
+          accountSecurity: null,
+          debugDeleteCitizenSdkWallet: () async {},
           debugChatDocumentsDirectoryProvider: () async => chatDocumentsRoot,
         ).timeout(_shortQueueTimeout),
         AppDataWipeStartupResult.ready,
@@ -1102,6 +1166,9 @@ void main() {
 
     expect(
       await AppLockService.recoverPersistentWipeAtStartup(
+        wallet: null,
+        accountSecurity: null,
+        debugDeleteCitizenSdkWallet: () async {},
         debugChatDocumentsDirectoryProvider: () async => chatDocumentsRoot,
       ).timeout(_shortQueueTimeout),
       AppDataWipeStartupResult.ready,
@@ -1121,6 +1188,9 @@ void main() {
     var sharedPreferencesCalls = 0;
     expect(
       await AppLockService.recoverPersistentWipeAtStartup(
+        wallet: null,
+        accountSecurity: null,
+        debugDeleteCitizenSdkWallet: () async {},
         debugDeleteSecureStorage: () async => secureStorageCalls += 1,
         debugClearSharedPreferences: () async => sharedPreferencesCalls += 1,
         debugChatDocumentsDirectoryProvider: () async {
@@ -1136,6 +1206,9 @@ void main() {
   test('部分擦除保留 pending 跨重启拒绝 Chat，无 PIN 重试成功才转 complete', () async {
     await expectLater(
       AppLockService.wipeAllData(
+        wallet: null,
+        accountSecurity: null,
+        debugDeleteCitizenSdkWallet: () async {},
         debugDeleteSecureStorage: () async {
           throw StateError('secure-storage-partial-failure');
         },
@@ -1164,6 +1237,9 @@ void main() {
 
     expect(
       await AppLockService.recoverPersistentWipeAtStartup(
+        wallet: null,
+        accountSecurity: null,
+        debugDeleteCitizenSdkWallet: () async {},
         debugDeleteSecureStorage: () async {},
         debugClearSharedPreferences: () async {},
         debugChatDocumentsDirectoryProvider: () async => chatDocumentsRoot,
@@ -1205,6 +1281,9 @@ void main() {
     try {
       await chatEntered.future.timeout(_shortQueueTimeout);
       final wipe = AppLockService.wipeAllData(
+        wallet: null,
+        accountSecurity: null,
+        debugDeleteCitizenSdkWallet: () async {},
         debugDeleteSecureStorage: () async {
           secureStorageAttempted.complete();
         },
@@ -1360,6 +1439,9 @@ void main() {
 
     await expectLater(
       AppLockService.wipeAllData(
+        wallet: null,
+        accountSecurity: null,
+        debugDeleteCitizenSdkWallet: () async {},
         debugDeleteSecureStorage: () async {
           throw StateError('secure-storage-test-failure');
         },

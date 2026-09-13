@@ -19,7 +19,7 @@ import 'package:flutter_test/flutter_test.dart';
 /// 聊天本地加密的测试用途子钥（固定 32 字节）。
 ///
 /// 单测没有平台通道，真实路径会走
-/// `WalletManager → 硬件金库 → flutter_secure_storage` 而抛 binding 错误；
+/// `AccountSecurityService → CitizenSDK/设备金库` 而需要真实平台；
 /// 这里注入固定用途子钥，让 `ChatStore` 在测试中走**真实加解密**（不是绕过加密），
 /// 只是密钥来源换成确定值。
 final Map<LocalKeyPurpose, Uint8List> debugChatKeys =

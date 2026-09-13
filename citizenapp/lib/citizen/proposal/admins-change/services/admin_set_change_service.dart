@@ -1,17 +1,17 @@
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/codec/admin_set_change_call_codec.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/codec/account_id_codec.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/models/admin_set_change_result.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/models/admin_account.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/services/admin_set_validation.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/rpc/signed_extrinsic_builder.dart';
 
 class AdminsChangeService {
-  AdminsChangeService({ChainRpc? chainRpc}) : _rpc = chainRpc ?? ChainRpc();
+  const AdminsChangeService({required CitizenTransactions transactions})
+      : _transactions = transactions;
 
-  final ChainRpc _rpc;
+  final CitizenTransactions _transactions;
 
   Uint8List buildCallData({
     required AdminAccountState account,
@@ -39,10 +39,10 @@ class AdminsChangeService {
     required AdminAccountState account,
     required List<AdminPerson> admins,
     required int newThreshold,
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
-    required Future<Uint8List> Function(Uint8List payload) sign,
-    TxPoolWatchCallback? onWatchEvent,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    ) externalSigning,
   }) async {
     final callData = buildCallData(
       account: account,
@@ -50,19 +50,35 @@ class AdminsChangeService {
       admins: admins,
       newThreshold: newThreshold,
     );
-    final result = await SignedExtrinsicBuilder(
-      chainRpc: _rpc,
-      logLabel: 'AdminsChange',
-    ).signAndSubmit(
-      callData: callData,
-      fromSs58Address: fromSs58Address,
-      signerPublicKey: signerPublicKey,
-      sign: sign,
-      onWatchEvent: onWatchEvent,
+    final prepared = await _transactions.prepareTransaction(
+      signerPublicKey,
+      callData,
     );
+    final started = await _transactions.executePreparedTransaction(
+      prepared.preparationId,
+    );
+    CitizenTransactionExecutionCompleted completed;
+    if (started is CitizenTransactionExternalSigningPending) {
+      final response = await externalSigning(started);
+      if (response == null) {
+        await _transactions.cancelPreparedTransactionExecution(
+          started.executionId,
+        );
+        throw StateError('管理员更换签名已取消');
+      }
+      completed = await _transactions.consumePreparedTransactionQrResponse(
+        started.executionId,
+        response,
+      );
+    } else {
+      completed = started as CitizenTransactionExecutionCompleted;
+    }
+    if (completed.resolution != CitizenTransactionResolution.finalizedSuccess) {
+      throw StateError(completed.poolRejectionReason ?? '管理员更换交易执行失败');
+    }
     return AdminsChangeSubmitResult(
-      txHash: result.txHash,
-      usedNonce: result.usedNonce,
+      txHash: '0x${AdminAccountIdCodec.hexEncode(completed.transactionHash)}',
+      usedNonce: prepared.nonce.toInt(),
     );
   }
 }

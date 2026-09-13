@@ -1,4 +1,4 @@
-import 'package:citizenapp/rpc/subscription_rpc.dart' show ChainCreatorTier;
+import 'package:citizenapp/my/membership/subscription_chain.dart' show ChainCreatorTier;
 
 /// 订阅周期。创作者每档可只开其中部分周期。
 enum BillingPeriod { monthly, quarterly, yearly }

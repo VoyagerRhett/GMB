@@ -5,7 +5,7 @@ import 'package:citizenapp/log/app_log.dart';
 import 'package:flutter/services.dart';
 import 'package:citizenapp/isar/wallet_isar.dart';
 import 'package:citizenapp/my/util/amount_format.dart';
-import 'package:citizenapp/transaction/history/data/local_tx_store.dart';
+import 'package:citizenapp/transaction/history/local_tx_store.dart';
 import 'package:citizenapp/transaction/history/presentation/tx_auto_refresh_mixin.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/app_layout.dart';

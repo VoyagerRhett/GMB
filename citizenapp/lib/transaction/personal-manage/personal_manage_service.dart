@@ -1,13 +1,12 @@
 import 'dart:convert';
 
-import 'package:citizenapp/rpc/pallet_registry.dart';
+import 'package:citizenapp/citizen/shared/pallet_registry.dart';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/foundation.dart';
 import 'package:polkadart/scale_codec.dart' show CompactBigIntCodec, ByteOutput;
 import 'package:polkadart_keyring/polkadart_keyring.dart' show Keyring;
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/rpc/signed_extrinsic_builder.dart';
 import 'package:citizenapp/citizen/institution/institution_role_storage_codec.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/codec/account_id_codec.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/models/admin_account.dart';
@@ -20,9 +19,14 @@ import 'personal_manage_storage_codec.dart';
 /// 只负责个人多签的创建、关闭、查询和 PersonalManage ProposalData 解码；
 /// 机构多签链访问由 `citizen/institution` 的 InstitutionChainService 处理。
 class PersonalManageService {
-  PersonalManageService({ChainRpc? chainRpc}) : _rpc = chainRpc ?? ChainRpc();
+  const PersonalManageService({
+    required CitizenChain chain,
+    required CitizenTransactions transactions,
+  })  : _chain = chain,
+        _transactions = transactions;
 
-  final ChainRpc _rpc;
+  final CitizenChain _chain;
+  final CitizenTransactions _transactions;
 
   /// PersonalManage pallet index(runtime pallet_index=7)。
   static const _palletIndex = PalletRegistry.personalManagePallet;
@@ -64,9 +68,10 @@ class PersonalManageService {
     required List<AdminPerson> admins,
     required int regularThreshold,
     required BigInt amountFen,
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
-    required Future<Uint8List> Function(Uint8List payload) sign,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    ) externalSigning,
   }) async {
     final callData = buildProposeCreatePersonalCallData(
       accountName: accountName,
@@ -74,14 +79,13 @@ class PersonalManageService {
       regularThreshold: regularThreshold,
       amountFen: amountFen,
     );
-    final submitResult = await _signAndSubmitInBlock(
+    final submitResult = await _executeFinalized(
       callData: callData,
-      fromSs58Address: fromSs58Address,
       signerPublicKey: signerPublicKey,
-      sign: sign,
+      externalSigning: externalSigning,
     );
     final event = await _confirmPersonalAccountProposedEvent(
-      blockHashHex: submitResult.blockHashHex,
+      finalizedBlock: submitResult.block,
       accountName: accountName,
       admins: admins,
       regularThreshold: regularThreshold,
@@ -93,7 +97,7 @@ class PersonalManageService {
       usedNonce: submitResult.usedNonce,
       proposalId: event.proposalId,
       accountId: event.accountId,
-      blockHashHex: submitResult.blockHashHex,
+      blockHashHex: submitResult.block.hash,
     );
   }
 
@@ -181,9 +185,10 @@ class PersonalManageService {
   Future<({String txHash, int usedNonce})> submitProposeClosePersonal({
     required String accountId,
     required String beneficiaryAddress,
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
-    required Future<Uint8List> Function(Uint8List payload) sign,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    ) externalSigning,
   }) async {
     final output = ByteOutput();
     output.pushByte(_palletIndex);
@@ -191,11 +196,10 @@ class PersonalManageService {
     output.write(_hexDecode(accountId));
     final beneficiaryId = Keyring().decodeAddress(beneficiaryAddress);
     output.write(beneficiaryId);
-    return _signAndSubmit(
+    return _executeWithoutBlock(
       callData: output.toBytes(),
-      fromSs58Address: fromSs58Address,
       signerPublicKey: signerPublicKey,
-      sign: sign,
+      externalSigning: externalSigning,
     );
   }
 
@@ -220,7 +224,7 @@ class PersonalManageService {
             '0x${_hexEncode(PersonalManageStorageCodec.personalAccountsKey(address))}',
     };
 
-    final values = await _rpc.fetchStorageBatchChunked(
+    final values = await _fetchStorageBatchChunked(
       storageKeyByAccountId.values.toSet(),
       chunkSize: chunkSize,
     );
@@ -249,7 +253,7 @@ class PersonalManageService {
     final key = PersonalManageStorageCodec.personalAccountsKey(
       accountId,
     );
-    final data = await _rpc.fetchStorage('0x${_hexEncode(key)}');
+    final data = await _fetchStorage('0x${_hexEncode(key)}');
     if (data == null) return null;
     final personal = PersonalManageStorageCodec.decodePersonalAccount(data);
     if (personal == null) return null;
@@ -257,7 +261,7 @@ class PersonalManageService {
       accountId,
     );
     final adminKey = PersonalManageStorageCodec.adminAccountKey(accountIdBytes);
-    final adminData = await _rpc.fetchStorage('0x${_hexEncode(adminKey)}');
+    final adminData = await _fetchStorage('0x${_hexEncode(adminKey)}');
     if (adminData == null) return null;
     final admin = PersonalManageStorageCodec.decodeAdminAccount(adminData);
     if (admin == null) return null;
@@ -306,7 +310,7 @@ class PersonalManageService {
         ..add(adminKey);
     }
 
-    final firstRoundValues = await _rpc.fetchStorageBatchChunked(
+    final firstRoundValues = await _fetchStorageBatchChunked(
       firstRoundKeys,
       chunkSize: chunkSize,
     );
@@ -338,7 +342,7 @@ class PersonalManageService {
       activeThresholdKeyByAccountId[entry.key] =
           '0x${_hexEncode(PersonalManageStorageCodec.activePersonalThresholdKey(accountId))}';
     }
-    final activeThresholdValues = await _rpc.fetchStorageBatchChunked(
+    final activeThresholdValues = await _fetchStorageBatchChunked(
       activeThresholdKeyByAccountId.values,
       chunkSize: chunkSize,
     );
@@ -370,7 +374,7 @@ class PersonalManageService {
     final key = PersonalManageStorageCodec.activePersonalThresholdKey(
       personalAccount,
     );
-    final data = await _rpc.fetchStorage('0x${_hexEncode(key)}');
+    final data = await _fetchStorage('0x${_hexEncode(key)}');
     return PersonalManageStorageCodec.decodeDynamicThreshold(data);
   }
 
@@ -458,20 +462,16 @@ class PersonalManageService {
 
   Future<({int proposalId, String accountId})>
       _confirmPersonalAccountProposedEvent({
-    required String blockHashHex,
+    required CitizenBlockRef finalizedBlock,
     required Uint8List accountName,
     required List<AdminPerson> admins,
     required int regularThreshold,
     required BigInt amountFen,
     required Uint8List proposerPublicKey,
   }) async {
-    final events = await _rpc.fetchSystemEventsAtBlock(blockHashHex);
+    final events = await _chain.getSystemEvents(finalizedBlock);
     if (events == null || events.isEmpty) {
       throw StateError('交易已入块，但未读取到 System.Events，不能确认个人多签创建提案');
-    }
-    final failure = _rpc.findExtrinsicFailureInEvents(events);
-    if (failure != null) {
-      throw StateError(failure.description);
     }
     final found = _findPersonalAccountProposedEvent(
       events,
@@ -585,39 +585,103 @@ class PersonalManageService {
     }
   }
 
-  Future<({String txHash, int usedNonce})> _signAndSubmit({
+  Future<({String txHash, int usedNonce})> _executeWithoutBlock({
     required Uint8List callData,
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
-    required Future<Uint8List> Function(Uint8List payload) sign,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    ) externalSigning,
   }) async {
-    return SignedExtrinsicBuilder(
-      chainRpc: _rpc,
-      logLabel: 'PersonalManage',
-    ).signAndSubmit(
+    final result = await _execute(
       callData: callData,
-      fromSs58Address: fromSs58Address,
       signerPublicKey: signerPublicKey,
-      sign: sign,
+      externalSigning: externalSigning,
+    );
+    return (txHash: result.txHash, usedNonce: result.usedNonce);
+  }
+
+  Future<({String txHash, int usedNonce, CitizenBlockRef block})>
+      _executeFinalized({
+    required Uint8List callData,
+    required Uint8List signerPublicKey,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    ) externalSigning,
+  }) async {
+    return _execute(
+      callData: callData,
+      signerPublicKey: signerPublicKey,
+      externalSigning: externalSigning,
     );
   }
 
-  Future<({String txHash, int usedNonce, String blockHashHex})>
-      _signAndSubmitInBlock({
+  Future<({String txHash, int usedNonce, CitizenBlockRef block})> _execute({
     required Uint8List callData,
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
-    required Future<Uint8List> Function(Uint8List payload) sign,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    ) externalSigning,
   }) async {
-    return SignedExtrinsicBuilder(
-      chainRpc: _rpc,
-      logLabel: 'PersonalManage',
-    ).signAndSubmitInBlock(
-      callData: callData,
-      fromSs58Address: fromSs58Address,
-      signerPublicKey: signerPublicKey,
-      sign: sign,
+    final prepared = await _transactions.prepareTransaction(
+      signerPublicKey,
+      callData,
     );
+    final started = await _transactions.executePreparedTransaction(
+      prepared.preparationId,
+    );
+    CitizenTransactionExecutionCompleted completed;
+    if (started is CitizenTransactionExternalSigningPending) {
+      final response = await externalSigning(started);
+      if (response == null) {
+        await _transactions.cancelPreparedTransactionExecution(
+          started.executionId,
+        );
+        throw StateError('个人多签交易签名已取消');
+      }
+      completed = await _transactions.consumePreparedTransactionQrResponse(
+        started.executionId,
+        response,
+      );
+    } else {
+      completed = started as CitizenTransactionExecutionCompleted;
+    }
+    if (completed.resolution !=
+            CitizenTransactionResolution.finalizedSuccess ||
+        completed.execution == null) {
+      throw StateError(completed.poolRejectionReason ?? '个人多签交易执行失败');
+    }
+    return (
+      txHash: '0x${_hexEncode(completed.transactionHash)}',
+      usedNonce: prepared.nonce.toInt(),
+      block: completed.execution!.block,
+    );
+  }
+
+  Future<Uint8List?> _fetchStorage(String keyHex) async {
+    final finalized = await _chain.getFinalizedHead();
+    return _chain.getStorage(finalized, _hexDecode(keyHex));
+  }
+
+  Future<Map<String, Uint8List?>> _fetchStorageBatchChunked(
+    Iterable<String> keyHexes, {
+    int chunkSize = 100,
+  }) async {
+    final keys = keyHexes.toSet().toList(growable: false);
+    if (keys.isEmpty) return const <String, Uint8List?>{};
+    final finalized = await _chain.getFinalizedHead();
+    final result = <String, Uint8List?>{};
+    for (var offset = 0; offset < keys.length; offset += chunkSize) {
+      final end = (offset + chunkSize).clamp(0, keys.length);
+      final chunk = keys.sublist(offset, end);
+      final values = await _chain.getStorageBatch(
+        finalized,
+        chunk.map(_hexDecode).toList(growable: false),
+      );
+      for (var index = 0; index < chunk.length; index++) {
+        result[chunk[index]] = values[index];
+      }
+    }
+    return result;
   }
 
   static MultisigStatus _statusFromByte(int statusByte) {

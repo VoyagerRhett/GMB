@@ -1,12 +1,11 @@
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:citizenapp/my/myid/citizen_identity_chain_reader.dart';
 import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/wallet/core/default_account_service.dart';
-import 'package:citizenapp/wallet/core/sign_mode.dart';
+import '../../support/fake_citizen_sdk.dart';
 
 const _account0 =
     '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -27,28 +26,37 @@ const _genesisCid = 'CN220-CTZN2-198805200-2026';
 const _genesisAccountId =
     '0x0cb1d05c0c9c7f05679b60d6f24c7e5719a3985264e41c5e899d4822dca4b06b';
 
-const _genesisDefaultAccount = DefaultAccount(
+final _genesisDefaultAccount = CitizenWalletStateAccount(
+  signMode: CitizenWalletSignMode.hot,
   walletIndex: 1,
-  accountName: '钱包1',
+  accountIndex: 0,
+  name: '钱包1',
   ss58Address: 'ss58-genesis',
   accountId: _genesisAccountId,
-  signMode: SignMode.hot,
+  createdAtMillis: BigInt.zero,
+  isDefault: true,
 );
 
-const _default0 = DefaultAccount(
+final _default0 = CitizenWalletStateAccount(
+  signMode: CitizenWalletSignMode.hot,
   walletIndex: 1,
-  accountName: '账户0',
+  accountIndex: 0,
+  name: '账户0',
   ss58Address: 'ss58-0',
   accountId: _account0,
-  signMode: SignMode.hot,
+  createdAtMillis: BigInt.zero,
+  isDefault: true,
 );
 
-const _default5 = DefaultAccount(
+final _default5 = CitizenWalletStateAccount(
+  signMode: CitizenWalletSignMode.cold,
   walletIndex: 2,
-  accountName: '冷账户5',
+  accountIndex: null,
+  name: '冷账户5',
   ss58Address: 'ss58-5',
   accountId: _account5,
-  signMode: SignMode.cold,
+  createdAtMillis: BigInt.zero,
+  isDefault: true,
 );
 
 CitizenIdentityChainSnapshot _anonSnapshot() => CitizenIdentityChainSnapshot(
@@ -61,14 +69,16 @@ CitizenIdentityChainSnapshot _anonSnapshot() => CitizenIdentityChainSnapshot(
 
 void main() {
   ({FinalizedIdentityResolver resolver, _FakeReader reader}) resolver({
-    DefaultAccount? account = _default0,
+    CitizenWalletStateAccount? account,
+    bool noAccount = false,
     Map<String, CitizenIdentityChainSnapshot> chain = const {},
     String? throwFor,
   }) {
     final reader = _FakeReader(chain, throwFor: throwFor);
     return (
       resolver: FinalizedIdentityResolver(
-        defaultAccountReader: _FakeDefaultAccountReader(account),
+        wallet: _FakeWallet(noAccount ? null : account ?? _default0),
+        chain: TestCitizenChain(),
         chainReader: reader,
       ),
       reader: reader,
@@ -109,7 +119,7 @@ void main() {
   });
 
   test('没有任何默认账户 → null', () async {
-    final r = await resolver(account: null).resolver.resolve();
+    final r = await resolver(noAccount: true).resolver.resolve();
     expect(r, isNull);
   });
 
@@ -134,7 +144,7 @@ void main() {
             data,
           ),
         );
-    final chainRpc = _BindingChainRpc(<String, Uint8List>{
+    final chainRpc = _BindingChain(<String, Uint8List>{
       key('AccountIdByCid', cidScale): accountId,
       key('CidRegistry', cidScale): _activeCidRecord(),
       key('BindingRevisionByCid', cidScale):
@@ -143,7 +153,7 @@ void main() {
           CitizenIdentityChainReader.encodeBoundedBytes(cidNumber.codeUnits),
     });
 
-    final result = await CitizenIdentityChainReader(chainRpc: chainRpc)
+    final result = await CitizenIdentityChainReader(chain: chainRpc)
         .readBindingByCidNumber(cidNumber);
 
     expect(result, isNotNull);
@@ -169,7 +179,7 @@ void main() {
             data,
           ),
         );
-    final chainRpc = _BindingChainRpc(<String, Uint8List>{
+    final chainRpc = _BindingChain(<String, Uint8List>{
       key('AccountIdByCid', cidScale): accountId,
       key('CidRegistry', cidScale): _activeCidRecord(),
       key('BindingRevisionByCid', cidScale):
@@ -178,7 +188,7 @@ void main() {
           CitizenIdentityChainReader.encodeBoundedBytes('OTHER-CID'.codeUnits),
     });
 
-    final result = await CitizenIdentityChainReader(chainRpc: chainRpc)
+    final result = await CitizenIdentityChainReader(chain: chainRpc)
         .readBindingByCidNumber(cidNumber);
 
     expect(result, isNull);
@@ -272,7 +282,7 @@ void main() {
 
     test('readByAccountId 命中匿名快照', () async {
       final snapshot = await CitizenIdentityChainReader(
-              chainRpc: _BindingChainRpc(genesisStorage()))
+              chain: _BindingChain(genesisStorage()))
           .readByAccountId(_genesisAccountId);
 
       expect(snapshot, isNotNull);
@@ -283,9 +293,10 @@ void main() {
 
     test('门禁判据 isRegistered = true(不再误判未注册)', () async {
       final r = await FinalizedIdentityResolver(
-        defaultAccountReader: _FakeDefaultAccountReader(_genesisDefaultAccount),
+        wallet: _FakeWallet(_genesisDefaultAccount),
+        chain: TestCitizenChain(),
         chainReader: CitizenIdentityChainReader(
-          chainRpc: _BindingChainRpc(genesisStorage()),
+          chain: _BindingChain(genesisStorage()),
         ),
       ).resolve();
 
@@ -322,16 +333,24 @@ Uint8List _bytes(String hex) => Uint8List.fromList([
 String _accountIdText(Uint8List bytes) =>
     CitizenIdentityChainReader.hexEncode(bytes);
 
-class _FakeDefaultAccountReader implements DefaultAccountReader {
-  _FakeDefaultAccountReader(this.account);
-  final DefaultAccount? account;
+class _FakeWallet implements CitizenSdkWallet {
+  _FakeWallet(this.account);
+  final CitizenWalletStateAccount? account;
 
   @override
-  Future<DefaultAccount?> getDefaultAccount() async => account;
+  Future<CitizenWalletState> getState() async => CitizenWalletState(
+        revision: BigInt.one,
+        hotProfile: null,
+        accounts: account == null ? const [] : [account!],
+      );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _FakeReader extends CitizenIdentityChainReader {
-  _FakeReader(this._chain, {this.throwFor});
+  _FakeReader(this._chain, {this.throwFor})
+      : super(chain: TestCitizenChain());
   final Map<String, CitizenIdentityChainSnapshot> _chain;
   final String? throwFor;
   final List<String> calls = <String>[];
@@ -345,22 +364,37 @@ class _FakeReader extends CitizenIdentityChainReader {
   }
 }
 
-class _BindingChainRpc extends ChainRpc {
-  _BindingChainRpc(this.storage);
+class _BindingChain extends TestCitizenChain {
+  _BindingChain(this.storage);
 
   final Map<String, Uint8List> storage;
   final List<String> blockHashes = <String>[];
 
   @override
-  Future<({Uint8List blockHash, int blockNumber})>
-      fetchFinalizedBlock() async => (blockHash: Uint8List(32), blockNumber: 7);
+  Future<CitizenBlockRef> getFinalizedHead() async => CitizenBlockRef(
+        hash: '0x${'00' * 32}',
+        number: BigInt.from(7),
+        finality: CitizenBlockFinality.finalized,
+      );
 
   @override
-  Future<Uint8List?> fetchStorageAtBlock(
-    String storageKeyHex,
-    String blockHashHex,
+  Future<Uint8List?> getStorage(
+    CitizenBlockRef block,
+    Uint8List key,
   ) async {
-    blockHashes.add(blockHashHex);
-    return storage[storageKeyHex];
+    blockHashes.add(block.hash);
+    return storage[_hex(key)];
   }
+
+  @override
+  Future<List<Uint8List?>> getStorageBatch(
+    CitizenBlockRef block,
+    List<Uint8List> keys,
+  ) async {
+    blockHashes.addAll(List<String>.filled(keys.length, block.hash));
+    return keys.map((key) => storage[_hex(key)]).toList(growable: false);
+  }
+
+  String _hex(List<int> bytes) =>
+      '0x${bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join()}';
 }

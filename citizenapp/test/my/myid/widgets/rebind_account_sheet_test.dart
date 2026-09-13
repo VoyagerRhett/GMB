@@ -1,22 +1,23 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
 
 import 'package:citizenapp/my/myid/widgets/rebind_account_sheet.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart' show Account;
-
-Account _account({
+CitizenWalletStateAccount _account({
   int index = 5,
   String name = '账户5',
   String accountId =
       '0x1111111111111111111111111111111111111111111111111111111111111111',
 }) {
-  return Account(
-    masterId:
-        '0x0000000000000000000000000000000000000000000000000000000000000001',
+  return CitizenWalletStateAccount(
+    signMode: CitizenWalletSignMode.hot,
+    walletIndex: 0,
     accountIndex: index,
     accountId: accountId,
     ss58Address: 'w5BekTimvtfYZvFpkDzy7ypqUntPgTbjRFCt9weR8vMgf7o8E',
-    accountName: name,
+    name: name,
+    createdAtMillis: BigInt.zero,
+    isDefault: index == 0,
   );
 }
 

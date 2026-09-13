@@ -99,12 +99,15 @@ final class CitizenSDKNativeAbiTests: XCTestCase {
                 $0.trimmingCharacters(in: .whitespacesAndNewlines)
             }
         })
-        XCTAssertEqual(names.count, 116)
+        XCTAssertEqual(names.count, 121)
         XCTAssertTrue(names.isSuperset(of: ["citizensdk_review_qr_sign_request", "citizensdk_sign_qr_request", "citizensdk_result_copy_qr"]))
         XCTAssertFalse(names.contains("citizensdk_qr_signing_bytes"))
         XCTAssertFalse(names.contains("citizensdk_qr_create_sign_response"))
         XCTAssertTrue(names.isSuperset(of: ["citizensdk_validate_modules", "citizensdk_create_with_modules", "citizensdk_verify_signature"]))
         XCTAssertTrue(names.isSuperset(of: ["citizensdk_get_genesis_hash", "citizensdk_get_finalized_account_balances",
             "citizensdk_result_get_account_balance_count", "citizensdk_result_get_account_balance_at"]))
+        XCTAssertTrue(names.isSuperset(of: ["citizensdk_get_storage_keys_paged",
+            "citizensdk_call_runtime_api", "citizensdk_derive_application_key",
+            "citizensdk_result_get_application_key"]))
     }
 }

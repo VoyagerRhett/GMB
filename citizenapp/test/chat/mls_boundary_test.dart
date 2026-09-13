@@ -6,7 +6,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:tatachat_sdk/tatachat_sdk.dart';
 import 'package:citizenapp/security/local_data_key.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/security/account_security_service.dart';
+import 'package:citizenapp/my/myid/current_user_context.dart';
 
 import '../support/isar_test_env.dart';
 
@@ -28,7 +29,8 @@ class _TestBinding extends AccountDataBinding implements ChatDataBinding {
   String get id => '$keyDomain|$userId|$bindingRevision|$accountId';
 }
 
-class _TargetHandoverKeyFailureWalletManager extends WalletManager {
+class _TargetHandoverKeyFailureWalletManager
+    implements AccountSecurityService {
   final List<Uint8List> sourceKeys = <Uint8List>[
     Uint8List.fromList(List<int>.filled(32, 17)),
     Uint8List.fromList(List<int>.filled(32, 29)),
@@ -42,6 +44,14 @@ class _TargetHandoverKeyFailureWalletManager extends WalletManager {
     if (binding.bindingRevision == 1) return sourceKeys;
     throw StateError('target-key-derivation-failed');
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _UnusedCurrentUserContext implements CurrentUserContext {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 void main() {
@@ -213,7 +223,8 @@ void main() {
       await store.activateBindingFence(source);
       final runtime = createCitizenChatRuntime(
         store: store,
-        walletManager: walletManager,
+        accountSecurity: walletManager,
+        currentUserContext: _UnusedCurrentUserContext(),
         documentsDirectoryProvider: () async => deviceDirectory,
       );
 

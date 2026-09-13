@@ -258,11 +258,11 @@ impl TransactionExecutionRecord {
 
     /// 用于持久化 admission 的通用资源权重；不包含任何 App 业务分类。
     pub fn durable_weight_bytes(&self) -> usize {
-        Self::try_durable_weight_for_lengths(
-            self.call_data.len(),
-            self.signed_extrinsic.as_bytes().len(),
-        )
-        .expect("validated transaction execution lengths cannot overflow durable weight")
+        // try_new 已把两段变长输入限制在固定上限；最大总和远低于 32 位
+        // usize，已构造记录的 getter 不再引入 panic 或重复的失败分支。
+        TRANSACTION_HISTORY_RECORD_FIXED_WEIGHT_BYTES
+            + self.call_data.len()
+            + self.signed_extrinsic.as_bytes().len()
     }
 
     /// 在签名前用已经冻结的 extrinsic template 长度执行精确资源准入。

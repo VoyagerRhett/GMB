@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
@@ -18,11 +19,10 @@ import 'package:citizenapp/qr/pages/qr_scan_page.dart';
 import 'package:citizenapp/security/local_cipher.dart';
 import 'package:isar_community/isar.dart';
 import 'package:citizenapp/security/local_data_key.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
-import 'package:citizenapp/wallet/core/default_account_service.dart';
-import 'package:citizenapp/wallet/core/sign_mode.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 
 import '../support/isar_test_env.dart';
+import '../support/fake_citizen_sdk.dart';
 
 const _owner = 'w5BekTimvtfYZvFpkDzy7ypqUntPgTbjRFCt9weR8vMgf7o8E';
 final _accountId = UserContactService.accountIdFromSs58(_owner);
@@ -30,7 +30,7 @@ const _contactA = 'w5Bc7ma8qUcECfQDJmRyQM2wGmga5XSYtz7DvEengQ86xBWrT';
 const _ownerCidNumber = 'CN220-CTZN2-198805200-2026';
 const _contactCidNumber = 'CN220-CTZN2-100000001-2026';
 
-class _FakeWalletManager extends WalletManager {
+class _FakeWalletManager implements AccountSecurityService {
   /// 固定当前钱包用途子钥，避免测试触碰硬件金库或平台通道。
   /// 只替换密钥来源，通讯录本地 KV 仍走真实 AES-256-GCM。
   @override
@@ -45,21 +45,6 @@ class _FakeWalletManager extends WalletManager {
       ));
 
   @override
-  Future<WalletProfile?> getDefaultWallet() async => WalletProfile(
-        walletIndex: 1,
-        walletName: '默认钱包',
-        walletIcon: '',
-        balance: 0,
-        ss58Address: _owner,
-        accountId: _accountId,
-        alg: 'sr25519',
-        ss58: 2027,
-        createdAtMillis: 1,
-        source: 'test',
-        signMode: SignMode.hot,
-      );
-
-  @override
   Future<ContactKeyMaterial> ensureContactKeyMaterialForAccountId(
     String accountId,
   ) async =>
@@ -67,18 +52,24 @@ class _FakeWalletManager extends WalletManager {
         encryptionKey: Uint8List.fromList(List<int>.filled(32, 7)),
         indexKey: Uint8List.fromList(List<int>.filled(32, 9)),
       );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// 身份缓存 fake：恒返回已注册 CID 及其当前绑定账户。
-class _FakeIdentityCache extends CurrentUserContext {
+class _FakeIdentityCache implements CurrentUserContext {
   @override
   Future<CurrentUser?> resolve() async => CurrentUser(
-        account: DefaultAccount(
+        account: CitizenWalletStateAccount(
+          signMode: CitizenWalletSignMode.hot,
+          walletIndex: 1,
+          accountIndex: 0,
           accountId: _accountId,
           ss58Address: _owner,
-          accountName: '默认账户',
-          signMode: SignMode.hot,
-          walletIndex: 1,
+          name: '默认账户',
+          createdAtMillis: BigInt.one,
+          isDefault: true,
         ),
         binding: AccountDataBinding(
           genesisHash: '0x${'11' * 32}',
@@ -89,9 +80,12 @@ class _FakeIdentityCache extends CurrentUserContext {
       );
   @override
   Future<String?> accountId() async => _accountId;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _FixedIdentityCache extends CurrentUserContext {
+class _FixedIdentityCache implements CurrentUserContext {
   _FixedIdentityCache(this.boundAccountId, {this.bindingRevision = 2});
 
   final String boundAccountId;
@@ -99,12 +93,15 @@ class _FixedIdentityCache extends CurrentUserContext {
 
   @override
   Future<CurrentUser?> resolve() async => CurrentUser(
-        account: DefaultAccount(
+        account: CitizenWalletStateAccount(
+          signMode: CitizenWalletSignMode.hot,
+          walletIndex: 1,
+          accountIndex: 0,
           accountId: boundAccountId,
           ss58Address: _owner,
-          accountName: '默认账户',
-          signMode: SignMode.hot,
-          walletIndex: 1,
+          name: '默认账户',
+          createdAtMillis: BigInt.one,
+          isDefault: true,
         ),
         binding: AccountDataBinding(
           genesisHash: '0x${'11' * 32}',
@@ -113,9 +110,12 @@ class _FixedIdentityCache extends CurrentUserContext {
           bindingRevision: bindingRevision,
         ),
       );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _FakeSessionProvider extends SquareSessionProvider {
+class _FakeSessionProvider implements SquareSessionProvider {
   @override
   Future<SquareSession?> ensureSession() async => SquareSession(
         sessionToken: 'token',
@@ -124,6 +124,9 @@ class _FakeSessionProvider extends SquareSessionProvider {
         accountId: _accountId,
         expiresAt: DateTime.now().millisecondsSinceEpoch + 60000,
       );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _FakeApi extends SquareApiClient {
@@ -159,7 +162,7 @@ class _FakeApi extends SquareApiClient {
   }
 }
 
-class _HandoverWalletManager extends WalletManager {
+class _HandoverWalletManager implements AccountSecurityService {
   Uint8List _key(
     String accountId,
     LocalKeyPurpose purpose, {
@@ -213,9 +216,12 @@ class _HandoverWalletManager extends WalletManager {
     AccountDataBinding binding,
   ) =>
       ensureContactKeyMaterialForAccountId(binding.accountId);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _HandoverSessionProvider extends SquareSessionProvider {
+class _HandoverSessionProvider implements SquareSessionProvider {
   _HandoverSessionProvider({
     required this.sourceAccountId,
     required this.targetAccountId,
@@ -238,6 +244,9 @@ class _HandoverSessionProvider extends SquareSessionProvider {
   @override
   Future<SquareSession?> ensureSessionForAccountId(String accountId) async =>
       accountId == targetAccountId ? _session(targetAccountId, 2) : null;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _HandoverApi extends SquareApiClient {
@@ -286,7 +295,12 @@ class _HandoverApi extends SquareApiClient {
 }
 
 class _FixedCidByAccountIdResolver extends CidByAccountIdResolver {
-  _FixedCidByAccountIdResolver(this.cidNumber);
+  _FixedCidByAccountIdResolver(this.cidNumber)
+      : super(
+          chainReader: _FakeBindingReader(
+            const <String, CitizenBindingChainSnapshot>{},
+          ),
+        );
 
   final String cidNumber;
   String? resolvedAccountId;
@@ -299,7 +313,7 @@ class _FixedCidByAccountIdResolver extends CidByAccountIdResolver {
 }
 
 class _FakeBindingReader extends CitizenIdentityChainReader {
-  _FakeBindingReader(this.bindings);
+  _FakeBindingReader(this.bindings) : super(chain: TestCitizenChain());
 
   final Map<String, CitizenBindingChainSnapshot> bindings;
   int batchReads = 0;
@@ -329,17 +343,13 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   useIsolatedIsar();
 
-  setUp(() {
-    CurrentUserContext.debugInstance = _FakeIdentityCache();
-  });
-
-  tearDown(CurrentUserContext.resetDebugInstance);
-
   group('UserContactService', () {
     UserContactService createService() => UserContactService(
-          walletManager: _FakeWalletManager(),
+          accountSecurity: _FakeWalletManager(),
+          currentUserContext: _FakeIdentityCache(),
           sessionProvider: _FakeSessionProvider(),
           apiClient: _FakeApi(),
+          chainReader: _FakeBindingReader(const {}),
           autoSync: false,
         );
 
@@ -394,7 +404,8 @@ void main() {
         ),
       });
       final service = UserContactService(
-        walletManager: _FakeWalletManager(),
+        accountSecurity: _FakeWalletManager(),
+          currentUserContext: _FakeIdentityCache(),
         sessionProvider: _FakeSessionProvider(),
         apiClient: _FakeApi(),
         chainReader: reader,
@@ -423,7 +434,8 @@ void main() {
         const <String, CitizenBindingChainSnapshot>{},
       );
       final service = UserContactService(
-        walletManager: _FakeWalletManager(),
+        accountSecurity: _FakeWalletManager(),
+          currentUserContext: _FakeIdentityCache(),
         sessionProvider: _FakeSessionProvider(),
         apiClient: _FakeApi(),
         chainReader: reader,
@@ -515,9 +527,11 @@ void main() {
     test('同步到云端的记录不含联系人明文', () async {
       final api = _FakeApi();
       final service = UserContactService(
-        walletManager: _FakeWalletManager(),
+        accountSecurity: _FakeWalletManager(),
+          currentUserContext: _FakeIdentityCache(),
         sessionProvider: _FakeSessionProvider(),
         apiClient: api,
+          chainReader: _FakeBindingReader(const {}),
         autoSync: false,
       );
       await service.addContact(
@@ -585,9 +599,11 @@ void main() {
 
   group('通讯录本地静止态加密', () {
     UserContactService createService() => UserContactService(
-          walletManager: _FakeWalletManager(),
+          accountSecurity: _FakeWalletManager(),
+          currentUserContext: _FakeIdentityCache(),
           sessionProvider: _FakeSessionProvider(),
           apiClient: _FakeApi(),
+          chainReader: _FakeBindingReader(const {}),
           autoSync: false,
         );
 
@@ -645,10 +661,11 @@ void main() {
         targetAccountId: newAccountId,
       );
       final currentBinding = UserContactService(
-        walletManager: wallet,
+        accountSecurity: wallet,
         currentUserContext: _FixedIdentityCache(_accountId, bindingRevision: 1),
         sessionProvider: sessions,
         apiClient: api,
+          chainReader: _FakeBindingReader(const {}),
         autoSync: false,
       );
       await currentBinding.addContact(
@@ -686,10 +703,11 @@ void main() {
       expect(api.cloud.values.single.accountId, newAccountId);
 
       final newBinding = UserContactService(
-        walletManager: wallet,
+        accountSecurity: wallet,
         currentUserContext: _FixedIdentityCache(newAccountId),
         sessionProvider: sessions,
         apiClient: api,
+          chainReader: _FakeBindingReader(const {}),
         autoSync: false,
       );
       final contacts = await newBinding.getContacts();
@@ -705,13 +723,14 @@ void main() {
           '0x1111111111111111111111111111111111111111111111111111111111111111';
       final wallet = _HandoverWalletManager();
       final sourceService = UserContactService(
-        walletManager: wallet,
+        accountSecurity: wallet,
         currentUserContext: _FixedIdentityCache(_accountId, bindingRevision: 1),
         sessionProvider: _HandoverSessionProvider(
           sourceAccountId: _accountId,
           targetAccountId: newAccountId,
         ),
         apiClient: _HandoverApi(),
+          chainReader: _FakeBindingReader(const {}),
         autoSync: false,
       );
       await sourceService.addContact(
@@ -754,7 +773,7 @@ void main() {
       );
 
       final targetService = UserContactService(
-        walletManager: wallet,
+        accountSecurity: wallet,
         currentUserContext:
             _FixedIdentityCache(newAccountId, bindingRevision: 2),
         sessionProvider: _HandoverSessionProvider(
@@ -762,6 +781,7 @@ void main() {
           targetAccountId: newAccountId,
         ),
         apiClient: _HandoverApi(),
+          chainReader: _FakeBindingReader(const {}),
         autoSync: false,
       );
       expect(await targetService.getContacts(), isEmpty);

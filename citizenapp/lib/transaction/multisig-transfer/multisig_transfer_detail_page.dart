@@ -1,6 +1,9 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:citizenapp/log/app_log.dart';
 import 'package:flutter/services.dart';
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
@@ -17,10 +20,6 @@ import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_balan
 import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_models.dart';
 import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_service.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/rpc/smoldot_client.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
-import 'package:citizenapp/signer/qr_signer.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:citizenapp/votingengine/internal-vote/proposal_vote_widgets.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
@@ -61,7 +60,8 @@ class MultisigTransferDetailPage extends StatefulWidget {
   final ProposalContext proposalContext;
 
   /// 便捷访问。
-  List<WalletProfile> get adminWallets => proposalContext.adminWallets;
+  List<CitizenWalletStateAccount> get adminWallets =>
+      proposalContext.adminWallets;
 
   @override
   State<MultisigTransferDetailPage> createState() =>
@@ -72,10 +72,11 @@ class _MultisigTransferDetailPageState
     extends State<MultisigTransferDetailPage> {
   static const int _statusVoting = 0;
 
-  final MultisigTransferService _proposalService = MultisigTransferService();
+  late final MultisigTransferService _proposalService;
   final ProposalDetailLocalStore _detailStore =
       ProposalDetailLocalStore.instance;
-  final InstitutionAdminService _adminService = InstitutionAdminService();
+  late final InstitutionAdminService _adminService;
+  bool _dependenciesReady = false;
   AdminAccountIdentity get _accountIdentity =>
       AdminAccountIdentity.fromInstitution(widget.institution);
   bool _loading = true;
@@ -129,8 +130,8 @@ class _MultisigTransferDetailPageState
   List<EligibleVoterTicket> _voterTickets = const [];
 
   // 当前用户已导入且属于合格选民快照的投票钱包。
-  List<WalletProfile> _votableWallets = const [];
-  WalletProfile? _selectedVoteWallet;
+  List<CitizenWalletStateAccount> _votableWallets = const [];
+  CitizenWalletStateAccount? _selectedVoteWallet;
 
   String? _voteNotice;
   bool _voteNoticeIsError = false;
@@ -138,6 +139,19 @@ class _MultisigTransferDetailPageState
   @override
   void initState() {
     super.initState();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    final sdk = context.read<CitizenSdk>();
+    _proposalService = MultisigTransferService(
+      chain: sdk.chain,
+      transactions: sdk.transactions,
+    );
+    _adminService = InstitutionAdminService(chain: sdk.chain);
+    _dependenciesReady = true;
     _load();
   }
 
@@ -166,12 +180,14 @@ class _MultisigTransferDetailPageState
       final Future<dynamic> detailFuture;
       switch (widget.kind) {
         case MultisigTransferKind.transfer:
-          detailFuture =
-              _proposalService.fetchProposalAction(widget.proposalId);
+          detailFuture = _proposalService.fetchProposalAction(
+            widget.proposalId,
+          );
           break;
         case MultisigTransferKind.safetyFund:
-          detailFuture =
-              _proposalService.fetchSafetyFundAction(widget.proposalId);
+          detailFuture = _proposalService.fetchSafetyFundAction(
+            widget.proposalId,
+          );
           break;
         case MultisigTransferKind.sweep:
           detailFuture = _proposalService.fetchSweepAction(widget.proposalId);
@@ -194,8 +210,10 @@ class _MultisigTransferDetailPageState
       ]);
 
       final voterTickets = results[0] as List<EligibleVoterTicket>;
-      final admins =
-          voterTickets.map((ticket) => ticket.voterAccountId).toSet().toList();
+      final admins = voterTickets
+          .map((ticket) => ticket.voterAccountId)
+          .toSet()
+          .toList();
       final thresholdSnapshot = results[1] as int?;
       final status = results[2] as int?;
       final tally = results[3] as ({int yes, int no});
@@ -207,7 +225,7 @@ class _MultisigTransferDetailPageState
       );
 
       // 筛选出至少仍有一张未投岗位票据的钱包。
-      final votable = <WalletProfile>[];
+      final votable = <CitizenWalletStateAccount>[];
       for (final w in widget.adminWallets) {
         final accountId = _requireAccountId(w.accountId);
         final walletTickets = voterTickets.where(
@@ -220,14 +238,16 @@ class _MultisigTransferDetailPageState
 
       if (!mounted) return;
       try {
-        await _detailStore.put(_snapshotFromChain(
-          status: status,
-          tally: tally,
-          thresholdSnapshot: thresholdSnapshot,
-          admins: admins,
-          votes: votes,
-          detail: detail,
-        ));
+        await _detailStore.put(
+          _snapshotFromChain(
+            status: status,
+            tally: tally,
+            thresholdSnapshot: thresholdSnapshot,
+            admins: admins,
+            votes: votes,
+            detail: detail,
+          ),
+        );
       } catch (e) {
         // 详情快照写入失败不能影响链上最新结果展示；仅留痕便于排查。
         AppLog.d('[MultisigDetail] 详情快照写入失败: $e');
@@ -266,7 +286,7 @@ class _MultisigTransferDetailPageState
         return;
       }
       setState(() {
-        _error = SmoldotClientManager.instance.buildUserFacingError(e);
+        _error = '多签提案链状态暂时不可用';
         _loading = false;
       });
     }
@@ -274,11 +294,13 @@ class _MultisigTransferDetailPageState
 
   Future<ProposalDetailSnapshot?> _applyLocalSnapshot() async {
     try {
-      final snapshot =
-          await _detailStore.read(_proposalTypeKey, widget.proposalId);
+      final snapshot = await _detailStore.read(
+        _proposalTypeKey,
+        widget.proposalId,
+      );
       if (snapshot == null || !mounted) return snapshot;
       final admins = snapshot.admins;
-      final votable = <WalletProfile>[];
+      final votable = <CitizenWalletStateAccount>[];
       for (final w in widget.adminWallets) {
         final accountId = _requireAccountId(w.accountId);
         if (admins.contains(accountId) &&
@@ -468,9 +490,7 @@ class _MultisigTransferDetailPageState
 
   Uint8List _accountIdBytes(String accountId) {
     if (!isAccountIdText(accountId)) {
-      throw const FormatException(
-        'institution_account_id 必须为小写 0x + 64 位十六进制',
-      );
+      throw const FormatException('institution_account_id 必须为小写 0x + 64 位十六进制');
     }
     return _hexDecode(accountId);
   }
@@ -532,10 +552,12 @@ class _MultisigTransferDetailPageState
       builder: (dialogContext) => SimpleDialog(
         title: const Text('选择本次投票岗位'),
         children: tickets
-            .map((ticket) => SimpleDialogOption(
-                  onPressed: () => Navigator.pop(dialogContext, ticket),
-                  child: Text(ticket.voterRoleCode ?? '个人多签管理员'),
-                ))
+            .map(
+              (ticket) => SimpleDialogOption(
+                onPressed: () => Navigator.pop(dialogContext, ticket),
+                child: Text(ticket.voterRoleCode ?? '个人多签管理员'),
+              ),
+            )
             .toList(growable: false),
       ),
     );
@@ -547,10 +569,11 @@ class _MultisigTransferDetailPageState
 
     final balanceBlockedReason =
         await MultisigTransferBalanceGuard.checkAdminWalletBalance(
-      wallet: wallet,
-      requiredFeeYuan: MultisigTransferBalanceGuard.voteFeeYuan,
-      actionLabel: '提交多签转账投票',
-    );
+          wallet: wallet,
+          requiredFeeYuan: MultisigTransferBalanceGuard.voteFeeYuan,
+          actionLabel: '提交多签转账投票',
+          chain: context.read<CitizenSdk>().chain,
+        );
     if (balanceBlockedReason != null) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -568,80 +591,60 @@ class _MultisigTransferDetailPageState
       final signerPublicKeyBytes = _hexDecode(wallet.accountId);
       final accountId = _requireAccountId(wallet.accountId);
       final availableTickets = _voterTickets
-          .where((ticket) =>
-              _requireAccountId(ticket.voterAccountId) == accountId &&
-              _adminVotes[ticket.ticketKey] == null)
+          .where(
+            (ticket) =>
+                _requireAccountId(ticket.voterAccountId) == accountId &&
+                _adminVotes[ticket.ticketKey] == null,
+          )
           .toList(growable: false);
       if (availableTickets.isEmpty) {
         throw StateError('当前钱包没有未使用的投票票据');
       }
       final ticket = await _selectTicket(availableTickets);
       if (ticket == null) throw StateError('已取消选择投票岗位');
-
-      // 按目标钱包账户精确分流：Hot 本机签名，Cold 扫码签名。
-      WalletManager? hotWalletManager;
-      if (wallet.requiresHotSign) {
-        hotWalletManager = WalletManager();
-      }
-
-      Future<Uint8List> signCallback(Uint8List payload) async {
-        if (hotWalletManager != null) {
-          return await hotWalletManager.signWithWallet(
-              wallet.walletIndex, payload);
-        }
-        // 冷钱包 QR 签名
-        final qrSigner = QrSigner();
-        final request = qrSigner.buildRequest(
-          requestId: QrSigner.generateRequestId(prefix: 'vote-'),
-          signerPublicKey: wallet.accountId,
-          payloadHex: '0x${_toHex(payload)}',
-          action: QrActions.internalVote,
-        );
-        final requestJson = qrSigner.encodeRequest(request);
-        if (!mounted) throw Exception('页面已关闭');
-        final response = await Navigator.push<SignResponseEnvelope>(
-          context,
-          MaterialPageRoute(
-            builder: (_) => QrSignSessionPage(
-                request: request,
-                requestJson: requestJson,
-                expectedSignerPublicKey: wallet.accountId),
-          ),
-        );
-        if (response == null) throw Exception('签名已取消');
-        return Uint8List.fromList(_hexDecode(response.body.signatureHex));
-      }
+      if (!mounted) return;
 
       // 机构岗位快照选民和个人多签管理员都统一走 InternalVote::cast(20.0)。
       // 业务 kind 仅用于 QR 展示的文案与 storage 读取。
-      final result = await InternalVoteService().submit(
-        proposalId: widget.proposalId,
-        approve: approve,
-        actorCidNumber: ticket.cidNumber,
-        voterRoleCode: ticket.voterRoleCode,
-        fromSs58Address: wallet.ss58Address,
-        signerPublicKey: Uint8List.fromList(signerPublicKeyBytes),
-        sign: signCallback,
-        onWatchEvent: (event) {
-          if (event.isIncluded) {
-            unawaited(_load(showSpinner: false));
-          }
-        },
-      );
+      final sdk = context.read<CitizenSdk>();
+      final result =
+          await InternalVoteService(
+            chain: sdk.chain,
+            transactions: sdk.transactions,
+          ).submit(
+            proposalId: widget.proposalId,
+            approve: approve,
+            actorCidNumber: ticket.cidNumber,
+            voterRoleCode: ticket.voterRoleCode,
+            signerPublicKey: Uint8List.fromList(signerPublicKeyBytes),
+            externalSigning: (pending) => showCitizenSdkQrResponse(
+              context,
+              request: pending.qrRequest,
+              expiresAt: BigInt.from(
+                pending.expiresAt.millisecondsSinceEpoch ~/ 1000,
+              ),
+            ),
+          );
       AppLog.d(
-          '[MultisigTransferVote] submit 已入块 txHash=${result.txHash} nonce=${result.usedNonce} block=${result.blockHashHex}');
+        '[MultisigTransferVote] submit 已入块 txHash=${result.txHash} nonce=${result.usedNonce} block=${result.blockHashHex}',
+      );
 
       if (!mounted) return;
       setState(() {
         _adminVotes[ticket.ticketKey] = approve;
-        _votableWallets = _votableWallets.where((w) {
-          final accountId = _requireAccountId(w.accountId);
-          return _voterTickets.any((candidate) =>
-              _requireAccountId(candidate.voterAccountId) == accountId &&
-              _adminVotes[candidate.ticketKey] == null);
-        }).toList(growable: false);
-        _selectedVoteWallet =
-            _votableWallets.isNotEmpty ? _votableWallets.first : null;
+        _votableWallets = _votableWallets
+            .where((w) {
+              final accountId = _requireAccountId(w.accountId);
+              return _voterTickets.any(
+                (candidate) =>
+                    _requireAccountId(candidate.voterAccountId) == accountId &&
+                    _adminVotes[candidate.ticketKey] == null,
+              );
+            })
+            .toList(growable: false);
+        _selectedVoteWallet = _votableWallets.isNotEmpty
+            ? _votableWallets.first
+            : null;
         _voteNotice = '链上已确认该合格选民投票。';
         _voteNoticeIsError = false;
       });
@@ -660,10 +663,7 @@ class _MultisigTransferDetailPageState
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('投票失败：$e'),
-          backgroundColor: AppTheme.danger,
-        ),
+        SnackBar(content: Text('投票失败：$e'), backgroundColor: AppTheme.danger),
       );
     } finally {
       if (mounted) setState(() => _submitting = false);
@@ -704,8 +704,9 @@ class _MultisigTransferDetailPageState
         title: Text(
           '$_kindLabel详情',
           style: TextStyle(
-              fontSize: AppLayout.scaled(context, 17),
-              fontWeight: FontWeight.w700),
+            fontSize: AppLayout.scaled(context, 17),
+            fontWeight: FontWeight.w700,
+          ),
         ),
         centerTitle: true,
         foregroundColor: AppTheme.textPrimary,
@@ -713,9 +714,10 @@ class _MultisigTransferDetailPageState
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _error != null
-              ? _buildError()
-              : _buildContent(),
-      bottomNavigationBar: (!_loading &&
+          ? _buildError()
+          : _buildContent(),
+      bottomNavigationBar:
+          (!_loading &&
               _error == null &&
               _status == _statusVoting &&
               _isCurrentUserAdmin)
@@ -739,19 +741,26 @@ class _MultisigTransferDetailPageState
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.error_outline,
-                size: AppLayout.scaledValue(48), color: AppTheme.danger),
+            Icon(
+              Icons.error_outline,
+              size: AppLayout.scaledValue(48),
+              color: AppTheme.danger,
+            ),
             SizedBox(height: AppLayout.scaledValue(12)),
-            Text('加载失败',
-                style: TextStyle(
-                    fontSize: AppLayout.scaledValue(16),
-                    color: AppTheme.textSecondary)),
+            Text(
+              '加载失败',
+              style: TextStyle(
+                fontSize: AppLayout.scaledValue(16),
+                color: AppTheme.textSecondary,
+              ),
+            ),
             SizedBox(height: AppLayout.scaledValue(6)),
             Text(
               _error!,
               style: TextStyle(
-                  fontSize: AppLayout.scaledValue(12),
-                  color: AppTheme.textTertiary),
+                fontSize: AppLayout.scaledValue(12),
+                color: AppTheme.textTertiary,
+              ),
               textAlign: TextAlign.center,
               maxLines: 4,
               overflow: TextOverflow.ellipsis,
@@ -897,16 +906,20 @@ class _MultisigTransferDetailPageState
     if (info != null) {
       rows
         ..add(Divider(height: AppLayout.scaledValue(20)))
-        ..add(_buildInfoRow(
-          '转账金额',
-          '${AmountFormat.format(info.amountYuan, symbol: '')} 元',
-        ))
+        ..add(
+          _buildInfoRow(
+            '转账金额',
+            '${AmountFormat.format(info.amountYuan, symbol: '')} 元',
+          ),
+        )
         ..add(Divider(height: AppLayout.scaledValue(20)))
-        ..add(_buildInfoRow(
-          '收款地址',
-          _truncateAddress(info.beneficiary),
-          onCopy: () => _copyToClipboard(info.beneficiary),
-        ));
+        ..add(
+          _buildInfoRow(
+            '收款地址',
+            _truncateAddress(info.beneficiary),
+            onCopy: () => _copyToClipboard(info.beneficiary),
+          ),
+        );
     }
     rows
       ..add(Divider(height: AppLayout.scaledValue(20)))
@@ -917,22 +930,24 @@ class _MultisigTransferDetailPageState
   /// 安全基金转账：金额 + 收款地址 + 备注（无机构维度，安全基金是全链级账户）。
   List<Widget> _buildSafetyFundRows() {
     final info = _safetyFundInfo;
-    final rows = <Widget>[
-      _buildInfoRow('付款账户', '安全基金账户'),
-    ];
+    final rows = <Widget>[_buildInfoRow('付款账户', '安全基金账户')];
     if (info != null) {
       rows
         ..add(Divider(height: AppLayout.scaledValue(20)))
-        ..add(_buildInfoRow(
-          '转账金额',
-          '${AmountFormat.format(info.amountYuan, symbol: '')} 元',
-        ))
+        ..add(
+          _buildInfoRow(
+            '转账金额',
+            '${AmountFormat.format(info.amountYuan, symbol: '')} 元',
+          ),
+        )
         ..add(Divider(height: AppLayout.scaledValue(20)))
-        ..add(_buildInfoRow(
-          '收款地址',
-          _truncateAddress(info.beneficiary),
-          onCopy: () => _copyToClipboard(info.beneficiary),
-        ));
+        ..add(
+          _buildInfoRow(
+            '收款地址',
+            _truncateAddress(info.beneficiary),
+            onCopy: () => _copyToClipboard(info.beneficiary),
+          ),
+        );
     }
     rows
       ..add(Divider(height: AppLayout.scaledValue(20)))
@@ -949,10 +964,12 @@ class _MultisigTransferDetailPageState
     if (info != null) {
       rows
         ..add(Divider(height: AppLayout.scaledValue(20)))
-        ..add(_buildInfoRow(
-          '划转金额',
-          '${AmountFormat.format(info.amountYuan, symbol: '')} 元',
-        ))
+        ..add(
+          _buildInfoRow(
+            '划转金额',
+            '${AmountFormat.format(info.amountYuan, symbol: '')} 元',
+          ),
+        )
         ..add(Divider(height: AppLayout.scaledValue(20)))
         ..add(_buildInfoRow('划转路径', '手续费账户 → 机构主账户'));
     }
@@ -962,10 +979,7 @@ class _MultisigTransferDetailPageState
   void _copyToClipboard(String value) {
     Clipboard.setData(ClipboardData(text: value));
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('地址已复制'),
-        duration: Duration(seconds: 1),
-      ),
+      const SnackBar(content: Text('地址已复制'), duration: Duration(seconds: 1)),
     );
   }
 
@@ -985,16 +999,18 @@ class _MultisigTransferDetailPageState
               child: Text(
                 '备注',
                 style: TextStyle(
-                    fontSize: AppLayout.scaledValue(13),
-                    color: AppTheme.textSecondary),
+                  fontSize: AppLayout.scaledValue(13),
+                  color: AppTheme.textSecondary,
+                ),
               ),
             ),
             Expanded(
               child: Text(
                 remark,
                 style: TextStyle(
-                    fontSize: AppLayout.scaledValue(13),
-                    color: AppTheme.textPrimary),
+                  fontSize: AppLayout.scaledValue(13),
+                  color: AppTheme.textPrimary,
+                ),
                 maxLines: _remarkExpanded ? null : 1,
                 overflow: _remarkExpanded ? null : TextOverflow.ellipsis,
               ),
@@ -1025,23 +1041,28 @@ class _MultisigTransferDetailPageState
           child: Text(
             label,
             style: TextStyle(
-                fontSize: AppLayout.scaledValue(13),
-                color: AppTheme.textSecondary),
+              fontSize: AppLayout.scaledValue(13),
+              color: AppTheme.textSecondary,
+            ),
           ),
         ),
         Expanded(
           child: Text(
             value,
             style: TextStyle(
-                fontSize: AppLayout.scaledValue(13),
-                color: AppTheme.textPrimary),
+              fontSize: AppLayout.scaledValue(13),
+              color: AppTheme.textPrimary,
+            ),
           ),
         ),
         if (onCopy != null)
           GestureDetector(
             onTap: onCopy,
-            child: Icon(Icons.copy,
-                size: AppLayout.scaledValue(16), color: AppTheme.textTertiary),
+            child: Icon(
+              Icons.copy,
+              size: AppLayout.scaledValue(16),
+              color: AppTheme.textTertiary,
+            ),
           ),
       ],
     );

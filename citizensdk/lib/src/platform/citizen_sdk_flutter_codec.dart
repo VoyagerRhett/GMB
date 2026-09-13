@@ -30,6 +30,11 @@ final class CitizenSdkFlutterCodec {
   static const int maximumStorageKeyBytes = 4 * 1024;
   static const int maximumStorageBatchKeys = 1024;
   static const int maximumStorageBatchKeyBytes = 1024 * 1024;
+  static const int maximumStorageKeysPageLimit = 1000;
+  static const int maximumStorageKeysPageBytes = 4 * 1024 * 1024;
+  static const int maximumRuntimeApiMethodBytes = 128;
+  static const int maximumRuntimeApiArgumentBytes = 1024 * 1024;
+  static const int maximumRuntimeApiOutputBytes = 64 * 1024 * 1024;
   static const int maximumHeaderDigestBytes = 1024 * 1024;
   static const int maximumBlockBodyExtrinsics = 16 * 1024;
   static const int maximumBlockBodyBytes = 64 * 1024 * 1024;
@@ -56,6 +61,8 @@ final class CitizenSdkFlutterCodec {
     'getRuntimeContext',
     'getStorage',
     'getStorageBatch',
+    'getStorageKeysPaged',
+    'callRuntimeApi',
     'getSystemEvents',
     'exportState',
     'importState',
@@ -81,6 +88,7 @@ final class CitizenSdkFlutterCodec {
     'deleteWallet',
     'reconcileWalletCleanup',
     'signWalletPayload',
+    'deriveApplicationKey',
     'beginSigning',
     'consumeExternalSignature',
     'cancelSigning',
@@ -269,6 +277,7 @@ final class CitizenSdkFlutterCodec {
     final event = switch (type) {
       'lifecycleChanged' => _decodeLifecycleEvent(sequence, payload),
       'historyChanged' => _decodeHistoryEvent(sequence, payload),
+      'finalizedBlockChanged' => _decodeFinalizedBlockEvent(sequence, payload),
       'capabilitiesChanged' => _decodeCapabilitiesEvent(sequence, payload),
       _ => throw _decodeFailure('未知事件类型：$type'),
     };
@@ -1055,6 +1064,38 @@ final class CitizenSdkFlutterCodec {
           }
         }
         return;
+      case 'getStorageKeysPaged':
+        _expectLength(fields, 4, '$method fields');
+        final keysBlock = decodeBlock(fields[0]);
+        final prefix = _bytesView(fields[1], '$method.prefix');
+        final startKey = fields[2] == null
+            ? null
+            : _bytesView(fields[2], '$method.startKey');
+        final keysLimit = _positiveInt(fields[3], '$method.limit');
+        if (keysBlock.finality != CitizenBlockFinality.finalized ||
+            prefix.isEmpty ||
+            prefix.length > maximumStorageKeyBytes ||
+            (startKey != null &&
+                (startKey.isEmpty ||
+                    startKey.length > maximumStorageKeyBytes)) ||
+            keysLimit > maximumStorageKeysPageLimit) {
+          throw _decodeFailure('getStorageKeysPaged 参数无效');
+        }
+        return;
+      case 'callRuntimeApi':
+        _expectLength(fields, 3, '$method fields');
+        decodeBlock(fields[0]);
+        final runtimeMethod = _string(fields[1], '$method.method');
+        final runtimeMethodBytes = utf8.encode(runtimeMethod);
+        final runtimeArguments = _bytesView(fields[2], '$method.arguments');
+        if (runtimeMethodBytes.isEmpty ||
+            runtimeMethodBytes.length > maximumRuntimeApiMethodBytes ||
+            !RegExp(r'^[A-Za-z][A-Za-z0-9_]*_[A-Za-z0-9_]+$')
+                .hasMatch(runtimeMethod) ||
+            runtimeArguments.length > maximumRuntimeApiArgumentBytes) {
+          throw _decodeFailure('callRuntimeApi 参数无效');
+        }
+        return;
       case 'importState':
         _expectLength(fields, 3, '$method fields');
         _positiveInt(fields[0], '$method.formatVersion');
@@ -1141,6 +1182,17 @@ final class CitizenSdkFlutterCodec {
         final payload = _bytesView(fields[1], 'signWalletPayload.payload');
         if (payload.length > maximumSigningPayloadBytes) {
           throw _decodeFailure('签名 payload 不能超过 16 MiB');
+        }
+        return;
+      case 'deriveApplicationKey':
+        _expectLength(fields, 3, '$method fields');
+        _hex32(fields[0], '$method.accountId');
+        if (_bytesView(fields[1], '$method.salt').length != 32) {
+          throw _decodeFailure('deriveApplicationKey.salt 必须是 32 字节');
+        }
+        final applicationInfo = _bytesView(fields[2], '$method.info');
+        if (applicationInfo.isEmpty || applicationInfo.length > 256) {
+          throw _decodeFailure('deriveApplicationKey.info 必须包含 1..256 字节');
         }
         return;
       case 'beginSigning':
@@ -1381,6 +1433,31 @@ final class CitizenSdkFlutterCodec {
         _expectLength(value, 1, '$method value');
         decodeStorageBatch(value[0]);
         return;
+      case 'getStorageKeysPaged':
+        _expectLength(value, 1, '$method value');
+        final keys = _list(value[0], '$method.keys');
+        if (keys.length > maximumStorageKeysPageLimit) {
+          throw _decodeFailure('storage keys page 超过 1000 项');
+        }
+        var keysBytes = 0;
+        for (final item in keys) {
+          final key = _bytesView(item, '$method.key');
+          if (key.isEmpty || key.length > maximumStorageKeyBytes) {
+            throw _decodeFailure('storage keys page 包含无效 key');
+          }
+          keysBytes += key.length;
+          if (keysBytes > maximumStorageKeysPageBytes) {
+            throw _decodeFailure('storage keys page 聚合字节超过 4 MiB');
+          }
+        }
+        return;
+      case 'callRuntimeApi':
+        _expectLength(value, 1, '$method value');
+        if (_bytesView(value[0], '$method.output').length >
+            maximumRuntimeApiOutputBytes) {
+          throw _decodeFailure('Runtime API output 超过 64 MiB');
+        }
+        return;
       case 'exportState':
         _expectLength(value, 1, '$method value');
         decodeChainState(value[0]);
@@ -1434,6 +1511,12 @@ final class CitizenSdkFlutterCodec {
         final signature = _bytes(value[0], 'signature');
         if (signature.length != 64) {
           throw _decodeFailure('sr25519 signature 必须是 64 字节');
+        }
+        return;
+      case 'deriveApplicationKey':
+        _expectLength(value, 1, '$method value');
+        if (_bytesView(value[0], '$method.key').length != 32) {
+          throw _decodeFailure('应用派生钥结果必须是 32 字节');
         }
         return;
       case 'beginSigning':
@@ -1618,6 +1701,21 @@ final class CitizenSdkFlutterCodec {
   ) {
     _expectLength(payload, 0, 'historyChanged');
     return CitizenSdkHistoryChanged(sequence: sequence);
+  }
+
+  CitizenSdkFinalizedBlockChanged _decodeFinalizedBlockEvent(
+    int sequence,
+    List<Object?> payload,
+  ) {
+    _expectLength(payload, 1, 'finalizedBlockChanged');
+    final finalized = decodeBlock(payload[0]);
+    if (finalized.finality != CitizenBlockFinality.finalized) {
+      throw _decodeFailure('finalizedBlockChanged 必须携带 finalized block');
+    }
+    return CitizenSdkFinalizedBlockChanged(
+      sequence: sequence,
+      finalized: finalized,
+    );
   }
 
   CitizenSdkLifecycleChanged _decodeLifecycleEvent(
@@ -1879,9 +1977,6 @@ final class CitizenSdkFlutterCodec {
       left.hash == right.hash &&
       left.number == right.number &&
       left.finality == right.finality;
-
-  int? _nullableU32Int(Object? raw, String name) =>
-      raw == null ? null : _u32Int(raw, name);
 
   int? _nullableU8Int(Object? raw, String name) {
     if (raw == null) return null;

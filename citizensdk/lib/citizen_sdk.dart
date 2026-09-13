@@ -7,7 +7,7 @@ export 'src/api/citizen_sdk.dart';
 export 'src/api/citizen_sdk_error.dart';
 export 'src/api/citizen_sdk_events.dart';
 export 'src/api/citizen_transactions.dart';
-export 'src/api/citizen_wallet.dart';
+export 'src/api/citizen_sdk_wallet.dart';
 export 'src/models/citizen_account.dart';
 export 'src/models/citizen_capability.dart';
 export 'src/models/citizen_chain_state.dart';

@@ -1,10 +1,10 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:citizenapp/my/myid/myid_page.dart';
 import 'package:citizenapp/my/myid/myid_service.dart';
 import 'package:citizenapp/ui/app_layout.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 
 const MyIdState _votingState = MyIdState(
   tier: MyIdTier.voting,
@@ -230,29 +230,6 @@ void main() {
     expect(find.text('公民身份 · 竞选'), findsOneWidget);
   });
 
-  testWidgets('身份账户变化后重新排序且只保留一个当前标记', (tester) async {
-    final service = _MutableMyIdService(
-      const MyIdState(tier: MyIdTier.visitor),
-    );
-    await tester.pumpWidget(MaterialApp(home: MyIdPage(myIdService: service)));
-    await tester.pumpAndSettle();
-    // 起始纯访客(无 CID)不挂徽章。
-    expect(find.text('当前身份'), findsNothing);
-    expect(find.byKey(const ValueKey<String>('current-identity-visitor')),
-        findsNothing);
-
-    service.state = _candidateState;
-    WalletManager.walletsRevision.value++;
-    await tester.pumpAndSettle();
-
-    // 切到竞选后只保留一个当前标记。
-    expect(find.text('当前身份'), findsOneWidget);
-    expect(find.byKey(const ValueKey<String>('current-identity-candidate')),
-        findsOneWidget);
-    expect(cardTop(tester, MyIdTier.candidate),
-        lessThan(cardTop(tester, MyIdTier.visitor)));
-  });
-
   testWidgets('余额不足 → 不提交注册，先引导去链上充值', (tester) async {
     // 占号是自签自付的链上交易，余额不够连入池预检都过不了；先充值再注册。
     final service = _RegisterFlowService(balanceFen: 0);
@@ -457,7 +434,7 @@ void main() {
 }
 
 /// 驱动注册前余额闸三分支的假 service：可配门槛、余额与链读失败。
-class _RegisterFlowService extends MyIdService {
+class _RegisterFlowService implements MyIdService {
   _RegisterFlowService({
     this.balanceFen = 0,
     this.affordabilityThrows = false,
@@ -474,12 +451,13 @@ class _RegisterFlowService extends MyIdService {
   Future<MyIdState> getState() async => const MyIdState(tier: MyIdTier.visitor);
 
   @override
-  Future<List<Account>> listBindableAccounts() async => const <Account>[];
+  Future<List<CitizenWalletStateAccount>> listBindableAccounts() async =>
+      const <CitizenWalletStateAccount>[];
 
   @override
   Future<({BigInt balanceFen, BigInt requiredFen})>
       fetchRegistrationAffordability(String bindAccountId) async {
-    if (affordabilityThrows) throw StateError('smoldot 未就绪');
+    if (affordabilityThrows) throw StateError('CitizenSDK 链状态未就绪');
     return (
       requiredFen: BigInt.from(requiredFen),
       balanceFen: BigInt.from(balanceFen),
@@ -488,28 +466,26 @@ class _RegisterFlowService extends MyIdService {
 
   @override
   Future<String> registerAnonymousCid({
+    required BuildContext? context,
     required String institution,
     String? bindAccountId,
   }) async {
     registerCalls++;
     return 'GD-CTZN1-8F3A2B';
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _FakeMyIdService extends MyIdService {
+class _FakeMyIdService implements MyIdService {
   _FakeMyIdService(this.state);
 
   final MyIdState state;
 
   @override
   Future<MyIdState> getState() async => state;
-}
-
-class _MutableMyIdService extends MyIdService {
-  _MutableMyIdService(this.state);
-
-  MyIdState state;
 
   @override
-  Future<MyIdState> getState() async => state;
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

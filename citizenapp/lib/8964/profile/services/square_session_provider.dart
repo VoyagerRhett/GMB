@@ -3,10 +3,10 @@ import 'dart:io';
 
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/my/myid/current_user_context.dart';
-import 'package:citizenapp/rpc/chain_bootstrap_api.dart';
+import 'package:citizenapp/security/chain_bootstrap_api.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/security/local_data_key.dart';
-import 'package:citizenapp/wallet/core/device_subkey.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/security/device_subkey.dart';
 
 /// 页面建立 CitizenServe 会话后的互斥结果。
 ///
@@ -53,27 +53,24 @@ class SquareSessionResolution {
 /// 不生成设备子钥。
 class SquareSessionProvider {
   SquareSessionProvider({
+    required AccountSecurityService accountSecurity,
+    required CurrentUserContext currentUserContext,
     SquareApiClient? client,
-    WalletManager? walletManager,
     DeviceSubkey? deviceSubkey,
-    CurrentUserContext? currentUserContext,
     ChainBootstrapApi? bootstrapApi,
   })  : _client = client ?? SquareApiClient(),
-        _walletManager = walletManager ?? WalletManager(),
+        _accountSecurity = accountSecurity,
         _deviceSubkey = deviceSubkey ?? DeviceSubkey(),
         _currentUserContext = currentUserContext,
         _bootstrapApi = bootstrapApi ?? ChainBootstrapApi();
 
-  static final SquareSessionProvider instance = SquareSessionProvider();
-
   final SquareApiClient _client;
-  final WalletManager _walletManager;
+  final AccountSecurityService _accountSecurity;
   final DeviceSubkey _deviceSubkey;
-  final CurrentUserContext? _currentUserContext;
+  final CurrentUserContext _currentUserContext;
   final ChainBootstrapApi _bootstrapApi;
 
-  CurrentUserContext get _currentUser =>
-      _currentUserContext ?? CurrentUserContext.instance;
+  CurrentUserContext get _currentUser => _currentUserContext;
 
   /// 返回当前默认用户的可用 session；访客返回 null（调用方按不可用处理）。
   ///
@@ -149,7 +146,7 @@ class SquareSessionProvider {
       return const SquareSessionResolution(
         SquareSessionStatus.networkUnavailable,
       );
-    } on WalletAuthException {
+    } on AccountSecurityException {
       return const SquareSessionResolution(
         SquareSessionStatus.deviceUnavailable,
       );
@@ -176,7 +173,7 @@ class SquareSessionProvider {
   /// 本入口不再自行解析身份或读链；Worker 登录挑战仍会按链上当前绑定 fail-closed。
   /// 只供同一次换绑交接提交目标密文使用。
   Future<SquareSession?> ensureSessionForAccountId(String accountId) async {
-    final binding = await _walletManager.accountDataBindingForAccountId(
+    final binding = await _accountSecurity.accountDataBindingForAccountId(
       accountId,
     );
     return _client.ensureSession(
@@ -185,7 +182,7 @@ class SquareSessionProvider {
         if (context.accountId != accountId ||
             context.cidNumber != binding.cidNumber ||
             context.bindingRevision != binding.bindingRevision) {
-          throw const WalletAuthException('换绑目标会话与 finalized 绑定不一致');
+          throw const AccountSecurityException('换绑目标会话与 finalized 绑定不一致');
         }
         final raw = await _deviceSubkey.signRawHex(
           binding.cidNumber,
@@ -199,14 +196,14 @@ class SquareSessionProvider {
 
   /// Worker 是设备登记状态真源；只有它明确报告缺钥时才进入一次钱包鉴权。
   Future<void> _registerMissingDeviceSubkey(AccountDataBinding binding) async {
-    await _walletManager.registerDeviceSubkeyForBinding(binding);
+    await _accountSecurity.registerDeviceSubkeyForBinding(binding);
     _currentUser.invalidate();
   }
 
   Future<AccountDataBinding> _bindingForContext(
     SquareLoginContext context,
   ) async {
-    final existing = await _walletManager.readAccountDataBindingForAccountId(
+    final existing = await _accountSecurity.readAccountDataBindingForAccountId(
       context.accountId,
     );
     if (existing != null &&
@@ -231,7 +228,7 @@ class SquareSessionProvider {
         accountId: session.accountId,
       ),
     );
-    await _walletManager.activateAccountDataBinding(
+    await _accountSecurity.activateAccountDataBinding(
       genesisHash: binding.genesisHash,
       cidNumber: binding.cidNumber,
       bindingRevision: binding.bindingRevision,
@@ -245,7 +242,7 @@ class SquareSessionProvider {
     SquareLoginContext context,
   ) {
     if (context.accountId != expectedAccountId) {
-      throw const WalletAuthException('Cloudflare 登录挑战与当前默认账户不一致');
+      throw const AccountSecurityException('Cloudflare 登录挑战与当前默认账户不一致');
     }
   }
 }

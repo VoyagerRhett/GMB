@@ -4,7 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:citizenapp/isar/wallet_isar.dart';
-import 'package:citizenapp/transaction/history/data/local_tx_store.dart';
+import 'package:citizenapp/transaction/history/local_tx_store.dart';
 import 'package:citizenapp/transaction/history/presentation/tx_auto_refresh_mixin.dart';
 
 import '../support/isar_test_env.dart';
@@ -41,6 +41,8 @@ void main() {
         counterpartySs58Address: toSs58Address,
         fromSs58Address: fromSs58Address,
         toSs58Address: toSs58Address,
+        executionId: 'execution-refresh',
+        callDataHash: '0x${'11' * 32}',
         usedNonce: 1,
         createdAtMillis: 1,
       );
@@ -52,10 +54,12 @@ void main() {
       );
       await Future<void>.delayed(const Duration(milliseconds: 150)); // 订阅生效
 
-      // 模拟后台 ChainTxMonitor 把记录就地翻 finalized。
+      // 模拟 SDK history 把记录投影为 finalized。
       await LocalTxStore.markLocalSubmitFinalized(
         accountId: fromAccountId,
         txHash: '0xfeed',
+        executionId: 'execution-refresh',
+        callDataHash: '0x${'11' * 32}',
         blockHash: '0x22',
         blockNumber: 9,
       );

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -17,9 +18,6 @@ import 'package:citizenapp/security/local_data_key.dart';
 import 'package:citizenapp/my/user/contact_book_page.dart';
 import 'package:citizenapp/my/user/contact_service.dart';
 import 'package:citizenapp/ui/app_theme.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
-import 'package:citizenapp/wallet/core/default_account_service.dart';
-import 'package:citizenapp/wallet/core/sign_mode.dart';
 
 const _accountId =
     '0x2222222222222222222222222222222222222222222222222222222222222222';
@@ -29,20 +27,23 @@ const _contactAccountId =
 
 /// 联系人身份主键 CID 号。通讯录关系按 cid_number 建立，页面直接用它索引公开资料。
 const _contactCidNumber = 'CN220-CTZN2-100000001-2026';
-const _ownerAccount = DefaultAccount(
+final _ownerAccount = CitizenWalletStateAccount(
+  signMode: CitizenWalletSignMode.hot,
+  walletIndex: 1,
+  accountIndex: 0,
   accountId: _accountId,
   ss58Address: 'ss58-owner',
-  accountName: '默认账户',
-  signMode: SignMode.hot,
-  walletIndex: 1,
+  name: '默认账户',
+  createdAtMillis: BigInt.one,
+  isDefault: true,
 );
 
 AccountDataBinding _ownerBinding() => AccountDataBinding(
-      genesisHash: '0x${'11' * 32}',
-      cidNumber: 'CN220-CTZN2-100000009-2026',
-      accountId: _accountId,
-      bindingRevision: 1,
-    );
+  genesisHash: '0x${'11' * 32}',
+  cidNumber: 'CN220-CTZN2-100000009-2026',
+  accountId: _accountId,
+  bindingRevision: 1,
+);
 const _contact = UserContact(
   cidNumber: _contactCidNumber,
   accountId: _contactAccountId,
@@ -75,8 +76,12 @@ const _profile = CitizenProfile(
   updatedAt: 2,
 );
 
-class _FakeContacts extends UserContactService {
-  _FakeContacts() : super(autoSync: false);
+class _FakeContacts implements UserContactService {
+  @override
+  final ValueNotifier<ContactSyncState> syncState =
+      ValueNotifier<ContactSyncState>(
+        const ContactSyncState(phase: ContactSyncPhase.idle),
+      );
 
   List<UserContact> contacts = <UserContact>[_contact];
 
@@ -126,6 +131,9 @@ class _FakeContacts extends UserContactService {
     contacts = const <UserContact>[];
     return contacts;
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _PendingContacts extends _FakeContacts {
@@ -144,8 +152,7 @@ class _FakeProfileApi extends CitizenProfileApi {
   Future<CitizenProfile> fetchProfile(
     String cidNumber, {
     SquareSession? session,
-  }) async =>
-      profile;
+  }) async => profile;
 }
 
 class _PendingProfileApi extends CitizenProfileApi {
@@ -155,19 +162,27 @@ class _PendingProfileApi extends CitizenProfileApi {
   Future<CitizenProfile> fetchProfile(
     String cidNumber, {
     SquareSession? session,
-  }) =>
-      completer.future;
+  }) => completer.future;
 }
 
-class _FakeSessionProvider extends SquareSessionProvider {
+class _FakeSessionProvider implements SquareSessionProvider {
   @override
   Future<SquareSession?> ensureSession() async => SquareSession(
-        sessionToken: 'token',
-        cidNumber: "CN220-CTZN2-198805200-2026",
-        bindingRevision: 1,
-        accountId: _accountId,
-        expiresAt: DateTime.now().millisecondsSinceEpoch + 60000,
-      );
+    sessionToken: 'token',
+    cidNumber: "CN220-CTZN2-198805200-2026",
+    bindingRevision: 1,
+    accountId: _accountId,
+    expiresAt: DateTime.now().millisecondsSinceEpoch + 60000,
+  );
+
+  @override
+  Future<SquareSessionResolution> resolveSession({bool refresh = false}) async {
+    final session = await ensureSession();
+    return SquareSessionResolution(SquareSessionStatus.ready, session: session);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _MemoryProfileCache extends CitizenProfileCache {
@@ -205,8 +220,7 @@ class _MemoryProfileMediaCache extends CitizenProfileMediaCache {
     required String? avatarUrl,
     required String? bannerUrl,
     required Map<String, String>? headers,
-  }) async =>
-      snapshot;
+  }) async => snapshot;
 }
 
 Widget _page({
@@ -220,59 +234,65 @@ Widget _page({
   CitizenProfileMediaCache? profileMediaCache,
   DirectChatOpener? directChatOpener,
   Future<void> Function(BuildContext context, {required String toSs58Address})?
-      transferOpener,
-}) =>
-    MaterialApp(
-      theme: AppTheme.lightTheme.copyWith(platform: platform),
-      home: ContactBookPage(
-        mode: mode,
-        service: service ?? _FakeContacts(),
-        profileApi: profileApi ?? _FakeProfileApi(profile),
-        profileCache: profileCache,
-        profileMediaCache: profileMediaCache,
-        sessionProvider: _FakeSessionProvider(),
-        initialProfiles: initialProfiles ?? {_contactCidNumber: profile},
-        directChatOpener: directChatOpener,
-        transferOpener: transferOpener,
-      ),
-    );
+  transferOpener,
+  CurrentUserContext? currentUserContext,
+  Listenable? identityRevision,
+}) => MaterialApp(
+  theme: AppTheme.lightTheme.copyWith(platform: platform),
+  home: ContactBookPage(
+    mode: mode,
+    service: service ?? _FakeContacts(),
+    profileApi: profileApi ?? _FakeProfileApi(profile),
+    profileCache: profileCache,
+    profileMediaCache: profileMediaCache,
+    sessionProvider: _FakeSessionProvider(),
+    initialProfiles: initialProfiles ?? {_contactCidNumber: profile},
+    directChatOpener: directChatOpener,
+    transferOpener: transferOpener,
+    currentUserContext: currentUserContext ?? _RegisteredIdentityCache(),
+    identityRevision: identityRevision,
+  ),
+);
 
 /// 身份账户缓存 fake:**已注册**。通讯录属主 = CID,页面对未注册身份整页显示注册
 /// 引导,因此常规用例必须注入已注册身份,否则测的全是引导态。
 /// `accountId` 仍返回 null,让点开他人主页时 `_resolveOwnAccount` 回退成「非本人」
 /// (行为与迁移前一致);避免 instance 触发真链读/真 Isar。
-class _RegisteredIdentityCache extends CurrentUserContext {
+class _RegisteredIdentityCache implements CurrentUserContext {
   @override
   Future<CurrentUser?> resolve() async =>
       CurrentUser(account: _ownerAccount, binding: _ownerBinding());
   @override
   Future<String?> accountId() async => null;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// 未注册：当前默认账户的本地绑定为空，不回退到其他账户。
-class _UnregisteredIdentityCache extends CurrentUserContext {
+class _UnregisteredIdentityCache implements CurrentUserContext {
   @override
   Future<CurrentUser?> resolve() async =>
-      const CurrentUser(account: _ownerAccount, binding: null);
+      CurrentUser(account: _ownerAccount, binding: null);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _MutableIdentityCache extends CurrentUserContext {
+class _MutableIdentityCache implements CurrentUserContext {
   bool registered = false;
 
   @override
   Future<CurrentUser?> resolve() async => CurrentUser(
-        account: _ownerAccount,
-        binding: registered ? _ownerBinding() : null,
-      );
+    account: _ownerAccount,
+    binding: registered ? _ownerBinding() : null,
+  );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 void main() {
-  setUp(() {
-    CurrentUserContext.debugInstance = _RegisteredIdentityCache();
-  });
-
-  tearDown(CurrentUserContext.resetDebugInstance);
-
   testWidgets('本地通讯录未返回时直接显示页面结构且不使用整页转圈', (tester) async {
     final service = _PendingContacts();
     await tester.pumpWidget(_page(service: service));
@@ -555,9 +575,10 @@ void main() {
   });
 
   testWidgets('未注册身份显示统一注册引导,且不读通讯录', (tester) async {
-    CurrentUserContext.debugInstance = _UnregisteredIdentityCache();
     final service = _FakeContacts();
-    await tester.pumpWidget(_page(service: service));
+    await tester.pumpWidget(
+      _page(service: service, currentUserContext: _UnregisteredIdentityCache()),
+    );
     await tester.pumpAndSettle();
 
     // 整页统一引导,不再是假的「空通讯录」。
@@ -582,15 +603,21 @@ void main() {
 
   testWidgets('同一账户 finalized 注册广播后原地退出尚未注册页', (tester) async {
     final identityCache = _MutableIdentityCache();
-    CurrentUserContext.debugInstance = identityCache;
+    final revision = ValueNotifier<int>(0);
     final service = _FakeContacts();
-    await tester.pumpWidget(_page(service: service));
+    await tester.pumpWidget(
+      _page(
+        service: service,
+        currentUserContext: identityCache,
+        identityRevision: revision,
+      ),
+    );
     await tester.pumpAndSettle();
     expect(find.text('尚未注册'), findsOneWidget);
     expect(service.getContactsCalls, 0);
 
     identityCache.registered = true;
-    WalletManager.notifyIdentityBindingChanged();
+    revision.value += 1;
     await tester.pumpAndSettle();
 
     expect(find.text('尚未注册'), findsNothing);

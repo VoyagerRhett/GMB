@@ -8,7 +8,7 @@ import 'package:http/testing.dart';
 
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/signer/signing.dart';
-import 'package:citizenapp/wallet/core/device_subkey.dart'
+import 'package:citizenapp/security/device_subkey.dart'
     show bytesToHex, hexToBytes;
 
 const _accountId =

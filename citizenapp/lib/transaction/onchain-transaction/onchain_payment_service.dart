@@ -1,35 +1,29 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:citizenapp/rpc/chain_rpc.dart';
 import 'package:citizenapp/transaction/onchain-transaction/onchain_payment_models.dart';
-import 'package:citizenapp/rpc/transfer_rpc.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/transaction/onchain-transaction/onchain_transfer_call.dart';
 
 class OnchainPaymentService {
   OnchainPaymentService({
-    WalletManager? walletManager,
-    TransferRpc? onchainRpc,
-  })  : _walletManager = walletManager ?? WalletManager(),
-        _onchainRpc = onchainRpc ?? TransferRpc();
+    required CitizenSdkWallet wallet,
+    required CitizenTransactions transactions,
+  })  : _wallet = wallet,
+        _transactions = transactions;
 
-  final WalletManager _walletManager;
-  final TransferRpc _onchainRpc;
+  final CitizenSdkWallet _wallet;
+  final CitizenTransactions _transactions;
 
-  Future<WalletProfile?> getCurrentWallet() {
-    return _walletManager.getWallet();
-  }
+  Future<CitizenWalletStateAccount?> getCurrentWallet() async =>
+      (await _wallet.getState()).defaultAccount;
 
-  /// 提交转账交易，返回交易哈希和 nonce。
-  ///
-  /// [sign] 回调由调用方根据钱包模式提供：
-  /// - 热钱包：从 seed 派生密钥对，本机签名
-  /// - 冷钱包：构造 QR 签名请求，由外部设备签名后回传
-  Future<({String txHash, int usedNonce})> submitTransfer(
-    OnchainPaymentDraft draft, {
-    required Future<Uint8List> Function(Uint8List payload) sign,
-    TxPoolWatchCallback? onWatchEvent,
-  }) async {
+  /// 校验 CitizenApp 转账表单、编码 opaque RuntimeCall，然后直接
+  /// 交给 CitizenSDK 准备。签名、广播和最终执行不在 App 业务服务内实现。
+  Future<CitizenPreparedTransaction> prepareTransfer(
+    OnchainPaymentDraft draft,
+  ) async {
     final toSs58Address = draft.toSs58Address.trim();
     final symbol = draft.symbol.trim().toUpperCase();
     final remarkBytes = utf8.encode(draft.remark).length;
@@ -39,14 +33,14 @@ class OnchainPaymentService {
         '交易草稿不合法，请检查收款地址、数量和币种',
       );
     }
-    if (remarkBytes > TransferRpc.maxTransferRemarkBytes) {
+    if (remarkBytes > OnchainTransferCall.maxTransferRemarkBytes) {
       throw const OnchainPaymentException(
         OnchainPaymentErrorCode.invalidDraft,
-        '转账备注不能超过 ${TransferRpc.maxTransferRemarkBytes} 字节',
+        '转账备注超过链上长度上限',
       );
     }
 
-    final wallet = await _walletManager.getWallet();
+    final wallet = (await _wallet.getState()).defaultAccount;
     if (wallet == null) {
       throw const OnchainPaymentException(
         OnchainPaymentErrorCode.walletMissing,
@@ -54,18 +48,16 @@ class OnchainPaymentService {
       );
     }
 
-    final publicKeyBytes = _hexToBytes(wallet.accountId);
-
-    ({String txHash, int usedNonce}) result;
+    final sourceAccountId = _hexToBytes(wallet.accountId);
+    final callData = OnchainTransferCall.encode(
+      destinationSs58Address: toSs58Address,
+      amountYuan: draft.amount,
+      remark: draft.remark,
+    );
     try {
-      result = await _onchainRpc.transferWithRemark(
-        fromSs58Address: wallet.ss58Address,
-        signerPublicKey: Uint8List.fromList(publicKeyBytes),
-        toSs58Address: toSs58Address,
-        amountYuan: draft.amount,
-        remark: draft.remark,
-        sign: sign,
-        onWatchEvent: onWatchEvent,
+      return await _transactions.prepareTransaction(
+        Uint8List.fromList(sourceAccountId),
+        callData,
       );
     } catch (e) {
       if (e is OnchainPaymentException) rethrow;
@@ -74,8 +66,6 @@ class OnchainPaymentService {
         '交易提交失败: $e',
       );
     }
-
-    return result;
   }
 
   List<int> _hexToBytes(String input) {

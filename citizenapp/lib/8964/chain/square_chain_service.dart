@@ -1,17 +1,17 @@
 import 'dart:convert';
 
-import 'package:citizenapp/rpc/pallet_registry.dart';
+import 'package:citizenapp/citizen/shared/pallet_registry.dart';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:polkadart/polkadart.dart' show Hasher;
 import 'package:polkadart/scale_codec.dart' show ByteOutput, CompactBigIntCodec;
 
 import 'package:citizenapp/8964/models/square_models.dart';
 import 'package:citizenapp/my/myid/citizen_identity_chain_reader.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/rpc/signed_extrinsic_builder.dart';
-import 'package:citizenapp/rpc/subscription_rpc.dart' show SubscriptionRpc;
+import 'package:citizenapp/my/membership/subscription_chain.dart'
+    show SubscriptionChain;
 
 class SquareChainPublishedResult {
   const SquareChainPublishedResult({
@@ -40,26 +40,29 @@ class SquareChainPublishException implements Exception {
 
 abstract class SquarePostChainPublisher {
   Future<SquareChainPublishedResult> publishPost({
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
     required String postId,
     required SquarePostType postType,
     required String contentHashHex,
     required String storageReceiptId,
-    required Future<Uint8List> Function(Uint8List payload) sign,
-    TxPoolWatchCallback? onWatchEvent,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    ) externalSigning,
   });
 }
 
 class SquareChainService implements SquarePostChainPublisher {
   SquareChainService({
-    ChainRpc? chainRpc,
+    required CitizenChain chain,
+    required CitizenTransactions transactions,
     CitizenIdentityChainReader? identityChainReader,
-  })  : _rpc = chainRpc ?? ChainRpc(),
+  })  : _chain = chain,
+        _transactions = transactions,
         _identityChainReader = identityChainReader ??
-            CitizenIdentityChainReader(chainRpc: chainRpc);
+            CitizenIdentityChainReader(chain: chain);
 
-  final ChainRpc _rpc;
+  final CitizenChain _chain;
+  final CitizenTransactions _transactions;
   final CitizenIdentityChainReader _identityChainReader;
 
   static const int palletIndex = PalletRegistry.squarePostPallet;
@@ -69,14 +72,14 @@ class SquareChainService implements SquarePostChainPublisher {
 
   @override
   Future<SquareChainPublishedResult> publishPost({
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
     required String postId,
     required SquarePostType postType,
     required String contentHashHex,
     required String storageReceiptId,
-    required Future<Uint8List> Function(Uint8List payload) sign,
-    TxPoolWatchCallback? onWatchEvent,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    ) externalSigning,
   }) async {
     final callData = buildPublishPostCallData(
       postId: postId,
@@ -84,48 +87,46 @@ class SquareChainService implements SquarePostChainPublisher {
       contentHashHex: contentHashHex,
       storageReceiptId: storageReceiptId,
     );
-    final result = await SignedExtrinsicBuilder(
-      chainRpc: _rpc,
-      logLabel: 'SquareChainService',
-    ).signAndSubmitInBlock(
-      callData: callData,
-      fromSs58Address: fromSs58Address,
-      signerPublicKey: signerPublicKey,
-      sign: sign,
-      onWatchEvent: onWatchEvent,
-      // Worker 只接受 canonical finalized 区块；发布调用必须在返回前完成最终确认。
-      waitForFinalized: true,
+    final prepared = await _transactions.prepareTransaction(
+      signerPublicKey,
+      callData,
     );
-
-    final events = await _rpc.fetchSystemEventsAtBlock(result.blockHashHex);
-    final extrinsicIndex =
-        await _rpc.findSubmittedExtrinsicIndexAtFinalizedBlock(
-      blockHashHex: result.blockHashHex,
-      txHashHex: result.txHash,
+    final started = await _transactions.executePreparedTransaction(
+      prepared.preparationId,
     );
-    if (extrinsicIndex == null) {
-      throw const SquareChainPublishException(
-        '发布交易已收到 finalized 状态，但无法在该区块精确定位交易',
-        canAbortUpload: false,
+    CitizenTransactionExecutionCompleted completed;
+    if (started is CitizenTransactionExternalSigningPending) {
+      final response = await externalSigning(started);
+      if (response == null) {
+        await _transactions.cancelPreparedTransactionExecution(
+          started.executionId,
+        );
+        throw const SquareChainPublishException(
+          '广场发布签名已取消',
+          canAbortUpload: true,
+        );
+      }
+      completed = await _transactions.consumePreparedTransactionQrResponse(
+        started.executionId,
+        response,
       );
+    } else {
+      completed = started as CitizenTransactionExecutionCompleted;
     }
-    final failure = events == null
-        ? null
-        : _rpc.findExtrinsicFailureInEvents(
-            events,
-            extrinsicIndex: extrinsicIndex,
-          );
-    if (failure != null) {
-      throw SquareChainPublishException(
-        '广场发布交易已 finalized 但执行失败：${failure.description}',
+    if (completed.resolution !=
+            CitizenTransactionResolution.finalizedSuccess ||
+        completed.execution == null) {
+      throw const SquareChainPublishException(
+        '广场发布交易执行失败',
         canAbortUpload: true,
       );
     }
+    final execution = completed.execution!;
 
     return SquareChainPublishedResult(
-      txHash: result.txHash,
-      usedNonce: result.usedNonce,
-      blockHashHex: result.blockHashHex,
+      txHash: '0x${hexEncode(completed.transactionHash)}',
+      usedNonce: prepared.nonce.toInt(),
+      blockHashHex: execution.block.hash,
     );
   }
 
@@ -159,8 +160,10 @@ class SquareChainService implements SquarePostChainPublisher {
   /// 读链上平台会员某档月价：`PlatformPrice[level]`（u128 分，OptionQuery）。
   /// 平台价链上单源（治理设置），未设该档返回 null，页面据此显示占位。
   Future<int?> fetchPlatformPriceFen(String level) async {
-    final data = await _rpc.fetchStorage(
-      '0x${hexEncode(_platformPriceKey(SubscriptionRpc.membershipLevelByte(level)))}',
+    final finalized = await _chain.getFinalizedHead();
+    final data = await _chain.getStorage(
+      finalized,
+      _platformPriceKey(SubscriptionChain.membershipLevelByte(level)),
     );
     return decodePlatformPriceFen(data);
   }
@@ -170,18 +173,18 @@ class SquareChainService implements SquarePostChainPublisher {
     bool forceFresh = false,
   }) async {
     const levels = ['freedom', 'democracy', 'spark'];
-    final keys = <String, String>{
+    final keys = <String, Uint8List>{
       for (final level in levels)
-        level:
-            '0x${hexEncode(_platformPriceKey(SubscriptionRpc.membershipLevelByte(level)))}',
+        level: _platformPriceKey(
+          SubscriptionChain.membershipLevelByte(level),
+        ),
     };
-    final values = await _rpc.fetchStorageBatch(
-      keys.values.toList(),
-      forceFresh: forceFresh,
-    );
+    final finalized = await _chain.getFinalizedHead();
+    final values = await _chain.getStorageBatch(finalized, keys.values.toList());
     final prices = <String, int>{};
-    for (final level in levels) {
-      final fen = decodePlatformPriceFen(values[keys[level]]);
+    for (var index = 0; index < levels.length; index++) {
+      final level = levels[index];
+      final fen = decodePlatformPriceFen(values[index]);
       if (fen != null) prices[level] = fen;
     }
     return prices;

@@ -75,6 +75,23 @@ internal class CitizenSdkNative private constructor(
     fun getStorageBatch(block: CitizenBlockRef, keys: Array<ByteArray>): Long = call {
         nativeGetStorageBatch(it, block.hash(), block.number.toULong().toLong(), block.finality.nativeValue(), keys)
     }
+    fun getStorageKeysPaged(
+        block: CitizenBlockRef,
+        prefix: ByteArray,
+        startKey: ByteArray?,
+        limit: Int,
+    ): Long = call {
+        nativeGetStorageKeysPaged(
+            it, block.hash(), block.number.toULong().toLong(), block.finality.nativeValue(),
+            prefix, startKey, limit,
+        )
+    }
+    fun callRuntimeApi(block: CitizenBlockRef, method: String, arguments: ByteArray): Long = call {
+        nativeCallRuntimeApi(
+            it, block.hash(), block.number.toULong().toLong(), block.finality.nativeValue(),
+            method.toByteArray(Charsets.UTF_8), arguments,
+        )
+    }
     fun getSystemEvents(block: CitizenBlockRef): Long = call {
         nativeGetSystemEvents(it, block.hash(), block.number.toULong().toLong(), block.finality.nativeValue())
     }
@@ -121,6 +138,8 @@ internal class CitizenSdkNative private constructor(
     fun reconcileWalletCleanup(): Long = call { nativeReconcileWalletCleanup(it) }
     fun signWalletPayload(accountId: ByteArray, message: ByteArray): Long =
         call { nativeSignWalletPayload(it, accountId, message) }
+    fun deriveApplicationKey(accountId: ByteArray, salt: ByteArray, info: ByteArray): Long =
+        call { nativeDeriveApplicationKey(it, accountId, salt, info) }
     fun beginSigning(intent: CitizenSigningIntent): Long = call {
         nativeBeginSigning(
             it,
@@ -270,6 +289,19 @@ internal class CitizenSdkNative private constructor(
         )
     }
 
+    @Suppress("unused") // Called only by citizensdk_jni.
+    private fun onNativeFinalizedBlockChanged(sequence: Long, encoded: ByteArray) {
+        val decoded = CitizenSdkNativeCodec.decode(encoded)
+        val block = (decoded.value as? CitizenSdkNativeResult.Block)?.value ?: return
+        if (block.finality != CitizenFinality.FINALIZED) return
+        if (!calls.isClosed()) eventSink?.invoke(
+            CitizenSdkEvents.Event.FinalizedBlockChanged(
+                java.lang.Long.toUnsignedString(sequence),
+                block,
+            ),
+        )
+    }
+
     override fun close() {
         calls.close {
             nativeDestroy(bridge)
@@ -326,6 +358,8 @@ internal class CitizenSdkNative private constructor(
     private external fun nativeGetRuntimeContext(bridge: Long, hash: ByteArray, number: Long, finality: Int): Long
     private external fun nativeGetStorage(bridge: Long, hash: ByteArray, number: Long, finality: Int, key: ByteArray): Long
     private external fun nativeGetStorageBatch(bridge: Long, hash: ByteArray, number: Long, finality: Int, keys: Array<ByteArray>): Long
+    private external fun nativeGetStorageKeysPaged(bridge: Long, hash: ByteArray, number: Long, finality: Int, prefix: ByteArray, startKey: ByteArray?, limit: Int): Long
+    private external fun nativeCallRuntimeApi(bridge: Long, hash: ByteArray, number: Long, finality: Int, method: ByteArray, arguments: ByteArray): Long
     private external fun nativeGetSystemEvents(bridge: Long, hash: ByteArray, number: Long, finality: Int): Long
     private external fun nativeExportState(bridge: Long): Long
     private external fun nativeImportState(bridge: Long, formatVersion: Int, hash: ByteArray, number: Long, finality: Int, database: ByteArray): Long
@@ -352,6 +386,7 @@ internal class CitizenSdkNative private constructor(
     private external fun nativeDeleteWallet(bridge: Long): Long
     private external fun nativeReconcileWalletCleanup(bridge: Long): Long
     private external fun nativeSignWalletPayload(bridge: Long, accountId: ByteArray, message: ByteArray): Long
+    private external fun nativeDeriveApplicationKey(bridge: Long, accountId: ByteArray, salt: ByteArray, info: ByteArray): Long
     private external fun nativeBeginSigning(
         bridge: Long,
         accountId: ByteArray,

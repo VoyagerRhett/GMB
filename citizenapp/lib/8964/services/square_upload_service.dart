@@ -79,14 +79,12 @@ abstract interface class SquareMediaProcessingController {
 class SquareUploadService
     implements SquareContentUploader, SquareMediaProcessingController {
   SquareUploadService({
+    required SubscriptionService subscriptionService,
     SquareApiClient? apiClient,
     SquareMediaProcessor? mediaProcessor,
-    SubscriptionService? subscriptionService,
   }) : _api = apiClient ?? SquareApiClient(),
        _mediaProcessor = mediaProcessor ?? SquareMediaProcessor(),
-       _subscriptionService =
-           subscriptionService ??
-           SubscriptionService(api: apiClient ?? SquareApiClient());
+       _subscriptionService = subscriptionService;
 
   final SquareApiClient _api;
   final SquareMediaProcessor _mediaProcessor;

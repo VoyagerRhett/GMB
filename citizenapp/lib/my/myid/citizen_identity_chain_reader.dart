@@ -1,10 +1,10 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:polkadart/polkadart.dart' show Hasher;
 
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
 
 /// 由永久 CID 定位的链上公民身份快照。
 ///
@@ -54,10 +54,10 @@ class CitizenBindingChainSnapshot {
 
 /// `citizen-identity` 永久 CID 存储的统一读取器。
 class CitizenIdentityChainReader {
-  CitizenIdentityChainReader({ChainRpc? chainRpc})
-      : _chainRpc = chainRpc ?? ChainRpc();
+  const CitizenIdentityChainReader({required CitizenChain chain})
+    : _chain = chain;
 
-  final ChainRpc _chainRpc;
+  final CitizenChain _chain;
 
   /// 在同一个 finalized 区块批量读取 CID 的当前有效钱包绑定。
   ///
@@ -76,67 +76,49 @@ class CitizenIdentityChainReader {
       return const <String, CitizenBindingChainSnapshot>{};
     }
 
-    final finalized = await _chainRpc.fetchFinalizedBlock();
-    final finalizedHash = hexEncode(finalized.blockHash);
+    final finalized = await _chain.getFinalizedHead();
     final candidates = <String, CitizenBindingChainSnapshot>{};
 
-    await Future.wait(normalized.map((cidNumber) async {
-      final cidScale = encodeBoundedBytes(utf8.encode(cidNumber));
-      final rows = await Future.wait([
-        _chainRpc.fetchStorageAtBlock(
-          hexEncode(storageMapKey(
-            'CitizenIdentity',
-            'AccountIdByCid',
-            cidScale,
-          )),
-          finalizedHash,
-        ),
-        _chainRpc.fetchStorageAtBlock(
-          hexEncode(storageMapKey(
-            'CitizenIdentity',
-            'CidRegistry',
-            cidScale,
-          )),
-          finalizedHash,
-        ),
-        _chainRpc.fetchStorageAtBlock(
-          hexEncode(storageMapKey(
-            'CitizenIdentity',
-            'BindingRevisionByCid',
-            cidScale,
-          )),
-          finalizedHash,
-        ),
-      ]);
-      final accountId = rows[0];
-      final bindingRevision = _decodeU64(rows[2]);
-      if (accountId == null ||
-          accountId.length != 32 ||
-          !cidRecordIsActive(rows[1]) ||
-          bindingRevision <= 0) {
-        return;
-      }
-      candidates[cidNumber] = CitizenBindingChainSnapshot(
-        cidNumber: cidNumber,
-        accountId: accountId,
-        bindingRevision: bindingRevision,
-      );
-    }));
+    await Future.wait(
+      normalized.map((cidNumber) async {
+        final cidScale = encodeBoundedBytes(utf8.encode(cidNumber));
+        final rows = await _chain.getStorageBatch(finalized, <Uint8List>[
+          storageMapKey('CitizenIdentity', 'AccountIdByCid', cidScale),
+          storageMapKey('CitizenIdentity', 'CidRegistry', cidScale),
+          storageMapKey('CitizenIdentity', 'BindingRevisionByCid', cidScale),
+        ]);
+        final accountId = rows[0];
+        final bindingRevision = _decodeU64(rows[2]);
+        if (accountId == null ||
+            accountId.length != 32 ||
+            !cidRecordIsActive(rows[1]) ||
+            bindingRevision <= 0) {
+          return;
+        }
+        candidates[cidNumber] = CitizenBindingChainSnapshot(
+          cidNumber: cidNumber,
+          accountId: accountId,
+          bindingRevision: bindingRevision,
+        );
+      }),
+    );
 
     final verified = <String, CitizenBindingChainSnapshot>{};
-    await Future.wait(candidates.values.map((candidate) async {
-      final reverse = await _chainRpc.fetchStorageAtBlock(
-        hexEncode(storageMapKey(
-          'CitizenIdentity',
-          'CidByAccountId',
-          candidate.accountId,
-        )),
-        finalizedHash,
-      );
-      if (decodeCidNumber(reverse) == candidate.cidNumber) {
-        verified[candidate.cidNumber] = candidate;
-      }
-    }));
+    await Future.wait(
+      candidates.values.map((candidate) async {
+        final reverse = await _chain.getStorage(
+          finalized,
+          storageMapKey(
+            'CitizenIdentity',
+            'CidByAccountId',
+            candidate.accountId,
+          ),
+        );
+        if (decodeCidNumber(reverse) == candidate.cidNumber) {
+          verified[candidate.cidNumber] = candidate;
+        }
+      }),
+    );
     return verified;
   }
 
@@ -170,18 +152,14 @@ class CitizenIdentityChainReader {
     ]);
 
     // 同一次身份判断必须锚定同一个 finalized 区块，避免 CID 映射与身份值跨块混读。
-    final finalized = await _chainRpc.fetchFinalizedBlock();
-    final finalizedHash = hexEncode(finalized.blockHash);
+    final finalized = await _chain.getFinalizedHead();
 
     final cidByAccountIdKey = storageMapKey(
       'CitizenIdentity',
       'CidByAccountId',
       accountId,
     );
-    final cidRaw = await _chainRpc.fetchStorageAtBlock(
-      hexEncode(cidByAccountIdKey),
-      finalizedHash,
-    );
+    final cidRaw = await _chain.getStorage(finalized, cidByAccountIdKey);
     final cidNumber = decodeCidNumber(cidRaw);
     if (cidNumber == null) return null;
 
@@ -211,16 +189,14 @@ class CitizenIdentityChainReader {
       'BindingRevisionByCid',
       cidScale,
     );
-    final keys = <String>[
-      hexEncode(accountIdByCidKey),
-      hexEncode(cidRegistryKey),
-      hexEncode(votingKey),
-      hexEncode(candidateKey),
-      hexEncode(bindingRevisionKey),
+    final keys = <Uint8List>[
+      accountIdByCidKey,
+      cidRegistryKey,
+      votingKey,
+      candidateKey,
+      bindingRevisionKey,
     ];
-    final rows = await Future.wait(
-      keys.map((key) => _chainRpc.fetchStorageAtBlock(key, finalizedHash)),
-    );
+    final rows = await _chain.getStorageBatch(finalized, keys);
     final boundAccountId = rows[0];
     final cidRecord = rows[1];
     final votingIdentity = rows[2];
@@ -254,7 +230,8 @@ class CitizenIdentityChainReader {
       accountId: accountId,
       bindingRevision: bindingRevision,
       votingIdentity: votingIdentity,
-      candidateIdentity: candidateIdentity != null &&
+      candidateIdentity:
+          candidateIdentity != null &&
               candidateIdentityLayoutIsValid(candidateIdentity)
           ? candidateIdentity
           : null,
@@ -375,24 +352,9 @@ class CitizenIdentityChainReader {
       }
       if (data[8] != 0 && data[8] != 1) return false;
       var offset = 9;
-      offset = _readBoundedBytes(
-        data,
-        offset,
-        16,
-        allowEmpty: true,
-      ).nextOffset;
-      offset = _readBoundedBytes(
-        data,
-        offset,
-        16,
-        allowEmpty: true,
-      ).nextOffset;
-      offset = _readBoundedBytes(
-        data,
-        offset,
-        16,
-        allowEmpty: true,
-      ).nextOffset;
+      offset = _readBoundedBytes(data, offset, 16, allowEmpty: true).nextOffset;
+      offset = _readBoundedBytes(data, offset, 16, allowEmpty: true).nextOffset;
+      offset = _readBoundedBytes(data, offset, 16, allowEmpty: true).nextOffset;
       return offset + 4 == data.length;
     } catch (_) {
       return false;
@@ -477,8 +439,8 @@ class CitizenIdentityChainReader {
 /// 仅供扫码导入联系人等必须核验码内账户的动作使用；Chat 路由已经以 CID
 /// 为主键，普通打开会话或主页禁止使用本类读链。
 class CidByAccountIdResolver {
-  CidByAccountIdResolver({CitizenIdentityChainReader? chainReader})
-      : _chainReader = chainReader ?? CitizenIdentityChainReader();
+  CidByAccountIdResolver({required CitizenIdentityChainReader chainReader})
+    : _chainReader = chainReader;
 
   final CitizenIdentityChainReader _chainReader;
   final Map<String, String> _cache = <String, String>{};

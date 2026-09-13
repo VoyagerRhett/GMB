@@ -1,24 +1,23 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:flutter/services.dart';
 import 'package:polkadart_keyring/polkadart_keyring.dart' show Keyring;
-import 'package:smoldot/smoldot.dart' show LightClientStatusSnapshot;
 
 import 'package:citizenapp/citizen/shared/institution_info.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/qr/widgets/address_scan_button.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/rpc/transfer_rpc.dart' show TransferRpc;
-import 'package:citizenapp/signer/qr_signer.dart';
+import 'package:citizenapp/transaction/onchain-transaction/onchain_transfer_call.dart';
 import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_balance_guard.dart';
 import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_service.dart';
 import 'package:citizenapp/transaction/shared/account_balance_snapshot_store.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/widgets/chain_progress_banner.dart';
 import 'package:citizenapp/my/util/amount_format.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
@@ -34,14 +33,16 @@ class SafetyFundTransferPage extends StatefulWidget {
     required this.icon,
     required this.badgeColor,
     required this.adminWallets,
-  }) : assert(institution.orgType == OrgType.nrc,
-            'SafetyFundTransferPage 仅支持国家储委会(NRC)');
+  }) : assert(
+         institution.orgType == OrgType.nrc,
+         'SafetyFundTransferPage 仅支持国家储委会(NRC)',
+       );
 
   final InstitutionInfo institution;
   final IconData icon;
   final Color badgeColor;
 
-  final List<WalletProfile> adminWallets;
+  final List<CitizenWalletStateAccount> adminWallets;
 
   @override
   State<SafetyFundTransferPage> createState() => _SafetyFundTransferPageState();
@@ -59,12 +60,12 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
   double _estimatedFee = 0.0;
   String? _addressError;
   String? _amountError;
-  LightClientStatusSnapshot? _chainProgress;
+  CitizenChainSyncStatus? _chainProgress;
   String? _chainProgressError;
 
   late final String _safetyFundAccountId;
   late final String _fromSs58;
-  late WalletProfile _selectedWallet;
+  late CitizenWalletStateAccount _selectedWallet;
 
   @override
   void initState() {
@@ -76,7 +77,8 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
     final hex = widget.institution.accounts?.safetyFundAccountId;
     if (hex == null) {
       throw StateError(
-          '国家储委会 InstitutionAccounts.safetyFundAccountId 为空,无法发起安全基金转账');
+        '国家储委会 InstitutionAccounts.safetyFundAccountId 为空,无法发起安全基金转账',
+      );
     }
     _safetyFundAccountId = hex;
     _fromSs58 = _accountIdToSs58(_safetyFundAccountId);
@@ -99,6 +101,7 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
   }
 
   Future<void> _fetchBalance() async {
+    final chain = context.read<CitizenSdk>().chain;
     final store = AccountBalanceSnapshotStore.instance;
     final local = await store.read(_safetyFundAccountId);
     if (local != null && mounted) {
@@ -109,13 +112,12 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
       if (local.isFresh(AccountBalanceSnapshotStore.displayTtl)) return;
     }
     try {
-      final balance =
-          await ChainRpc().fetchFinalizedBalance(_safetyFundAccountId);
+      final balanceSnapshot = await chain.getAccountBalance(
+        _safetyFundAccountId,
+      );
+      final balance = balanceSnapshot.freeFen.toDouble() / 100;
       try {
-        await store.put(
-          accountId: _safetyFundAccountId,
-          balanceYuan: balance,
-        );
+        await store.put(accountId: _safetyFundAccountId, balanceYuan: balance);
       } catch (_) {
         // 余额快照写入失败不影响当前链上余额展示。
       }
@@ -139,7 +141,7 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
     final amount = AmountFormat.tryParse(_amountController.text);
     setState(() {
       if (amount != null && amount > 0) {
-        _estimatedFee = TransferRpc.estimateTransferFeeYuan(amount);
+        _estimatedFee = OnchainTransferCall.estimateTransferFeeYuan(amount);
       } else {
         _estimatedFee = 0.0;
       }
@@ -159,8 +161,9 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
       return false;
     }
     final beneficiaryBytes = Keyring().decodeAddress(address);
-    final safetyFundBytes =
-        Uint8List.fromList(_hexToBytes(_safetyFundAccountId));
+    final safetyFundBytes = Uint8List.fromList(
+      _hexToBytes(_safetyFundAccountId),
+    );
     if (_bytesEqual(beneficiaryBytes, safetyFundBytes)) {
       setState(() => _addressError = '收款地址不能与安全基金账户相同');
       return false;
@@ -176,11 +179,13 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
       return false;
     }
     if (_availableBalance != null) {
-      final fee = TransferRpc.estimateTransferFeeYuan(amount);
+      final fee = OnchainTransferCall.estimateTransferFeeYuan(amount);
       const ed = 1.11;
       if (amount + ed > _availableBalance!) {
-        setState(() => _amountError =
-            '安全基金账户余额不足（转账后须保留 ${AmountFormat.format(ed, symbol: '')} 元 ED，${AmountFormat.format(fee, symbol: '')} 元手续费由国家储委会费用账户另付）');
+        setState(
+          () => _amountError =
+              '安全基金账户余额不足（转账后须保留 ${AmountFormat.format(ed, symbol: '')} 元 ED，${AmountFormat.format(fee, symbol: '')} 元手续费由国家储委会费用账户另付）',
+        );
         return false;
       }
     }
@@ -203,9 +208,9 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
   Future<void> _submit() async {
     final blockedReason = _submitBlockedReason;
     if (blockedReason != null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(blockedReason)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(blockedReason)));
       return;
     }
 
@@ -214,66 +219,41 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
     }
     final proposerRoleCode = _proposerRoleCodeController.text.trim();
     if (proposerRoleCode.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请输入提案发起岗位码')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('请输入提案发起岗位码')));
       return;
     }
 
     final wallet = _selectedWallet;
     final amountYuan = AmountFormat.tryParse(_amountController.text) ?? 0;
+    final sdk = context.read<CitizenSdk>();
     final balanceBlockedReason =
         await MultisigTransferBalanceGuard.checkInstitutionFeeAccountBalance(
-      feeAccountId: widget.institution.accounts!.feeAccountId,
-      actionLabel: '发起安全基金转账提案',
-      additionalDebitYuan: TransferRpc.estimateTransferFeeYuan(amountYuan),
-    );
+          feeAccountId: widget.institution.accounts!.feeAccountId,
+          actionLabel: '发起安全基金转账提案',
+          additionalDebitYuan: OnchainTransferCall.estimateTransferFeeYuan(
+            amountYuan,
+          ),
+          chain: sdk.chain,
+        );
     if (balanceBlockedReason != null) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(balanceBlockedReason)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(balanceBlockedReason)));
       return;
     }
 
     setState(() => _submitting = true);
 
     try {
-      WalletManager? hotWalletManager;
-      if (wallet.requiresHotSign) {
-        hotWalletManager = WalletManager();
-      }
-
-      Future<Uint8List> signCallback(Uint8List payload) async {
-        if (hotWalletManager != null) {
-          return await hotWalletManager.signWithWallet(
-              wallet.walletIndex, payload);
-        }
-        final qrSigner = QrSigner();
-        final request = qrSigner.buildRequest(
-          requestId: QrSigner.generateRequestId(prefix: 'propose-safety-'),
-          signerPublicKey: wallet.accountId,
-          payloadHex: '0x${_toHex(payload)}',
-          action: QrActions.safetyFundTransfer,
-        );
-        final requestJson = qrSigner.encodeRequest(request);
-        if (!mounted) throw Exception('页面已关闭');
-        final response = await Navigator.push<SignResponseEnvelope>(
-          context,
-          MaterialPageRoute(
-            builder: (_) => QrSignSessionPage(
-                request: request,
-                requestJson: requestJson,
-                expectedSignerPublicKey: wallet.accountId),
-          ),
-        );
-        if (response == null) throw Exception('签名已取消');
-        return Uint8List.fromList(_hexToBytes(response.body.signatureHex));
-      }
-
       final signerPublicKey = Uint8List.fromList(_hexToBytes(wallet.accountId));
 
-      final service = MultisigTransferService();
+      final service = MultisigTransferService(
+        chain: sdk.chain,
+        transactions: sdk.transactions,
+      );
       // 提案类交易等真正入块并核对事件后才返回，proposalId 来自
       // 链上 SafetyFundTransferProposed 事件，是业务成功的唯一凭据。
       final result = await service.submitProposeSafetyFund(
@@ -282,9 +262,14 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
         beneficiaryAddress: _beneficiaryController.text.trim(),
         amountYuan: amountYuan,
         remark: _remarkController.text,
-        fromSs58Address: wallet.ss58Address,
         signerPublicKey: signerPublicKey,
-        sign: signCallback,
+        externalSigning: (pending) => showCitizenSdkQrResponse(
+          context,
+          request: pending.qrRequest,
+          expiresAt: BigInt.from(
+            pending.expiresAt.millisecondsSinceEpoch ~/ 1000,
+          ),
+        ),
       );
 
       if (!mounted) return;
@@ -292,16 +277,16 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
         SnackBar(content: Text('提案已创建（#${result.proposalId}），等待岗位选民投票')),
       );
       Navigator.of(context).pop(true);
-    } on WalletAuthException catch (e) {
+    } on AccountSecurityException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.message)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.message)));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('提交失败：$e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('提交失败：$e')));
     } finally {
       if (mounted) {
         setState(() => _submitting = false);
@@ -309,7 +294,7 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
     }
   }
 
-  void _handleChainProgressChanged(LightClientStatusSnapshot? progress) {
+  void _handleChainProgressChanged(CitizenChainSyncStatus? progress) {
     if (!mounted) return;
     setState(() {
       _chainProgress = progress;
@@ -330,7 +315,7 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
     if (progress == null) {
       return _chainProgressError ?? '正在读取区块链状态，请稍后再试';
     }
-    if (!progress.hasPeers) {
+    if (progress.peerCount == BigInt.zero) {
       return '轻节点尚未连接到区块链网络，暂不能提交安全基金转账提案';
     }
     if (progress.isSyncing) {
@@ -350,8 +335,9 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
         title: Text(
           '发起安全基金转账提案',
           style: TextStyle(
-              fontSize: AppLayout.scaled(context, 17),
-              fontWeight: FontWeight.w700),
+            fontSize: AppLayout.scaled(context, 17),
+            fontWeight: FontWeight.w700,
+          ),
         ),
         centerTitle: true,
         backgroundColor: Colors.white,
@@ -399,28 +385,33 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
                 decoration: InputDecoration(
                   hintText: '输入 SS58 格式地址',
                   hintStyle: TextStyle(
-                      color: AppTheme.textTertiary,
-                      fontSize: AppLayout.scaled(context, 14)),
+                    color: AppTheme.textTertiary,
+                    fontSize: AppLayout.scaled(context, 14),
+                  ),
                   filled: true,
                   fillColor: AppTheme.surfaceMuted,
                   enabledBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.border),
                   ),
                   focusedBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.primaryDark),
                   ),
                   errorBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.danger),
                   ),
                   focusedErrorBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.danger),
                   ),
                   errorText: _addressError,
@@ -437,34 +428,40 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
               SizedBox(height: AppLayout.scaled(context, 6)),
               TextField(
                 controller: _amountController,
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
                 inputFormatters: [ThousandSeparatorFormatter()],
                 decoration: InputDecoration(
                   hintText: '最低 1.11 元',
                   hintStyle: TextStyle(
-                      color: AppTheme.textTertiary,
-                      fontSize: AppLayout.scaled(context, 14)),
+                    color: AppTheme.textTertiary,
+                    fontSize: AppLayout.scaled(context, 14),
+                  ),
                   filled: true,
                   fillColor: AppTheme.surfaceMuted,
                   enabledBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.border),
                   ),
                   focusedBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.primaryDark),
                   ),
                   errorBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.danger),
                   ),
                   focusedErrorBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.danger),
                   ),
                   errorText: _amountError,
@@ -485,8 +482,8 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
                 _loadingBalance
                     ? '查询中...'
                     : _availableBalance != null
-                        ? '${AmountFormat.format(_availableBalance!, symbol: '')} 元'
-                        : '查询失败',
+                    ? '${AmountFormat.format(_availableBalance!, symbol: '')} 元'
+                    : '查询失败',
               ),
               SizedBox(height: AppLayout.scaled(context, 16)),
               _buildLabel('备注（可选）'),
@@ -497,18 +494,21 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
                 decoration: InputDecoration(
                   hintText: '最多 256 字节',
                   hintStyle: TextStyle(
-                      color: AppTheme.textTertiary,
-                      fontSize: AppLayout.scaled(context, 14)),
+                    color: AppTheme.textTertiary,
+                    fontSize: AppLayout.scaled(context, 14),
+                  ),
                   filled: true,
                   fillColor: AppTheme.surfaceMuted,
                   enabledBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.border),
                   ),
                   focusedBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.primaryDark),
                   ),
                 ),
@@ -522,8 +522,9 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
                   style: FilledButton.styleFrom(
                     backgroundColor: AppTheme.primaryDark,
                     shape: RoundedRectangleBorder(
-                      borderRadius:
-                          BorderRadius.circular(AppLayout.scaledValue(10)),
+                      borderRadius: BorderRadius.circular(
+                        AppLayout.scaledValue(10),
+                      ),
                     ),
                   ),
                   onPressed: _canSubmit ? _submit : null,
@@ -575,8 +576,9 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
       return Container(
         width: double.infinity,
         padding: EdgeInsets.symmetric(
-            horizontal: AppLayout.scaledValue(12),
-            vertical: AppLayout.scaledValue(12)),
+          horizontal: AppLayout.scaledValue(12),
+          vertical: AppLayout.scaledValue(12),
+        ),
         decoration: BoxDecoration(
           color: AppTheme.success.withValues(alpha: 0.06),
           borderRadius: BorderRadius.circular(AppLayout.scaledValue(8)),
@@ -584,8 +586,11 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
         ),
         child: Row(
           children: [
-            Icon(Icons.verified_user,
-                size: AppLayout.scaledValue(16), color: AppTheme.success),
+            Icon(
+              Icons.verified_user,
+              size: AppLayout.scaledValue(16),
+              color: AppTheme.success,
+            ),
             SizedBox(width: AppLayout.scaledValue(8)),
             Expanded(
               child: Text(
@@ -619,8 +624,11 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
               value: w.walletIndex,
               child: Row(
                 children: [
-                  Icon(Icons.verified_user,
-                      size: AppLayout.scaledValue(14), color: AppTheme.success),
+                  Icon(
+                    Icons.verified_user,
+                    size: AppLayout.scaledValue(14),
+                    color: AppTheme.success,
+                  ),
                   SizedBox(width: AppLayout.scaledValue(6)),
                   Expanded(
                     child: Text(
@@ -639,8 +647,9 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
           onChanged: (index) {
             if (index == null) return;
             setState(() {
-              _selectedWallet =
-                  wallets.firstWhere((w) => w.walletIndex == index);
+              _selectedWallet = wallets.firstWhere(
+                (w) => w.walletIndex == index,
+              );
             });
           },
         ),
@@ -658,8 +667,11 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
             color: widget.badgeColor.withValues(alpha: 0.12),
             borderRadius: BorderRadius.circular(AppLayout.scaledValue(10)),
           ),
-          child: Icon(widget.icon,
-              size: AppLayout.scaledValue(18), color: widget.badgeColor),
+          child: Icon(
+            widget.icon,
+            size: AppLayout.scaledValue(18),
+            color: widget.badgeColor,
+          ),
         ),
         SizedBox(width: AppLayout.scaledValue(10)),
         Expanded(
@@ -691,8 +703,9 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
     return Container(
       width: double.infinity,
       padding: EdgeInsets.symmetric(
-          horizontal: AppLayout.scaledValue(12),
-          vertical: AppLayout.scaledValue(14)),
+        horizontal: AppLayout.scaledValue(12),
+        vertical: AppLayout.scaledValue(14),
+      ),
       decoration: BoxDecoration(
         color: AppTheme.surfaceMuted,
         borderRadius: BorderRadius.circular(AppLayout.scaledValue(8)),
@@ -716,8 +729,9 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
         Text(
           label,
           style: TextStyle(
-              fontSize: AppLayout.scaledValue(13),
-              color: AppTheme.textSecondary),
+            fontSize: AppLayout.scaledValue(13),
+            color: AppTheme.textSecondary,
+          ),
         ),
         Text(
           value,
@@ -730,17 +744,6 @@ class _SafetyFundTransferPageState extends State<SafetyFundTransferPage> {
       ],
     );
   }
-}
-
-String _toHex(List<int> bytes) {
-  const chars = '0123456789abcdef';
-  final buf = StringBuffer();
-  for (final b in bytes) {
-    buf
-      ..write(chars[(b >> 4) & 0x0f])
-      ..write(chars[b & 0x0f]);
-  }
-  return buf.toString();
 }
 
 List<int> _hexToBytes(String input) {

@@ -149,13 +149,15 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
             "open", "start", "stop", "close", "getCapabilities", "getFinalizedHead",
             "getSyncStatus", "getBestHead", "getFinalizedBlockAt", "resolveFinalizedBlock",
             "getBlockHeader", "getBlockBody", "getRuntimeContext", "getStorage", "getStorageBatch",
+            "getStorageKeysPaged", "callRuntimeApi",
             "getSystemEvents", "exportState", "importState",
             "getGenesisHash", "getAccountBalance", "getAccountBalances", "getAccountNonce", "getFeeSnapshot", "getWalletProfile",
             "getWalletState", "importColdAccountId", "importColdAccountSs58",
             "reorderWalletAccountsWithoutDefaultChange", "renameAccount", "deleteAccount",
             "viewAccountPrivateKey", "createWallet", "importWallet", "addWalletAccounts", "setActiveWalletAccount",
             "renameWalletAccount", "deleteWalletAccount", "deleteWallet",
-            "reconcileWalletCleanup", "signWalletPayload", "beginSigning", "consumeExternalSignature",
+            "reconcileWalletCleanup", "signWalletPayload", "deriveApplicationKey",
+            "beginSigning", "consumeExternalSignature",
             "cancelSigning", "beginDefaultAccountChange", "consumeDefaultAccountChange",
             "verifySignature", "prepareTransaction", "cancelPreparedTransaction", "executePreparedTransaction",
             "consumePreparedTransactionQrResponse", "cancelPreparedTransactionExecution",
@@ -187,6 +189,10 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
         requests["getStorageBatch"] = [version, "session-1", sequence, finalizedBlock, [
             FlutterStandardTypedData(bytes: Data([1])), FlutterStandardTypedData(bytes: Data([2])),
         ]]
+        requests["getStorageKeysPaged"] = [version, "session-1", sequence, finalizedBlock,
+            FlutterStandardTypedData(bytes: Data([1])), nil, NSNumber(value: 1000)]
+        requests["callRuntimeApi"] = [version, "session-1", sequence, finalizedBlock,
+            "CitizenApi_items", FlutterStandardTypedData(bytes: Data())]
         requests["importState"] = [version, "session-1", sequence, NSNumber(value: 1), finalizedBlock,
                                    FlutterStandardTypedData(bytes: Data([1]))]
         for method in [
@@ -206,6 +212,9 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
             "7", [account, destination]]
         requests["signWalletPayload"] = [version, "session-1", sequence, account,
                                           FlutterStandardTypedData(bytes: Data([1]))]
+        requests["deriveApplicationKey"] = [version, "session-1", sequence, account,
+            FlutterStandardTypedData(bytes: Data(repeating: 0, count: 32)),
+            FlutterStandardTypedData(bytes: Data([1]))]
         requests["beginSigning"] = [version, "session-1", sequence, account,
             FlutterStandardTypedData(bytes: Data([1])), "raw",
             FlutterStandardTypedData(bytes: Data()), "none", NSNumber(value: 0), NSNumber(value: 120)]
@@ -349,7 +358,8 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
 
     func testEventVocabularyIsClosed() throws {
         XCTAssertEqual(CitizenSdkFlutterCodec.eventTypes,
-                       ["lifecycleChanged", "capabilitiesChanged", "historyChanged"])
+                       ["lifecycleChanged", "capabilitiesChanged", "historyChanged",
+                        "finalizedBlockChanged"])
         XCTAssertNoThrow(try CitizenSdkFlutterCodec.event(
             session: "s", sequence: 1, type: "lifecycleChanged", payload: ["running"]
         ))

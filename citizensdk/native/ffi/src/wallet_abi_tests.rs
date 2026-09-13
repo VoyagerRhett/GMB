@@ -13,10 +13,34 @@ use crate::abi::{
     CitizenSdkWalletStateAccountInfo, CitizenSdkWalletStateInfo, CitizenSdkWalletWordCount,
 };
 use citizen_sdk_contracts::{
-    citizen_ss58_address, AccountId32, ColdWalletAccount, Hash32, SigningCompletion,
+    citizen_ss58_address, AccountId32, ColdWalletAccount, Hash32, SecretBuffer, SigningCompletion,
     Sr25519Signature, WalletState,
 };
 use std::sync::Arc;
+
+#[test]
+fn application_key_result_has_one_exact_secret_copy_surface() {
+    use crate::ownership::{self, OwnedResult, ResultPayload};
+
+    let result = ownership::insert(OwnedResult::success(
+        71,
+        ResultPayload::ApplicationKey(Arc::new(SecretBuffer::try_new(vec![0x5a; 32]).unwrap())),
+    ))
+    .unwrap();
+    let mut output = [0_u8; 32];
+    unsafe {
+        assert_eq!(
+            super::citizensdk_result_get_application_key(result, output.as_mut_ptr()),
+            CitizenSdkErrorCode::Ok.as_i32(),
+        );
+        assert_eq!(
+            super::citizensdk_result_get_application_key(result, std::ptr::null_mut()),
+            CitizenSdkErrorCode::InvalidArgument.as_i32(),
+        );
+    }
+    assert_eq!(output, [0x5a; 32]);
+    ownership::release(result).unwrap();
+}
 
 #[test]
 fn signing_and_default_change_results_preflight_and_project_each_variant_exactly() {
@@ -686,8 +710,11 @@ fn wallet_state_projection_is_globally_ordered_and_multi_buffer_copy_is_atomic()
         Vec::new(),
     )
     .expect("统一钱包状态");
-    let result = ownership::insert(OwnedResult::success(0, ResultPayload::WalletState(state)))
-        .expect("钱包状态 result");
+    let result = ownership::insert(OwnedResult::success(
+        0,
+        ResultPayload::WalletState(Box::new(state)),
+    ))
+    .expect("钱包状态 result");
 
     let mut state_info = CitizenSdkWalletStateInfo::default();
     let mut account_info = CitizenSdkWalletStateAccountInfo::default();

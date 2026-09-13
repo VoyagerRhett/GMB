@@ -1,10 +1,10 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:polkadart/polkadart.dart' show Hasher;
 
 import 'package:citizenapp/citizen/shared/proposal/proposal_query_service.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
 
 /// 立法投票阶段(链端 votingengine STAGE_LEG_*,Proposal.stage 字节)。
 class LegStage {
@@ -86,11 +86,11 @@ class LegProposalState {
 /// 不借用 internal-vote 查询。核心 Proposal 阶段/状态读
 /// VotingEngine.Proposals。
 class LegislationVoteQueryService {
-  LegislationVoteQueryService({ChainRpc? chainRpc})
-      : _rpc = chainRpc ?? ChainRpc(),
-        _proposalQuery = ProposalQueryService(chainRpc: chainRpc);
+  LegislationVoteQueryService({required CitizenChain chain})
+      : _chain = chain,
+        _proposalQuery = ProposalQueryService(chain: chain);
 
-  final ChainRpc _rpc;
+  final CitizenChain _chain;
   final ProposalQueryService _proposalQuery;
 
   static const String _votePallet = 'LegislationVote';
@@ -108,14 +108,14 @@ class LegislationVoteQueryService {
 
   Future<LegRepresentativeMeta?> fetchRepresentativeMeta(int proposalId) async {
     final key = _mapKey(_votePallet, 'RepresentativeMetas', _u64Le(proposalId));
-    final data = await _rpc.fetchStorage('0x${_hex(key)}');
+    final data = await _readStorage(key);
     if (data == null || data.isEmpty) return null;
     return _decodeRepresentativeMeta(data);
   }
 
   Future<LegislationMeta?> fetchLegislationMeta(int proposalId) async {
     final key = _mapKey(_votePallet, 'LegislationMetas', _u64Le(proposalId));
-    final data = await _rpc.fetchStorage('0x${_hex(key)}');
+    final data = await _readStorage(key);
     if (data == null || data.isEmpty) return null;
     return _decodeLegislationMeta(data);
   }
@@ -193,7 +193,7 @@ class LegislationVoteQueryService {
       _u64Le(proposalId),
       _u32Le(bodyIndex),
     );
-    final data = await _rpc.fetchStorage('0x${_hex(key)}');
+    final data = await _readStorage(key);
     if (data == null || data.length != 8) return (yes: 0, no: 0);
     return (yes: _u32(data, 0), no: _u32(data, 4));
   }
@@ -201,7 +201,7 @@ class LegislationVoteQueryService {
   /// 公投计票(VoteCountU64:yes u64 + no u64)。
   Future<({int yes, int no})> fetchReferendumTally(int proposalId) async {
     final key = _mapKey(_votePallet, 'LegReferendumTally', _u64Le(proposalId));
-    final data = await _rpc.fetchStorage('0x${_hex(key)}');
+    final data = await _readStorage(key);
     if (data == null || data.length != 16) return (yes: 0, no: 0);
     return (yes: _u64(data, 0), no: _u64(data, 8));
   }
@@ -226,7 +226,7 @@ class LegislationVoteQueryService {
       _u64Le(proposalId),
       tupleKey,
     );
-    final data = await _rpc.fetchStorage('0x${_hex(key)}');
+    final data = await _readStorage(key);
     if (data == null || data.length != 1 || data[0] > 1) return null;
     return data[0] == 1;
   }
@@ -260,7 +260,7 @@ class LegislationVoteQueryService {
     int proposalId,
   ) async {
     final key = _mapKey(_votePallet, storage, _u64Le(proposalId));
-    final data = await _rpc.fetchStorage('0x${_hex(key)}');
+    final data = await _readStorage(key);
     if (data == null || data.isEmpty) return const [];
     try {
       final c = _Cursor(data);
@@ -274,6 +274,11 @@ class LegislationVoteQueryService {
     } on Object {
       return const [];
     }
+  }
+
+  Future<Uint8List?> _readStorage(Uint8List key) async {
+    final finalized = await _chain.getFinalizedHead();
+    return _chain.getStorage(finalized, key);
   }
 
   // ──── key 构造 ────

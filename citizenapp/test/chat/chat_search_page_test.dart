@@ -113,13 +113,16 @@ class _PendingSearchStore extends _FakeChatStore {
   }) => completer.future;
 }
 
-class _FakeContacts extends UserContactService {
-  _FakeContacts(this.contacts) : super(autoSync: false);
+class _FakeContacts implements UserContactService {
+  _FakeContacts(this.contacts);
 
   final List<UserContact> contacts;
 
   @override
   Future<List<UserContact>> getContacts() async => contacts;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 void main() {

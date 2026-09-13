@@ -1,30 +1,32 @@
 import 'dart:convert';
 
-import 'package:citizenapp/rpc/pallet_registry.dart';
+import 'package:citizenapp/citizen/shared/pallet_registry.dart';
+
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:polkadart/scale_codec.dart' show ByteOutput;
 
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/rpc/signed_extrinsic_builder.dart';
 import 'package:citizenapp/votingengine/legislation-vote/legislation_vote_query_service.dart';
 
 /// 立法投票/签署提交服务(LegislationVote sub-pallet,pallet_index=26)。
 ///
 /// 代表机构表决/行政签署/三人会签/护宪终审四个动作都是**纯 extrinsic**
-/// (signer=origin=动作人本人,零 op_tag),统一走 [SignedExtrinsicBuilder] 标准
-/// 交易签名,范式照搬 internal-vote。提交后必须回读 legislation-vote storage 确认
+/// (signer=origin=动作人本人,零 op_tag)，业务层只编码 RuntimeCall，
+/// 交易准备、冷热签名和最终执行由 CitizenSDK 完成。提交后回读 legislation-vote storage 确认
 /// runtime 已记账,txHash 不代表已执行。特别案公投(referendum/snapshot)带 CID
 /// 凭证,另见 legislation_referendum_service。
 ///
 /// 代表机构表决额外携带 `voter_role_code`；其余签署调用保持
 /// `[26][call_index][proposal_id:u64_le][approve:bool]`。
 class LegislationVoteService {
-  LegislationVoteService({ChainRpc? chainRpc})
-      : _rpc = chainRpc ?? ChainRpc(),
-        _query = LegislationVoteQueryService(chainRpc: chainRpc);
+  LegislationVoteService({
+    required CitizenChain chain,
+    required CitizenTransactions transactions,
+  }) : _transactions = transactions,
+       _query = LegislationVoteQueryService(chain: chain);
 
-  final ChainRpc _rpc;
+  final CitizenTransactions _transactions;
   final LegislationVoteQueryService _query;
 
   /// LegislationVote runtime pallet_index。
@@ -40,27 +42,26 @@ class LegislationVoteService {
 
   /// 当前代表机构表决；同一钱包在不同机构的席位分别记票。
   Future<({String txHash, int usedNonce, String blockHashHex})>
-      castRepresentativeVote({
+  castRepresentativeVote({
     required int proposalId,
     required String voterRoleCode,
     required bool approve,
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
-    required Future<Uint8List> Function(Uint8List payload) sign,
-    TxPoolWatchCallback? onWatchEvent,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    )
+    externalSigning,
   }) async {
     final meta = await _query.fetchRepresentativeMeta(proposalId);
     if (meta == null) throw StateError('代表机构表决元数据不存在');
     final bodyIndex = meta.currentBody;
-    final result = await _signAndSubmit(
+    final result = await _executeFinalized(
       callIndex: callCastRepresentativeVote,
       proposalId: proposalId,
       voterRoleCode: voterRoleCode,
       approve: approve,
-      fromSs58Address: fromSs58Address,
       signerPublicKey: signerPublicKey,
-      sign: sign,
-      onWatchEvent: onWatchEvent,
+      externalSigning: externalSigning,
     );
     await _confirmRepresentativeVote(
       proposalId,
@@ -78,19 +79,18 @@ class LegislationVoteService {
   Future<({String txHash, int usedNonce, String blockHashHex})> executiveSign({
     required int proposalId,
     required bool approve,
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
-    required Future<Uint8List> Function(Uint8List payload) sign,
-    TxPoolWatchCallback? onWatchEvent,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    )
+    externalSigning,
   }) async {
-    final result = await _signAndSubmit(
+    final result = await _executeFinalized(
       callIndex: callExecutiveSign,
       proposalId: proposalId,
       approve: approve,
-      fromSs58Address: fromSs58Address,
       signerPublicKey: signerPublicKey,
-      sign: sign,
-      onWatchEvent: onWatchEvent,
+      externalSigning: externalSigning,
     );
     // 行政签署无 per-signer 账本:确认提案已离开签署阶段(进会签/已生效/已否决)。
     await _confirmStageAdvanced(proposalId, LegStage.sign, result.blockHashHex);
@@ -101,19 +101,18 @@ class LegislationVoteService {
   Future<({String txHash, int usedNonce, String blockHashHex})> overrideSign({
     required int proposalId,
     required bool approve,
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
-    required Future<Uint8List> Function(Uint8List payload) sign,
-    TxPoolWatchCallback? onWatchEvent,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    )
+    externalSigning,
   }) async {
-    final result = await _signAndSubmit(
+    final result = await _executeFinalized(
       callIndex: callOverrideSign,
       proposalId: proposalId,
       approve: approve,
-      fromSs58Address: fromSs58Address,
       signerPublicKey: signerPublicKey,
-      sign: sign,
-      onWatchEvent: onWatchEvent,
+      externalSigning: externalSigning,
     );
     await _confirmSignRecorded(
       proposalId,
@@ -128,19 +127,18 @@ class LegislationVoteService {
   Future<({String txHash, int usedNonce, String blockHashHex})> guardVote({
     required int proposalId,
     required bool approve,
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
-    required Future<Uint8List> Function(Uint8List payload) sign,
-    TxPoolWatchCallback? onWatchEvent,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    )
+    externalSigning,
   }) async {
-    final result = await _signAndSubmit(
+    final result = await _executeFinalized(
       callIndex: callGuardVote,
       proposalId: proposalId,
       approve: approve,
-      fromSs58Address: fromSs58Address,
       signerPublicKey: signerPublicKey,
-      sign: sign,
-      onWatchEvent: onWatchEvent,
+      externalSigning: externalSigning,
     );
     await _confirmSignRecorded(
       proposalId,
@@ -180,31 +178,55 @@ class LegislationVoteService {
 
   // ──── 内部:签名提交 ────
 
-  Future<({String txHash, int usedNonce, String blockHashHex})> _signAndSubmit({
+  Future<({String txHash, int usedNonce, String blockHashHex})>
+  _executeFinalized({
     required int callIndex,
     required int proposalId,
     String? voterRoleCode,
     required bool approve,
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
-    required Future<Uint8List> Function(Uint8List payload) sign,
-    TxPoolWatchCallback? onWatchEvent,
-  }) {
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    )
+    externalSigning,
+  }) async {
     final callData = buildCallData(
       callIndex: callIndex,
       proposalId: proposalId,
       voterRoleCode: voterRoleCode,
       approve: approve,
     );
-    return SignedExtrinsicBuilder(
-      chainRpc: _rpc,
-      logLabel: 'LegislationVote',
-    ).signAndSubmitInBlock(
-      callData: callData,
-      fromSs58Address: fromSs58Address,
-      signerPublicKey: signerPublicKey,
-      sign: sign,
-      onWatchEvent: onWatchEvent,
+    final prepared = await _transactions.prepareTransaction(
+      signerPublicKey,
+      callData,
+    );
+    final started = await _transactions.executePreparedTransaction(
+      prepared.preparationId,
+    );
+    CitizenTransactionExecutionCompleted completed;
+    if (started is CitizenTransactionExternalSigningPending) {
+      final response = await externalSigning(started);
+      if (response == null) {
+        await _transactions.cancelPreparedTransactionExecution(
+          started.executionId,
+        );
+        throw StateError('立法投票签名已取消');
+      }
+      completed = await _transactions.consumePreparedTransactionQrResponse(
+        started.executionId,
+        response,
+      );
+    } else {
+      completed = started as CitizenTransactionExecutionCompleted;
+    }
+    if (completed.resolution != CitizenTransactionResolution.finalizedSuccess ||
+        completed.execution == null) {
+      throw StateError(completed.poolRejectionReason ?? '立法投票交易执行失败');
+    }
+    return (
+      txHash: '0x${_hexEncode(completed.transactionHash)}',
+      usedNonce: prepared.nonce.toInt(),
+      blockHashHex: completed.execution!.block.hash,
     );
   }
 
@@ -236,7 +258,7 @@ class LegislationVoteService {
         await Future<void>.delayed(const Duration(milliseconds: 500));
       }
     }
-    await _throwWithEventFailure(blockHashHex, '交易已入块，但 runtime 未记录该议员投票');
+    throw StateError('交易已成功执行，但 runtime 未记录该议员投票');
   }
 
   Future<void> _confirmSignRecorded(
@@ -256,7 +278,7 @@ class LegislationVoteService {
         await Future<void>.delayed(const Duration(milliseconds: 500));
       }
     }
-    await _throwWithEventFailure(blockHashHex, '交易已入块，但 runtime 未记录该签署');
+    throw StateError('交易已成功执行，但 runtime 未记录该签署');
   }
 
   Future<void> _confirmStageAdvanced(
@@ -276,18 +298,7 @@ class LegislationVoteService {
         await Future<void>.delayed(const Duration(milliseconds: 500));
       }
     }
-    await _throwWithEventFailure(blockHashHex, '交易已入块，但 runtime 未推进签署阶段');
-  }
-
-  Future<void> _throwWithEventFailure(
-      String blockHashHex, String fallback) async {
-    final events = await _rpc.fetchSystemEventsAtBlock(blockHashHex);
-    final failure =
-        events == null ? null : _rpc.findExtrinsicFailureInEvents(events);
-    if (failure != null) {
-      throw StateError('runtime 拒绝该操作：${failure.description}');
-    }
-    throw StateError(fallback);
+    throw StateError('交易已成功执行，但 runtime 未推进签署阶段');
   }
 
   // ──── 内部:编码工具 ────

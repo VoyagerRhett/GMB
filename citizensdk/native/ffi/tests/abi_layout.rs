@@ -5,16 +5,17 @@ use citizensdk::{
     CitizenSdkBlockBodyInfo, CitizenSdkBlockHeaderInfo, CitizenSdkBlockRef, CitizenSdkBytesView,
     CitizenSdkCapabilitySnapshot, CitizenSdkCapabilityStatus, CitizenSdkChainSyncStatusInfo,
     CitizenSdkCreateOptions, CitizenSdkDefaultAccountChangeInfo, CitizenSdkEvent,
-    CitizenSdkExecutionInfo, CitizenSdkExportedStateInfo, CitizenSdkFailureStage,
-    CitizenSdkFeeSnapshotInfo, CitizenSdkHostBoolResultV1, CitizenSdkHostBytesKind,
-    CitizenSdkHostBytesResultV1, CitizenSdkHostHash32, CitizenSdkHostId128,
-    CitizenSdkHostPublicStoreV1, CitizenSdkHostRecordDomain, CitizenSdkHostRecordResultV1,
-    CitizenSdkHostSecretKind, CitizenSdkHostSecretRefV1, CitizenSdkHostSecretVaultV1,
-    CitizenSdkHostSecureStoreV1, CitizenSdkHostServicesV1, CitizenSdkHostStatusResultV1,
-    CitizenSdkHostVaultAvailability, CitizenSdkHostVaultAvailabilityResultV1,
-    CitizenSdkHostWalletKeyRefV1, CitizenSdkMutableBytesView, CitizenSdkPreparedTransactionInfo,
-    CitizenSdkPreparedWalletInfo, CitizenSdkResultInfo, CitizenSdkResultKind,
-    CitizenSdkRuntimeContextInfo, CitizenSdkSigningOutcomeInfo, CitizenSdkTransactionExecutionId,
+    CitizenSdkEventType, CitizenSdkExecutionInfo, CitizenSdkExportedStateInfo,
+    CitizenSdkFailureStage, CitizenSdkFeeSnapshotInfo, CitizenSdkHostBoolResultV1,
+    CitizenSdkHostBytesKind, CitizenSdkHostBytesResultV1, CitizenSdkHostHash32,
+    CitizenSdkHostId128, CitizenSdkHostPublicStoreV1, CitizenSdkHostRecordDomain,
+    CitizenSdkHostRecordResultV1, CitizenSdkHostSecretKind, CitizenSdkHostSecretRefV1,
+    CitizenSdkHostSecretVaultV1, CitizenSdkHostSecureStoreV1, CitizenSdkHostServicesV1,
+    CitizenSdkHostStatusResultV1, CitizenSdkHostVaultAvailability,
+    CitizenSdkHostVaultAvailabilityResultV1, CitizenSdkHostWalletKeyRefV1,
+    CitizenSdkMutableBytesView, CitizenSdkPreparedTransactionInfo, CitizenSdkPreparedWalletInfo,
+    CitizenSdkResultInfo, CitizenSdkResultKind, CitizenSdkRuntimeContextInfo,
+    CitizenSdkSigningOutcomeInfo, CitizenSdkTransactionExecutionId,
     CitizenSdkTransactionExecutionInfo, CitizenSdkTransactionExecutionStatus,
     CitizenSdkTransactionHistoryPageInfo, CitizenSdkTransactionHistoryRecordInfo,
     CitizenSdkTransactionHistoryStatus, CitizenSdkU128, CitizenSdkWalletAccountInfo,
@@ -49,6 +50,8 @@ fn original_public_layout_remains_frozen() {
     assert_eq!(CitizenSdkFailureStage::Verification as u32, 6);
     assert_eq!(CitizenSdkFailureStage::Cancellation as u32, 7);
     assert_eq!(CitizenSdkFailureStage::Teardown as u32, 8);
+    assert_eq!(CitizenSdkEventType::HistoryChanged as u32, 5);
+    assert_eq!(CitizenSdkEventType::FinalizedBlockChanged as u32, 6);
 
     assert_layout!(CitizenSdkBytesView, 16, 8, { data: 0, len: 8 });
     assert_layout!(CitizenSdkU128, 16, 8, { low: 0, high: 8 });
@@ -471,6 +474,7 @@ fn account_wallet_and_history_layout_and_constants_are_exact() {
     assert_eq!(CitizenSdkResultKind::TransactionHistoryPage as u32, 17);
     assert_eq!(CitizenSdkResultKind::PreparedTransaction as u32, 27);
     assert_eq!(CitizenSdkResultKind::TransactionExecution as u32, 28);
+    assert_eq!(CitizenSdkResultKind::ApplicationKey as u32, 29);
     assert_eq!(
         CitizenSdkTransactionExecutionStatus::ExternalPending as u32,
         1

@@ -18,7 +18,8 @@ use std::{
 use citizen_sdk_contracts::{
     BlockFinality, ChainIdentity, ExecutionConclusion, ExportedChainState, ExtrinsicWatchEvent,
     Hash32, Modules, SignedExtrinsic, UnverifiedReason, VerifiedBlockRef,
-    MAX_STORAGE_BATCH_KEY_BYTES, MAX_STORAGE_KEY_BYTES,
+    MAX_RUNTIME_API_ARGUMENT_BYTES, MAX_RUNTIME_API_METHOD_BYTES, MAX_STORAGE_BATCH_KEY_BYTES,
+    MAX_STORAGE_KEYS_PAGE_LIMIT, MAX_STORAGE_KEY_BYTES,
 };
 use futures_util::{FutureExt, StreamExt};
 
@@ -424,7 +425,7 @@ pub unsafe extern "C" fn citizensdk_start(
                         match runtime.drive(runtime.engine().restore_state_from_store()) {
                             Ok(Ok(_)) => Ok(()),
                             Ok(Err(error)) => Err(error.into()),
-                            Err(error) => Err(error.into()),
+                            Err(error) => Err(error),
                         }
                     },
                     // A provider import followed by failed CAS is already one-way
@@ -468,7 +469,7 @@ pub unsafe extern "C" fn citizensdk_start(
                     }
                     Err(error) => {
                         runtime.converge_failed_start();
-                        return Err(error.into());
+                        return Err(error);
                     }
                 }
 
@@ -524,8 +525,7 @@ pub unsafe extern "C" fn citizensdk_stop(
                     runtime.uses_host_services(),
                     || -> FfiResult<()> {
                         runtime
-                            .drive(runtime.engine().export_and_persist_state())
-                            .map_err(FfiError::from)?
+                            .drive(runtime.engine().export_and_persist_state())?
                             .map(|_| ())
                             .map_err(FfiError::from)
                     },
@@ -929,6 +929,116 @@ pub unsafe extern "C" fn citizensdk_get_storage_batch_at(
             })
         })
     }
+}
+
+#[no_mangle]
+/// Reads one bounded page of opaque storage keys at an exact finalized block.
+///
+/// # Safety
+/// `block`, prefix/start views and `out_request_id` must satisfy their ordinary ABI contracts.
+pub unsafe extern "C" fn citizensdk_get_storage_keys_paged(
+    handle: CitizenSdkHandle,
+    block: *const CitizenSdkBlockRef,
+    prefix: CitizenSdkBytesView,
+    has_start_key: u8,
+    start_key: CitizenSdkBytesView,
+    limit: u32,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "chain"))]
+    return ffi_status(|| {
+        Err(FfiError::new(
+            CitizenSdkErrorCode::Unsupported,
+            "chain is not compiled into this build",
+        ))
+    });
+    #[cfg(feature = "chain")]
+    ffi_status(|| {
+        let runtime = handles::get(handle)?;
+        runtime.provider()?;
+        let block = block_from_abi(read_versioned(block, "block")?)?
+            .require_finalized()
+            .map_err(FfiError::from)?;
+        let prefix = copy_view(prefix, "storage key prefix", MAX_STORAGE_KEY_BYTES)?;
+        if prefix.is_empty() || limit == 0 || limit > MAX_STORAGE_KEYS_PAGE_LIMIT {
+            return Err(FfiError::invalid(
+                "storage keys page requires a non-empty prefix and limit 1..1000",
+            ));
+        }
+        let start_key = match has_start_key {
+            0 => {
+                if start_key.len != 0 {
+                    return Err(FfiError::invalid(
+                        "absent storage start key must have zero length",
+                    ));
+                }
+                None
+            }
+            1 => {
+                let value = copy_view(start_key, "storage start key", MAX_STORAGE_KEY_BYTES)?;
+                if value.is_empty() {
+                    return Err(FfiError::invalid("storage start key must not be empty"));
+                }
+                Some(value)
+            }
+            _ => return Err(FfiError::invalid("has_start_key must be 0 or 1")),
+        };
+        accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            runtime.refresh_provider_capabilities()?;
+            let keys = runtime.drive(
+                runtime
+                    .engine()
+                    .storage_keys_paged(block, prefix, start_key, limit),
+            )??;
+            Ok(ResultPayload::StorageBatch(
+                keys.into_iter().map(Some).collect(),
+            ))
+        })
+    })
+}
+
+#[no_mangle]
+/// Executes one bounded opaque Runtime API call at an exact verified block.
+///
+/// # Safety
+/// All pointers/views must satisfy their ordinary ABI contracts.
+pub unsafe extern "C" fn citizensdk_call_runtime_api(
+    handle: CitizenSdkHandle,
+    block: *const CitizenSdkBlockRef,
+    method: CitizenSdkBytesView,
+    arguments: CitizenSdkBytesView,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "chain"))]
+    return ffi_status(|| {
+        Err(FfiError::new(
+            CitizenSdkErrorCode::Unsupported,
+            "chain is not compiled into this build",
+        ))
+    });
+    #[cfg(feature = "chain")]
+    ffi_status(|| {
+        let runtime = handles::get(handle)?;
+        runtime.provider()?;
+        let block = block_from_abi(read_versioned(block, "block")?)?;
+        let method = String::from_utf8(copy_view(
+            method,
+            "runtime API method",
+            MAX_RUNTIME_API_METHOD_BYTES,
+        )?)
+        .map_err(|_| FfiError::invalid("runtime API method must be UTF-8"))?;
+        let arguments = copy_view(
+            arguments,
+            "runtime API arguments",
+            MAX_RUNTIME_API_ARGUMENT_BYTES,
+        )?;
+        accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            runtime.refresh_provider_capabilities()?;
+            let output =
+                runtime.drive(runtime.engine().call_runtime_api(block, method, arguments))??;
+            Ok(ResultPayload::Storage(Some(output)))
+        })
+    })
 }
 
 #[no_mangle]

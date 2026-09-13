@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
 import 'package:citizenapp/8964/models/square_models.dart';
 import 'package:citizenapp/8964/compose/compose_page.dart';
@@ -46,6 +47,7 @@ class _SquarePostDetailPageState extends State<SquarePostDetailPage> {
   bool _loading = true;
   Object? _loadError;
   bool _deleting = false;
+  bool _dependenciesReady = false;
 
   SquarePost get post => _post;
 
@@ -54,10 +56,18 @@ class _SquarePostDetailPageState extends State<SquarePostDetailPage> {
     super.initState();
     _post = widget.post;
     _api = widget.api ?? SquareApiClient();
-    _sessionProvider = widget.sessionProvider ?? SquareSessionProvider.instance;
     _deletionCoordinator =
         widget.deletionCoordinator ??
         SquarePostDeletionCoordinator(remoteDeletion: _api);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    _sessionProvider =
+        widget.sessionProvider ?? context.read<SquareSessionProvider>();
+    _dependenciesReady = true;
     unawaited(_loadDetail());
   }
 

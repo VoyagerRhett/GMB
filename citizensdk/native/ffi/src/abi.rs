@@ -150,6 +150,8 @@ pub enum CitizenSdkEventType {
     LifecycleChanged = 4,
     /// 无 payload 的历史失效通知，接收者通过已有历史 API 读取最新状态。
     HistoryChanged = 5,
+    /// provider 已验证的 finalized block 变化；result 是一个 BlockRef。
+    FinalizedBlockChanged = 6,
 }
 
 #[repr(u32)]
@@ -185,6 +187,7 @@ pub enum CitizenSdkResultKind {
     BlockBody = 26,
     PreparedTransaction = 27,
     TransactionExecution = 28,
+    ApplicationKey = 29,
 }
 
 #[repr(u32)]

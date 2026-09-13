@@ -1,6 +1,9 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:flutter/services.dart';
@@ -16,10 +19,7 @@ import 'package:citizenapp/citizen/shared/proposal/proposal_query_service.dart';
 import 'package:citizenapp/citizen/proposal/runtime-upgrade/runtime_upgrade_service.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_models.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
-import 'package:citizenapp/rpc/smoldot_client.dart';
-import 'package:citizenapp/signer/qr_signer.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/votingengine/internal-vote/proposal_vote_widgets.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
@@ -41,7 +41,7 @@ class RuntimeUpgradeDetailPage extends StatefulWidget {
 
   /// 便捷访问。
   InstitutionInfo? get institution => proposalContext.institution;
-  List<WalletProfile> get adminWallets => proposalContext.adminWallets;
+  List<CitizenWalletStateAccount> get adminWallets => proposalContext.adminWallets;
 
   @override
   State<RuntimeUpgradeDetailPage> createState() =>
@@ -49,9 +49,10 @@ class RuntimeUpgradeDetailPage extends StatefulWidget {
 }
 
 class _RuntimeUpgradeDetailPageState extends State<RuntimeUpgradeDetailPage> {
-  final RuntimeUpgradeService _service = RuntimeUpgradeService();
-  final ProposalQueryService _proposalQueryService = ProposalQueryService();
-  final InstitutionAdminService _adminService = InstitutionAdminService();
+  late final RuntimeUpgradeService _service;
+  late final ProposalQueryService _proposalQueryService;
+  late final InstitutionAdminService _adminService;
+  bool _dependenciesReady = false;
   final ProposalDetailLocalStore _detailStore =
       ProposalDetailLocalStore.instance;
 
@@ -69,12 +70,26 @@ class _RuntimeUpgradeDetailPageState extends State<RuntimeUpgradeDetailPage> {
   List<String> _admins = const [];
   ({int yes, int no}) _institutionAdminTally = (yes: 0, no: 0);
   Map<String, bool?> _adminVotes = const {};
-  List<WalletProfile> _votableWallets = const [];
-  WalletProfile? _selectedVoteWallet;
+  List<CitizenWalletStateAccount> _votableWallets = const [];
+  CitizenWalletStateAccount? _selectedVoteWallet;
 
   @override
   void initState() {
     super.initState();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    final sdk = context.read<CitizenSdk>();
+    _service = RuntimeUpgradeService(
+      chain: sdk.chain,
+      transactions: sdk.transactions,
+    );
+    _proposalQueryService = ProposalQueryService(chain: sdk.chain);
+    _adminService = InstitutionAdminService(chain: sdk.chain);
+    _dependenciesReady = true;
     _load();
   }
 
@@ -175,8 +190,8 @@ class _RuntimeUpgradeDetailPageState extends State<RuntimeUpgradeDetailPage> {
       bool? institutionVote;
       ({int yes, int no}) institutionAdminTally = (yes: 0, no: 0);
       Map<String, bool?> adminVotes = const {};
-      List<WalletProfile> votableWallets = const [];
-      WalletProfile? selectedVoteWallet = _selectedVoteWallet;
+      List<CitizenWalletStateAccount> votableWallets = const [];
+      CitizenWalletStateAccount? selectedVoteWallet = _selectedVoteWallet;
       if (institution != null) {
         admins = results[4] as List<String>;
         institutionVote = results[5] as bool?;
@@ -245,7 +260,7 @@ class _RuntimeUpgradeDetailPageState extends State<RuntimeUpgradeDetailPage> {
         return;
       }
       setState(() {
-        _error = SmoldotClientManager.instance.buildUserFacingError(e);
+        _error = '协议升级链状态暂时不可用';
         _loading = false;
       });
     }
@@ -500,38 +515,6 @@ class _RuntimeUpgradeDetailPageState extends State<RuntimeUpgradeDetailPage> {
     return Keyring().encodeAddress(_hexDecode(publicKey), kGmbSs58Prefix);
   }
 
-  Future<Uint8List> _signPayloadWithWallet({
-    required WalletProfile wallet,
-    required Uint8List payload,
-    required String requestPrefix,
-    required int action,
-  }) async {
-    // 岗位有效选民投票统一通过 QR 码签名（CitizenWallet 公民钱包）。
-    final qrSigner = QrSigner();
-    final request = qrSigner.buildRequest(
-      requestId: QrSigner.generateRequestId(prefix: '$requestPrefix-'),
-      signerPublicKey: wallet.accountId,
-      payloadHex: '0x${_toHex(payload)}',
-      action: action,
-    );
-    final requestJson = qrSigner.encodeRequest(request);
-    if (!mounted) throw Exception('页面已关闭');
-    final response = await Navigator.push<SignResponseEnvelope>(
-      context,
-      MaterialPageRoute(
-        builder: (_) => QrSignSessionPage(
-          request: request,
-          requestJson: requestJson,
-          expectedSignerPublicKey: wallet.accountId,
-        ),
-      ),
-    );
-    if (response == null) {
-      throw Exception('签名已取消');
-    }
-    return _hexDecode(response.body.signatureHex);
-  }
-
   Future<void> _submitJointVote(bool approve) async {
     final institution = widget.institution;
     final voteWallet = _selectedVoteWallet;
@@ -545,16 +528,14 @@ class _RuntimeUpgradeDetailPageState extends State<RuntimeUpgradeDetailPage> {
         actorCidNumber: institution.cidNumber,
         voterRoleCode: _voterRoleCode,
         approve: approve,
-        fromSs58Address: voteWallet.ss58Address,
         signerPublicKey: _hexDecode(voteWallet.accountId),
-        sign: (payload) {
-          return _signPayloadWithWallet(
-            wallet: voteWallet,
-            payload: payload,
-            requestPrefix: approve ? 'runtime-joint-yes' : 'runtime-joint-no',
-            action: QrActions.jointVote,
-          );
-        },
+        externalSigning: (pending) => showCitizenSdkQrResponse(
+          context,
+          request: pending.qrRequest,
+          expiresAt: BigInt.from(
+            pending.expiresAt.millisecondsSinceEpoch ~/ 1000,
+          ),
+        ),
       );
 
       final accountId = _requireAccountId(voteWallet.accountId);
@@ -583,7 +564,7 @@ class _RuntimeUpgradeDetailPageState extends State<RuntimeUpgradeDetailPage> {
       // 服务层已经等待入块并回读 JointVote storage；这里刷新页面
       // 只负责同步最新展示状态，投票成功与否不再由 txHash 判断。
       unawaited(_load(showSpinner: false));
-    } on WalletAuthException catch (e) {
+    } on AccountSecurityException catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(e.message), backgroundColor: AppTheme.danger),

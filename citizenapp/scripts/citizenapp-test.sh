@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # CitizenApp 本机与 CI 唯一 Flutter 测试入口。
 #
-# flutter_tester 是宿主进程，不会链接 iOS Runner 的 libsmoldot.a，也不会使用
-# Android APK 内的 libsmoldot.so。任何 Dart FFI 测试开始前，必须先构建并验收
-# 当前宿主的 libsmoldot.dylib/so；随后才允许 analyze 和顺序执行测试。
+# CitizenApp 测试只依赖 CitizenSDK 公开 Dart 合同与可控 fake；不构建或
+# 加载 App 自有链库。TataChatSDK 的宿主库仍由其产品脚本准备。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -33,25 +32,16 @@ if ! command -v "$FLUTTER_BIN" >/dev/null 2>&1; then
   exit 1
 fi
 
-EXPECTED_FLUTTER_VERSION="$(
-  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["toolchains"]["flutter"])' \
-    "$REPO_ROOT/.github/dependencies.json"
-)"
-ACTUAL_FLUTTER_VERSION="$(
-  "$FLUTTER_BIN" --version --machine \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["frameworkVersion"])'
-)"
-if [ "$ACTUAL_FLUTTER_VERSION" != "$EXPECTED_FLUTTER_VERSION" ]; then
-  echo "错误: Flutter 版本为 $ACTUAL_FLUTTER_VERSION，仓库要求 $EXPECTED_FLUTTER_VERSION" >&2
-  exit 1
-fi
+# Flutter 版本由 TataConsole 工具登记或 GitHub Action 的同一流程输入唯一确定；
+# 产品测试脚本只消费调用方注入的可执行文件，不再读取仓库中不存在的第二份版本表。
 
 if [ ! -f "$FLUTTER_ROOT/.dart_tool/package_config.json" ]; then
   if [[ "${CI:-}" == true ]]; then
     echo "错误: 缺少 .dart_tool/package_config.json；CI必须先执行锁定依赖解析" >&2
     exit 1
   fi
-  (cd "$FLUTTER_ROOT" && "$FLUTTER_BIN" pub get --enforce-lockfile)
+  # 本机测试不得把缺少的依赖交给 Flutter 下载；调用方必须先从塔塔依赖库物化准确锁定原件。
+  (cd "$FLUTTER_ROOT" && "$FLUTTER_BIN" pub get --offline --enforce-lockfile)
 fi
 
 # 设备 Release 构建会先 cargo clean；测试必须从宿主库构建开始一直持锁到最后一个
@@ -121,11 +111,6 @@ fi
 if [[ "${CI:-}" == true ]]; then
   acquire_native_build_lock
 fi
-if rg -n --hidden --glob '!target/**' 'tatachat_sdk' "$CITIZENAPP_DIR/smoldot"; then
-  echo '错误: CitizenApp Smoldot 目录仍包含 TataChatSDK 编译或链接依赖' >&2
-  exit 1
-fi
-"$SCRIPT_DIR/build-smoldot-native.sh" host
 "$SCRIPT_DIR/../../../TATA/tatachatsdk/scripts/build-native.sh" host
 "$FLUTTER_BIN" analyze --no-pub
 "$FLUTTER_BIN" test --no-pub --concurrency=1 "$@"

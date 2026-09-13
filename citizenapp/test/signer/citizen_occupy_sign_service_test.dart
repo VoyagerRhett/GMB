@@ -1,49 +1,69 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizenapp/qr/bodies/sign_request_body.dart';
+import 'package:citizenapp/qr/bodies/sign_response_body.dart';
 import 'package:citizenapp/qr/envelope.dart';
 import 'package:citizenapp/qr/generated/qr_action_registry.g.dart';
 import 'package:citizenapp/qr/qr_protocols.dart';
 import 'package:citizenapp/signer/citizen_occupy_sign_service.dart';
-import 'package:citizenapp/signer/qr_signer.dart';
+import 'package:citizenapp/signer/app_business_qr_codec.dart';
 import 'package:citizenapp/signer/signing.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 const _cid = 'CN220-CTZN2-198805200-2026';
 const _expiresAt = 1900000000;
 
-Account _account({int index = 0, int accountByte = 0xab}) => Account(
-      masterId: '0x${_hexByte(accountByte) * 32}',
+CitizenWalletStateAccount _account({int index = 0, int accountByte = 0xab}) =>
+    CitizenWalletStateAccount(
+      signMode: CitizenWalletSignMode.hot,
+      walletIndex: 0,
       accountIndex: index,
       accountId: '0x${_hexByte(accountByte) * 32}',
       ss58Address: 'w5FhTestAddress',
-      accountName: '账户$index',
+      name: '账户$index',
+      createdAtMillis: BigInt.zero,
+      isDefault: index == 0,
     );
 
-class _FakeWalletManager extends WalletManager {
-  _FakeWalletManager({this.currentAccount});
+class _FakeWallet implements CitizenSdkWallet {
+  _FakeWallet({this.currentAccount});
 
-  final Account? currentAccount;
+  final CitizenWalletStateAccount? currentAccount;
+
+  @override
+  Future<CitizenWalletState> getState() async => CitizenWalletState(
+        revision: BigInt.one,
+        hotProfile: null,
+        accounts: currentAccount == null ? const [] : [currentAccount!],
+      );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _FakeSigning implements CitizenSigning {
   String? signedAccountId;
   Uint8List? signedPayload;
   final List<String> signedAccountIds = <String>[];
   final List<Uint8List> signedPayloads = <Uint8List>[];
 
   @override
-  Future<Account?> getAccountByAccountId(String accountId) async =>
-      currentAccount?.accountId == accountId ? currentAccount : null;
+  Future<CitizenSigningOutcome> begin(CitizenSigningIntent intent) async {
+    signedAccountId = intent.accountId;
+    signedPayload = Uint8List.fromList(intent.payload);
+    signedAccountIds.add(intent.accountId);
+    signedPayloads.add(Uint8List.fromList(intent.payload));
+    return CitizenSigningCompleted(
+      accountId: intent.accountId,
+      payloadHash: '0x${'00' * 32}',
+      signature: Uint8List(64),
+    );
+  }
 
   @override
-  Future<Uint8List> signForAccountId(
-      String accountId, Uint8List payload) async {
-    signedAccountId = accountId;
-    signedPayload = Uint8List.fromList(payload);
-    signedAccountIds.add(accountId);
-    signedPayloads.add(Uint8List.fromList(payload));
-    return Uint8List(64);
-  }
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 String _hexByte(int value) => value.toRadixString(16).padLeft(2, '0');
@@ -82,7 +102,7 @@ String _domainRaw({
           ? _occupyTemplate()
           : _rebindTemplate());
   final payloadB64 = base64Url.encode(authorization).replaceAll('=', '');
-  return QrSigner().encodeRequest(QrEnvelope<SignRequestBody>(
+  return AppBusinessQrCodec().encodeRequest(QrEnvelope<SignRequestBody>(
     kind: QrKind.signRequest,
     id: 'citizen-occupy-req-000001',
     issuedAt: 1800000000,
@@ -141,7 +161,7 @@ void main() {
   });
 
   test('非占号/换绑动作即拒', () async {
-    final raw = QrSigner().encodeRequest(QrSigner().buildRequest(
+    final raw = AppBusinessQrCodec().encodeRequest(AppBusinessQrCodec().buildRequest(
       requestId: 'citizen-identity-req-0001',
       signerPublicKey: '0x${'11' * 32}',
       payloadHex: '0x01020304',
@@ -223,11 +243,11 @@ void main() {
 
   test('账户卡锁定的子账户原位填入占号零槽后签名', () async {
     final account = _account(index: 5);
-    final manager = _FakeWalletManager();
+    final signing = _FakeSigning();
     final prep = await service.prepare(_domainRaw(), account);
-    await service.sign(prep, manager);
+    await service.sign(prep, signing, null);
     expect(prep.account.accountIndex, 5);
-    expect(manager.signedAccountId, account.accountId);
+    expect(signing.signedAccountId, account.accountId);
     final exactAuthorization = _occupyTemplate()
       ..setRange(
         32 + 1 + _cid.length,
@@ -235,7 +255,7 @@ void main() {
         List<int>.filled(32, 0xab),
       );
     expect(
-      manager.signedPayload,
+      signing.signedPayload,
       signingMessage(
         opTag: kOpSignCidOccupy,
         scalePayload: exactAuthorization,
@@ -246,16 +266,17 @@ void main() {
   test('注册局换绑在同一次扫码中收集当前与新账户对同一授权的双签名', () async {
     final newAccount = _account(accountByte: 0xab);
     final currentAccount = _account(accountByte: 0x55);
-    final manager = _FakeWalletManager(currentAccount: currentAccount);
+    final wallet = _FakeWallet(currentAccount: currentAccount);
+    final signing = _FakeSigning();
     final prep = await service.prepare(
       _domainRaw(action: QrActions.citizenRebind),
       newAccount,
-      manager,
+      wallet,
     );
 
     expect(prep.currentAccount?.accountId, currentAccount.accountId);
-    final raw = await service.sign(prep, manager);
-    expect(manager.signedAccountIds, <String>[
+    final raw = await service.sign(prep, signing, null);
+    expect(signing.signedAccountIds, <String>[
       newAccount.accountId,
       currentAccount.accountId,
     ]);
@@ -267,45 +288,42 @@ void main() {
         List<int>.filled(32, 0xab),
       );
     expect(
-      manager.signedPayloads[0],
-      QrSigner.signingBytesForHex(
+      signing.signedPayloads[0],
+      AppBusinessQrCodec.signingBytesForHex(
         payloadHex: prep.request.body.payloadHex,
         action: QrActions.citizenRebind,
         selfAccountId: Uint8List.fromList(List<int>.filled(32, 0xab)),
       ),
     );
     expect(
-      manager.signedPayloads[1],
+      signing.signedPayloads[1],
       signingMessage(
         opTag: kOpSignCidRebind,
         scalePayload: exactAuthorization,
       ),
     );
 
-    final response = QrSigner().parseResponse(
-      raw,
-      expectedRequestId: prep.request.id!,
-    );
-    expect(response.body.signerPublicKeyHex, newAccount.accountId);
-    expect(response.body.currentAccountIdHex, currentAccount.accountId);
-    expect(response.body.currentAccountSignatureHex, '0x${'00' * 64}');
+    final response = QrEnvelope.parse(raw);
+    final responseBody = response.body as SignResponseBody;
+    expect(responseBody.signerPublicKeyHex, newAccount.accountId);
+    expect(responseBody.currentAccountIdHex, currentAccount.accountId);
+    expect(responseBody.currentAccountSignatureHex, '0x${'00' * 64}');
   });
 
   test('当前钱包不在本机时注册局仍可强制换绑，但响应不伪造当前账户签名', () async {
-    final manager = _FakeWalletManager();
+    final wallet = _FakeWallet();
+    final signing = _FakeSigning();
     final prep = await service.prepare(
       _domainRaw(action: QrActions.citizenRebind),
       _account(accountByte: 0xab),
-      manager,
+      wallet,
     );
     expect(prep.currentAccount, isNull);
 
-    final response = QrSigner().parseResponse(
-      await service.sign(prep, manager),
-      expectedRequestId: prep.request.id!,
-    );
-    expect(manager.signedAccountIds, <String>['0x${'ab' * 32}']);
-    expect(response.body.currentAccountIdHex, isNull);
-    expect(response.body.currentAccountSignatureHex, isNull);
+    final response = QrEnvelope.parse(await service.sign(prep, signing, null));
+    final responseBody = response.body as SignResponseBody;
+    expect(signing.signedAccountIds, <String>['0x${'ab' * 32}']);
+    expect(responseBody.currentAccountIdHex, isNull);
+    expect(responseBody.currentAccountSignatureHex, isNull);
   });
 }

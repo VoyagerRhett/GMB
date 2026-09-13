@@ -121,6 +121,7 @@ internal object CitizenSdkNativeCodec {
                 ),
             )
             28L -> CitizenSdkNativeResult.TransactionExecution(reader.transactionExecution())
+            29L -> CitizenSdkNativeResult.ApplicationKey(reader.fixed(32))
             else -> throw CitizenSdkException(
                 CitizenSdkErrorCode.INTEGRITY,
                 "JNI returned unsupported result kind $kind",

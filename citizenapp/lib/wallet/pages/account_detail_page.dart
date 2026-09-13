@@ -1,14 +1,15 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
 import 'package:citizenapp/isar/wallet_isar.dart';
 import 'package:citizenapp/log/app_log.dart';
-import 'package:citizenapp/my/util/screenshot_guard.dart';
-import 'package:citizenapp/transaction/history/data/local_tx_store.dart';
+import 'package:citizenapp/transaction/history/local_tx_store.dart';
 import 'package:citizenapp/transaction/history/presentation/tx_auto_refresh_mixin.dart';
 import 'package:citizenapp/ui/app_theme.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:citizenapp/transaction/history/presentation/transaction_history_page.dart';
 import 'package:citizenapp/wallet/widgets/wallet_action_card.dart';
 import 'package:citizenapp/wallet/widgets/wallet_qr_dialog.dart';
@@ -21,14 +22,13 @@ import 'package:citizenapp/ui/app_layout.dart';
 /// - 清算行菜单当前只显示“暂未上线，敬请期待”，不进入尚未完成的设置页；
 /// - 交易记录（[TransactionHistoryPage]，按账户 `account_id` 查询）；
 /// - 顶部完整 SS58 地址与该账户的账户码（`k=5`，只声明账户；身份码在用户主页）；
-/// - AppBar 菜单中的私钥（child mini-secret 独立、单向；展示前生物识别 +
-///   防截屏 + 纯文本不可复制）。
+/// - AppBar 菜单中的私钥入口直接启动 CitizenSDK 安全窗口；App 不读取私钥文本。
 ///
 /// 追加账户不在本页：收在「我的钱包」列表右上角「＋」的「添加下一个账户 / 添加指定账户」。
 class AccountDetailPage extends StatefulWidget {
   const AccountDetailPage({super.key, required this.account});
 
-  final Account account;
+  final CitizenWalletStateAccount account;
 
   @override
   State<AccountDetailPage> createState() => _AccountDetailPageState();
@@ -36,13 +36,10 @@ class AccountDetailPage extends StatefulWidget {
 
 class _AccountDetailPageState extends State<AccountDetailPage>
     with TxAutoRefreshMixin<AccountDetailPage> {
-  final WalletManager _walletManager = WalletManager();
 
   /// 充值/提现/零钱包动作卡:下拉刷新时通过此 key 触发清算行余额重查。
   final GlobalKey<WalletActionCardState> _actionCardKey =
       GlobalKey<WalletActionCardState>();
-
-  bool _screenshotGuardActive = false;
 
   /// 该账户最近交易记录(最多 5 条),按 `account_id` 查询。
   List<LocalTxEntity> _recentRecords = const [];
@@ -50,7 +47,7 @@ class _AccountDetailPageState extends State<AccountDetailPage>
   @override
   void initState() {
     super.initState();
-    // 初始化加载最近交易记录;之后由 ChainTxMonitor 后台写库触发响应式重刷
+    // 初始化加载最近交易记录；之后由 SDK history/finalized 业务投影触发响应式重刷。
     // (不重复启动监听、不劫持全局回调)。
     _loadRecentRecords();
     startTxAutoRefresh(widget.account.accountId);
@@ -66,7 +63,6 @@ class _AccountDetailPageState extends State<AccountDetailPage>
         AppLog.d('[Wallet] 账户详情 watcher 停止失败: $error\n$stackTrace');
       }),
     );
-    if (_screenshotGuardActive) ScreenshotGuard.disable();
     super.dispose();
   }
 
@@ -98,100 +94,19 @@ class _AccountDetailPageState extends State<AccountDetailPage>
   }
 
   Future<void> _revealPrivateKey() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('查看私钥'),
-        content: const Text('私钥泄露将导致该账户资产被盗（仅该账户，不影响本钱包其他账户）。\n\n确认要查看吗？'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            style: TextButton.styleFrom(foregroundColor: AppTheme.danger),
-            child: const Text('查看'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
-    String? key;
     try {
-      key = await _walletManager.getAccountPrivateKey(widget.account.accountId);
-      if (!mounted) return;
-      if (!_screenshotGuardActive) {
-        _screenshotGuardActive = true;
-        await ScreenshotGuard.enable();
-        if (!mounted) return;
-      }
-      await showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        builder: (dialogContext) => AlertDialog(
-          title: const Text('私钥'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: double.infinity,
-                padding: EdgeInsets.all(AppLayout.scaledValue(14)),
-                decoration: BoxDecoration(
-                  color: AppTheme.danger.withAlpha(15),
-                  borderRadius: BorderRadius.circular(AppTheme.radiusSm),
-                  border: Border.all(color: AppTheme.danger.withAlpha(40)),
-                ),
-                // 普通 Text 不提供选择/复制菜单，避免私钥进入剪贴板。
-                child: Text(
-                  key!,
-                  style: TextStyle(
-                    fontSize: AppLayout.scaledValue(13),
-                    fontFamily: 'monospace',
-                    color: AppTheme.textPrimary,
-                    height: 1.6,
-                  ),
-                ),
-              ),
-              SizedBox(height: AppLayout.scaledValue(10)),
-              Text(
-                '请手抄备份，不支持复制；导出即等于该账户控制权',
-                style: TextStyle(
-                  color: AppTheme.danger,
-                  fontSize: AppLayout.scaledValue(12),
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('关闭'),
-            ),
-          ],
-        ),
+      await context
+          .read<CitizenSdk>()
+          .wallet
+          .viewAccountPrivateKey(widget.account.accountId);
+    } on CitizenSdkException catch (error) {
+      if (!mounted || error.code == CitizenSdkErrorCode.cancelled) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('验证失败：${error.message}')),
       );
-    } on WalletAuthException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('验证失败：${e.message}')));
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('验证失败：$e')));
-    } finally {
-      // 私钥弹窗关闭后立即释放页面引用并恢复截屏策略，不把敏感信息留在详情页状态中。
-      key = null;
-      if (_screenshotGuardActive) {
-        _screenshotGuardActive = false;
-        await ScreenshotGuard.disable();
-      }
     }
   }
+
 
   void _copy(String text, String label) {
     Clipboard.setData(ClipboardData(text: text));
@@ -215,7 +130,7 @@ class _AccountDetailPageState extends State<AccountDetailPage>
     await showWalletQrDialog(
       context,
       accountId: widget.account.accountId,
-      accountName: widget.account.accountName,
+      accountName: widget.account.name,
     );
   }
 
@@ -341,7 +256,7 @@ class _AccountDetailPageState extends State<AccountDetailPage>
                         padding:
                             EdgeInsets.only(right: AppLayout.scaledValue(36)),
                         child: Text(
-                          account.accountName,
+                          account.name,
                           style: TextStyle(
                             fontSize: AppLayout.scaledValue(18),
                             fontWeight: FontWeight.w700,

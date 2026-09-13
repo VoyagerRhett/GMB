@@ -14,7 +14,7 @@
 // 链端 pallet(index 23)、qr-protocol action(0x1700-0x1704)、citizenwallet decoder 均已实装。
 // 框架阶段的 pages/ 与 widgets/ 占位壳已于 2026-07-23 删除,子任务 C 按真实设计重写。
 
-import 'package:citizenapp/rpc/pallet_registry.dart';
+import 'package:citizenapp/citizen/shared/pallet_registry.dart';
 
 class OnchainAssetActions {
   OnchainAssetActions._();

@@ -1,16 +1,14 @@
 import 'dart:convert';
 
-import 'package:citizenapp/rpc/pallet_registry.dart';
+import 'package:citizenapp/citizen/shared/pallet_registry.dart';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/foundation.dart';
-import 'package:citizenapp/log/app_log.dart';
 import 'package:polkadart/polkadart.dart' show Hasher;
 import 'package:polkadart/scale_codec.dart' show ByteOutput;
 import 'package:polkadart_keyring/polkadart_keyring.dart' show Keyring;
 
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/rpc/signed_extrinsic_builder.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_models.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_query_service.dart';
 
@@ -18,11 +16,15 @@ import 'package:citizenapp/citizen/shared/proposal/proposal_query_service.dart';
 ///
 /// 负责协议升级提案详情查询，并保留现有详情页投票提交能力。
 class RuntimeUpgradeService {
-  RuntimeUpgradeService({ChainRpc? chainRpc})
-      : _rpc = chainRpc ?? ChainRpc(),
-        _proposalQuery = ProposalQueryService(chainRpc: chainRpc);
+  RuntimeUpgradeService({
+    required CitizenChain chain,
+    required CitizenTransactions transactions,
+  })  : _chain = chain,
+        _transactions = transactions,
+        _proposalQuery = ProposalQueryService(chain: chain);
 
-  final ChainRpc _rpc;
+  final CitizenChain _chain;
+  final CitizenTransactions _transactions;
   final ProposalQueryService _proposalQuery;
 
   // ──── 常量 ────
@@ -48,9 +50,10 @@ class RuntimeUpgradeService {
     required String actorCidNumber,
     required String voterRoleCode,
     required bool approve,
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
-    required Future<Uint8List> Function(Uint8List payload) sign,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    ) externalSigning,
   }) async {
     final callData = _buildJointVoteCall(
       proposalId: proposalId,
@@ -58,11 +61,10 @@ class RuntimeUpgradeService {
       voterRoleCode: voterRoleCode,
       approve: approve,
     );
-    final result = await _signAndSubmit(
+    final result = await _executeFinalized(
       callData: callData,
-      fromSs58Address: fromSs58Address,
       signerPublicKey: signerPublicKey,
-      sign: sign,
+      externalSigning: externalSigning,
     );
     await _confirmRuntimeJointVote(
       proposalId: proposalId,
@@ -70,7 +72,6 @@ class RuntimeUpgradeService {
       voterRoleCode: voterRoleCode,
       approve: approve,
       signerPublicKey: signerPublicKey,
-      blockHashHex: result.blockHashHex,
     );
     return result;
   }
@@ -92,7 +93,7 @@ class RuntimeUpgradeService {
       'ProposalData',
       _u64ToLeBytes(proposalId),
     );
-    final raw = await _rpc.fetchStorage('0x${_hexEncode(key)}');
+    final raw = await _fetchStorage('0x${_hexEncode(key)}');
     if (raw == null || raw.isEmpty) return null;
     return decodeRuntimeUpgradeStorageValue(proposalId, raw);
   }
@@ -124,7 +125,7 @@ class RuntimeUpgradeService {
       'JointTallies',
       _u64ToLeBytes(proposalId),
     );
-    final data = await _rpc.fetchStorage('0x${_hexEncode(key)}');
+    final data = await _fetchStorage('0x${_hexEncode(key)}');
     if (data == null || data.length != 8) return (yes: 0, no: 0);
     // VoteCountU32: { yes: u32, no: u32 } — 4+4 bytes little-endian
     final yes = _decodeU32(data, 0);
@@ -144,7 +145,7 @@ class RuntimeUpgradeService {
       _u64ToLeBytes(proposalId),
       _encodeCidNumber(actorCidNumber),
     );
-    final data = await _rpc.fetchStorage('0x${_hexEncode(fullKey)}');
+    final data = await _fetchStorage('0x${_hexEncode(fullKey)}');
     return _decodeBoolVote(data);
   }
 
@@ -157,7 +158,7 @@ class RuntimeUpgradeService {
       _u64ToLeBytes(proposalId),
       _encodeCidNumber(actorCidNumber),
     );
-    final data = await _rpc.fetchStorage('0x${_hexEncode(fullKey)}');
+    final data = await _fetchStorage('0x${_hexEncode(fullKey)}');
     if (data == null || data.length != 8) return (yes: 0, no: 0);
     return (yes: _decodeU32(data, 0), no: _decodeU32(data, 4));
   }
@@ -176,7 +177,7 @@ class RuntimeUpgradeService {
       publicKey,
     );
     if (key == null) return null;
-    final data = await _rpc.fetchStorage(key);
+    final data = await _fetchStorage(key);
     return _decodeBoolVote(data);
   }
 
@@ -203,7 +204,7 @@ class RuntimeUpgradeService {
       keyByAccountId[normalizedAccountId] = key;
     }
     if (keyByAccountId.isEmpty) return const {};
-    final values = await _rpc.fetchStorageBatchChunked(keyByAccountId.values);
+    final values = await _fetchStorageBatchChunked(keyByAccountId.values);
     return {
       for (final entry in keyByAccountId.entries)
         entry.key: _decodeBoolVote(values[entry.value]),
@@ -243,7 +244,7 @@ class RuntimeUpgradeService {
       }
     }
     if (keyToCoord.isEmpty) return const {};
-    final values = await _rpc.fetchStorageBatchChunked(keyToCoord.keys);
+    final values = await _fetchStorageBatchChunked(keyToCoord.keys);
     final result = <int, Map<String, bool?>>{};
     keyToCoord.forEach((key, coord) {
       (result[coord.pid] ??= <String, bool?>{})[coord.accountId] =
@@ -296,7 +297,7 @@ class RuntimeUpgradeService {
       'ReferendumTallies',
       _u64ToLeBytes(proposalId),
     );
-    final data = await _rpc.fetchStorage('0x${_hexEncode(key)}');
+    final data = await _fetchStorage('0x${_hexEncode(key)}');
     if (data == null || data.length != 16) return (yes: 0, no: 0);
     // VoteCountU64: { yes: u64, no: u64 } — 8+8 bytes little-endian
     final yes = _decodeU64(data.sublist(0, 8));
@@ -419,24 +420,45 @@ class RuntimeUpgradeService {
   /// 签名、提交并等待交易进入区块。
   ///
   /// 返回交易哈希、runtime nonce 和入块哈希。
-  Future<({String txHash, int usedNonce, String blockHashHex})> _signAndSubmit({
+  Future<({String txHash, int usedNonce, String blockHashHex})> _executeFinalized({
     required Uint8List callData,
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
-    required Future<Uint8List> Function(Uint8List payload) sign,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    ) externalSigning,
   }) async {
-    return SignedExtrinsicBuilder(
-      chainRpc: _rpc,
-      logLabel: 'ProtocolUpgrade',
-    ).signAndSubmitInBlock(
-      callData: callData,
-      fromSs58Address: fromSs58Address,
-      signerPublicKey: signerPublicKey,
-      sign: sign,
-      onTrace: (trace) {
-        AppLog.d(
-            '[ProtocolUpgrade] encoded extrinsic hex: ${_hexEncode(trace.encoded)}');
-      },
+    final prepared = await _transactions.prepareTransaction(
+      signerPublicKey,
+      callData,
+    );
+    final started = await _transactions.executePreparedTransaction(
+      prepared.preparationId,
+    );
+    CitizenTransactionExecutionCompleted completed;
+    if (started is CitizenTransactionExternalSigningPending) {
+      final response = await externalSigning(started);
+      if (response == null) {
+        await _transactions.cancelPreparedTransactionExecution(
+          started.executionId,
+        );
+        throw StateError('联合投票签名已取消');
+      }
+      completed = await _transactions.consumePreparedTransactionQrResponse(
+        started.executionId,
+        response,
+      );
+    } else {
+      completed = started as CitizenTransactionExecutionCompleted;
+    }
+    if (completed.resolution !=
+            CitizenTransactionResolution.finalizedSuccess ||
+        completed.execution == null) {
+      throw StateError(completed.poolRejectionReason ?? '联合投票交易执行失败');
+    }
+    return (
+      txHash: '0x${_hexEncode(completed.transactionHash)}',
+      usedNonce: prepared.nonce.toInt(),
+      blockHashHex: completed.execution!.block.hash,
     );
   }
 
@@ -447,7 +469,6 @@ class RuntimeUpgradeService {
     required String voterRoleCode,
     required bool approve,
     required Uint8List signerPublicKey,
-    required String blockHashHex,
   }) async {
     final publicKey = _hexEncode(signerPublicKey);
     for (var attempt = 0; attempt < 6; attempt++) {
@@ -466,13 +487,39 @@ class RuntimeUpgradeService {
       }
     }
 
-    final events = await _rpc.fetchSystemEventsAtBlock(blockHashHex);
-    final failure =
-        events == null ? null : _rpc.findExtrinsicFailureInEvents(events);
-    if (failure != null) {
-      throw StateError('runtime 拒绝联合投票：${failure.description}');
+    throw StateError('交易已成功执行，但 runtime JointVote 未记录该岗位选民投票');
+  }
+
+  Future<Uint8List?> _fetchStorage(String keyHex) async {
+    final finalized = await _chain.getFinalizedHead();
+    return _chain.getStorage(
+      finalized,
+      Uint8List.fromList(_hexDecode(keyHex)),
+    );
+  }
+
+  Future<Map<String, Uint8List?>> _fetchStorageBatchChunked(
+    Iterable<String> keyHexes, {
+    int chunkSize = 100,
+  }) async {
+    final keys = keyHexes.toSet().toList(growable: false);
+    if (keys.isEmpty) return const <String, Uint8List?>{};
+    final finalized = await _chain.getFinalizedHead();
+    final result = <String, Uint8List?>{};
+    for (var offset = 0; offset < keys.length; offset += chunkSize) {
+      final end = (offset + chunkSize).clamp(0, keys.length);
+      final chunk = keys.sublist(offset, end);
+      final values = await _chain.getStorageBatch(
+        finalized,
+        chunk
+            .map((key) => Uint8List.fromList(_hexDecode(key)))
+            .toList(growable: false),
+      );
+      for (var index = 0; index < chunk.length; index++) {
+        result[chunk[index]] = values[index];
+      }
     }
-    throw StateError('交易已入块，但 runtime JointVote 未记录该岗位选民投票');
+    return result;
   }
 
   // ──── 内部：storage key 构造 ────

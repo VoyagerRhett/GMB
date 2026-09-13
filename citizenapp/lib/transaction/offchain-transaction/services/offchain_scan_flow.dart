@@ -1,8 +1,10 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:citizenapp/transaction/offchain-transaction/pages/offchain_pay_page.dart';
 import 'package:citizenapp/transaction/offchain-transaction/services/clearing_bank_directory.dart';
 import 'package:citizenapp/qr/pages/qr_scan_page.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 
 /// 链下支付尾段：已拿到收款码解析结果后，校验清算行 → 查节点 → 跳付款确认页。
 ///
@@ -11,7 +13,7 @@ import 'package:citizenapp/wallet/core/wallet_manager.dart';
 /// 扫码结果必须携带 `UserTransferBody.bank`（收款方清算行 `cid_number`）。
 Future<void> proceedOffchainPayment({
   required BuildContext context,
-  required WalletProfile wallet,
+  required CitizenWalletStateAccount wallet,
   required QrScanTransferResult result,
 }) async {
   if (result.bank == null || result.bank!.isEmpty) {
@@ -21,7 +23,9 @@ Future<void> proceedOffchainPayment({
     return;
   }
 
-  final directory = ClearingBankDirectory();
+  final directory = ClearingBankDirectory(
+    chain: context.read<CitizenSdk>().chain,
+  );
   final endpoint = await directory.fetchEndpoint(result.bank!);
   if (!context.mounted) return;
   if (endpoint == null) {

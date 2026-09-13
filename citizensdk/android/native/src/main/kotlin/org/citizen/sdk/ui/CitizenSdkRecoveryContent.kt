@@ -80,11 +80,11 @@ internal class CitizenSdkRecoveryContent(
     private val privateKey: CitizenSdkPrivateKeyDisplayBuffer? = null,
 ) : View(context), AutoCloseable {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xff111111.toInt()
+        color = 0xff1a2b3c.toInt()
         if (privateKey != null) typeface = android.graphics.Typeface.MONOSPACE
         textSize = TypedValue.applyDimension(
             TypedValue.COMPLEX_UNIT_SP,
-            18f,
+            if (privateKey == null) 15f else 13f,
             resources.displayMetrics,
         )
     }
@@ -93,7 +93,12 @@ internal class CitizenSdkRecoveryContent(
     init {
         importantForAutofill = IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
         importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
-        setPadding(32, 32, 32, 32)
+        setPadding(dp(14), dp(14), dp(14), dp(14))
+        background = android.graphics.drawable.GradientDrawable().apply {
+            setColor(if (privateKey == null) 0xffffffff.toInt() else 0x0fef4444)
+            setStroke(dp(1), if (privateKey == null) 0xffe2e8f0.toInt() else 0x28ef4444)
+            cornerRadius = dp(8).toFloat()
+        }
     }
 
     @JvmSynthetic
@@ -158,4 +163,6 @@ internal class CitizenSdkRecoveryContent(
         characters = CharArray(0)
         invalidate()
     }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 }

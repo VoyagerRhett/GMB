@@ -24,7 +24,7 @@ final class ReferenceConsumer {
   );
 
   final CitizenChain chain;
-  final CitizenWallet wallet;
+  final CitizenSdkWallet wallet;
   final CitizenSigning signing;
   final CitizenQr qr;
   final CitizenTransactions transactions;

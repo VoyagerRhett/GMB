@@ -1,11 +1,17 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:tatachat_sdk/tatachat_sdk.dart';
 
+import 'package:citizenapp/my/myid/current_user_context.dart';
+import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
+import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
 import 'package:citizenapp/my/myid/myid_service.dart';
 import 'package:citizenapp/my/myid/register_identity_flow.dart';
 import 'package:citizenapp/my/myid/widgets/rebind_account_sheet.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/identity_badge.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 身份页(原电子护照)。
@@ -34,7 +40,8 @@ class _MyIdPageState extends State<MyIdPage> {
     MyIdTier.candidate,
   ];
 
-  late final MyIdService _myIdService;
+  MyIdService? _myIdService;
+  AccountSecurityService? _accountSecurity;
   MyIdState _state = const MyIdState(tier: MyIdTier.visitor);
   bool _loading = true;
   bool _submitting = false;
@@ -54,15 +61,38 @@ class _MyIdPageState extends State<MyIdPage> {
   @override
   void initState() {
     super.initState();
-    _myIdService = widget.myIdService ?? MyIdService();
+    if (widget.myIdService != null) {
+      _myIdService = widget.myIdService;
+      _loadState();
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_myIdService != null) return;
+    final sdk = context.read<CitizenSdk>();
+    final accountSecurity = context.read<AccountSecurityService>();
+    _accountSecurity = accountSecurity;
+    _myIdService = MyIdService(
+      wallet: sdk.wallet,
+      signing: sdk.signing,
+      chain: sdk.chain,
+      transactions: sdk.transactions,
+      accountSecurity: accountSecurity,
+      currentUserContext: context.read<CurrentUserContext>(),
+      identityResolver: context.read<FinalizedIdentityResolver>(),
+      sessionProvider: context.read<SquareSessionProvider>(),
+      chatRuntime: () => context.read<ChatSdk>(),
+    );
     // 身份账户切换必须让身份页立即重排，和广场、聊天共用同一身份版本号。
-    WalletManager.walletsRevision.addListener(_loadState);
+    accountSecurity.revision.addListener(_loadState);
     _loadState();
   }
 
   @override
   void dispose() {
-    WalletManager.walletsRevision.removeListener(_loadState);
+    _accountSecurity?.revision.removeListener(_loadState);
     super.dispose();
   }
 
@@ -70,7 +100,7 @@ class _MyIdPageState extends State<MyIdPage> {
     if (mounted) setState(() => _loading = true);
     MyIdState nextState;
     try {
-      nextState = await _myIdService.getState();
+      nextState = await _myIdService!.getState();
     } on Exception catch (error) {
       // Service 正常会把链错误收口为 queryFailed；这里兜住依赖异常，仍不能把
       // 未知错误误认成访客。
@@ -120,14 +150,17 @@ class _MyIdPageState extends State<MyIdPage> {
   Future<void> _onRebind() async {
     final cid = _state.cidNumber;
     if (cid == null || cid.trim().isEmpty) return;
-    final targets = await _myIdService.listRebindTargets();
+    final targets = await _myIdService!.listRebindTargets();
     if (!mounted) return;
     final newAccountId =
         await showRebindAccountSheet(context, targets: targets);
     if (newAccountId == null || !mounted) return;
     await _runSubmit(() async {
-      await _myIdService.rebindCidTo(
-          cidNumber: cid, newAccountId: newAccountId);
+      await _myIdService!.rebindCidTo(
+        buildContext: context,
+        cidNumber: cid,
+        newAccountId: newAccountId,
+      );
       return '身份 CID 已换绑到所选账户';
     });
   }
@@ -159,7 +192,7 @@ class _MyIdPageState extends State<MyIdPage> {
   }
 
   String _describeError(Object error) {
-    if (error is WalletAuthException) return error.message;
+    if (error is AccountSecurityException) return error.message;
     final text = error.toString();
     const prefix = 'Exception: ';
     return text.startsWith(prefix) ? text.substring(prefix.length) : text;

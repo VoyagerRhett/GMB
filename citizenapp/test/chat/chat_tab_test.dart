@@ -15,7 +15,6 @@ import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/chat/chat_entry.dart';
 import 'package:citizenapp/chat/chat_product_policy.dart';
 import 'package:tatachat_sdk/tatachat_sdk.dart';
-import 'package:citizenapp/chat/tatachat_sdk_adapter.dart';
 import 'package:citizenapp/my/user/contact_service.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 
@@ -112,7 +111,7 @@ void main() {
     expect(find.text('注册'), findsOneWidget);
     expect(find.textContaining('尚未激活'), findsNothing);
     // 短路铁证:加密会话存储一次都不读——其密钥绑定解析对未注册身份必抛
-    // WalletAuthException,读了就会以错误横幅盖住引导。
+    // AccountSecurityException，读了就会以错误横幅盖住引导。
     expect(store.readPreviewCount, 0);
 
     await tester.pumpWidget(const SizedBox.shrink());
@@ -821,11 +820,7 @@ void main() {
 
     expect(deleteCalls, 1);
     expect(find.text('聊天暂时无法使用，请稍后重试'), findsNothing);
-    expect(
-      find.byType(CitizenChatPage),
-      findsNothing,
-      reason: '确认后聊天窗口必须立即关闭',
-    );
+    expect(find.byType(CitizenChatPage), findsNothing, reason: '确认后聊天窗口必须立即关闭');
     expect(find.text('Bob'), findsNothing, reason: '后台删除未完成时路由重载也不得恢复卡片');
     expect(store.deletedConversationIds, isEmpty);
 
@@ -1632,8 +1627,8 @@ class _FakeChatStore extends ChatStore {
   _FakeChatStore({
     List<ChatConversationPreview> conversations = const [],
     List<ChatStoredMessage> messages = const [],
-  })  : _conversations = List<ChatConversationPreview>.from(conversations),
-        _messages = List<ChatStoredMessage>.from(messages);
+  }) : _conversations = List<ChatConversationPreview>.from(conversations),
+       _messages = List<ChatStoredMessage>.from(messages);
 
   final List<ChatConversationPreview> _conversations;
   final List<ChatStoredMessage> _messages;
@@ -1717,8 +1712,7 @@ class _PendingChatStore extends _FakeChatStore {
   Future<List<ChatConversationPreview>> readConversationPreviews({
     required String ownerUserId,
     required String currentAccountId,
-  }) =>
-      completer.future;
+  }) => completer.future;
 }
 
 class _PendingMessagesStore extends _FakeChatStore {
@@ -1730,13 +1724,12 @@ class _PendingMessagesStore extends _FakeChatStore {
     required String ownerUserId,
     required String currentAccountId,
     required String conversationId,
-  }) =>
-      completer.future;
+  }) => completer.future;
 }
 
 class _IntegrityRefreshStore extends _FakeChatStore {
   _IntegrityRefreshStore(this.message)
-      : super(messages: <ChatStoredMessage>[message]);
+    : super(messages: <ChatStoredMessage>[message]);
 
   final ChatStoredMessage message;
   final Completer<ChatMessageDisplayBatch> _heartbeat =
@@ -1781,17 +1774,19 @@ class _FakeProfileApi extends CitizenProfileApi {
   Future<CitizenProfile> fetchProfile(
     String cidNumber, {
     SquareSession? session,
-  }) async =>
-      profile;
+  }) async => profile;
 }
 
-class _FakeContactService extends UserContactService {
-  _FakeContactService(this.contacts) : super(autoSync: false);
+class _FakeContactService implements UserContactService {
+  _FakeContactService(this.contacts);
 
   final List<UserContact> contacts;
 
   @override
   Future<List<UserContact>> getContacts() async => contacts;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _MemoryProfileCache extends CitizenProfileCache {
@@ -1821,20 +1816,41 @@ class _MemoryProfileMediaCache extends CitizenProfileMediaCache {
     required String? avatarUrl,
     required String? bannerUrl,
     required Map<String, String>? headers,
-  }) async =>
-      snapshot;
+  }) async => snapshot;
 }
 
-class _FakeProfileSessionProvider extends SquareSessionProvider {
+class _FakeProfileSessionProvider implements SquareSessionProvider {
   @override
   Future<SquareSession?> ensureSession() async => SquareSession(
-        sessionToken: 'profile-token',
-        cidNumber: _ownerUserId,
-        bindingRevision: 1,
-        accountId:
-            '0x1111111111111111111111111111111111111111111111111111111111111111',
-        expiresAt: DateTime.now().millisecondsSinceEpoch + 60000,
-      );
+    sessionToken: 'profile-token',
+    cidNumber: _ownerUserId,
+    bindingRevision: 1,
+    accountId:
+        '0x1111111111111111111111111111111111111111111111111111111111111111',
+    expiresAt: DateTime.now().millisecondsSinceEpoch + 60000,
+  );
+
+  @override
+  Future<SquareSessionResolution> resolveSession({bool refresh = false}) async {
+    final session = await ensureSession();
+    return SquareSessionResolution(SquareSessionStatus.ready, session: session);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _UnusedChatHost implements ChatRuntimeHost {
+  @override
+  final ChatStorageKeyProvider keyProvider = _UnusedChatStorageKeyProvider();
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _UnusedChatStorageKeyProvider implements ChatStorageKeyProvider {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _FakeRuntime extends ChatSdk {
@@ -1844,7 +1860,7 @@ class _FakeRuntime extends ChatSdk {
     this.onDeleteConversation,
     this.retryCompleter,
     this.retryError,
-  }) : super(host: createCitizenChatRuntimeHost());
+  }) : super(host: _UnusedChatHost());
 
   final String address;
   final bool enableRealtime;

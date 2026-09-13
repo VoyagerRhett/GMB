@@ -6,8 +6,6 @@ import 'package:citizenapp/citizen/proposal/admins-change/models/admin_account.d
 import 'package:citizenapp/citizen/proposal/admins-change/services/institution_admin_service.dart';
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/citizen/shared/institution_code_label.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
-import 'package:citizenapp/signer/qr_signer.dart';
 import 'package:citizenapp/signer/signing.dart';
 import 'package:citizenapp/isar/wallet_isar.dart';
 
@@ -37,31 +35,27 @@ class ActivatedAdmin {
   final int activatedAtMs;
 
   Map<String, dynamic> toJson() => {
-        'account_id': accountId,
-        'cid_number': cidNumber,
-        'institution_code': institutionCode,
-        'kind': kind,
-        'activated_at_ms': activatedAtMs,
-      };
+    'account_id': accountId,
+    'cid_number': cidNumber,
+    'institution_code': institutionCode,
+    'kind': kind,
+    'activated_at_ms': activatedAtMs,
+  };
 
   factory ActivatedAdmin.fromJson(Map<String, dynamic> json) => ActivatedAdmin(
-        accountId: json['account_id'] as String,
-        cidNumber: json['cid_number'] as String,
-        institutionCode: json['institution_code'] as String,
-        kind: json['kind'] as int,
-        activatedAtMs: json['activated_at_ms'] as int,
-      );
+    accountId: json['account_id'] as String,
+    cidNumber: json['cid_number'] as String,
+    institutionCode: json['institution_code'] as String,
+    kind: json['kind'] as int,
+    activatedAtMs: json['activated_at_ms'] as int,
+  );
 }
 
-/// 管理员激活服务（QR 扫码签名激活模式）。
-///
-/// 用户在管理员列表页点击"激活"→ 展示签名请求 QR →
-/// 持有私钥的外部设备扫码签名 → QrSignSessionPage 校验签名响应 →
-/// 本服务复核链上管理员账户和签名账户 ID → 写入本地存储。
+/// 管理员激活服务。App 构造并审阅业务 payload，CitizenSDK 按账户冷热模式完成签名，
+/// 本服务随后复核链上管理员账户并写入本地激活记录。
 class ActivationService {
-  ActivationService({
-    InstitutionAdminService? adminService,
-  }) : _adminService = adminService ?? InstitutionAdminService();
+  ActivationService({required InstitutionAdminService adminService})
+    : _adminService = adminService;
 
   final InstitutionAdminService _adminService;
 
@@ -93,18 +87,21 @@ class ActivationService {
 
   /// 获取指定管理员账户的已激活管理员，并与链上管理员列表交叉校验。
   Future<List<ActivatedAdmin>> getActivatedAdmins(
-      AdminAccountIdentity identity) async {
+    AdminAccountIdentity identity,
+  ) async {
     final cidNumber = _requireInstitutionCid(identity);
     var all = await loadAll();
-    final institutionRecords =
-        all.where((item) => item.cidNumber == cidNumber).toList();
+    final institutionRecords = all
+        .where((item) => item.cidNumber == cidNumber)
+        .toList();
     if (institutionRecords.isEmpty) return [];
 
     // 链上交叉校验
     try {
       final chainAdmins = await _adminService.fetchAdmins(identity);
-      final validAccountIds =
-          chainAdmins.map((admin) => admin.account_id).toSet();
+      final validAccountIds = chainAdmins
+          .map((admin) => admin.account_id)
+          .toSet();
       final before = all.length;
       all.removeWhere(
         (a) =>
@@ -122,7 +119,9 @@ class ActivationService {
 
   /// 检查指定账户 ID 是否已激活。
   Future<bool> isActivated(
-      String accountId, AdminAccountIdentity identity) async {
+    String accountId,
+    AdminAccountIdentity identity,
+  ) async {
     final normalizedAccountId = _normalize(accountId);
     final cidNumber = _requireInstitutionCid(identity);
     final all = await loadAll();
@@ -131,51 +130,27 @@ class ActivationService {
     );
   }
 
-  // QR 激活流程
-  /// 构建激活签名请求（用于展示 QR 码）。
-  ///
-  /// 返回 (SignRequestEnvelope, requestJson),直接传给 QrSignSessionPage。
-  ({SignRequestEnvelope request, String json}) buildActivationRequest({
+  /// 构建管理员激活业务 payload；账户签名与冷热分流由 CitizenSDK 完成。
+  Uint8List buildActivationPayload({
     required String accountId,
     required AdminAccountIdentity identity,
   }) {
     _requireInstitutionCid(identity);
     final normalizedAccountId = _normalize(accountId);
 
-    final payload = _buildActivatePayload(identity, normalizedAccountId);
-    final payloadHex = '0x${_bytesToHex(payload)}';
-
-    final signer = QrSigner();
-    final requestId = QrSigner.generateRequestId(prefix: 'act-');
-    final request = signer.buildRequest(
-      requestId: requestId,
-      signerPublicKey: normalizedAccountId,
-      payloadHex: payloadHex,
-      action: QrActions.activateAdmin,
-    );
-    final json = signer.encodeRequest(request);
-
-    return (request: request, json: json);
+    return _buildActivatePayload(identity, normalizedAccountId);
   }
 
-  /// 通过 QR 签名响应完成激活。
+  /// CitizenSDK 已完成账户控制证明后记录本机激活状态。
   ///
   /// [accountId] 管理员账户 ID。
   /// [identity] 管理员账户。
-  /// [response] 从 QrSignSessionPage 获取的签名响应。
-  Future<ActivatedAdmin> activateViaQr({
+  Future<ActivatedAdmin> activate({
     required String accountId,
     required AdminAccountIdentity identity,
-    required SignResponseEnvelope response,
   }) async {
     final cidNumber = _requireInstitutionCid(identity);
     final normalizedAccountId = _normalize(accountId);
-
-    // 验证签名者与目标管理员一致
-    final responsePk = _normalize(response.body.signerPublicKeyHex);
-    if (responsePk != normalizedAccountId) {
-      throw Exception('签名账户 ID 与管理员账户 ID 不一致');
-    }
 
     // 验证是链上管理员
     final admins = await _adminService.fetchAdmins(identity);
@@ -207,7 +182,9 @@ class ActivationService {
   // 取消激活
   /// 取消激活。
   Future<void> deactivate(
-      String accountId, AdminAccountIdentity identity) async {
+    String accountId,
+    AdminAccountIdentity identity,
+  ) async {
     final normalizedAccountId = _normalize(accountId);
     final cidNumber = _requireInstitutionCid(identity);
     var all = await loadAll();
@@ -219,7 +196,9 @@ class ActivationService {
 
   // 内部方法
   Uint8List _buildActivatePayload(
-      AdminAccountIdentity identity, String accountId) {
+    AdminAccountIdentity identity,
+    String accountId,
+  ) {
     final signerPublicKey = _hexToBytes(accountId);
     final timestamp = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final random = Random.secure();
@@ -269,9 +248,5 @@ class ActivationService {
       result[i] = int.parse(clean.substring(i * 2, i * 2 + 2), radix: 16);
     }
     return result;
-  }
-
-  static String _bytesToHex(Uint8List bytes) {
-    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 }

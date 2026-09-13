@@ -1,8 +1,8 @@
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:polkadart/polkadart.dart' show Hasher;
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_models.dart';
 
 /// InternalVote 通用查询服务。
@@ -10,14 +10,14 @@ import 'package:citizenapp/citizen/shared/proposal/proposal_models.dart';
 /// 内部投票记录属于投票引擎通用状态，不放进具体业务模块，
 /// 避免 proposal 共享层依赖业务 service。
 class InternalVoteQueryService {
-  InternalVoteQueryService({ChainRpc? chainRpc})
-      : _rpc = chainRpc ?? ChainRpc();
+  const InternalVoteQueryService({required CitizenChain chain})
+      : _chain = chain;
 
-  final ChainRpc _rpc;
+  final CitizenChain _chain;
 
   /// 查询某管理员对某提案的投票记录。null=未投票，true=赞成，false=反对。
   Future<bool?> fetchAdminVote(int proposalId, String accountId) async {
-    final data = await _rpc.fetchStorage(_ticketVoteKey(proposalId, accountId));
+    final data = await _readOne(_ticketVoteKey(proposalId, accountId));
     return _decodeVote(data);
   }
 
@@ -28,7 +28,7 @@ class InternalVoteQueryService {
     String voterRoleCode,
     String accountId,
   ) async {
-    final data = await _rpc.fetchStorage(_ticketVoteKey(
+    final data = await _readOne(_ticketVoteKey(
       proposalId,
       accountId,
       cidNumber: cidNumber,
@@ -45,7 +45,7 @@ class InternalVoteQueryService {
     int proposalId,
     Iterable<String> accountIds,
   ) async {
-    final keyByAccountId = <String, String>{};
+    final keyByAccountId = <String, Uint8List>{};
     for (final accountId in accountIds) {
       final normalizedAccountId = _requireAccountId(accountId);
       keyByAccountId[normalizedAccountId] =
@@ -53,10 +53,10 @@ class InternalVoteQueryService {
     }
     if (keyByAccountId.isEmpty) return const {};
 
-    final values = await _rpc.fetchStorageBatchChunked(keyByAccountId.values);
+    final values = await _readBatch(keyByAccountId.values.toList());
     return {
-      for (final entry in keyByAccountId.entries)
-        entry.key: _decodeVote(values[entry.value]),
+      for (var index = 0; index < keyByAccountId.length; index++)
+        keyByAccountId.keys.elementAt(index): _decodeVote(values[index]),
     };
   }
 
@@ -65,7 +65,7 @@ class InternalVoteQueryService {
     int proposalId,
     Iterable<EligibleVoterTicket> tickets,
   ) async {
-    final storageByTicket = <String, String>{};
+    final storageByTicket = <String, Uint8List>{};
     for (final ticket in tickets) {
       storageByTicket[ticket.ticketKey] = _ticketVoteKey(
         proposalId,
@@ -74,10 +74,10 @@ class InternalVoteQueryService {
         voterRoleCode: ticket.voterRoleCode,
       );
     }
-    final values = await _rpc.fetchStorageBatchChunked(storageByTicket.values);
+    final values = await _readBatch(storageByTicket.values.toList());
     return {
-      for (final entry in storageByTicket.entries)
-        entry.key: _decodeVote(values[entry.value]),
+      for (var index = 0; index < storageByTicket.length; index++)
+        storageByTicket.keys.elementAt(index): _decodeVote(values[index]),
     };
   }
 
@@ -90,21 +90,23 @@ class InternalVoteQueryService {
   Future<Map<int, Map<String, bool?>>> fetchAdminVotesForProposals(
     Map<int, List<String>> accountIdsByProposal,
   ) async {
-    final keyToCoord = <String, ({int pid, String accountId})>{};
+    final keys = <Uint8List>[];
+    final coordinates = <({int pid, String accountId})>[];
     for (final entry in accountIdsByProposal.entries) {
       for (final accountId in entry.value) {
         final normalizedAccountId = _requireAccountId(accountId);
-        keyToCoord[_ticketVoteKey(entry.key, normalizedAccountId)] =
-            (pid: entry.key, accountId: normalizedAccountId);
+        keys.add(_ticketVoteKey(entry.key, normalizedAccountId));
+        coordinates.add((pid: entry.key, accountId: normalizedAccountId));
       }
     }
-    if (keyToCoord.isEmpty) return const {};
-    final values = await _rpc.fetchStorageBatchChunked(keyToCoord.keys);
+    if (keys.isEmpty) return const {};
+    final values = await _readBatch(keys);
     final result = <int, Map<String, bool?>>{};
-    keyToCoord.forEach((key, coord) {
+    for (var index = 0; index < coordinates.length; index++) {
+      final coord = coordinates[index];
       (result[coord.pid] ??= <String, bool?>{})[coord.accountId] =
-          _decodeVote(values[key]);
-    });
+          _decodeVote(values[index]);
+    }
     return result;
   }
 
@@ -112,7 +114,8 @@ class InternalVoteQueryService {
   Future<Map<int, Map<String, bool?>>> fetchTicketVotesForProposals(
     Map<int, List<EligibleVoterTicket>> ticketsByProposal,
   ) async {
-    final keyToCoord = <String, ({int pid, String ticketKey})>{};
+    final keys = <Uint8List>[];
+    final coordinates = <({int pid, String ticketKey})>[];
     for (final entry in ticketsByProposal.entries) {
       for (final ticket in entry.value) {
         final storageKey = _ticketVoteKey(
@@ -121,23 +124,25 @@ class InternalVoteQueryService {
           cidNumber: ticket.cidNumber,
           voterRoleCode: ticket.voterRoleCode,
         );
-        keyToCoord[storageKey] = (
+        keys.add(storageKey);
+        coordinates.add((
           pid: entry.key,
           ticketKey: ticket.ticketKey,
-        );
+        ));
       }
     }
-    if (keyToCoord.isEmpty) return const {};
-    final values = await _rpc.fetchStorageBatchChunked(keyToCoord.keys);
+    if (keys.isEmpty) return const {};
+    final values = await _readBatch(keys);
     final result = <int, Map<String, bool?>>{};
-    keyToCoord.forEach((key, coord) {
+    for (var index = 0; index < coordinates.length; index++) {
+      final coord = coordinates[index];
       (result[coord.pid] ??= <String, bool?>{})[coord.ticketKey] =
-          _decodeVote(values[key]);
-    });
+          _decodeVote(values[index]);
+    }
     return result;
   }
 
-  String _ticketVoteKey(
+  Uint8List _ticketVoteKey(
     int proposalId,
     String accountId, {
     String? cidNumber,
@@ -172,7 +177,25 @@ class InternalVoteQueryService {
     fullKey.setAll(offset, key1);
     offset += key1.length;
     fullKey.setAll(offset, key2);
-    return '0x${_hexEncode(fullKey)}';
+    return fullKey;
+  }
+
+  Future<Uint8List?> _readOne(Uint8List key) async {
+    final finalized = await _chain.getFinalizedHead();
+    return _chain.getStorage(finalized, key);
+  }
+
+  Future<List<Uint8List?>> _readBatch(List<Uint8List> keys) async {
+    if (keys.isEmpty) return const <Uint8List?>[];
+    final finalized = await _chain.getFinalizedHead();
+    final result = <Uint8List?>[];
+    for (var offset = 0; offset < keys.length; offset += 100) {
+      final end = (offset + 100).clamp(0, keys.length);
+      result.addAll(
+        await _chain.getStorageBatch(finalized, keys.sublist(offset, end)),
+      );
+    }
+    return result;
   }
 
   bool? _decodeVote(Uint8List? data) {
@@ -228,7 +251,4 @@ class InternalVoteQueryService {
     return accountId;
   }
 
-  static String _hexEncode(Uint8List bytes) {
-    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-  }
 }

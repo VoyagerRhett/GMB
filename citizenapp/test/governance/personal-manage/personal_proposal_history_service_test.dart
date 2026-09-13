@@ -1,33 +1,47 @@
 // 个人多签提案历史服务单元测试。
 //
 // 仅覆盖 Isar 持久层路径(`recordOrUpdate` 写 / `fetchAll` 读 / 状态字段映射 /
-// snapshot JSON 序列化反序列化)。链上拉取依赖 smoldot,在测试环境下走容错回退,
+// snapshot JSON 序列化反序列化)。链上拉取依赖 CitizenChain，测试走不可用分支，
 // 等价于"链上失败 → 仅返回 Isar"路径。
 
 import 'dart:typed_data';
 import 'dart:convert';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_query_service.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
 import 'package:citizenapp/transaction/personal-manage/personal_proposal_history_service.dart';
 import '../../support/isar_test_env.dart';
+import '../../support/fake_citizen_sdk.dart';
 
-/// 离线 ChainRpc:本单测只验证 Isar 持久层,注入它切断真链依赖——链读一律空、
+/// 离线 CitizenChain：本单测只验证 Isar 持久层，注入它切断真链依赖。
 /// 可达探针为 false(等价「链不可达 → 仅返回本机 Isar」)。避免本机是否连着真链
 /// 造成 flaky;配合服务端「链不可达不删幽灵」的容错回退,写入的历史必被完整读回。
-class _OfflineChainRpc extends ChainRpc {
+class _OfflineChain extends TestCitizenChain {
   @override
-  Future<bool> isFinalizedChainReachable() async => false;
-
-  @override
-  Future<Uint8List?> fetchStorage(String storageKeyHex) async => null;
+  Future<CitizenChainSyncStatus> getSyncStatus() async {
+    final finalized = CitizenBlockRef(
+      hash: '0x${'00' * 32}',
+      number: BigInt.zero,
+      finality: CitizenBlockFinality.finalized,
+    );
+    return CitizenChainSyncStatus(
+      peerCount: BigInt.zero,
+      isSyncing: false,
+      isUsable: false,
+      best: finalized,
+      finalized: finalized,
+    );
+  }
 }
 
-PersonalProposalHistoryService _service() => PersonalProposalHistoryService(
-      chainRpc: _OfflineChainRpc(),
-      proposalService: ProposalQueryService(chainRpc: _OfflineChainRpc()),
-    );
+PersonalProposalHistoryService _service() {
+  final chain = _OfflineChain();
+  return PersonalProposalHistoryService(
+    chain: chain,
+    proposalService: ProposalQueryService(chain: chain),
+  );
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();

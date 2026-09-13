@@ -23,7 +23,8 @@ revision 汇总、单条 execution 或最多 100 条稳定游标页，通过 `TH
 `sdk.chain.getAccountBalances(accountIds)` 复用同一 finalized 批量读取，保留输入顺序和重复项。
 两项查询均要求选择 chain 模块，不依赖钱包或签名。
 通用链读取还公开同一轻节点快照的同步状态、best/finalized 链头、finalized canonical 块解析、
-准确块 Header/Body/Runtime、opaque storage 单项/批量读取、finalized `System.Events` 原始字节和
+准确块 Header/Body/Runtime、opaque storage 单项/批量读取、finalized storage key 有界分页、
+准确块 opaque Runtime API、finalized `System.Events` 原始字节和
 显式 smoldot 状态导入导出。SDK 只验证链锚与资源边界，不内置任何 App 的业务 key、业务 DTO
 或业务 SCALE 解码；每个接入 App 负责自己的业务协议。
 `sdk.transactions.prepareTransaction(sourceAccountId, callData)` 接收业务 App 已编码好的 opaque
@@ -33,6 +34,10 @@ preparationId、callData hash、准确块和链上运行时摘要。调用方可
 nonce 选项、待签字节、raw extrinsic 或原生句柄。本步骤不签名、不广播、不写历史。
 `sdk.wallet.viewAccountPrivateKey(accountId)` 只启动 SDK 原生安全查看，返回完成、取消或错误；
 不把账户秘密交给宿主、Flutter 或可替换显示回调。它属于钱包模块，不要求链或签名模块。
+`sdk.wallet.deriveApplicationKey(accountId, salt, info)` 只在现有热账户金库内执行通用
+HKDF-SHA256 并返回 32 字节结果；SDK 不登记 CID、聊天、联系人或其它宿主用途。冷账户不在
+本机伪造秘密，由独立外部设备提供对应材料。SDK 钱包公开接口固定命名为
+`CitizenSdkWallet`，不得与独立 CitizenWallet 产品重名。
 
 `sdk.qr` 是独立的区块链二维码模块：Rust 唯一实现 `QR_V1` 解析、编码、请求会话、
 过期/取消/单次消费与响应验签；图像识别和生成五端唯一使用 ZXing-C++ 3.1.1。
@@ -53,13 +58,16 @@ SDK 自有审阅、用户确认和设备授权，返回签名响应及二维码�
 SDK 原生后台监控复用 smoldot 现有 finalized 订阅；完整钱包组合启动后自动读取本机
 钱包账户集合、同步历史，并在没有新块时只读核验待确认交易。不会重新签名或广播。
 `historyChanged` 事件只表示历史应刷新，接收方使用已有历史查询；不携带秘密或账户快照。
+`finalizedBlockChanged` 直接投影同一 smoldot finalized 订阅的 verified block，不创建第二订阅；
+接入 App 自行读取和解码自己的业务状态。
 停止会取消旧代际并排空已进入的存储写入和订阅资源。本地钱包输入不要求启动网络。
 
 当前未发布版本已补充通用 opaque RuntimeCall 的未决交易原授权恢复、通用执行历史、
 Android 关闭/认证边界、Apple 宿主数据隔离及 Linux SHM 恢复，不包含 App 业务 API。
 本机测试不等于跨平台硬件或正式发布验收，准确结果与未完成项以任务卡为准。
 
-SDK 钱包安全界面统一选择 12／18／24 词，默认 12；“钱包密码（选填）”默认空，非空只
+SDK 创建钱包安全界面按 CitizenApp 金标提供 12／24 词（12 推荐），导入仍识别
+12／18／24 词；“钱包密码（选填）”默认空，非空只
 确认一次派生风险，不要求重复输入。创建先准备、展示助记词并确认离线备份，再提交持久化。
 SDK 不持久保存助记词，关闭后无法再次显示；非空派生密码须另行记忆，恢复必须保持相同。
 这些输入与本地补全在 SDK 原生界面完成，Dart 只获得公开账户结果。
@@ -113,7 +121,9 @@ Rust 路径已经建立 `native/contracts`、`native/engine`、真实
 QR 公开合同统一为 8 个协议、审阅、签名及结果入口；统一钱包、通用冷热签名与安全链读取加入后
 第 1.5 步加入通用交易准备三项入口，第 1.6 步再加入准备执行、冷签响应消费、execution 取消与
 安全执行结果读取四项入口；第 1.7 步以四个通用历史入口替换八个业务转账/历史入口，当前总计
-第 1.8 步删除一个业务二维码入口、第 1.10.3 步增加一个只读失败阶段 getter 后，当前总计 117 个。五端 Flutter 方法闭集仍为 62 个。
+第 1.8 步删除一个业务二维码入口、第 1.10.3 步增加一个只读失败阶段 getter；本次增加
+storage keys page、Runtime API、应用派生钥及结果 getter 后，当前总计 121 个。
+五端 Flutter 方法闭集为 65 个。
 原待签字节获取和外部签名拼装入口已删除，不保留兼容接口。图像层另以 3 个稳定 C 函数包装 ZXing-C++。
 `citizensdk_create_with_modules` 是官方绑定的模块构造入口；既有构造也进入同一私有装配逻辑，
 不建立第二套状态机。链、钱包管理、签名、交易和历史按选择提供，宿主仅补齐所选功能必需的
@@ -125,7 +135,7 @@ Dart、Swift、Kotlin 或 C/C++ 传入。启用链的实例创建时 Rust 会再
 第 1.9 步的通用性验收位于 `test/consumers/`：零业务 reference、CitizenApp 形状和第三方旅行
 形状三类消费者，以及不依赖任何外部钱包产品实现的通用 `QR_V1` signer，全部只导入根公开库。
 两个业务夹具各自编码完全不同的 storage key、SCALE 业务值和 opaque RuntimeCall；SDK 生产代码、
-117 个 Core ABI 与 62 个 Flutter 方法不随业务变化。该目录只进入测试来源闭集，不进入 Hosted
+121 个 Core ABI 与 65 个 Flutter 方法不随业务变化。该目录只进入测试来源闭集，不进入 Hosted
 运行包。
 
 Engine 固定 `VerifiedChainClient`、`ChainSigner`、`SecretVault`、五类状态仓储、十项能力状态、
@@ -258,7 +268,8 @@ light sync state 摘要；任何不一致都失败关闭，远端启动清单只
   源码注册不代表已交付，跨平台实际验证按后续统一 GitHub CI/Release 推进，不阻塞本步
   的 macOS 本机开发验收。
 - 聊天、广场、OpenMLS、TUYU 账户签名协议、旅行/生活/商家业务均不属于 CitizenSDK。
-- CitizenWallet 冷钱包是独立产品，不属于本 SDK 的能力收编范围。
+- CitizenWallet 是独立冷签产品，本任务不修改它；CitizenSDK 继续支持导入冷账户公钥并通过
+  唯一 `QR_V1` 请求外部设备签名。
 
 ## 安全边界
 
@@ -488,7 +499,7 @@ Linux 环境才完成当前开发步骤。根包源码注册不代表已正式�
 实际编译/运行；第 8.4 步登记默认 Flutter 入口、DLL 候选投影和真实公开消费者，尚未正式分发，
 详见 [Windows 平台合同](docs/WINDOWS_PLATFORM.md)。
 
-Windows Flutter 只使用统一双通道和 62 方法，连接同版已安装 Host/Core/QR 图像层。宿主需一次声明
+Windows Flutter 只使用统一双通道和 65 方法，连接同版已安装 Host/Core/QR 图像层。宿主需一次声明
 `CITIZENSDK_APPLICATION_ID`，原样作为稳定应用数据命名空间，不是业务账户或 Windows
 身份认证；无默认值，不从文件名或展示名推导。公开类型仍只有 `CitizenSdk`，Windows
 使用默认平台和官方自动注册；缺少同版插件立即失败，不注入替代实现。宿主仍需这一项

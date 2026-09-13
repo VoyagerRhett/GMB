@@ -3,10 +3,10 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 
 import 'package:citizenapp/log/app_log.dart';
-import 'package:citizenapp/transaction/history/data/local_tx_store.dart';
+import 'package:citizenapp/transaction/history/local_tx_store.dart';
 
 /// 交易记录展示页共用:订阅某账户在 Isar 里的交易记录变更,后台
-/// [ChainTxMonitor] 一把记录写成 finalized(已确认),列表就自动重刷 ——
+/// SDK history 或 finalized 业务投影更新记录后，列表自动重刷——
 /// 取代"提交后延时 N 秒盲刷"。子类给出重载动作,mixin 负责订阅/去抖/取消。
 ///
 /// 用法:

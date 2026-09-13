@@ -6,8 +6,7 @@ import 'package:citizenapp/8964/profile/services/citizen_profile_cache.dart';
 import 'package:citizenapp/8964/services/square_account_deletion_service.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/8964/services/square_post_store.dart';
-import 'package:citizenapp/chat/tatachat_sdk_adapter.dart';
-import 'package:citizenapp/wallet/core/device_subkey.dart';
+import 'package:citizenapp/security/device_subkey.dart';
 import 'package:tatachat_sdk/tatachat_sdk.dart';
 
 const _owner =
@@ -65,7 +64,7 @@ class _FakeSubkey extends DeviceSubkey {
 }
 
 class _FakeChatRuntime extends ChatSdk {
-  _FakeChatRuntime() : super(host: createCitizenChatRuntimeHost());
+  _FakeChatRuntime() : super(host: _UnusedChatHost());
 
   bool cleared = false;
   @override
@@ -75,6 +74,19 @@ class _FakeChatRuntime extends ChatSdk {
   }) async {
     cleared = true;
   }
+}
+
+class _UnusedChatHost implements ChatRuntimeHost {
+  @override
+  final ChatStorageKeyProvider keyProvider = _UnusedChatStorageKeyProvider();
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _UnusedChatStorageKeyProvider implements ChatStorageKeyProvider {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _FakeLocalPostStore implements SquareLocalPostBulkDeletionStore {

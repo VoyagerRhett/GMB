@@ -1,13 +1,12 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:polkadart/polkadart.dart' show Hasher;
 import 'package:polkadart_keyring/polkadart_keyring.dart' show Keyring;
 import 'package:citizenapp/citizen/institution/institution.dart';
 import 'package:citizenapp/citizen/institution/institution_repository.dart';
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/rpc/smoldot_client.dart';
 
 /// 清算行节点链上声明。
 ///
@@ -74,13 +73,13 @@ class ClearingBankCandidate {
 /// 展示，不参与清算行资格判断。关键操作每次重新读链，不保留长 TTL 权限缓存。
 class ClearingBankDirectory {
   ClearingBankDirectory({
-    ChainRpc? chainRpc,
+    required CitizenChain chain,
     InstitutionRepository? institutionRepository,
-  })  : _chainRpc = chainRpc ?? ChainRpc(),
+  })  : _chain = chain,
         _institutionRepository =
             institutionRepository ?? InstitutionRepository();
 
-  final ChainRpc _chainRpc;
+  final CitizenChain _chain;
   final InstitutionRepository _institutionRepository;
 
   static const int _pageSize = 256;
@@ -132,7 +131,11 @@ class ClearingBankDirectory {
 
   /// 精确读取单个清算行声明。绑定和付款前调用本方法重新校验链状态。
   Future<ClearingBankNodeEndpoint?> fetchEndpoint(String cidNumber) async {
-    final raw = await _chainRpc.fetchStorage(_clearingBankNodesKey(cidNumber));
+    final finalized = await _chain.getFinalizedHead();
+    final raw = await _chain.getStorage(
+      finalized,
+      _clearingBankNodesKey(cidNumber),
+    );
     if (raw == null || raw.isEmpty) return null;
     return _decodeEndpoint(cidNumber, raw);
   }
@@ -140,20 +143,23 @@ class ClearingBankDirectory {
   /// 查询 finalized `UserBank[user]`，返回当前绑定清算行主账户 SS58。
   Future<String?> fetchUserBank(String userAddress) async {
     final account = Uint8List.fromList(Keyring().decodeAddress(userAddress));
-    final raw = await _chainRpc.fetchStorage(_userBankKey(account));
+    final finalized = await _chain.getFinalizedHead();
+    final raw = await _chain.getStorage(finalized, _userBankKey(account));
     if (raw == null || raw.length != 32) return null;
     return Keyring().encodeAddress(raw.toList(), kGmbSs58Prefix);
   }
 
   Future<List<ClearingBankNodeEndpoint>> _fetchAllEndpoints() async {
     final prefix = _storagePrefix('OffchainTransaction', 'ClearingBankNodes');
-    final keys = <String>[];
-    String? startKey;
+    final finalized = await _chain.getFinalizedHead();
+    final keys = <Uint8List>[];
+    Uint8List? startKey;
     while (true) {
-      final page = await SmoldotClientManager.instance.getKeysPagedFinalized(
+      final page = await _chain.getStorageKeysPaged(
+        finalized,
         prefix,
-        count: _pageSize,
         startKey: startKey,
+        limit: _pageSize,
       );
       if (page.isEmpty) break;
       keys.addAll(page);
@@ -161,14 +167,18 @@ class ClearingBankDirectory {
       startKey = page.last;
     }
 
-    final values = await _chainRpc.fetchStorageBatchChunked(
-      keys,
-      chunkSize: _batchSize,
-    );
+    final values = <Uint8List?>[];
+    for (var offset = 0; offset < keys.length; offset += _batchSize) {
+      final end = (offset + _batchSize).clamp(0, keys.length);
+      values.addAll(
+        await _chain.getStorageBatch(finalized, keys.sublist(offset, end)),
+      );
+    }
     final out = <ClearingBankNodeEndpoint>[];
-    for (final key in keys) {
+    for (var index = 0; index < keys.length; index++) {
+      final key = keys[index];
       final cidNumber = _decodeBlake2MapStringKey(key);
-      final raw = values[key];
+      final raw = values[index];
       if (cidNumber == null || raw == null) continue;
       final endpoint = _decodeEndpoint(cidNumber, raw);
       if (endpoint != null) out.add(endpoint);
@@ -206,33 +216,36 @@ class ClearingBankDirectory {
     );
   }
 
-  static String _clearingBankNodesKey(String cidNumber) {
+  static Uint8List _clearingBankNodesKey(String cidNumber) {
     final keyData = _encodeBytes(utf8.encode(cidNumber));
     return _mapKey('OffchainTransaction', 'ClearingBankNodes', keyData);
   }
 
-  static String _userBankKey(Uint8List accountId) {
+  static Uint8List _userBankKey(Uint8List accountId) {
     return _mapKey('OffchainTransaction', 'UserBank', accountId);
   }
 
-  static String _storagePrefix(String pallet, String storage) {
+  static Uint8List _storagePrefix(String pallet, String storage) {
     final bytes = BytesBuilder()
       ..add(Hasher.twoxx128.hashString(pallet))
       ..add(Hasher.twoxx128.hashString(storage));
-    return '0x${_hex(bytes.toBytes())}';
+    return bytes.toBytes();
   }
 
-  static String _mapKey(String pallet, String storage, Uint8List keyData) {
+  static Uint8List _mapKey(
+    String pallet,
+    String storage,
+    Uint8List keyData,
+  ) {
     final bytes = BytesBuilder()
       ..add(Hasher.twoxx128.hashString(pallet))
       ..add(Hasher.twoxx128.hashString(storage))
       ..add(Hasher.blake2b128.hash(keyData))
       ..add(keyData);
-    return '0x${_hex(bytes.toBytes())}';
+    return bytes.toBytes();
   }
 
-  static String? _decodeBlake2MapStringKey(String keyHex) {
-    final bytes = _hexDecode(keyHex);
+  static String? _decodeBlake2MapStringKey(Uint8List bytes) {
     const valueOffset = 32 + 16;
     if (bytes.length <= valueOffset) return null;
     final (value, next) = _readUtf8Vec(bytes, valueOffset, maxLength: 32);
@@ -298,20 +311,4 @@ class ClearingBankDirectory {
         (bytes[offset + 3] << 24);
   }
 
-  static Uint8List _hexDecode(String hex) {
-    final clean = hex.startsWith('0x') ? hex.substring(2) : hex;
-    if (clean.length.isOdd) return Uint8List(0);
-    return Uint8List.fromList(
-      List<int>.generate(
-        clean.length ~/ 2,
-        (index) =>
-            int.parse(clean.substring(index * 2, index * 2 + 2), radix: 16),
-        growable: false,
-      ),
-    );
-  }
-
-  static String _hex(List<int> bytes) {
-    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-  }
 }

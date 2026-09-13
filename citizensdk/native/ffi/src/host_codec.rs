@@ -855,12 +855,14 @@ pub fn encode_transaction_history_page_query(
         TransactionHistoryQueryKind::OldestRetentionTerminal => 4,
         TransactionHistoryQueryKind::OldestReconcilable => 5,
     };
+    let limit = u32::try_from(limit)
+        .map_err(|_| model_integrity("history query limit cannot fit the wire u32"))?;
     Ok(encode_transaction_history_query(
         wire_kind,
         expected_revision,
         None,
         before,
-        u32::try_from(limit).expect("history page limit is at most 100"),
+        limit,
     ))
 }
 

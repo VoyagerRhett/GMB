@@ -710,6 +710,50 @@ jlong native_storage_batch(JNIEnv *env, jobject, jlong raw, jbyteArray hash,
   });
 }
 
+jlong native_storage_keys_paged(JNIEnv *env, jobject, jlong raw, jbyteArray hash,
+                                 jlong number, jint finality, jbyteArray prefix,
+                                 jbyteArray start_key, jint limit) {
+  auto bridge = bridge_from(env, raw);
+  citizensdk_block_ref_t block{};
+  std::vector<uint8_t> prefix_bytes;
+  std::vector<uint8_t> start_bytes;
+  if (bridge == nullptr || !block_ref(env, hash, number, finality, &block) ||
+      !take_bytes(env, prefix, &prefix_bytes) || prefix_bytes.empty() ||
+      prefix_bytes.size() > 4096 || limit <= 0 || limit > 1000 ||
+      (start_key != nullptr && (!take_bytes(env, start_key, &start_bytes) ||
+                                start_bytes.empty() || start_bytes.size() > 4096))) {
+    if (!env->ExceptionCheck()) throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                                         "storage keys page request is invalid");
+    return 0;
+  }
+  return begin_request(env, bridge, [&block, &prefix_bytes, &start_bytes, start_key, limit](auto handle, auto *out) {
+    return citizensdk_get_storage_keys_paged(
+        handle, &block, view(prefix_bytes), start_key == nullptr ? 0 : 1,
+        view(start_bytes), static_cast<uint32_t>(limit), out);
+  });
+}
+
+jlong native_runtime_api(JNIEnv *env, jobject, jlong raw, jbyteArray hash,
+                         jlong number, jint finality, jbyteArray method,
+                         jbyteArray arguments) {
+  auto bridge = bridge_from(env, raw);
+  citizensdk_block_ref_t block{};
+  std::vector<uint8_t> method_bytes;
+  std::vector<uint8_t> argument_bytes;
+  if (bridge == nullptr || !block_ref(env, hash, number, finality, &block) ||
+      !take_bytes(env, method, &method_bytes) || method_bytes.empty() ||
+      method_bytes.size() > 128 || !take_bytes(env, arguments, &argument_bytes) ||
+      argument_bytes.size() > 1024U * 1024U) {
+    if (!env->ExceptionCheck()) throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                                         "runtime API request is invalid");
+    return 0;
+  }
+  return begin_request(env, bridge, [&block, &method_bytes, &argument_bytes](auto handle, auto *out) {
+    return citizensdk_call_runtime_api(
+        handle, &block, view(method_bytes), view(argument_bytes), out);
+  });
+}
+
 jlong native_export_state(JNIEnv *env, jobject, jlong raw) {
   auto bridge = bridge_from(env, raw);
   return bridge == nullptr ? 0 : begin_request(
@@ -971,6 +1015,28 @@ jlong native_sign(JNIEnv *env, jobject, jlong raw, jbyteArray account_bytes,
       !take_bytes(env, message_bytes, &message)) return 0;
   return begin_request(env, bridge, [&value, &message](auto handle, auto *out) {
     return citizensdk_sign_wallet_payload(handle, &value, view(message), out);
+  });
+}
+
+jlong native_derive_application_key(JNIEnv *env, jobject, jlong raw,
+                                    jbyteArray account_bytes,
+                                    jbyteArray salt_bytes,
+                                    jbyteArray info_bytes) {
+  auto bridge = bridge_from(env, raw);
+  citizensdk_account_id_t account_id{};
+  SensitiveBytes salt;
+  SensitiveBytes info;
+  if (bridge == nullptr || !account(env, account_bytes, &account_id) ||
+      !take_wallet_secret(env, salt_bytes, salt.out()) || salt.value().size() != 32 ||
+      !take_wallet_secret(env, info_bytes, info.out()) || info.value().empty() ||
+      info.value().size() > 256) {
+    if (!env->ExceptionCheck()) throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                                         "application key request is invalid");
+    return 0;
+  }
+  return begin_request(env, bridge, [&account_id, &salt, &info](auto handle, auto *out) {
+    return citizensdk_derive_application_key(
+        handle, &account_id, view(salt.value()), view(info.value()), out);
   });
 }
 
@@ -1599,6 +1665,8 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char *>("nativeGetRuntimeContext"), const_cast<char *>("(J[BJI)J"), reinterpret_cast<void *>(native_runtime_context)},
     {const_cast<char *>("nativeGetStorage"), const_cast<char *>("(J[BJI[B)J"), reinterpret_cast<void *>(native_storage)},
     {const_cast<char *>("nativeGetStorageBatch"), const_cast<char *>("(J[BJI[[B)J"), reinterpret_cast<void *>(native_storage_batch)},
+    {const_cast<char *>("nativeGetStorageKeysPaged"), const_cast<char *>("(J[BJI[B[BI)J"), reinterpret_cast<void *>(native_storage_keys_paged)},
+    {const_cast<char *>("nativeCallRuntimeApi"), const_cast<char *>("(J[BJI[B[B)J"), reinterpret_cast<void *>(native_runtime_api)},
     {const_cast<char *>("nativeGetSystemEvents"), const_cast<char *>("(J[BJI)J"), reinterpret_cast<void *>(native_system_events)},
     {const_cast<char *>("nativeExportState"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_export_state)},
     {const_cast<char *>("nativeImportState"), const_cast<char *>("(JI[BJI[B)J"), reinterpret_cast<void *>(native_import_state)},
@@ -1625,6 +1693,7 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char *>("nativeDeleteWallet"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_delete_wallet)},
     {const_cast<char *>("nativeReconcileWalletCleanup"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_reconcile)},
     {const_cast<char *>("nativeSignWalletPayload"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_sign)},
+    {const_cast<char *>("nativeDeriveApplicationKey"), const_cast<char *>("(J[B[B[B)J"), reinterpret_cast<void *>(native_derive_application_key)},
     {const_cast<char *>("nativeBeginSigning"), const_cast<char *>("(J[B[BI[BIIJ)J"), reinterpret_cast<void *>(native_begin_signing)},
     {const_cast<char *>("nativeConsumeExternalSignature"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_consume_external_signature)},
     {const_cast<char *>("nativeCancelSigningSession"), const_cast<char *>("(J[B)Z"), reinterpret_cast<void *>(native_cancel_signing_session)},
@@ -1944,6 +2013,13 @@ bool encode_result(citizensdk_result_handle_t result, uint64_t prepared_token,
       valid = citizensdk_result_get_signature(result, signature) == kOk;
       if (valid) payload.fixed(signature, sizeof(signature));
       std::memset(signature, 0, sizeof(signature));
+      break;
+    }
+    case CITIZENSDK_RESULT_APPLICATION_KEY: {
+      uint8_t key[32]{};
+      valid = citizensdk_result_get_application_key(result, key) == kOk;
+      if (valid) payload.fixed(key, sizeof(key));
+      std::memset(key, 0, sizeof(key));
       break;
     }
     case CITIZENSDK_RESULT_PREPARED_WALLET: {

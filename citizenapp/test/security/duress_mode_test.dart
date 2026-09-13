@@ -27,11 +27,19 @@ void main() {
     expect(await AppLockService.setDuressModePin('654321'), isTrue);
     expect(await AppLockService.isDuressModeEnabled(), isTrue);
     expect(
-      await AppLockService.verifyPin('123456'),
+      await AppLockService.verifyPin(
+        '123456',
+        wallet: null,
+        accountSecurity: null,
+      ),
       AppPinVerificationResult.verified,
     );
     expect(
-      await AppLockService.verifyPin('654321'),
+      await AppLockService.verifyPin(
+        '654321',
+        wallet: null,
+        accountSecurity: null,
+      ),
       AppPinVerificationResult.duressMode,
     );
     expect(await AppLockService.getFailCount(), 0);

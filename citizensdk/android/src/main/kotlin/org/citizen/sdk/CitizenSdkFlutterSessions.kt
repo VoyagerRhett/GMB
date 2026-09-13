@@ -506,6 +506,18 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
             is CitizenSdkFlutterCodec.Request.StorageBatch -> complete(
                 session, request, result, sdk.getStorageBatch(request.block, request.keys),
             ) { listOf(it) }
+            is CitizenSdkFlutterCodec.Request.StorageKeysPage -> complete(
+                session,
+                request,
+                result,
+                sdk.getStorageKeysPaged(request.block, request.prefix, request.startKey, request.limit),
+            ) { listOf(it) }
+            is CitizenSdkFlutterCodec.Request.RuntimeApi -> complete(
+                session,
+                request,
+                result,
+                sdk.callRuntimeApi(request.block, request.method, request.arguments),
+            ) { listOf(it) }
             is CitizenSdkFlutterCodec.Request.ImportState -> complete(
                 session, request, result, sdk.importState(request.state),
             ) { emptyList() }
@@ -538,6 +550,12 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
                 result,
                 sdk.signing.sign(request.accountId, request.payload),
             ) { listOf(CitizenSdkFlutterCodec.signature(it)) }
+            is CitizenSdkFlutterCodec.Request.DeriveApplicationKey -> complete(
+                session,
+                request,
+                result,
+                sdk.deriveApplicationKey(request.accountId, request.salt, request.info),
+            ) { listOf(it) }
             is CitizenSdkFlutterCodec.Request.BeginSigning -> complete(
                 session, request, result, sdk.signing.begin(request.intent),
             ) { listOf(CitizenSdkFlutterCodec.signingOutcome(it)) }
@@ -704,6 +722,11 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
     private fun onNativeEvent(session: Session, event: CitizenSdkEvents.Event) {
         when (event) {
             is CitizenSdkEvents.Event.HistoryChanged -> emit(session, "historyChanged", emptyList())
+            is CitizenSdkEvents.Event.FinalizedBlockChanged -> emit(
+                session,
+                "finalizedBlockChanged",
+                listOf(CitizenSdkFlutterCodec.block(event.finalized)),
+            )
             is CitizenSdkEvents.Event.LifecycleChanged -> emit(
                 session,
                 "lifecycleChanged",

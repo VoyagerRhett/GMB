@@ -82,14 +82,16 @@ final class CitizenSDKWalletInputTests: XCTestCase {
         let sheet = try XCTUnwrap(parent.attachedSheet)
         func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
         let controls = descendants(try XCTUnwrap(sheet.contentView))
-        let selector = try XCTUnwrap(controls.compactMap { $0 as? NSPopUpButton }.first { $0.itemTitles == ["12 词", "18 词", "24 词"] })
-        for index in 0..<3 { selector.selectItem(at: index); XCTAssertEqual(selector.indexOfSelectedItem, index) }
+        let selector = try XCTUnwrap(controls.compactMap { $0 as? NSPopUpButton }.first {
+            $0.itemTitles == ["12 个助记词 · 推荐", "24 个助记词"]
+        })
+        for index in 0..<2 { selector.selectItem(at: index); XCTAssertEqual(selector.indexOfSelectedItem, index) }
         let passwords = controls.compactMap { $0 as? NSSecureTextField }
         XCTAssertEqual(passwords.count, 1)
         let password = try XCTUnwrap(passwords.first)
         XCTAssertEqual(password.placeholderString, "钱包密码（选填）")
         password.stringValue = "abcdef" // 公开合成输入，只验证风险取消，不调用钱包创建。
-        let generate = try XCTUnwrap(controls.compactMap { $0 as? NSButton }.first { $0.title == "生成钱包" })
+        let generate = try XCTUnwrap(controls.compactMap { $0 as? NSButton }.first { $0.title == "创建钱包" })
         generate.performClick(nil)
         let risk = try XCTUnwrap(sheet.attachedSheet)
         let riskCancel = try XCTUnwrap(descendants(try XCTUnwrap(risk.contentView)).compactMap { $0 as? NSButton }.first { $0.title == "取消" })

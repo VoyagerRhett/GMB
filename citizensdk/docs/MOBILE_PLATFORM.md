@@ -32,16 +32,16 @@ MethodChannel  citizen/sdk/core/v1
 EventChannel   citizen/sdk/events/v1
 ```
 
-Linux adapter 源码也只使用这两个 channel 和相同 62 方法 tuple；无会话验签是五端共享方法，
+Linux adapter 源码也只使用这两个 channel 和相同 65 方法 tuple；无会话验签是五端共享方法，
 不增加 Map 旁路或 Linux 专用 Dart API。第 7.4 步公开入口使用同版已安装 Host/Core；跨平台实测仍
 由后续统一 GitHub CI 增量缓存、Release 全量构建承担，保持同一产品版本与 ABI。
 
-Windows adapter 源码也复用这两个 channel 和全部 62 方法；五份绑定各自的权威常量/方法表
+Windows adapter 源码也复用这两个 channel 和全部 65 方法；五份绑定各自的权威常量/方法表
 独立对拍同一金标。Windows 不带入 GLib 实现，也不增加移动端参数或业务功能；其本地身份、
 路径和 HWND 只在原生环境层取得。第 8.4 步注册官方 Windows 插件，不增加新的协议或
 产品业务；注册源码不代表已在 Hosted 发布。
 
-协议共 62 个方法。第 1.6 步新增准备执行、QR_V1 响应消费和 execution 取消三个方法；第 1.5 步新增
+协议共 65 个方法。新增 storage keys 分页、Runtime API 与应用派生钥三个通用方法；第 1.6 步新增准备执行、QR_V1 响应消费和 execution 取消三个方法；第 1.5 步新增
 通用交易准备和显式取消两个方法；第 1.4 步新增 12 个通用安全链读取方法；此前新增的 5 个通用签名/默认账户
 授权方法、6 个统一钱包方法与既有 10 个 QR
 方法在五端名称、字段位置、上限和错误映射完全相同。平台层只投影 Core，不解释 opaque payload/action。
@@ -54,7 +54,7 @@ Int32/Int64/浮点 typed data 即使底层长度合适也会失败关闭。
 
 错误固定为 `[1, sessionId?, requestSequence?, errorCode, failureStage, method,
 errorMessage?]` 七项 tuple。同步拒绝不伪造 requestSequence；异步完成精确回显原序号。
-Android/Apple 只投影 C 真源的八阶段，未知阶段或非 62 项 method 失败关闭。
+Android/Apple 只投影 C 真源的八阶段，未知阶段或非 65 项 method 失败关闭。
 
 通用链读取方法为 `getSyncStatus`、`getBestHead`、`getFinalizedBlockAt`、
 `resolveFinalizedBlock`、`getBlockHeader`、`getBlockBody`、`getRuntimeContext`、`getStorage`、

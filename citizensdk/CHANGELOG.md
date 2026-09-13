@@ -2,6 +2,14 @@
 
 ## 1.0.0 - Unreleased
 
+- 公民软件包接入新任务第 1 步补齐通用底层合同：直接复用已收编 smoldot 的 finalized
+  storage keys 分页、准确块 Runtime API 与唯一 finalized 订阅；热账户新增通用
+  HKDF-SHA256 应用派生钥。Dart 钱包端口固定为 `CitizenSdkWallet`，不与独立
+  CitizenWallet 产品重名。五端安全钱包窗口按 CitizenApp 创建、导入、追加账户和私钥查看
+  金标统一，不向宿主返回助记词或私钥。当前闭集为 121 项 Core ABI、65 项 Flutter 方法；
+  没有迁移、兼容、任意 RPC、业务模型或 `native/smoldot/pow/**` 改动。测试源码已完善，依照
+  总任务门禁尚未运行编译、测试、Flutter、CI 或 Release。
+
 - CitizenApp 接入任务第 1.10.4 步完成候选：通用 execution history 从 whole-history BLOB
   替换为 index/exact/page 查询与原子 delete/upsert/meta mutation；Android、Apple、Linux、Windows
   统一 schema v2、稳定索引和有界 incremental vacuum。旧开发库不迁移、不兼容。finalized

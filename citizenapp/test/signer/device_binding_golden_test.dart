@@ -5,9 +5,8 @@
 // cloudflare/test/device_subkey.test.ts 的 DEVICE_BIND_GOLDEN_HEX 完全相同。
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
-import 'package:citizenapp/signer/qr_signer.dart';
-import 'package:citizenapp/wallet/core/device_subkey.dart';
+import 'package:citizenapp/security/device_subkey.dart';
+import 'package:citizenapp/signer/signing.dart';
 
 const _accountId =
     '0x1111111111111111111111111111111111111111111111111111111111111111';
@@ -31,7 +30,7 @@ void main() {
     expect(bytesToHex(message), _goldenHex);
   });
 
-  test('QR_V1 action 13 与热签设备绑定逐字节共用 0x1C', () {
+  test('CitizenSDK Blake2Domain 输入与设备绑定逐字节共用 0x1C', () {
     final payload = encodeDeviceBindingPayload(
       cidNumber: _cidNumber,
       bindingRevision: _bindingRevision,
@@ -39,9 +38,9 @@ void main() {
       p256PublicKeyHex: _publicKey,
       issuedAtMillis: _issuedAt,
     );
-    final coldSigningMessage = QrSigner.signingBytesForHex(
-      payloadHex: '0x${bytesToHex(payload)}',
-      action: QrActions.squareDeviceBind,
+    final coldSigningMessage = signingMessage(
+      opTag: kOpSignSquareDeviceBind,
+      scalePayload: payload,
     );
     expect(bytesToHex(coldSigningMessage), _goldenHex);
   });

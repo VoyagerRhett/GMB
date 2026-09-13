@@ -1,10 +1,11 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:polkadart_keyring/polkadart_keyring.dart' show Keyring;
 
 import 'package:citizenapp/ui/app_theme.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_models.dart';
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/ui/app_layout.dart';
@@ -328,12 +329,12 @@ class ProposalVoteActions extends StatelessWidget {
     required this.onVote,
   });
 
-  final List<WalletProfile> votableWallets;
-  final WalletProfile? selectedWallet;
+  final List<CitizenWalletStateAccount> votableWallets;
+  final CitizenWalletStateAccount? selectedWallet;
   final bool submitting;
   final bool canVote;
   final bool allVoted;
-  final ValueChanged<WalletProfile?> onWalletChanged;
+  final ValueChanged<CitizenWalletStateAccount?> onWalletChanged;
 
   /// 投票回调：true=赞成，false=反对。
   final ValueChanged<bool> onVote;

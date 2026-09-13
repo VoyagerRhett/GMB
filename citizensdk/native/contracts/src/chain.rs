@@ -16,6 +16,11 @@ pub const MAX_FINALIZED_BLOCKS_PER_BATCH: u64 = 120;
 pub const MAX_STORAGE_KEY_BYTES: usize = 4 * 1024;
 pub const MAX_STORAGE_BATCH_KEYS: usize = 1024;
 pub const MAX_STORAGE_BATCH_KEY_BYTES: usize = 1024 * 1024;
+pub const MAX_STORAGE_KEYS_PAGE_LIMIT: u32 = 1000;
+pub const MAX_STORAGE_KEYS_PAGE_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_RUNTIME_API_METHOD_BYTES: usize = 128;
+pub const MAX_RUNTIME_API_ARGUMENT_BYTES: usize = 1024 * 1024;
+pub const MAX_RUNTIME_API_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_HEADER_DIGEST_BYTES: usize = 1024 * 1024;
 pub const MAX_RUNTIME_METADATA_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_BLOCK_BODY_EXTRINSICS: usize = 16 * 1024;
@@ -592,6 +597,42 @@ pub trait VerifiedChainClient: Send + Sync {
             }
         }
         Box::pin(Unsupported(true))
+    }
+
+    /// 读取一个准确 finalized 块上的有界 storage key 页面。
+    ///
+    /// prefix/start key 都是 opaque 字节；provider 不解释业务 storage，也不得把本方法
+    /// 扩展为任意 RPC。默认实现明确拒绝，不以扫描或逐 key 查询伪装分页能力。
+    fn get_storage_keys_paged(
+        &self,
+        _block: FinalizedBlockRef,
+        _prefix: Vec<u8>,
+        _start_key: Option<Vec<u8>>,
+        _limit: u32,
+    ) -> ContractFuture<'_, Vec<Vec<u8>>> {
+        Box::pin(async {
+            Err(ContractError::new(
+                ContractErrorCode::Unsupported,
+                "provider does not expose storage keys paging",
+            ))
+        })
+    }
+
+    /// 在一个 provider-verified 准确块上执行有界 Runtime API。
+    ///
+    /// method 和 arguments 对 SDK 保持 opaque；业务方法、参数与返回解码属于调用 App。
+    fn call_runtime_api(
+        &self,
+        _block: VerifiedBlockRef,
+        _method: String,
+        _arguments: Vec<u8>,
+    ) -> ContractFuture<'_, Vec<u8>> {
+        Box::pin(async {
+            Err(ContractError::new(
+                ContractErrorCode::Unsupported,
+                "provider does not expose runtime API calls",
+            ))
+        })
     }
 
     /// 解析一个高度在当前 verified finalized 上界内的 canonical finalized 块。

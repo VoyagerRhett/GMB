@@ -1,7 +1,10 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:async' show unawaited;
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:flutter/services.dart';
 import 'package:isar_community/isar.dart';
 import 'package:polkadart_keyring/polkadart_keyring.dart' show Keyring;
@@ -11,10 +14,9 @@ import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_entry
 import 'package:citizenapp/citizen/shared/institution_info.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/models/admin_account.dart';
 import 'package:citizenapp/votingengine/internal-vote/internal_vote_service.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
+import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/my/util/amount_format.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 
 import 'personal_admin_list_page.dart';
 import 'personal_account_close_page.dart';
@@ -22,6 +24,7 @@ import 'personal_pending_create_lookup.dart';
 import 'personal_proposal_list_section.dart';
 import 'personal_manage_models.dart';
 import 'personal_manage_service.dart';
+
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 个人多签账户详情页。
@@ -46,8 +49,9 @@ class PersonalManageAccountInfoPage extends StatefulWidget {
 
 class _PersonalManageAccountInfoPageState
     extends State<PersonalManageAccountInfoPage> {
-  final PersonalManageService _personalManageService = PersonalManageService();
-  final ChainRpc _rpc = ChainRpc();
+  late final CitizenChain _chain;
+  late final PersonalManageService _personalManageService;
+  bool _dependenciesReady = false;
 
   AccountInfo? _accountInfo;
   List<AdminPerson> _admins = const [];
@@ -67,6 +71,19 @@ class _PersonalManageAccountInfoPageState
         widget.initialLocalStatus ?? PersonalMultisigLocalState.statusPending;
     _admins = _adminsFromAccounts(widget.initialAdminAccountIds);
     _isClosed = _localStatus == PersonalMultisigLocalState.statusClosed;
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    final sdk = context.read<CitizenSdk>();
+    _chain = sdk.chain;
+    _personalManageService = PersonalManageService(
+      chain: _chain,
+      transactions: sdk.transactions,
+    );
+    _dependenciesReady = true;
     _load();
   }
 
@@ -103,7 +120,8 @@ class _PersonalManageAccountInfoPageState
         );
       });
 
-      final status = local.status?.status ??
+      final status =
+          local.status?.status ??
           local.detail?.status ??
           widget.initialLocalStatus ??
           PersonalMultisigLocalState.statusPending;
@@ -127,8 +145,8 @@ class _PersonalManageAccountInfoPageState
       final balance = isClosed
           ? null
           : statusEnum == MultisigStatus.active
-              ? local.detail?.balanceYuan
-              : local.pendingBalance ?? local.detail?.balanceYuan;
+          ? local.detail?.balanceYuan
+          : local.pendingBalance ?? local.detail?.balanceYuan;
 
       if (!mounted) return;
       setState(() {
@@ -137,7 +155,8 @@ class _PersonalManageAccountInfoPageState
         _admins = normalizedAdmins;
         _isClosed = isClosed;
         _balanceYuan = balance;
-        _lastDetailRefreshAtMillis = local.detail?.lastChainRefreshAtMillis ??
+        _lastDetailRefreshAtMillis =
+            local.detail?.lastChainRefreshAtMillis ??
             local.status?.lastSyncAtMillis;
         _lastBalanceRefreshAtMillis = local.detail?.lastBalanceRefreshAtMillis;
       });
@@ -171,8 +190,10 @@ class _PersonalManageAccountInfoPageState
   Future<void> _refreshBalanceIfNeeded({bool force = false}) async {
     if (!force && !_shouldRefreshBalance()) return;
     try {
-      final balance = await _rpc
-          .fetchFinalizedBalance(widget.institution.personalAccountId);
+      final snapshot = await _chain.getAccountBalance(
+        widget.institution.personalAccountId,
+      );
+      final balance = snapshot.freeFen.toDouble() / 100;
       final now = DateTime.now().millisecondsSinceEpoch;
       await WalletIsar.instance.writeTxn((isar) async {
         final previous = await PersonalMultisigLocalState.readDetail(
@@ -187,7 +208,8 @@ class _PersonalManageAccountInfoPageState
             admins: previous?.admins ?? _admins,
             threshold: previous?.threshold ?? _accountInfo?.threshold,
             balanceYuan: balance,
-            lastChainRefreshAtMillis: previous?.lastChainRefreshAtMillis ??
+            lastChainRefreshAtMillis:
+                previous?.lastChainRefreshAtMillis ??
                 _lastDetailRefreshAtMillis,
             lastBalanceRefreshAtMillis: now,
             updatedAtMillis: now,
@@ -207,9 +229,9 @@ class _PersonalManageAccountInfoPageState
   Future<void> _refreshChainDetail({bool force = false}) async {
     if (!force && !_shouldRefreshDetail()) return;
     try {
-      final infos = await _personalManageService.fetchPersonalAccountsBatch(
-        [widget.institution.personalAccountId],
-      );
+      final infos = await _personalManageService.fetchPersonalAccountsBatch([
+        widget.institution.personalAccountId,
+      ]);
       final info = infos[widget.institution.personalAccountId];
       final status = info == null
           ? PersonalMultisigLocalState.statusClosed
@@ -244,8 +266,8 @@ class _PersonalManageAccountInfoPageState
               lastChainRefreshAtMillis: now,
               lastBalanceRefreshAtMillis:
                   info.status == MultisigStatus.active && balance != null
-                      ? now
-                      : previous?.lastBalanceRefreshAtMillis,
+                  ? now
+                  : previous?.lastBalanceRefreshAtMillis,
               updatedAtMillis: now,
             ),
           );
@@ -274,8 +296,10 @@ class _PersonalManageAccountInfoPageState
   Future<double?> _resolveBalance(MultisigStatus? status) async {
     if (status == MultisigStatus.active) {
       try {
-        return await _rpc
-            .fetchFinalizedBalance(widget.institution.personalAccountId);
+        final snapshot = await _chain.getAccountBalance(
+          widget.institution.personalAccountId,
+        );
+        return snapshot.freeFen.toDouble() / 100;
       } catch (_) {
         return null;
       }
@@ -322,9 +346,8 @@ class _PersonalManageAccountInfoPageState
     if (admins == null) return const [];
     return admins
         .map(
-          (admin) => admin.copyWith(
-            account_id: _requireAccountId(admin.account_id),
-          ),
+          (admin) =>
+              admin.copyWith(account_id: _requireAccountId(admin.account_id)),
         )
         .where((admin) => admin.account_id.isNotEmpty)
         .toList(growable: false);
@@ -356,9 +379,7 @@ class _PersonalManageAccountInfoPageState
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('关闭个人多签'),
-        content: const Text(
-          '关闭个人多签将发起链上关闭提案，需要其他管理员投票通过后才会真正关闭。\n\n确定要发起关闭吗？',
-        ),
+        content: const Text('关闭个人多签将发起链上关闭提案，需要其他管理员投票通过后才会真正关闭。\n\n确定要发起关闭吗？'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
@@ -385,9 +406,8 @@ class _PersonalManageAccountInfoPageState
     }
     if (!mounted || wallets.isEmpty) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('请先导入此账户的管理员钱包')),
-        );
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('请先导入此账户的管理员钱包')));
       }
       return;
     }
@@ -416,9 +436,9 @@ class _PersonalManageAccountInfoPageState
         _localStatus == PersonalMultisigLocalState.statusPending;
   }
 
-  Future<List<WalletProfile>> _getAdminWallets() async {
-    final wm = WalletManager();
-    final wallets = await wm.getWallets();
+  Future<List<CitizenWalletStateAccount>> _getAdminWallets() async {
+    final wallets =
+        (await context.read<CitizenSdk>().wallet.getState()).accounts;
     final adminSet = _admins.map((admin) => admin.account_id).toSet();
     return wallets.where((w) {
       return adminSet.contains(w.accountId);
@@ -495,29 +515,28 @@ class _PersonalManageAccountInfoPageState
     }
     if (!mounted) return;
     if (adminWallets.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请先导入此多签的管理员钱包')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('请先导入此多签的管理员钱包')));
       return;
     }
     final hot = adminWallets.firstWhere(
-      (w) => w.isHotWallet,
+      (w) => w.signMode == CitizenWalletSignMode.hot,
       orElse: () => adminWallets.first,
     );
-    if (!hot.isHotWallet) {
+    if (hot.signMode != CitizenWalletSignMode.hot) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('当前管理员钱包均为冷钱包,请到"管理员列表"扫码投反对票')),
       );
       return;
     }
 
-    final pid = await PersonalPendingCreateLookup()
-        .findActiveCreate(widget.institution.personalAccountId);
+    final pid = await PersonalPendingCreateLookup().findActiveCreate(
+      widget.institution.personalAccountId,
+    );
     if (!mounted) return;
     if (pid == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('未找到活跃的创建提案,可能已被处理')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('未找到活跃的创建提案,可能已被处理')));
       return;
     }
 
@@ -546,14 +565,22 @@ class _PersonalManageAccountInfoPageState
     if (ok != true || !mounted) return;
 
     try {
-      final wm = WalletManager();
       final publicKeyBytes = _hexDecode(hot.accountId);
-      await InternalVoteService().submit(
+      final sdk = context.read<CitizenSdk>();
+      await InternalVoteService(
+        chain: sdk.chain,
+        transactions: sdk.transactions,
+      ).submit(
         proposalId: pid,
         approve: false,
-        fromSs58Address: hot.ss58Address,
         signerPublicKey: Uint8List.fromList(publicKeyBytes),
-        sign: (payload) => wm.signWithWallet(hot.walletIndex, payload),
+        externalSigning: (pending) => showCitizenSdkQrResponse(
+          context,
+          request: pending.qrRequest,
+          expiresAt: BigInt.from(
+            pending.expiresAt.millisecondsSinceEpoch ~/ 1000,
+          ),
+        ),
       );
       // 链上 reject 触发 cleanup 是异步的(下个出块周期),但 admins-change
       // 一旦清空,反向索引就扫不到 → 兜底机制完整。本地立即清,避免用户再看到。
@@ -562,9 +589,8 @@ class _PersonalManageAccountInfoPageState
       Navigator.pop(context);
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('撤销失败:$e')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('撤销失败:$e')));
     }
   }
 
@@ -578,8 +604,9 @@ class _PersonalManageAccountInfoPageState
         title: Text(
           '个人多签账户',
           style: TextStyle(
-              fontSize: AppLayout.scaled(context, 17),
-              fontWeight: FontWeight.w700),
+            fontSize: AppLayout.scaled(context, 17),
+            fontWeight: FontWeight.w700,
+          ),
         ),
         centerTitle: true,
         backgroundColor: Colors.white,
@@ -607,9 +634,11 @@ class _PersonalManageAccountInfoPageState
                       value: 'delete',
                       child: Row(
                         children: [
-                          Icon(Icons.delete_outline,
-                              size: AppLayout.scaled(context, 20),
-                              color: AppTheme.danger),
+                          Icon(
+                            Icons.delete_outline,
+                            size: AppLayout.scaled(context, 20),
+                            color: AppTheme.danger,
+                          ),
                           SizedBox(width: AppLayout.scaled(context, 8)),
                           const Text(
                             '删除',
@@ -631,12 +660,16 @@ class _PersonalManageAccountInfoPageState
                       value: 'revoke_create',
                       child: Row(
                         children: [
-                          Icon(Icons.cancel_outlined,
-                              size: AppLayout.scaled(context, 20),
-                              color: AppTheme.danger),
+                          Icon(
+                            Icons.cancel_outlined,
+                            size: AppLayout.scaled(context, 20),
+                            color: AppTheme.danger,
+                          ),
                           SizedBox(width: AppLayout.scaled(context, 8)),
-                          const Text('撤销创建',
-                              style: TextStyle(color: AppTheme.danger)),
+                          const Text(
+                            '撤销创建',
+                            style: TextStyle(color: AppTheme.danger),
+                          ),
                         ],
                       ),
                     ),
@@ -655,13 +688,13 @@ class _PersonalManageAccountInfoPageState
     final statusLabel = _isClosed
         ? '已注销'
         : _localStatus == PersonalMultisigLocalState.statusActive
-            ? '已激活'
-            : '待激活';
+        ? '已激活'
+        : '待激活';
     final statusColor = _isClosed
         ? AppTheme.textTertiary
         : _localStatus == PersonalMultisigLocalState.statusActive
-            ? AppTheme.success
-            : AppTheme.warning;
+        ? AppTheme.success
+        : AppTheme.warning;
 
     return RefreshIndicator(
       onRefresh: () async {
@@ -740,10 +773,11 @@ class _PersonalManageAccountInfoPageState
 
           // 个人多签提案列表(req 5):活跃 + 历史(本机 Isar 永久保留终态记录)
           SizedBox(height: AppLayout.scaledValue(16)),
-          FutureBuilder<List<WalletProfile>>(
+          FutureBuilder<List<CitizenWalletStateAccount>>(
             future: _getAdminWallets(),
             builder: (context, snapshot) {
-              final wallets = snapshot.data ?? const <WalletProfile>[];
+              final wallets =
+                  snapshot.data ?? const <CitizenWalletStateAccount>[];
               return PersonalProposalListSection(
                 institution: widget.institution,
                 adminWallets: wallets,
@@ -762,8 +796,8 @@ class _PersonalManageAccountInfoPageState
     final subtitle = _isClosed
         ? '已注销'
         : threshold == null
-            ? '$adminsLen 人'
-            : '$adminsLen 人 · 阈值 $threshold/$adminsLen';
+        ? '$adminsLen 人'
+        : '$adminsLen 人 · 阈值 $threshold/$adminsLen';
 
     // 卡片高度对齐 institution_detail_page._buildAdminEntry,
     // 用 InkWell + Padding(14,12) + Row(36×36 icon)而非 ListTile 减少视觉高度。
@@ -779,8 +813,9 @@ class _PersonalManageAccountInfoPageState
         borderRadius: BorderRadius.circular(AppLayout.scaledValue(12)),
         child: Padding(
           padding: EdgeInsets.symmetric(
-              horizontal: AppLayout.scaledValue(14),
-              vertical: AppLayout.scaledValue(12)),
+            horizontal: AppLayout.scaledValue(14),
+            vertical: AppLayout.scaledValue(12),
+          ),
           child: Row(
             children: [
               Container(
@@ -788,12 +823,15 @@ class _PersonalManageAccountInfoPageState
                 height: AppLayout.scaledValue(36),
                 decoration: BoxDecoration(
                   color: AppTheme.primaryDark.withValues(alpha: 0.08),
-                  borderRadius:
-                      BorderRadius.circular(AppLayout.scaledValue(10)),
+                  borderRadius: BorderRadius.circular(
+                    AppLayout.scaledValue(10),
+                  ),
                 ),
-                child: Icon(Icons.group_outlined,
-                    size: AppLayout.scaledValue(18),
-                    color: AppTheme.primaryDark),
+                child: Icon(
+                  Icons.group_outlined,
+                  size: AppLayout.scaledValue(18),
+                  color: AppTheme.primaryDark,
+                ),
               ),
               SizedBox(width: AppLayout.scaledValue(12)),
               Expanded(
@@ -812,15 +850,18 @@ class _PersonalManageAccountInfoPageState
                     Text(
                       subtitle,
                       style: TextStyle(
-                          fontSize: AppLayout.scaledValue(12),
-                          color: AppTheme.textTertiary),
+                        fontSize: AppLayout.scaledValue(12),
+                        color: AppTheme.textTertiary,
+                      ),
                     ),
                   ],
                 ),
               ),
-              Icon(Icons.chevron_right,
-                  size: AppLayout.scaledValue(20),
-                  color: AppTheme.textTertiary),
+              Icon(
+                Icons.chevron_right,
+                size: AppLayout.scaledValue(20),
+                color: AppTheme.textTertiary,
+              ),
             ],
           ),
         ),
@@ -874,8 +915,9 @@ class _PersonalManageAccountInfoPageState
   /// - Active:链上 free_balance 实时(无标签)
   /// - Pending:发起人承诺金额(snapshot.amount_fen)+ "不可用" 灰色标签
   Widget _buildBalanceRow(MultisigStatus? status) {
-    final balanceStr =
-        _balanceYuan == null ? '—' : AmountFormat.format(_balanceYuan!);
+    final balanceStr = _balanceYuan == null
+        ? '—'
+        : AmountFormat.format(_balanceYuan!);
     final isPending = status != MultisigStatus.active;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -885,8 +927,9 @@ class _PersonalManageAccountInfoPageState
           child: Text(
             '账户余额',
             style: TextStyle(
-                fontSize: AppLayout.scaledValue(13),
-                color: AppTheme.textSecondary),
+              fontSize: AppLayout.scaledValue(13),
+              color: AppTheme.textSecondary,
+            ),
           ),
         ),
         Expanded(
@@ -905,12 +948,14 @@ class _PersonalManageAccountInfoPageState
               if (isPending && _balanceYuan != null)
                 Container(
                   padding: EdgeInsets.symmetric(
-                      horizontal: AppLayout.scaledValue(6),
-                      vertical: AppLayout.scaledValue(2)),
+                    horizontal: AppLayout.scaledValue(6),
+                    vertical: AppLayout.scaledValue(2),
+                  ),
                   decoration: BoxDecoration(
                     color: AppTheme.textTertiary.withValues(alpha: 0.1),
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(4)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(4),
+                    ),
                   ),
                   child: Text(
                     '不可用',
@@ -927,8 +972,12 @@ class _PersonalManageAccountInfoPageState
     );
   }
 
-  Widget _buildInfoRow(String label, String value,
-      {VoidCallback? onCopy, Color? valueColor}) {
+  Widget _buildInfoRow(
+    String label,
+    String value, {
+    VoidCallback? onCopy,
+    Color? valueColor,
+  }) {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -937,8 +986,9 @@ class _PersonalManageAccountInfoPageState
           child: Text(
             label,
             style: TextStyle(
-                fontSize: AppLayout.scaledValue(13),
-                color: AppTheme.textSecondary),
+              fontSize: AppLayout.scaledValue(13),
+              color: AppTheme.textSecondary,
+            ),
           ),
         ),
         Expanded(
@@ -954,8 +1004,11 @@ class _PersonalManageAccountInfoPageState
         if (onCopy != null)
           GestureDetector(
             onTap: onCopy,
-            child: Icon(Icons.copy,
-                size: AppLayout.scaledValue(16), color: AppTheme.textTertiary),
+            child: Icon(
+              Icons.copy,
+              size: AppLayout.scaledValue(16),
+              color: AppTheme.textTertiary,
+            ),
           ),
       ],
     );

@@ -1,14 +1,13 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:polkadart/polkadart.dart' show Hasher;
 import 'package:citizenapp/citizen/institution/institution_role_models.dart';
 import 'package:citizenapp/citizen/institution/institution_role_storage_codec.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/codec/account_id_codec.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/models/admin_account.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/services/admin_account_service.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/rpc/smoldot_client.dart';
 
 class InstitutionAdminState {
   const InstitutionAdminState({
@@ -29,11 +28,11 @@ class InstitutionAdminState {
 /// 调用方必须传入明确的 `AdminAccountIdentity`，不再把
 /// `cidNumber` 当作个人多签、机构账户和治理机构共用的模糊参数。
 class InstitutionAdminService {
-  InstitutionAdminService({ChainRpc? chainRpc})
-      : _rpc = chainRpc ?? ChainRpc(),
-        _accountService = AdminAccountService(chainRpc: chainRpc);
+  InstitutionAdminService({required CitizenChain chain})
+      : _chain = chain,
+        _accountService = AdminAccountService(chain: chain);
 
-  final ChainRpc _rpc;
+  final CitizenChain _chain;
   final AdminAccountService _accountService;
 
   Future<List<AdminPerson>> fetchAdmins(AdminAccountIdentity identity) {
@@ -149,14 +148,15 @@ class InstitutionAdminService {
       String pallet, String storage, String cidNumber) async {
     final prefix =
         _doubleMapFirstKeyPrefix(pallet, storage, utf8.encode(cidNumber));
-    final prefixHex = '0x${_hex(prefix)}';
-    final keys = <String>[];
-    String? startKey;
+    final finalized = await _chain.getFinalizedHead();
+    final keys = <Uint8List>[];
+    Uint8List? startKey;
     while (true) {
-      final page = await SmoldotClientManager.instance.getKeysPagedFinalized(
-        prefixHex,
-        count: 256,
+      final page = await _chain.getStorageKeysPaged(
+        finalized,
+        prefix,
         startKey: startKey,
+        limit: 256,
       );
       if (page.isEmpty) break;
       keys.addAll(page);
@@ -164,11 +164,16 @@ class InstitutionAdminService {
       startKey = page.last;
     }
     if (keys.isEmpty) return const [];
-    final values = await _rpc.fetchStorageBatchChunked(keys);
-    return keys
-        .map((key) => values[key])
-        .whereType<Uint8List>()
-        .toList(growable: false);
+    final values = <Uint8List>[];
+    for (var offset = 0; offset < keys.length; offset += 100) {
+      final end = (offset + 100).clamp(0, keys.length);
+      final rows = await _chain.getStorageBatch(
+        finalized,
+        keys.sublist(offset, end),
+      );
+      values.addAll(rows.whereType<Uint8List>());
+    }
+    return values;
   }
 
   Uint8List _doubleMapFirstKeyPrefix(
@@ -184,6 +189,4 @@ class InstitutionAdminService {
         parts.expand((part) => part).toList(growable: false));
   }
 
-  String _hex(Iterable<int> bytes) =>
-      bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
 }

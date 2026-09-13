@@ -1,105 +1,189 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
-import 'package:gmb_scanner_flutter/scanner_flutter.dart';
+import 'package:citizenapp/qr/scanner/scanner.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:citizenapp/qr/envelope.dart';
 import 'package:citizenapp/qr/qr_protocols.dart';
 import 'package:citizenapp/qr/bodies/account_data_key_response_body.dart';
 import 'package:citizenapp/ui/app_theme.dart';
-import 'package:citizenapp/signer/qr_signer.dart';
+import 'package:citizenapp/security/account_security_service.dart';
+import 'package:citizenapp/signer/app_business_qr_codec.dart';
 import 'package:citizenapp/ui/app_layout.dart';
-import 'package:citizenapp/wallet/core/sign_mode.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 
-/// 钱包账户签名的唯一 Hot/Cold 分流器。
-///
-/// [SignMode.hot] 只允许按 `account_id` 读取当前联网设备的本机私钥；
-/// [SignMode.cold] 只允许生成 QR_V1 请求并等待 CitizenWallet 回扫。
-/// 模式缺失、账户不完整或冷签取消都直接拒绝，不得降级到另一路径。
-class WalletAccountSigner {
-  WalletAccountSigner({WalletManager? walletManager})
-      : _walletManager = walletManager ?? WalletManager();
-
-  final WalletManager _walletManager;
-
-  Future<Uint8List> sign({
-    required BuildContext? context,
-    required String accountId,
-    required SignMode? signMode,
-    required Uint8List payload,
-    required int action,
-    required String requestPrefix,
-  }) async {
-    if (accountId.isEmpty) {
-      throw const WalletAuthException('当前钱包账户信息不完整');
-    }
-    switch (signMode) {
-      case SignMode.hot:
-        return _walletManager.signForAccountId(accountId, payload);
-      case SignMode.cold:
-        if (context == null) {
-          throw const WalletAuthException('冷签缺少扫码页面上下文，已拒绝签名');
-        }
-        return _signCold(
-          context: context,
-          accountId: accountId,
-          payload: payload,
-          action: action,
-          requestPrefix: requestPrefix,
-        );
-      case null:
-        throw const WalletAuthException('当前钱包账户签名模式无效，已拒绝签名');
-    }
-  }
-
-  Future<Uint8List> _signCold({
-    required BuildContext context,
-    required String accountId,
-    required Uint8List payload,
-    required int action,
-    required String requestPrefix,
-  }) async {
-    final qrSigner = QrSigner();
-    final request = qrSigner.buildRequest(
-      requestId: QrSigner.generateRequestId(prefix: requestPrefix),
-      signerPublicKey: accountId,
-      payloadHex: '0x${_hexEncode(payload)}',
-      action: action,
-    );
-    if (!context.mounted) throw const WalletAuthException('页面已关闭');
-    final response = await Navigator.push<SignResponseEnvelope>(
-      context,
+/// 展示 CitizenSDK 已生成的唯一 QR_V1 请求，并只把扫描原文交回 SDK 验证。
+Future<String?> showCitizenSdkQrResponse(
+  BuildContext context, {
+  required String request,
+  required BigInt expiresAt,
+}) =>
+    Navigator.of(context).push<String>(
       MaterialPageRoute(
-        builder: (_) => QrSignSessionPage(
+        builder: (_) => _CitizenSdkQrSessionPage(
           request: request,
-          requestJson: qrSigner.encodeRequest(request),
-          expectedSignerPublicKey: accountId,
+          expiresAt: expiresAt,
         ),
       ),
     );
-    if (response == null) throw const WalletAuthException('签名已取消');
-    return Uint8List.fromList(_hexDecode(response.body.signatureHex));
+
+class _CitizenSdkQrSessionPage extends StatefulWidget {
+  const _CitizenSdkQrSessionPage({
+    required this.request,
+    required this.expiresAt,
+  });
+
+  final String request;
+  final BigInt expiresAt;
+
+  @override
+  State<_CitizenSdkQrSessionPage> createState() =>
+      _CitizenSdkQrSessionPageState();
+}
+
+class _CitizenSdkQrSessionPageState extends State<_CitizenSdkQrSessionPage> {
+  Timer? _timer;
+  late int _remaining;
+
+  @override
+  void initState() {
+    super.initState();
+    _remaining = _secondsLeft();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() => _remaining = _secondsLeft());
+    });
   }
 
-  static String _hexEncode(List<int> bytes) =>
-      bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
 
-  static List<int> _hexDecode(String input) {
-    final text = input.startsWith('0x') ? input.substring(2) : input;
-    if (text.length.isOdd) throw const WalletAuthException('签名响应长度无效');
-    return List<int>.generate(
-      text.length ~/ 2,
-      (index) => int.parse(
-        text.substring(index * 2, index * 2 + 2),
-        radix: 16,
+  int _secondsLeft() {
+    final now = BigInt.from(DateTime.now().millisecondsSinceEpoch ~/ 1000);
+    final remaining = widget.expiresAt - now;
+    return remaining.isNegative ? 0 : remaining.toInt();
+  }
+
+  Future<void> _scan() async {
+    final raw = await Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (_) => const _SimpleScanner()),
+    );
+    if (mounted && raw != null) Navigator.of(context).pop(raw);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final expired = _remaining <= 0;
+    return Scaffold(
+      appBar: AppBar(title: const Text('公民钱包签名'), centerTitle: true),
+      body: ListView(
+        padding: EdgeInsets.all(AppLayout.scaled(context, 16)),
+        children: [
+          Container(
+            padding: EdgeInsets.all(AppLayout.scaled(context, 12)),
+            decoration: AppTheme.bannerDecoration(
+              expired ? AppTheme.danger : AppTheme.success,
+            ),
+            child: Text(
+              expired ? '签名请求已过期，请返回重新提交' : '签名请求有效期剩余：${_remaining}s',
+              style: TextStyle(
+                color: expired ? AppTheme.danger : AppTheme.success,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          SizedBox(height: AppLayout.scaled(context, 16)),
+          Center(
+            child: QrImageView(
+              data: widget.request,
+              version: QrVersions.auto,
+              size: AppLayout.scaled(context, 240),
+            ),
+          ),
+          SizedBox(height: AppLayout.scaled(context, 16)),
+          const Text(
+            '请用公民钱包扫描此二维码完成签名，然后扫描公民钱包生成的响应二维码。',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: AppTheme.textSecondary),
+          ),
+          SizedBox(height: AppLayout.scaled(context, 24)),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('取消'),
+                ),
+              ),
+              SizedBox(width: AppLayout.scaled(context, 12)),
+              Expanded(
+                child: FilledButton(
+                  onPressed: expired ? null : _scan,
+                  child: const Text('扫描响应'),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
-      growable: false,
     );
   }
 }
+
+/// 钱包账户签名的唯一 Hot/Cold 分流器。
+///
+/// 热账户由 CitizenSDK 在本机安全签名；冷账户只生成 QR_V1 请求并等待独立公民钱包回扫。
+/// 模式缺失、账户不完整或冷签取消都直接拒绝，不得降级到另一路径。
+Future<Uint8List> signCitizenPayload({
+  required CitizenSigning signing,
+  required BuildContext? context,
+  required String accountId,
+  required Uint8List payload,
+  required int action,
+  CitizenSigningTransform? transform,
+}) async {
+  final signingTransform = transform ??
+      (QrActions.isChainAction(action)
+          ? CitizenSigningTransform.substrateSigningPayload()
+          : CitizenSigningTransform.raw());
+  final outcome = await signing.begin(
+    CitizenSigningIntent(
+      accountId: accountId,
+      payload: payload,
+      transform: signingTransform,
+      externalSignerTransport: CitizenExternalSignerTransport.qrV1,
+      opaqueAction: action,
+      ttlSeconds: 120,
+    ),
+  );
+  if (outcome is CitizenSigningCompleted) {
+    return Uint8List.fromList(outcome.signature);
+  }
+  final pending = outcome as CitizenExternalSigningPending;
+  if (context == null || !context.mounted) {
+    await signing.cancel(pending.sessionId);
+    throw const AccountSecurityException('冷签缺少扫码页面上下文，已拒绝签名');
+  }
+  final response = await showCitizenSdkQrResponse(
+    context,
+    request: pending.transportRequest,
+    expiresAt: pending.expiresAt,
+  );
+  if (response == null) {
+    await signing.cancel(pending.sessionId);
+    throw const AccountSecurityException('签名已取消');
+  }
+  final completed = await signing.consumeExternalSignature(
+    sessionId: pending.sessionId,
+    response: response,
+  );
+  return Uint8List.fromList(completed.signature);
+}
+
 
 /// 冷钱包扫码签名会话页面。
 ///
@@ -114,7 +198,7 @@ class QrSignSessionPage extends StatefulWidget {
     required this.request,
     required this.requestJson,
     required this.expectedSignerPublicKey,
-    this.responseKind = QrKind.signResponse,
+    this.responseKind = QrKind.accountDataKeyResponse,
   });
 
   /// 已构建的签名请求 envelope。
@@ -124,7 +208,7 @@ class QrSignSessionPage extends StatefulWidget {
   final String requestJson;
   final String expectedSignerPublicKey;
 
-  /// 普通冷签收 `k=2`；账户数据用途钥提供收独立 `k=6`。
+  /// 本页面只承接 CitizenApp 账户数据用途钥业务的 `k=6` 响应。
   final QrKind responseKind;
 
   @override
@@ -172,54 +256,27 @@ class _QrSignSessionPageState extends State<QrSignSessionPage> {
       if ((widget.request.expiresAt ?? 0) <= now) {
         throw const FormatException('当前请求已过期，请重新生成二维码');
       }
-      final Object response;
-      if (widget.responseKind == QrKind.accountDataKeyResponse) {
-        final envelope = QrEnvelope.parse(raw);
-        if (envelope.kind != QrKind.accountDataKeyResponse ||
-            envelope.id != widget.request.id ||
-            envelope.expiresAt != widget.request.expiresAt ||
-            envelope.body is! AccountDataKeyResponseBody ||
-            (envelope.body as AccountDataKeyResponseBody).signerPublicKeyHex !=
-                widget.expectedSignerPublicKey) {
-          throw const FormatException('用途钥响应与当前请求不一致');
-        }
-        response = QrEnvelope<AccountDataKeyResponseBody>(
-          kind: envelope.kind,
-          id: envelope.id,
-          issuedAt: envelope.issuedAt,
-          expiresAt: envelope.expiresAt,
-          body: envelope.body as AccountDataKeyResponseBody,
-        );
-      } else {
-        final expectedHash = QrSigner.computePayloadHash(
-          widget.request.body.payloadHex,
-        );
-        response = QrSigner().parseResponse(
-          raw,
-          expectedRequestId: widget.request.id!,
-          expectedSignerPublicKey: widget.expectedSignerPublicKey,
-          expectedPayloadHash: expectedHash,
-          expectedPayloadHex: widget.request.body.payloadHex,
-          expectedAction: widget.request.body.action,
-        );
+      if (widget.responseKind != QrKind.accountDataKeyResponse) {
+        throw const FormatException('此页面只接受用途钥响应');
       }
+      final envelope = QrEnvelope.parse(raw);
+      if (envelope.kind != QrKind.accountDataKeyResponse ||
+          envelope.id != widget.request.id ||
+          envelope.expiresAt != widget.request.expiresAt ||
+          envelope.body is! AccountDataKeyResponseBody ||
+          (envelope.body as AccountDataKeyResponseBody).signerPublicKeyHex !=
+              widget.expectedSignerPublicKey) {
+        throw const FormatException('用途钥响应与当前请求不一致');
+      }
+      final response = QrEnvelope<AccountDataKeyResponseBody>(
+        kind: envelope.kind,
+        id: envelope.id,
+        issuedAt: envelope.issuedAt,
+        expiresAt: envelope.expiresAt,
+        body: envelope.body as AccountDataKeyResponseBody,
+      );
       if (!mounted) return;
       Navigator.of(context).pop(response);
-    } on QrSignException catch (e) {
-      if (!mounted) return;
-      await showDialog<void>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('签名响应解析失败'),
-          content: Text(e.message),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('确定'),
-            ),
-          ],
-        ),
-      );
     } on FormatException catch (e) {
       if (!mounted) return;
       await showDialog<void>(
@@ -338,9 +395,9 @@ class _QrSignSessionPageState extends State<QrSignSessionPage> {
 
 // 签名响应扫码入口：设备层统一复用共享适配器，本页只接受 QR_V1 签名响应码。
 class _SimpleScanner extends StatefulWidget {
-  const _SimpleScanner({required this.acceptedKind});
+  const _SimpleScanner({this.acceptedKind});
 
-  final QrKind acceptedKind;
+  final QrKind? acceptedKind;
 
   @override
   State<_SimpleScanner> createState() => _SimpleScannerState();
@@ -388,10 +445,10 @@ class _SimpleScannerState extends State<_SimpleScanner> {
     _handled = true;
     try {
       await _controller.stop();
-      final envelope = QrEnvelope.parse(raw);
-      if (envelope.kind != widget.acceptedKind) {
+      final acceptedKind = widget.acceptedKind;
+      if (acceptedKind != null && QrEnvelope.parse(raw).kind != acceptedKind) {
         throw FormatException(
-          widget.acceptedKind == QrKind.accountDataKeyResponse
+          acceptedKind == QrKind.accountDataKeyResponse
               ? '请扫描账户数据用途钥响应二维码'
               : '请扫描签名响应二维码',
         );

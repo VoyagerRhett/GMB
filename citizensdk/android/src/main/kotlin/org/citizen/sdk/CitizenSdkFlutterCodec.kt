@@ -34,13 +34,14 @@ internal object CitizenSdkFlutterCodec {
         "open", "start", "stop", "close", "getCapabilities", "getFinalizedHead",
         "getSyncStatus", "getBestHead", "getFinalizedBlockAt", "resolveFinalizedBlock",
         "getBlockHeader", "getBlockBody", "getRuntimeContext", "getStorage", "getStorageBatch",
+        "getStorageKeysPaged", "callRuntimeApi",
         "getSystemEvents", "exportState", "importState",
         "getGenesisHash", "getAccountBalance", "getAccountBalances", "getAccountNonce", "getFeeSnapshot", "getWalletProfile", "viewAccountPrivateKey",
         "getWalletState", "importColdAccountId", "importColdAccountSs58",
         "reorderWalletAccountsWithoutDefaultChange", "renameAccount", "deleteAccount",
         "createWallet", "importWallet", "addWalletAccounts", "setActiveWalletAccount",
         "renameWalletAccount", "deleteWalletAccount", "deleteWallet",
-        "reconcileWalletCleanup", "signWalletPayload",
+        "reconcileWalletCleanup", "signWalletPayload", "deriveApplicationKey",
         "beginSigning", "consumeExternalSignature", "cancelSigning",
         "beginDefaultAccountChange", "consumeDefaultAccountChange",
         "verifySignature", "prepareTransaction", "cancelPreparedTransaction",
@@ -102,6 +103,21 @@ internal object CitizenSdkFlutterCodec {
             val block: CitizenBlockRef,
             val keys: List<ByteArray>,
         ) : SessionRequest
+        data class StorageKeysPage(
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val block: CitizenBlockRef,
+            val prefix: ByteArray,
+            val startKey: ByteArray?,
+            val limit: Int,
+        ) : SessionRequest
+        data class RuntimeApi(
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val block: CitizenBlockRef,
+            val method: String,
+            val arguments: ByteArray,
+        ) : SessionRequest
         data class ImportState(
             override val sessionId: String,
             override val requestSequence: Long,
@@ -141,6 +157,13 @@ internal object CitizenSdkFlutterCodec {
             override val requestSequence: Long,
             val accountId: ByteArray,
             val payload: ByteArray,
+        ) : SessionRequest
+        data class DeriveApplicationKey(
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val accountId: ByteArray,
+            val salt: ByteArray,
+            val info: ByteArray,
         ) : SessionRequest
         data class BeginSigning(
             override val sessionId: String,
@@ -229,6 +252,8 @@ internal object CitizenSdkFlutterCodec {
         is Request.Block -> request.method
         is Request.Storage -> "getStorage"
         is Request.StorageBatch -> "getStorageBatch"
+        is Request.StorageKeysPage -> "getStorageKeysPaged"
+        is Request.RuntimeApi -> "callRuntimeApi"
         is Request.ImportState -> "importState"
         is Request.CreateWallet -> "createWallet"
         is Request.AddWalletAccounts -> "addWalletAccounts"
@@ -236,6 +261,7 @@ internal object CitizenSdkFlutterCodec {
         is Request.ColdSs58 -> "importColdAccountSs58"
         is Request.ReorderWalletAccounts -> "reorderWalletAccountsWithoutDefaultChange"
         is Request.SignWalletPayload -> "signWalletPayload"
+        is Request.DeriveApplicationKey -> "deriveApplicationKey"
         is Request.BeginSigning -> "beginSigning"
         is Request.ExternalSignature -> request.method
         is Request.CancelSigning -> "cancelSigning"
@@ -325,6 +351,36 @@ internal object CitizenSdkFlutterCodec {
                         }
                     }
                     Request.StorageBatch(sessionId, sequence, blockRef(tuple[3]), keys)
+                }
+                "getStorageKeysPaged" -> {
+                    length(7)
+                    val block = blockRef(tuple[3])
+                    if (block.finality != CitizenFinality.FINALIZED) {
+                        badRequest("storage keys page requires finalized block", sessionId, sequence)
+                    }
+                    val prefix = bytes(tuple[4], "storage key prefix", false, MAXIMUM_STORAGE_KEY_BYTES)
+                    val start = tuple[5]?.let {
+                        bytes(it, "storage start key", false, MAXIMUM_STORAGE_KEY_BYTES)
+                    }
+                    val limit = exactLong(tuple[6], "storage keys page limit")
+                    if (limit !in 1..1000) {
+                        badRequest("storage keys page limit must be 1..1000", sessionId, sequence)
+                    }
+                    Request.StorageKeysPage(sessionId, sequence, block, prefix, start, limit.toInt())
+                }
+                "callRuntimeApi" -> {
+                    length(6)
+                    val name = string(tuple[4], "runtime API method", 1, 128)
+                    if (!Regex("^[A-Za-z][A-Za-z0-9_]*_[A-Za-z0-9_]+$").matches(name)) {
+                        badRequest("runtime API method is invalid", sessionId, sequence)
+                    }
+                    Request.RuntimeApi(
+                        sessionId,
+                        sequence,
+                        blockRef(tuple[3]),
+                        name,
+                        bytes(tuple[5], "runtime API arguments", true, 1024 * 1024),
+                    )
                 }
                 "importState" -> {
                     length(6)
@@ -426,6 +482,20 @@ internal object CitizenSdkFlutterCodec {
                         // Core/sr25519 明确允许签名空消息；这里必须与 C ABI
                         // 和 Dart codec 保持完全相同，避免 decoder 拒绝已消耗的序号。
                         payload,
+                    )
+                }
+                "deriveApplicationKey" -> {
+                    length(6)
+                    val salt = bytes(tuple[4], "application key salt", false, 32)
+                    if (salt.size != 32) {
+                        badRequest("application key salt must be 32 bytes", sessionId, sequence)
+                    }
+                    Request.DeriveApplicationKey(
+                        sessionId,
+                        sequence,
+                        hash32(tuple[3]),
+                        salt,
+                        bytes(tuple[5], "application key info", false, 256),
                     )
                 }
                 "beginSigning" -> {
@@ -601,8 +671,12 @@ internal object CitizenSdkFlutterCodec {
 
     /** [1, sessionId, eventSequence, type, type-specific payload tuple]. */
     fun event(sessionId: String, eventSequence: Long, type: String, payload: List<Any?>): List<Any?> {
-        require(type in setOf("lifecycleChanged", "capabilitiesChanged", "historyChanged"))
+        require(type in setOf(
+            "lifecycleChanged", "capabilitiesChanged", "historyChanged", "finalizedBlockChanged",
+        ))
+        require(eventSequence > 0)
         require(type != "historyChanged" || (eventSequence > 0 && payload.isEmpty()))
+        require(type != "finalizedBlockChanged" || payload.size == 1)
         return listOf(PROTOCOL_VERSION, sessionId, eventSequence, type, payload)
     }
 

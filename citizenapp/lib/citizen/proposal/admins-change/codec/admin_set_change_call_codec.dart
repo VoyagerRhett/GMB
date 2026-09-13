@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:citizenapp/rpc/pallet_registry.dart';
+import 'package:citizenapp/citizen/shared/pallet_registry.dart';
 import 'dart:typed_data';
 
 import 'package:polkadart/scale_codec.dart' show ByteOutput, CompactBigIntCodec;

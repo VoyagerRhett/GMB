@@ -11,8 +11,8 @@ import 'package:citizenapp/my/creator/models/creator_plan.dart';
 import 'fake_profile.dart';
 
 /// 只覆盖订阅按钮的 CitizenServe 投影门禁：服务端返回有效档位才显示，其余隐藏。
-class _FakeSubscribeService extends CreatorSubscribeService {
-  _FakeSubscribeService({required this.view, this.throwView = false}) : super();
+class _FakeSubscribeService implements CreatorSubscribeService {
+  _FakeSubscribeService({required this.view, this.throwView = false});
 
   final CreatorView view;
   final bool throwView;
@@ -25,6 +25,9 @@ class _FakeSubscribeService extends CreatorSubscribeService {
     if (throwView) throw const CreatorApiException('service unavailable');
     return view;
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 final _plan = CreatorPlan.fromJson({

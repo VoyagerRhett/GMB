@@ -1,3 +1,7 @@
+import 'package:provider/provider.dart';
+import 'package:citizenapp/8964/chain/square_chain_service.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -21,13 +25,13 @@ import 'package:citizenapp/my/myid/current_user_context.dart';
 import 'package:citizenapp/my/membership/membership_revision.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/widgets/identity_register_guide.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
 class SquareHomePage extends StatefulWidget {
   const SquareHomePage({
     super.key,
-    this.identityService = const SquareIdentityService(),
+    this.identityService,
     this.feedSource,
     this.initialFeed = SquareFeedKind.recommended,
     this.seedPosts = const <SquarePost>[],
@@ -37,7 +41,7 @@ class SquareHomePage extends StatefulWidget {
     this.tabIndex = 0,
   });
 
-  final SquareIdentityService identityService;
+  final SquareIdentityService? identityService;
   final SquareFeedSource? feedSource;
   final SquareFeedKind initialFeed;
   final List<SquarePost> seedPosts;
@@ -57,6 +61,7 @@ class SquareHomePage extends StatefulWidget {
 class _SquareHomePageState extends State<SquareHomePage> {
   late SquareFeedKind _selectedFeed = widget.initialFeed;
   late Future<SquareIdentityState> _identityFuture;
+  late final SquareIdentityService _identityService;
   late final SquareFeedSource _feedSource;
   late Future<List<SquarePost>> _feedFuture;
   int _feedLoadGeneration = 0;
@@ -71,7 +76,9 @@ class _SquareHomePageState extends State<SquareHomePage> {
 
   /// 最近一次 feed 加载的 session token，供卡片头像鉴权头复用。
   String? _feedSessionToken;
-  late final SquareSessionProvider _sessionProvider;
+  SquareSessionProvider? _sessionProvider;
+  AccountSecurityService? _accountSecurity;
+  bool _dependenciesReady = false;
 
   /// 关注子 tab 红点数（服务端 following_unread）。广场底部 tab 数经回调上抛。
   int _followingUnread = 0;
@@ -84,17 +91,40 @@ class _SquareHomePageState extends State<SquareHomePage> {
   @override
   void initState() {
     super.initState();
-    _sessionProvider = widget.sessionProvider ?? SquareSessionProvider.instance;
     _feedSource = widget.feedSource ?? SquareApiClient();
+    MembershipRevision.instance.listenable.addListener(_onMembershipChanged);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    _sessionProvider = widget.sessionProvider;
+    final injectedIdentity = widget.identityService;
+    if (injectedIdentity != null) {
+      _identityService = injectedIdentity;
+    } else {
+      final sdk = context.read<CitizenSdk>();
+      final accountSecurity = context.read<AccountSecurityService>();
+      _sessionProvider ??= context.read<SquareSessionProvider>();
+      _identityService = SquareIdentityService(
+        wallet: sdk.wallet,
+        currentUserContext: context.read<CurrentUserContext>(),
+        chainService: SquareChainService(
+          chain: sdk.chain,
+          transactions: sdk.transactions,
+        ),
+      );
+      _accountSecurity = accountSecurity;
+      accountSecurity.revision.addListener(_onWalletsChanged);
+    }
     _identityFuture = _loadIdentity(readLiveChain: false);
     // 浏览态首帧直接挂载页面并并行加载 feed；身份与会员只在发布等写操作前严格校验，
     // 避免链读取或会话握手把整个广场长期挡在转圈页后面。
     _feedFuture = _beginFeedLoad();
     // 本页常驻 IndexedStack；切换身份账户（CID 换绑 / 切钱包）后经
-    // walletsRevision 广播重载身份，保证身份图标与作者点击的 isSelf
+    // 账户／身份 revision 广播重载身份，保证身份图标与作者点击的 isSelf
     // 判定始终基于当前身份账户。
-    WalletManager.walletsRevision.addListener(_onWalletsChanged);
-    MembershipRevision.instance.listenable.addListener(_onMembershipChanged);
     // 发帖通知红点：仅生产真实数据源下开启（fake feedSource 的测试不触网）。
     if (_feedSource is SquareApiClient) {
       widget.selectedTab?.addListener(_onSelectedTabChanged);
@@ -104,11 +134,12 @@ class _SquareHomePageState extends State<SquareHomePage> {
         (_) => unawaited(_refreshNotify()),
       );
     }
+    _dependenciesReady = true;
   }
 
   @override
   void dispose() {
-    WalletManager.walletsRevision.removeListener(_onWalletsChanged);
+    _accountSecurity?.revision.removeListener(_onWalletsChanged);
     MembershipRevision.instance.listenable.removeListener(_onMembershipChanged);
     _notifyTimer?.cancel();
     widget.selectedTab?.removeListener(_onSelectedTabChanged);
@@ -140,7 +171,8 @@ class _SquareHomePageState extends State<SquareHomePage> {
 
   Future<SquareSession?> _notifySession() async {
     try {
-      return await _sessionProvider.ensureSession();
+      return await (_sessionProvider ?? context.read<SquareSessionProvider>())
+          .ensureSession();
     } on Object {
       // 后台通知由 unawaited 启动，任何会话失败都只能降级为不刷新红点，
       // 不得逸出为未捕获异步异常并影响广场浏览。
@@ -197,7 +229,7 @@ class _SquareHomePageState extends State<SquareHomePage> {
   Future<SquareIdentityState> _loadIdentity({
     required bool readLiveChain,
   }) async {
-    final identity = await widget.identityService.loadCurrent(
+    final identity = await _identityService.loadCurrent(
       readLiveChain: readLiveChain,
     );
     _identityAddress = identity.accountId;
@@ -208,7 +240,7 @@ class _SquareHomePageState extends State<SquareHomePage> {
   Future<void> _onWalletsChanged() async {
     // CID 占号可在 account_id 不变时把 cid_number 从空推进为有效值；收到显式身份
     // revision 后必须读取完整身份，不能沿用只比较账户的旧优化。
-    final identity = await CurrentUserContext.instance.resolve();
+    final identity = await context.read<CurrentUserContext>().resolve();
     final identityAccountId = identity?.accountId ?? '';
     final identityCidNumber = identity?.cidNumber ?? '';
     if (!mounted) return;
@@ -229,7 +261,7 @@ class _SquareHomePageState extends State<SquareHomePage> {
       MaterialPageRoute<SquarePost>(
         builder: (_) => SquareComposePage(
           postType: postType,
-          identityService: widget.identityService,
+          identityService: _identityService,
         ),
       ),
     );
@@ -247,10 +279,7 @@ class _SquareHomePageState extends State<SquareHomePage> {
     final isSelf = selfCid.isNotEmpty && selfCid == cidNumber;
     await Navigator.of(context).push<void>(
       MaterialPageRoute(
-        builder: (_) => UserProfilePage(
-          cidNumber: cidNumber,
-          isSelf: isSelf,
-        ),
+        builder: (_) => UserProfilePage(cidNumber: cidNumber, isSelf: isSelf),
       ),
     );
   }
@@ -359,8 +388,9 @@ class _SquareHomePageState extends State<SquareHomePage> {
                           final posts = _composeFeed(
                             snapshot.data ?? const <SquarePost>[],
                           );
-                          final errorMessage =
-                              snapshot.hasError ? '广场内容加载失败' : null;
+                          final errorMessage = snapshot.hasError
+                              ? '广场内容加载失败'
+                              : null;
                           return Stack(
                             children: [
                               RefreshIndicator(
@@ -375,7 +405,7 @@ class _SquareHomePageState extends State<SquareHomePage> {
                                       ? null
                                       : {
                                           'authorization':
-                                              'Bearer $_feedSessionToken'
+                                              'Bearer $_feedSessionToken',
                                         },
                                 ),
                               ),
@@ -386,9 +416,7 @@ class _SquareHomePageState extends State<SquareHomePage> {
                                   left: 0,
                                   right: 0,
                                   child: LinearProgressIndicator(
-                                    key: const ValueKey(
-                                      'square-feed-progress',
-                                    ),
+                                    key: const ValueKey('square-feed-progress'),
                                     minHeight: AppLayout.scaled(context, 2),
                                   ),
                                 ),
@@ -421,8 +449,11 @@ class _SquareHomePageState extends State<SquareHomePage> {
     int generation,
   ) async {
     SquareSession? session;
+    SquareSessionProvider? sessionProvider;
     if (_feedSource is SquareApiClient) {
-      session = await _sessionProvider.ensureSession();
+      sessionProvider =
+          _sessionProvider ?? context.read<SquareSessionProvider>();
+      session = await sessionProvider.ensureSession();
       if (session == null) {
         throw const SquareApiException('需要钱包账户才能浏览广场');
       }
@@ -436,10 +467,7 @@ class _SquareHomePageState extends State<SquareHomePage> {
     }
     List<SquarePost> posts;
     try {
-      posts = await _feedSource.fetchFeed(
-        feedKind: feedKind,
-        session: session,
-      );
+      posts = await _feedSource.fetchFeed(feedKind: feedKind, session: session);
     } on SquareApiException catch (error) {
       // 只在 Worker 明确拒绝旧 Session 时重新握手一次；第二次失败原样交给前台，禁止
       // 无限重试。测试/离线数据源不参与生产会话刷新。
@@ -448,7 +476,7 @@ class _SquareHomePageState extends State<SquareHomePage> {
           generation != _feedLoadGeneration) {
         rethrow;
       }
-      final refreshed = await _sessionProvider.refreshSession();
+      final refreshed = await sessionProvider!.refreshSession();
       if (refreshed == null) rethrow;
       session = refreshed;
       posts = await _feedSource.fetchFeed(
@@ -562,9 +590,7 @@ class _FeedBody extends StatelessWidget {
       return ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
-        children: [
-          if (errorMessage != null) _errorBanner(errorMessage!),
-        ],
+        children: [if (errorMessage != null) _errorBanner(errorMessage!)],
       );
     }
 
@@ -676,18 +702,9 @@ class _SquarePublishMenuState extends State<_SquarePublishMenu> {
     // 视频圆形入口的右边距一致。三个圆心仍使用同一虚拟圆心和标准等分角度。
     final arcOriginY = origin - labelGap - labelSize;
     const entries = <({SquarePostType postType, IconData icon})>[
-      (
-        postType: SquarePostType.document,
-        icon: Icons.description_outlined,
-      ),
-      (
-        postType: SquarePostType.article,
-        icon: Icons.article_outlined,
-      ),
-      (
-        postType: SquarePostType.video,
-        icon: Icons.videocam_outlined,
-      ),
+      (postType: SquarePostType.document, icon: Icons.description_outlined),
+      (postType: SquarePostType.article, icon: Icons.article_outlined),
+      (postType: SquarePostType.video, icon: Icons.videocam_outlined),
     ];
     return SizedBox(
       width: size,
@@ -782,9 +799,7 @@ class _SquarePublishMenuState extends State<_SquarePublishMenu> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Material(
-                        key: ValueKey(
-                          'square-publish-${postType.workerValue}',
-                        ),
+                        key: ValueKey('square-publish-${postType.workerValue}'),
                         color: AppTheme.surfaceCard,
                         elevation: 3,
                         shadowColor: Colors.black26,

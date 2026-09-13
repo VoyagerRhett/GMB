@@ -129,6 +129,18 @@ class CitizenSdkFlutterCodecTest {
             CitizenSdkFlutterCodec.event("session", 7L, "historyChanged", listOf(1))
         }
     }
+
+    @Test
+    fun `finalized event is a one-block public tuple`() {
+        val payload = listOf(listOf("0x" + "11".repeat(32), "7", "finalized"))
+        assertEquals(
+            "finalizedBlockChanged",
+            CitizenSdkFlutterCodec.event("session", 8L, "finalizedBlockChanged", payload)[3],
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            CitizenSdkFlutterCodec.event("session", 8L, "finalizedBlockChanged", emptyList())
+        }
+    }
     @Test
     fun `wallet word count closure is exactly twelve eighteen twenty four`() {
         for (count in listOf(12, 18, 24)) {
@@ -151,14 +163,16 @@ class CitizenSdkFlutterCodecTest {
                 "open", "start", "stop", "close", "getCapabilities",
                 "getFinalizedHead", "getSyncStatus", "getBestHead", "getFinalizedBlockAt",
                 "resolveFinalizedBlock", "getBlockHeader", "getBlockBody", "getRuntimeContext",
-                "getStorage", "getStorageBatch", "getSystemEvents", "exportState", "importState",
+                "getStorage", "getStorageBatch", "getStorageKeysPaged", "callRuntimeApi",
+                "getSystemEvents", "exportState", "importState",
                 "getGenesisHash", "getAccountBalance", "getAccountBalances", "getAccountNonce",
                 "getFeeSnapshot", "getWalletProfile", "getWalletState", "importColdAccountId",
                 "importColdAccountSs58", "reorderWalletAccountsWithoutDefaultChange",
                 "renameAccount", "deleteAccount", "viewAccountPrivateKey", "createWallet", "importWallet",
                 "addWalletAccounts", "setActiveWalletAccount", "renameWalletAccount",
                 "deleteWalletAccount", "deleteWallet", "reconcileWalletCleanup",
-                "signWalletPayload", "beginSigning", "consumeExternalSignature", "cancelSigning",
+                "signWalletPayload", "deriveApplicationKey", "beginSigning",
+                "consumeExternalSignature", "cancelSigning",
                 "beginDefaultAccountChange", "consumeDefaultAccountChange", "verifySignature",
                 "prepareTransaction", "cancelPreparedTransaction", "executePreparedTransaction",
                 "consumePreparedTransactionQrResponse", "cancelPreparedTransactionExecution",
@@ -209,6 +223,12 @@ class CitizenSdkFlutterCodecTest {
         requests["getStorageBatch"] = listOf(
             1, "session-1", 1L, finalizedBlock, listOf(byteArrayOf(1), byteArrayOf(2)),
         )
+        requests["getStorageKeysPaged"] = listOf(
+            1, "session-1", 1L, finalizedBlock, byteArrayOf(1), null, 1000L,
+        )
+        requests["callRuntimeApi"] = listOf(
+            1, "session-1", 1L, finalizedBlock, "CitizenApi_items", byteArrayOf(),
+        )
         requests["importState"] = listOf(1, "session-1", 1L, 1, finalizedBlock, byteArrayOf(1))
         for (method in listOf(
             "getAccountBalance", "getAccountNonce", "viewAccountPrivateKey", "setActiveWalletAccount",
@@ -226,6 +246,9 @@ class CitizenSdkFlutterCodecTest {
         requests["reorderWalletAccountsWithoutDefaultChange"] =
             listOf(1, "session-1", 1L, "7", listOf(account, destination))
         requests["signWalletPayload"] = listOf(1, "session-1", 1L, account, byteArrayOf(1))
+        requests["deriveApplicationKey"] = listOf(
+            1, "session-1", 1L, account, ByteArray(32), byteArrayOf(1),
+        )
         requests["beginSigning"] = listOf(
             1, "session-1", 1L, account, byteArrayOf(1), "raw", byteArrayOf(), "none", 0, 120L,
         )

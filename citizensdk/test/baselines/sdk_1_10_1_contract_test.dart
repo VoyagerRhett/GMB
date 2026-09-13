@@ -21,12 +21,12 @@ void main() {
     expect(CitizenSdkModules.full, 63);
     expect(CitizenCapabilityName.values, hasLength(10));
     expect(CitizenSdkErrorCode.values, hasLength(22));
-    expect(CitizenSdkFlutterCodec.methods, hasLength(62));
+    expect(CitizenSdkFlutterCodec.methods, hasLength(65));
 
     final facade = File('lib/src/api/citizen_sdk.dart').readAsStringSync();
     for (final declaration in <String>[
       'final CitizenChain chain;',
-      'final CitizenWallet wallet;',
+      'final CitizenSdkWallet wallet;',
       'final CitizenSigning signing;',
       'final CitizenQr qr;',
       'final CitizenTransactions transactions;',

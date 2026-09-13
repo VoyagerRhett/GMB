@@ -12,7 +12,7 @@ use citizen_sdk_contracts::{
         MAX_PERSISTED_RUNTIME_METADATA_BYTES,
     },
     AccountId32, AccountNonce, AccountNonceSource, CapabilityName, CapabilityReason,
-    CapabilitySnapshot, ChainSigner, ChainSyncStatus, ContractErrorCode,
+    CapabilitySnapshot, ChainSigner, ChainSyncStatus, ContractError, ContractErrorCode,
     DefaultAccountChangeAuthorization, ExecutionConclusion, ExportedChainState,
     ExtrinsicWatchEvent, FinalizedAccountBalance, FinalizedBlockRef, Hash32, Modules,
     OpaqueTransactionCall, PreparedTransactionSummary, RuntimeContext, SecretBuffer, SecretVault,
@@ -587,6 +587,41 @@ impl CitizenEngine {
             self.components
                 .chain_client()?
                 .get_storage_batch_at(block, keys)
+                .await
+                .map_err(EngineError::from)
+        })
+    }
+
+    /// 读取一个准确 finalized 块上的有界 storage key 页面。
+    pub fn storage_keys_paged(
+        &self,
+        block: FinalizedBlockRef,
+        prefix: Vec<u8>,
+        start_key: Option<Vec<u8>>,
+        limit: u32,
+    ) -> EngineFuture<'_, Vec<Vec<u8>>> {
+        Box::pin(async move {
+            self.require_capabilities(&[CapabilityName::ChainRead])?;
+            self.components
+                .chain_client()?
+                .get_storage_keys_paged(block, prefix, start_key, limit)
+                .await
+                .map_err(EngineError::from)
+        })
+    }
+
+    /// 在一个准确 verified block 上执行 opaque Runtime API。
+    pub fn call_runtime_api(
+        &self,
+        block: VerifiedBlockRef,
+        method: String,
+        arguments: Vec<u8>,
+    ) -> EngineFuture<'_, Vec<u8>> {
+        Box::pin(async move {
+            self.require_capabilities(&[CapabilityName::ChainRead])?;
+            self.components
+                .chain_client()?
+                .call_runtime_api(block, method, arguments)
                 .await
                 .map_err(EngineError::from)
         })
@@ -1251,6 +1286,27 @@ impl CitizenEngine {
                 CapabilityName::HardwareVault,
                 CapabilityName::UserAuthentication,
             ])?;
+            // LocalSigning 可独立于钱包管理模块启用，但仍必须从同一 WalletState
+            // 真源核对热/冷账户；不能调用要求 WalletProfile capability 的公开管理入口。
+            match self
+                .wallet_service_from_components()?
+                .account_sign_mode(account_id)
+                .await?
+            {
+                Some(WalletSignMode::Hot) => {}
+                Some(WalletSignMode::Cold) => {
+                    return Err(EngineError::Contract(ContractError::new(
+                        ContractErrorCode::Unsupported,
+                        "冷账户必须由独立外部设备完成签名",
+                    )));
+                }
+                None => {
+                    return Err(EngineError::Contract(ContractError::new(
+                        ContractErrorCode::NotFound,
+                        "签名账户不存在",
+                    )));
+                }
+            }
             let service = SigningService::new(
                 self.components
                     .signer()
@@ -1273,6 +1329,60 @@ impl CitizenEngine {
         })
     }
 
+    /// 由现有热账户金库执行通用 HKDF-SHA256，不解释调用 App 的 salt/info。
+    pub fn derive_application_key(
+        &self,
+        account_id: AccountId32,
+        salt: [u8; 32],
+        info: Vec<u8>,
+    ) -> EngineFuture<'_, SecretBuffer> {
+        Box::pin(async move {
+            self.require_local_capabilities(&[
+                CapabilityName::LocalSigning,
+                CapabilityName::HardwareVault,
+                CapabilityName::UserAuthentication,
+            ])?;
+            match self
+                .wallet_service_from_components()?
+                .account_sign_mode(account_id)
+                .await?
+            {
+                Some(WalletSignMode::Hot) => {}
+                Some(WalletSignMode::Cold) => {
+                    return Err(EngineError::Contract(ContractError::new(
+                        ContractErrorCode::Unsupported,
+                        "冷账户的应用派生钥必须由独立外部设备提供",
+                    )));
+                }
+                None => {
+                    return Err(EngineError::Contract(ContractError::new(
+                        ContractErrorCode::NotFound,
+                        "应用派生钥账户不存在",
+                    )));
+                }
+            }
+            let service = SigningService::new(
+                self.components
+                    .signer()
+                    .cloned()
+                    .ok_or_else(|| component_missing("chain_signer"))?,
+                self.components
+                    .secret_vault()
+                    .cloned()
+                    .ok_or_else(|| component_missing("secret_vault"))?,
+                self.components
+                    .wallet_profiles()
+                    .cloned()
+                    .ok_or_else(|| component_missing("wallet_profile_store"))?,
+                self.components
+                    .encrypted_secrets()
+                    .cloned()
+                    .ok_or_else(|| component_missing("encrypted_secret_blob_store"))?,
+            );
+            service.derive_application_key(account_id, salt, info).await
+        })
+    }
+
     /// Product-independent hot signing path for a validated opaque intent.
     ///
     /// WalletState is authoritative for routing. Cold accounts are never allowed to fall through
@@ -1280,7 +1390,11 @@ impl CitizenEngine {
     /// crosses the Engine boundary.
     pub fn sign_wallet_intent(&self, intent: SigningIntent) -> EngineFuture<'_, SigningCompletion> {
         Box::pin(async move {
-            match self.wallet_account_sign_mode(intent.account_id()).await? {
+            match self
+                .wallet_service_from_components()?
+                .account_sign_mode(intent.account_id())
+                .await?
+            {
                 Some(WalletSignMode::Hot) => {}
                 Some(WalletSignMode::Cold) => {
                     return Err(EngineError::contract(

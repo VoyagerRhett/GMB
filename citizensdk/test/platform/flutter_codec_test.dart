@@ -107,6 +107,32 @@ void main() {
     );
   });
 
+  test('finalized 通知携带准确 finalized block，拒绝 best 冒充', () {
+    final decoded = codec.decodeEvent(<Object?>[
+      1,
+      'session',
+      9,
+      'finalizedBlockChanged',
+      <Object?>[
+        <Object?>[_account(3), '77', 'finalized'],
+      ],
+    ]);
+    final event = decoded.event as CitizenSdkFinalizedBlockChanged;
+    expect(event.finalized.number, BigInt.from(77));
+    expect(
+      () => codec.decodeEvent(<Object?>[
+        1,
+        'session',
+        10,
+        'finalizedBlockChanged',
+        <Object?>[
+          <Object?>[_account(3), '77', 'best'],
+        ],
+      ]),
+      throwsA(isA<CitizenSdkException>()),
+    );
+  });
+
   test('五平台 Flutter 的固定方法使用固定长度 tuple 且没有 Map 兼容旁路', () {
     const expectedMethods = <String>{
       'open',
@@ -124,6 +150,8 @@ void main() {
       'getRuntimeContext',
       'getStorage',
       'getStorageBatch',
+      'getStorageKeysPaged',
+      'callRuntimeApi',
       'getSystemEvents',
       'exportState',
       'importState',
@@ -148,6 +176,7 @@ void main() {
       'deleteWalletAccount',
       'deleteWallet',
       'reconcileWalletCleanup',
+      'deriveApplicationKey',
       'signWalletPayload',
       'beginSigning',
       'consumeExternalSignature',
@@ -219,6 +248,17 @@ void main() {
           Uint8List.fromList(<int>[2]),
         ],
       ],
+      'getStorageKeysPaged': <Object?>[
+        finalizedBlock,
+        Uint8List.fromList(<int>[1]),
+        null,
+        1000,
+      ],
+      'callRuntimeApi': <Object?>[
+        finalizedBlock,
+        'CitizenApi_items',
+        Uint8List(0),
+      ],
       'getSystemEvents': <Object?>[finalizedBlock],
       'importState': <Object?>[
         1,
@@ -254,6 +294,11 @@ void main() {
       ],
       'signWalletPayload': <Object?>[
         account,
+        Uint8List.fromList(<int>[1]),
+      ],
+      'deriveApplicationKey': <Object?>[
+        account,
+        Uint8List(32),
         Uint8List.fromList(<int>[1]),
       ],
       'beginSigning': <Object?>[
@@ -383,6 +428,41 @@ void main() {
         raw: <Object?>[1, 'session-a', 1, <String, Object?>{}],
         expectedSessionId: 'session-a',
         expectedRequestSequence: 1,
+      ),
+      throwsA(isA<CitizenSdkException>()),
+    );
+  });
+
+  test('新增通用链与派生钥边界在 Dart tuple 前失败关闭', () {
+    final finalized = <Object?>[_account(1), '1', 'finalized'];
+    for (final limit in <int>[0, 1001]) {
+      expect(
+        () => codec.encodeRequest(
+          method: 'getStorageKeysPaged',
+          sessionId: 's',
+          requestSequence: 1,
+          fields: <Object?>[finalized, Uint8List(1), null, limit],
+        ),
+        throwsA(isA<CitizenSdkException>()),
+      );
+    }
+    for (final size in <int>[31, 33]) {
+      expect(
+        () => codec.encodeRequest(
+          method: 'deriveApplicationKey',
+          sessionId: 's',
+          requestSequence: 1,
+          fields: <Object?>[_account(1), Uint8List(size), Uint8List(1)],
+        ),
+        throwsA(isA<CitizenSdkException>()),
+      );
+    }
+    expect(
+      () => codec.encodeRequest(
+        method: 'callRuntimeApi',
+        sessionId: 's',
+        requestSequence: 1,
+        fields: <Object?>[finalized, 'arbitrary-rpc', Uint8List(0)],
       ),
       throwsA(isA<CitizenSdkException>()),
     );

@@ -16,7 +16,7 @@ import 'package:local_auth_darwin/local_auth_darwin.dart';
 /// [messages] 就会出现"中文解释 + 英文标题/按钮"的混排。
 ///
 /// 语言判定用 [PlatformDispatcher.instance.locale](设备当前语言),不依赖
-/// `BuildContext`:`WalletManager` 等非 Widget 层也要弹这个框。
+/// `BuildContext`：部分非 Widget 业务层也要复用平台认证文案。
 class BiometricAuthText {
   const BiometricAuthText._();
 

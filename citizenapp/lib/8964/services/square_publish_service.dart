@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizenapp/log/app_log.dart';
 
 import 'package:citizenapp/8964/chain/square_chain_service.dart';
@@ -11,7 +11,6 @@ import 'package:citizenapp/8964/services/square_post_deletion_coordinator.dart';
 import 'package:citizenapp/8964/services/square_post_store.dart';
 import 'package:citizenapp/8964/services/square_post_sync_service.dart';
 import 'package:citizenapp/8964/services/square_upload_service.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
 
 class SquarePublishException implements Exception {
   const SquarePublishException(this.message);
@@ -38,7 +37,6 @@ class SquarePublishResult {
   final String? completionWarning;
 }
 
-typedef SquareChainSigner = Future<Uint8List> Function(Uint8List payload);
 typedef SquarePostRecoveryScheduler = void Function(SquareSession session);
 
 abstract class SquarePublishBalanceReader {
@@ -49,38 +47,44 @@ abstract class SquarePublishBalanceReader {
 }
 
 class SquareChainBalanceReader implements SquarePublishBalanceReader {
-  SquareChainBalanceReader({ChainRpc? chainRpc})
-      : _rpc = chainRpc ?? ChainRpc();
+  const SquareChainBalanceReader(this._chain);
 
-  final ChainRpc _rpc;
+  final CitizenChain _chain;
 
   @override
-  Future<double> fetchFreshFinalizedBalanceYuan(String accountId) {
-    return _rpc.fetchFinalizedBalance(accountId, forceFresh: true);
+  Future<double> fetchFreshFinalizedBalanceYuan(String accountId) async {
+    final balance = await _chain.getAccountBalance(accountId);
+    return balance.freeFen.toDouble() / 100;
   }
 
   @override
-  Future<BigInt> fetchMinSelfPayBalanceFen() =>
-      _rpc.fetchMinSelfPayBalanceFen();
+  Future<BigInt> fetchMinSelfPayBalanceFen() async {
+    final fees = await _chain.getFeeSnapshot();
+    return fees.minimumFeeFen + fees.existentialDepositFen;
+  }
 }
 
 class SquarePublishService {
   SquarePublishService({
-    SquareContentUploader? uploadService,
+    required SquareContentUploader uploadService,
+    required CitizenChain chain,
+    required CitizenTransactions transactions,
     SquarePostChainPublisher? chainService,
     SquarePublicationConfirmer? publicationConfirmer,
     SquarePostDeleteCoordinator? postDeletionCoordinator,
     SquarePublishBalanceReader? balanceReader,
     SquareLocalPostWriter? localPostWriter,
     SquarePostRecoveryScheduler? recoveryScheduler,
-  })  : _uploadService = uploadService ?? SquareUploadService(),
-        _chainService = chainService ?? SquareChainService(),
-        _publicationConfirmer = publicationConfirmer ?? SquareApiClient(),
-        _postDeletionCoordinator =
-            postDeletionCoordinator ?? SquarePostDeletionCoordinator(),
-        _balanceReader = balanceReader ?? SquareChainBalanceReader(),
-        _localPostWriter = localPostWriter ?? const SquarePostStore(),
-        _recoveryScheduler = recoveryScheduler ?? _scheduleDefaultLocalRecovery;
+  }) : _uploadService = uploadService,
+       _chainService =
+           chainService ??
+           SquareChainService(chain: chain, transactions: transactions),
+       _publicationConfirmer = publicationConfirmer ?? SquareApiClient(),
+       _postDeletionCoordinator =
+           postDeletionCoordinator ?? SquarePostDeletionCoordinator(),
+       _balanceReader = balanceReader ?? SquareChainBalanceReader(chain),
+       _localPostWriter = localPostWriter ?? const SquarePostStore(),
+       _recoveryScheduler = recoveryScheduler ?? _scheduleDefaultLocalRecovery;
 
   final SquareContentUploader _uploadService;
   final SquarePostChainPublisher _chainService;
@@ -105,12 +109,14 @@ class SquarePublishService {
     required String text,
     required List<SquareLocalMediaDraft> mediaDrafts,
     required SquareLoginSigner signLoginPayload,
-    required SquareChainSigner signChainPayload,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    )
+    externalSigning,
     String? title,
     List<Map<String, Object?>>? contentSections,
     String? replacePostId,
     void Function(SquarePublishStage stage)? onStage,
-    TxPoolWatchCallback? onWatchEvent,
   }) async {
     final trimmedText = text.trim();
     if (!identity.hasWallet || identity.ss58Address == null) {
@@ -126,8 +132,7 @@ class SquarePublishService {
     SquarePreparedContent? prepared;
     SquareUploadedContent? uploaded;
     SquareChainPublishedResult? chainResult;
-    var chainAuthorizationCompleted = false;
-    var chainDefinitivelyRejected = false;
+    var chainExecutionStarted = false;
     try {
       prepared = await _uploadService.preparePostContent(
         accountId: identity.accountId,
@@ -150,26 +155,19 @@ class SquarePublishService {
       onStage?.call(SquarePublishStage.checkingBalance);
       await _ensurePublishBalance(identity.accountId);
       onStage?.call(SquarePublishStage.submittingChain);
-      chainResult = await _chainService.publishPost(
-        fromSs58Address: identity.ss58Address!,
+      chainExecutionStarted = true;
+      final chainFuture = _chainService.publishPost(
         signerPublicKey: SquareChainService.hexDecode(identity.accountId),
         postId: prepared.postId,
         postType: postType,
         contentHashHex: prepared.contentHash,
         storageReceiptId: prepared.storageReceiptId,
-        sign: (payload) async {
-          final signature = await signChainPayload(payload);
-          chainAuthorizationCompleted = true;
-          return signature;
-        },
-        onWatchEvent: (event) {
-          if (event.isFailure) chainDefinitivelyRejected = true;
-          if (event.isIncluded) {
-            onStage?.call(SquarePublishStage.waitingInBlock);
-          }
-          onWatchEvent?.call(event);
-        },
+        externalSigning: externalSigning,
       );
+      // CitizenSDK 接管交易观察并只在 Runtime finalized 终态返回；App 不再
+      // 自建交易池监听，只把这段唯一等待期映射到现有发布进度 UI。
+      onStage?.call(SquarePublishStage.waitingInBlock);
+      chainResult = await chainFuture;
 
       onStage?.call(SquarePublishStage.confirmingPost);
       final confirmedPost = await _publicationConfirmer.confirmPublishedPost(
@@ -207,9 +205,7 @@ class SquarePublishService {
       // confirm 失败时 chainResult 已存在，保留云端正文供同一 finalized 事实重试确认。
       final chainFailureAllowsAbort =
           e is SquareChainPublishException && e.canAbortUpload;
-      final canAbortUpload = !chainAuthorizationCompleted ||
-          chainDefinitivelyRejected ||
-          chainFailureAllowsAbort;
+      final canAbortUpload = !chainExecutionStarted || chainFailureAllowsAbort;
       if (uploaded != null && chainResult == null && canAbortUpload) {
         try {
           await _publicationConfirmer.abortUpload(

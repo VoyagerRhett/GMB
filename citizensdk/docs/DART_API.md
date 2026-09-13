@@ -26,7 +26,7 @@ CI/Release 验证，当前源码注册不是正式发布或这些平台运行通
 iOS 模拟器变体可运行产品 ABI 与公开链能力，但没有 Secure Enclave；硬件金库、钱包和
 依赖它们的签名/交易能力必须通过 capability snapshot 报告不可用。
 
-共享 `citizen/sdk/core/v1` 的 62 方法 tuple 从未定义 mnemonic、password、DEK、child secret、
+共享 `citizen/sdk/core/v1` 的 65 方法 tuple 从未定义 mnemonic、password、DEK、child secret、
 private key、prepared/result/native handle 或 signed-extrinsic 位置。Android、Darwin、Linux
 以及第 8.2 步 Windows adapter 源码都遵守同一秘密不跨 Flutter 的合同。Linux 使用长度保持的标准消息 codec，线上仍是
 标准 string tag；内嵌 NUL 的合法备注不得被 GLib 的 NUL 结尾字符串表示截断。
@@ -64,7 +64,7 @@ lib/src/api/citizen_sdk.dart
 lib/src/api/citizen_sdk_error.dart
 lib/src/api/citizen_sdk_events.dart
 lib/src/api/citizen_transactions.dart
-lib/src/api/citizen_wallet.dart
+lib/src/api/citizen_sdk_wallet.dart
 lib/src/crypto/account_codec.dart
 lib/src/models/citizen_account.dart
 lib/src/models/citizen_capability.dart
@@ -160,6 +160,17 @@ final values = await sdk.chain.getStorageBatch(
   proven,
   applicationOwnedStorageKeys,
 );
+final keys = await sdk.chain.getStorageKeysPaged(
+  proven,
+  applicationOwnedPrefix,
+  startKey: previousLastKey,
+  limit: 1000,
+);
+final runtimeOutput = await sdk.chain.callRuntimeApi(
+  proven,
+  applicationOwnedRuntimeApiMethod,
+  applicationOwnedArguments,
+);
 final events = await sdk.chain.getSystemEvents(proven);
 final balance = await sdk.chain.getAccountBalance(accountId);
 final balances = await sdk.chain.getAccountBalances(accountIds);
@@ -183,6 +194,10 @@ final fee = await sdk.chain.getFeeSnapshot();
   返回并在进程内缓存，只是不写可重建的 SQLite runtime cache；Dart 不需要分支或重试。
 - storage key 由 App 自己根据业务协议生成。SDK 仅执行准确块读取、optional 值与资源边界校验，
   不知道广场、投票、立法、提案、治理、旅行、商家或其它业务含义。
+- storage keys page 只接受准确 finalized block、1..4 KiB prefix、可选排他 startKey 和
+  1..1000 limit，直接复用上游 `state_getKeysPaged`；SDK 不自动翻页、排序或解释前缀。
+- Runtime API 只接受准确 verified block、1..128 ASCII 的 `Trait_method` 与最大 1 MiB opaque
+  arguments，直接复用上游 `state_call` 并返回最大 64 MiB opaque bytes；业务方法名和解码属于 App。
 - `getSystemEvents` 只接受 finalized block，并只返回 `System.Events` opaque SCALE bytes；业务
   事件解码属于各 App。`exportState`/`importState` 只运输显式 smoldot 状态，不读取旧 App 数据，
   不承担迁移或兼容。
@@ -237,6 +252,11 @@ final created = await sdk.wallet.create(
 );
 final imported = await sdk.wallet.importWallet();
 final expanded = await sdk.wallet.addAccounts(const <int>[1, 2]);
+final applicationKey = await sdk.wallet.deriveApplicationKey(
+  accountId: accountId,
+  salt: applicationOwnedSalt32,
+  info: applicationOwnedDomain,
+);
 ```
 
 `create`/`importWallet`/`addAccounts` 只启动 SDK 自有的原生安全流程：Android 使用非导出、
@@ -246,6 +266,11 @@ handle、native handle、result handle 或 signed extrinsic 参数/返回槽位�
 只在备份确认前由 SDK 安全界面展示；取消会尝试 release 未提交的准备钱包。若该次释放失败，
 native session 仍拥有 handle，后续 `close` 会在 destroy 前重试并在仍失败时关闭失败，不能直接
 销毁或把该 handle 遗忘在 Core 外。
+
+公开钱包接口类型固定为 `CitizenSdkWallet`，避免与独立 CitizenWallet 产品重名；不保留旧类型、
+typedef、转发文件或兼容导出。`deriveApplicationKey` 只接受 SDK 热账户，金库认证后核对
+AccountId 再执行 HKDF-SHA256；salt 必须 32 字节、info 为 1..256 字节，输出恰好 32 字节且
+不持久化。冷账户由独立外部设备提供对应材料，SDK 不在本机伪造秘密。
 
 其它热钱包与统一账户操作：
 
@@ -377,7 +402,7 @@ MethodChannel  citizen/sdk/core/v1
 EventChannel   citizen/sdk/events/v1
 ```
 
-62 个方法的请求、响应、事件、错误及所有嵌套值都是固定长度、固定位置的
+65 个方法的请求、响应、事件、错误及所有嵌套值都是固定长度、固定位置的
 `List` tuple。任意层级的 `Map`、未知枚举、额外字段、跨 session 响应、request/event
 序号缺口或乱序都失败关闭，没有兼容旁路。该协议是 binding 内部实现细节，
 不是业务应用应直接调用的公共 API。
@@ -387,7 +412,7 @@ EventChannel   citizen/sdk/events/v1
 
 错误 tuple 固定为 `[1, sessionId?, requestSequence?, errorCode, failureStage, method,
 errorMessage?]`。`CitizenSdkException` 暴露同一 22 类 code、八阶段 stage、固定方法名和
-可选关联字段；未知 stage、非 62 项 method 或关联不一致均按 decode/integrity 失败关闭。
+可选关联字段；未知 stage、非 65 项 method 或关联不一致均按 decode/integrity 失败关闭。
 阶段仅供诊断和策略选择，不能用来推断链上执行成功。
 
 open 仅接受 `[1, modules]`。无会话 `verifySignature` 仅接受
@@ -399,11 +424,15 @@ session/sequence 为 null。它直接调用同一 Rust 纯验签，不创建 ses
 接收一项账户列表，返回一项既有余额 tuple 列表。五端绑定共同验证数量、逐项账户及同块约束，
 不另行查询、合并或计算余额。
 
-第 1.4 步新增的 12 个链方法与上面的 Dart facade 一一对应。块 tuple 固定为
+链方法与上面的 Dart facade 一一对应。块 tuple 固定为
 `[hash, numberDecimal, finality]`；同步状态、Header、Body、Runtime 和导出状态都使用各自的
 固定位置 tuple。storage key 必须为 1..4 KiB，batch 必须为 1..1024 项且 key 总量不超过
 1 MiB；Header digest 上限 1 MiB，Body/metadata 与 storage batch 响应聚合上限 64 MiB，
 状态 database 上限 256 KiB。任何层级类型、长度、顺序、finality 或 import 回执不一致均失败关闭。
+
+公开事件增加 `CitizenSdkFinalizedBlockChanged`，只携带同一 SDK chain monitor 已验证的
+finalized block tuple；它复用唯一 smoldot finalized 订阅，不建立轮询或第二订阅。业务 App
+收到事件后自行读取、解码和更新自己的业务状态。
 
 需要 session 的调用中，每个 Flutter engine 只有一个 EventChannel router；它在发出 native `open` 前先订阅，
 按 session 隔离有界暂存早到事件。`open` 响应携带该 session 的准确 event baseline，Dart

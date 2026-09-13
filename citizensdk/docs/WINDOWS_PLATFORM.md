@@ -4,7 +4,7 @@
 同一 ZXing-C++ 识别。系统相机隐私权限关闭、无设备或设备断开都明确失败，不启用其它识别器。
 链调用的签名窗口只展示 Rust 已验证审阅，确认后消费同一 Core 结果并复用现有设备授权。
 
-当前为 117 个 Core 函数、17 个 Host 函数、3 个 QR 图像函数和五端统一 62 个 Flutter 方法。
+当前为 121 个 Core 函数、17 个 Host 函数、3 个 QR 图像函数和五端统一 65 个 Flutter 方法。
 Config.modules 是唯一模块真源，旧 C Host 配置 enable_wallet 的布局/布尔含义保持。
 先由 Rust 验证模块，再按需创建 public/secure store 与 Vault；未选 chain 不加载链资产或创建
 链数据库，未选 history 不初始化历史。signing-only 不开放钱包管理/UI，只使用同宿主既有
@@ -125,7 +125,7 @@ MSVC/CTest、全量 PE 导出、UI、跨进程存储与真实 TPM 结果必须�
 ## Flutter 绑定与应用身份（第 8.2 步）
 
 依赖为 `CitizenSdk → 标准双通道 → Windows adapter → 已安装 Host/Core`。官方
-StandardMethodCodec 的字符串保留精确长度，不引入 Linux GLib 的专用内部表示。62 个
+StandardMethodCodec 的字符串保留精确长度，不引入 Linux GLib 的专用内部表示。65 个
 方法与其它四份绑定按独立金标对齐，不增加 Windows 专用 Dart 参数或业务方法。
 
 open 只接受 `[1, modules]`；无会话 verifySignature 只接受

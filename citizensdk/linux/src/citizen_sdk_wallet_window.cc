@@ -7,6 +7,7 @@
 #include <sstream>
 #include <utility>
 #include <memory>
+#include <vector>
 #include <unistd.h>
 #include "citizen_sdk_host_record.hpp"
 #include "citizen_sdk_input_limits.hpp"
@@ -79,13 +80,29 @@ WalletWindow::WalletWindow(void *parent, const ValidatedWalletRequest &request,
   require(ui_context_ != nullptr, CITIZENSDK_ERROR_UNAVAILABLE,
           "GTK thread-default context is unavailable for CitizenSDK wallet UI");
   GtkWidget *dialog = gtk_dialog_new_with_buttons(
-      "CitizenSDK 钱包", static_cast<GtkWindow *>(parent),
+      request.account_id ? "查看私钥" :
+          request.kind == CITIZENSDK_WALLET_FLOW_CREATE ? "创建钱包" :
+          request.kind == CITIZENSDK_WALLET_FLOW_IMPORT ? "输入助记词" : "添加账户",
+      static_cast<GtkWindow *>(parent),
       static_cast<GtkDialogFlags>(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
       "取消", GTK_RESPONSE_CANCEL, nullptr);
   window_ = dialog;
   gtk_window_set_default_size(GTK_WINDOW(dialog), 560, 560);
   gtk_window_set_resizable(GTK_WINDOW(dialog), TRUE);
   GtkWidget *area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+  std::string host_application = "当前应用";
+  if (parent != nullptr) {
+    const char *label = gtk_window_get_title(GTK_WINDOW(parent));
+    if (label != nullptr && *label != '\0') {
+      host_application = label;
+      if (host_application.size() < 3 ||
+          host_application.compare(host_application.size() - 3, 3, "App") != 0)
+        host_application += "App";
+    }
+  }
+  GdkRGBA scaffold{};
+  gdk_rgba_parse(&scaffold, "#f7f9fc");
+  gtk_widget_override_background_color(area, GTK_STATE_FLAG_NORMAL, &scaffold);
   GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
   gtk_container_set_border_width(GTK_CONTAINER(box), 20);
   gtk_container_add(GTK_CONTAINER(area), box);
@@ -95,11 +112,10 @@ WalletWindow::WalletWindow(void *parent, const ValidatedWalletRequest &request,
   gtk_box_pack_start(GTK_BOX(box), static_cast<GtkWidget *>(status_), FALSE, FALSE, 0);
 
   if (private_key_mode_) {
-    gtk_window_set_title(GTK_WINDOW(dialog), "CitizenSDK 账户私钥安全查看");
+    gtk_window_set_title(GTK_WINDOW(dialog), "查看私钥");
     gtk_label_set_text(GTK_LABEL(status_),
-        "私钥可控制此账户全部资产。请确认周围无人、没有录屏。"
-        "仅在 SDK 安全窗口短时查看；不可选择、复制或导出。"
-        "设备认证后才会显示，关闭、隐藏或离开查看窗口即永久清除。");
+        "私钥泄露将导致该账户资产被盗（仅该账户，不影响本钱包其他账户）。\n\n"
+        "确认要查看吗？");
     // 账户标识是公开审阅信息，显示值与传给 Core 的原始 AccountId 一致。
     std::string account_text = "账户：0x";
     constexpr char account_digits[] = "0123456789abcdef";
@@ -121,7 +137,7 @@ WalletWindow::WalletWindow(void *parent, const ValidatedWalletRequest &request,
       if (!self->private_key_visible_ || self->private_key_text_.size() != 67) return FALSE;
       // 私钥不进入 GtkLabel/GtkTextBuffer/可访问文本；只从可擦除缓冲绘制字形。
       cairo_select_font_face(cr, "monospace", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-      cairo_set_font_size(cr, 16.0);
+      cairo_set_font_size(cr, 13.0);
       for (std::size_t row = 0; row < 2; ++row) {
         const std::size_t begin = row == 0 ? 0 : 34;
         const std::size_t count = row == 0 ? 34 : 32;
@@ -132,7 +148,11 @@ WalletWindow::WalletWindow(void *parent, const ValidatedWalletRequest &request,
       }
       return FALSE;
     })), this);
-    action_button_ = gtk_button_new_with_label("我已了解风险，进行设备认证并查看");
+    GtkWidget *private_note = gtk_label_new(
+        "请手抄备份，不支持复制；导出即等于该账户控制权");
+    gtk_label_set_xalign(GTK_LABEL(private_note), 0.0F);
+    gtk_box_pack_start(GTK_BOX(box), private_note, FALSE, FALSE, 0);
+    action_button_ = gtk_button_new_with_label("查看");
     gtk_box_pack_start(GTK_BOX(box), static_cast<GtkWidget *>(action_button_), FALSE, FALSE, 0);
     g_signal_connect(dialog, "focus-out-event", G_CALLBACK((+[](GtkWidget *, GdkEventFocus *,
                                                                gpointer data) -> gboolean {
@@ -174,16 +194,23 @@ WalletWindow::WalletWindow(void *parent, const ValidatedWalletRequest &request,
   gtk_box_pack_start(GTK_BOX(box), static_cast<GtkWidget *>(suggestion_apply_), FALSE, FALSE, 0);
 
   word_count_ = gtk_combo_box_text_new();
-  for (const char *count : {"12", "18", "24"}) {
+  const std::vector<const char *> counts = request.kind == CITIZENSDK_WALLET_FLOW_CREATE
+      ? std::vector<const char *>{"12", "24"}
+      : std::vector<const char *>{"12", "18", "24"};
+  for (const char *count : counts) {
     gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(word_count_), count, count);
   }
   const std::string initial_words = std::to_string(
-      request.word_count == 0 ? CITIZENSDK_WALLET_WORDS_12 : request.word_count);
+      request.kind == CITIZENSDK_WALLET_FLOW_CREATE &&
+              request.word_count == CITIZENSDK_WALLET_WORDS_18
+          ? CITIZENSDK_WALLET_WORDS_12
+          : request.word_count == 0 ? CITIZENSDK_WALLET_WORDS_12 : request.word_count);
   require(gtk_combo_box_set_active_id(GTK_COMBO_BOX(word_count_),
                                       initial_words.c_str()) != FALSE,
           CITIZENSDK_ERROR_INVALID_ARGUMENT,
           "CitizenSDK wallet word count is unsupported");
-  gtk_box_pack_start(GTK_BOX(box), gtk_label_new("助记词数量"), FALSE, FALSE, 0);
+  GtkWidget *word_count_label = gtk_label_new("助记词长度（12 个推荐；24 个安全性更高）");
+  gtk_box_pack_start(GTK_BOX(box), word_count_label, FALSE, FALSE, 0);
   gtk_box_pack_start(GTK_BOX(box), static_cast<GtkWidget *>(word_count_), FALSE, FALSE, 0);
 
   password_ = gtk_entry_new();
@@ -212,15 +239,19 @@ WalletWindow::WalletWindow(void *parent, const ValidatedWalletRequest &request,
   if (request.kind == CITIZENSDK_WALLET_FLOW_CREATE) {
     gtk_widget_hide(scroll);
     gtk_widget_hide(static_cast<GtkWidget *>(backup_));
-    gtk_button_set_label(GTK_BUTTON(action_button_), "生成钱包");
-    gtk_label_set_text(GTK_LABEL(status_),
-                       "助记词只在本设备生成。显示后必须离线备份。\n设备 TPM 金库口令将在提交时由 CitizenSDK 单独询问。");
+    gtk_button_set_label(GTK_BUTTON(action_button_), "创建钱包");
+    const std::string intro = "钱包账户是 " + host_application +
+        " 唯一的账户，请务必妥善保存助记词和钱包密码（如设置），若丢失或遗忘将永久无法找回。";
+    gtk_label_set_text(GTK_LABEL(status_), intro.c_str());
   } else {
+    gtk_widget_hide(word_count_label);
+    gtk_widget_hide(static_cast<GtkWidget *>(word_count_));
     gtk_widget_hide(static_cast<GtkWidget *>(backup_));
     gtk_button_set_label(GTK_BUTTON(action_button_),
-                         request.kind == CITIZENSDK_WALLET_FLOW_IMPORT ? "导入钱包" : "添加账户");
+                         request.kind == CITIZENSDK_WALLET_FLOW_IMPORT ? "确认导入" : "确认添加");
     gtk_label_set_text(GTK_LABEL(status_),
-                       "助记词与钱包密码只在本机 CitizenSDK 原生界面和 Rust Core 内使用。");
+        request.kind == CITIZENSDK_WALLET_FLOW_IMPORT ? "" :
+        "无根设备不保存助记词或密码，追加账户需重新录入两者校验归属。");
   }
   if (request.kind != CITIZENSDK_WALLET_FLOW_ADD_ACCOUNTS) {
     gtk_widget_hide(static_cast<GtkWidget *>(next_account_));
@@ -249,13 +280,19 @@ WalletWindow::WalletWindow(void *parent, const ValidatedWalletRequest &request,
             if (!whitespace && separated) ++word_total;
             separated = whitespace;
           }
+          if (self->kind_ != CITIZENSDK_WALLET_FLOW_CREATE &&
+              (word_total == 12 || word_total == 18 || word_total == 24)) {
+            const std::string inferred = std::to_string(word_total);
+            gtk_combo_box_set_active_id(
+                GTK_COMBO_BOX(self->word_count_), inferred.c_str());
+          }
           const citizensdk_wallet_word_count_t selected = self->word_count();
           const bool checksum = word_total == selected && text.value != nullptr &&
               citizensdk_validate_wallet_mnemonic(
                   {reinterpret_cast<const uint8_t *>(text.value), text.size},
                   selected) == CITIZENSDK_OK;
-          const std::string state = "当前 " + std::to_string(word_total) + " / 选择 " +
-              std::to_string(selected) + (checksum ? "；校验和有效" : "；校验和尚未通过");
+          const std::string state = std::to_string(word_total) + " 个助记词" +
+              (checksum ? " · 校验通过" : "");
           gtk_label_set_text(GTK_LABEL(self->mnemonic_state_), state.c_str());
           const std::string candidates =
               text.value == nullptr || has_selection ||
@@ -448,17 +485,20 @@ void WalletWindow::show_prepared_mnemonic(const SensitiveBuffer &mnemonic) {
   gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(mnemonic_), FALSE);
   gtk_widget_show(static_cast<GtkWidget *>(mnemonic_scroll_));
   gtk_widget_show(static_cast<GtkWidget *>(mnemonic_state_));
-  gtk_widget_show(static_cast<GtkWidget *>(backup_));
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(backup_), TRUE);
+  gtk_widget_hide(static_cast<GtkWidget *>(backup_));
   gtk_widget_hide(static_cast<GtkWidget *>(password_));
   gtk_widget_hide(static_cast<GtkWidget *>(word_count_));
   gtk_widget_hide(static_cast<GtkWidget *>(suggestions_));
   gtk_widget_hide(static_cast<GtkWidget *>(suggestion_apply_));
   gtk_widget_hide(static_cast<GtkWidget *>(next_account_));
   gtk_widget_hide(static_cast<GtkWidget *>(account_indices_));
-  gtk_button_set_label(GTK_BUTTON(action_button_), "确认备份并创建");
+  gtk_button_set_label(GTK_BUTTON(action_button_), "我已备份");
   gtk_widget_set_sensitive(static_cast<GtkWidget *>(action_button_), TRUE);
   gtk_label_set_text(GTK_LABEL(status_),
-      "请断网抄写并在离线安全位置核对助记词。热钱包不保存助记词，关闭后无法再次显示。若使用了非空钱包密码，还必须单独记住；不同密码会得到不同账户。设备 TPM 认证是独立的金库保护，不是钱包密码。");
+      "公民不保存助记词，关闭本弹窗后将无法再次显示。\n"
+      "请立即手抄备份，或在「公民钱包」中妥善保管——这是恢复钱包与追加其他账户的唯一凭证。"
+      "设置过钱包密码时，还必须单独备份密码。\n不支持复制，不支持截屏。");
 #else
   (void)mnemonic;
 #endif
@@ -652,9 +692,9 @@ void WalletWindow::show_private_key(const SensitiveBuffer &private_key) {
   private_key_text_ = std::move(text);
   private_key_visible_ = true;
   gtk_widget_queue_draw(static_cast<GtkWidget *>(private_key_area_));
-  gtk_button_set_label(GTK_BUTTON(action_button_), "清除并关闭");
+  gtk_button_set_label(GTK_BUTTON(action_button_), "关闭");
   gtk_widget_set_sensitive(static_cast<GtkWidget *>(action_button_), TRUE);
-  gtk_label_set_text(GTK_LABEL(status_), "私钥仅短时显示于此窗口。不可复制、选择或导出；离开窗口即清除。");
+  gtk_label_set_text(GTK_LABEL(status_), "请手抄备份，不支持复制；导出即等于该账户控制权");
 #else
   (void)private_key;
   throw HostError(CITIZENSDK_ERROR_UNSUPPORTED, "安全查看 UI 未编译");

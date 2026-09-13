@@ -13,18 +13,21 @@ internal enum CitizenSdkFlutterCodec {
     static let methodChannel = "citizen/sdk/core/v1"
     static let eventChannel = "citizen/sdk/events/v1"
     static let version: Int64 = 1
-    static let eventTypes: Set<String> = ["lifecycleChanged", "capabilitiesChanged", "historyChanged"]
+    static let eventTypes: Set<String> = [
+        "lifecycleChanged", "capabilitiesChanged", "historyChanged", "finalizedBlockChanged",
+    ]
     static let methods: Set<String> = [
         "open", "start", "stop", "close", "getCapabilities", "getFinalizedHead",
         "getSyncStatus", "getBestHead", "getFinalizedBlockAt", "resolveFinalizedBlock",
         "getBlockHeader", "getBlockBody", "getRuntimeContext", "getStorage", "getStorageBatch",
+        "getStorageKeysPaged", "callRuntimeApi",
         "getSystemEvents", "exportState", "importState",
         "getGenesisHash", "getAccountBalance", "getAccountBalances", "getAccountNonce", "getFeeSnapshot", "getWalletProfile", "viewAccountPrivateKey",
         "getWalletState", "importColdAccountId", "importColdAccountSs58",
         "reorderWalletAccountsWithoutDefaultChange", "renameAccount", "deleteAccount",
         "createWallet", "importWallet", "addWalletAccounts", "setActiveWalletAccount",
         "renameWalletAccount", "deleteWalletAccount", "deleteWallet", "reconcileWalletCleanup",
-        "signWalletPayload", "beginSigning", "consumeExternalSignature", "cancelSigning",
+        "signWalletPayload", "deriveApplicationKey", "beginSigning", "consumeExternalSignature", "cancelSigning",
         "beginDefaultAccountChange", "consumeDefaultAccountChange",
         "verifySignature", "prepareTransaction", "cancelPreparedTransaction",
         "executePreparedTransaction", "consumePreparedTransactionQrResponse",
@@ -43,6 +46,10 @@ internal enum CitizenSdkFlutterCodec {
         case block(method: String, session: String, sequence: Int64, block: CitizenBlockRef)
         case storage(session: String, sequence: Int64, block: CitizenBlockRef, key: Data)
         case storageBatch(session: String, sequence: Int64, block: CitizenBlockRef, keys: [Data])
+        case storageKeysPage(session: String, sequence: Int64, block: CitizenBlockRef,
+                             prefix: Data, startKey: Data?, limit: UInt32)
+        case runtimeAPI(session: String, sequence: Int64, block: CitizenBlockRef,
+                        method: String, arguments: Data)
         case importState(session: String, sequence: Int64, state: CitizenChainState)
         case create(session: String, sequence: Int64, wordCount: UInt32)
         case addAccounts(session: String, sequence: Int64, indices: [UInt32])
@@ -50,6 +57,8 @@ internal enum CitizenSdkFlutterCodec {
         case coldSS58(session: String, sequence: Int64, address: String, name: String)
         case reorder(session: String, sequence: Int64, expectedRevision: UInt64, accountIDs: [Data])
         case sign(session: String, sequence: Int64, accountID: Data, payload: Data)
+        case deriveApplicationKey(session: String, sequence: Int64, accountID: Data,
+                                  salt: Data, info: Data)
         case beginSigning(session: String, sequence: Int64, intent: CitizenSigningIntent)
         case externalSignature(method: String, session: String, sequence: Int64,
                                signingSessionID: String, response: String)
@@ -80,6 +89,9 @@ internal enum CitizenSdkFlutterCodec {
                  let .qr(_, value, _, _), let .blockNumber(value, _, _),
                  let .resolveBlock(value, _, _, _), let .block(_, value, _, _),
                  let .storage(value, _, _, _), let .storageBatch(value, _, _, _),
+                 let .storageKeysPage(value, _, _, _, _, _),
+                 let .runtimeAPI(value, _, _, _, _),
+                 let .deriveApplicationKey(value, _, _, _, _),
                  let .importState(value, _, _): return value
             }
         }
@@ -98,6 +110,9 @@ internal enum CitizenSdkFlutterCodec {
                  let .qr(_, _, value, _), let .blockNumber(_, value, _),
                  let .resolveBlock(_, value, _, _), let .block(_, _, value, _),
                  let .storage(_, value, _, _), let .storageBatch(_, value, _, _),
+                 let .storageKeysPage(_, value, _, _, _, _),
+                 let .runtimeAPI(_, value, _, _, _),
+                 let .deriveApplicationKey(_, value, _, _, _),
                  let .importState(_, value, _): return value
             }
         }
@@ -115,12 +130,15 @@ internal enum CitizenSdkFlutterCodec {
             case .resolveBlock: return "resolveFinalizedBlock"
             case .storage: return "getStorage"
             case .storageBatch: return "getStorageBatch"
+            case .storageKeysPage: return "getStorageKeysPaged"
+            case .runtimeAPI: return "callRuntimeApi"
             case .importState: return "importState"
             case .create: return "createWallet"
             case .addAccounts: return "addWalletAccounts"
             case .coldSS58: return "importColdAccountSs58"
             case .reorder: return "reorderWalletAccountsWithoutDefaultChange"
             case .sign: return "signWalletPayload"
+            case .deriveApplicationKey: return "deriveApplicationKey"
             case .beginSigning: return "beginSigning"
             case .cancelSigning: return "cancelSigning"
             case .beginDefaultChange: return "beginDefaultAccountChange"
@@ -213,6 +231,40 @@ internal enum CitizenSdkFlutterCodec {
                 }
                 return .storageBatch(session: session, sequence: sequence,
                                      block: try blockRef(tuple[3]), keys: keys)
+            case "getStorageKeysPaged":
+                try length(7)
+                let block = try blockRef(tuple[3])
+                guard block.finality == .finalized else {
+                    throw failure(.invalidArgument, "storage keys page requires finalized block")
+                }
+                let prefix = try bytes(tuple[4], maximum: 4 * 1_024)
+                guard !prefix.isEmpty else {
+                    throw failure(.invalidArgument, "storage key prefix is empty")
+                }
+                let start = tuple[5] == nil ? nil : try bytes(tuple[5], maximum: 4 * 1_024)
+                guard start == nil || !start!.isEmpty else {
+                    throw failure(.invalidArgument, "storage start key is empty")
+                }
+                let limit = try integer(tuple[6], "storage keys page limit")
+                guard (1...1_000).contains(limit) else {
+                    throw failure(.invalidArgument, "storage keys page limit must be 1...1000")
+                }
+                return .storageKeysPage(
+                    session: session, sequence: sequence, block: block,
+                    prefix: prefix, startKey: start, limit: UInt32(limit))
+            case "callRuntimeApi":
+                try length(6)
+                let methodName = try string(tuple[4], "runtime API method", 1...128)
+                guard methodName.range(
+                    of: #"^[A-Za-z][A-Za-z0-9_]*_[A-Za-z0-9_]+$"#,
+                    options: .regularExpression
+                ) != nil else {
+                    throw failure(.invalidArgument, "runtime API method is invalid")
+                }
+                return .runtimeAPI(
+                    session: session, sequence: sequence, block: try blockRef(tuple[3]),
+                    method: methodName,
+                    arguments: try bytes(tuple[5], maximum: 1_024 * 1_024))
             case "importState":
                 try length(6)
                 let format = try integer(tuple[3], "formatVersion"), finalized = try blockRef(tuple[4])
@@ -280,6 +332,16 @@ internal enum CitizenSdkFlutterCodec {
                 try length(5)
                 return .sign(session: session, sequence: sequence, accountID: try hash32(tuple[3]),
                              payload: try bytes(tuple[4], maximum: 16 * 1_024 * 1_024))
+            case "deriveApplicationKey":
+                try length(6)
+                let salt = try bytes(tuple[4], maximum: 32)
+                let info = try bytes(tuple[5], maximum: 256)
+                guard salt.count == 32, !info.isEmpty else {
+                    throw failure(.invalidArgument, "application key salt/info is invalid")
+                }
+                return .deriveApplicationKey(
+                    session: session, sequence: sequence, accountID: try hash32(tuple[3]),
+                    salt: salt, info: info)
             case "beginSigning":
                 try length(10)
                 let payload = try bytes(tuple[4], maximum: 16 * 1_024 * 1_024)
@@ -456,7 +518,8 @@ internal enum CitizenSdkFlutterCodec {
     }
     static func event(session: String, sequence: Int64, type: String, payload: [Any?]) throws -> [Any?] {
         guard eventTypes.contains(type), sequence > 0,
-              type != "historyChanged" || payload.isEmpty else {
+              (type != "historyChanged" || payload.isEmpty),
+              (type != "finalizedBlockChanged" || payload.count == 1) else {
             throw CitizenSDKError(.integrity, "Unsupported CitizenSDK event type")
         }
         return [version, session, sequence, type, payload]

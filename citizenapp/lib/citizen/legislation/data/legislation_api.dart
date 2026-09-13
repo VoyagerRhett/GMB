@@ -6,21 +6,17 @@
 
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:polkadart/polkadart.dart' show Hasher;
 
 import 'package:citizenapp/citizen/legislation/data/law_models.dart';
 import 'package:citizenapp/citizen/legislation/data/legislation_codec.dart';
 import 'package:citizenapp/isar/wallet_isar.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/rpc/runtime_api.dart';
 
 class LegislationApi {
-  LegislationApi({RuntimeApi? runtimeApi, ChainRpc? chainRpc})
-      : _api = runtimeApi ?? RuntimeApi(),
-        _chainRpc = chainRpc ?? ChainRpc();
+  LegislationApi({required CitizenChain chain}) : _chain = chain;
 
-  final RuntimeApi _api;
-  final ChainRpc _chainRpc;
+  final CitizenChain _chain;
 
   // 会话内内存缓存(法律体量大、改动稀;同实例复用避免重拉,尤其宪法 219KB)。
   // 本机持久快照只写 WalletLegislationSnapshotEntity；链上 finalized 仍是真源。
@@ -31,23 +27,25 @@ class LegislationApi {
 
   /// 某层级+行政区范围下的全部 law_id(`list_laws(tier, scope_code)`)。
   Future<List<int>> listLaws(LawTier tier, int scopeCode) async {
-    final raw = await _api.call(
+    final finalized = await _chain.getFinalizedHead();
+    final raw = await _chain.callRuntimeApi(
+      finalized,
       'LegislationApi_list_laws',
       Uint8List.fromList([tier.index, ..._u32(scopeCode)]),
     );
-    return raw == null ? const [] : decodeLawIds(raw);
+    return decodeLawIds(raw);
   }
 
   /// 法律主记录(`law(law_id)`,不存在返回 null)。
   Future<Law?> law(int lawId, {bool forceRefresh = false}) async {
     final cached = _lawCache[lawId];
     if (!forceRefresh && cached != null) return cached;
-    final raw = await _chainRpc.fetchStorage(
-      '0x${_hex(_storageMapKey(
+    final raw = await _readStorage(
+      _storageMapKey(
         'LegislationYuan',
         'Laws',
         Uint8List.fromList(_u64(lawId)),
-      ))}',
+      ),
     );
     if (raw == null) return null;
     final law = decodeLaw(raw);
@@ -65,13 +63,13 @@ class LegislationApi {
     final key = '$lawId:$version';
     final cached = _versionCache[key];
     if (!forceRefresh && cached != null) return cached;
-    final raw = await _chainRpc.fetchStorage(
-      '0x${_hex(_storageDoubleMapKey(
+    final raw = await _readStorage(
+      _storageDoubleMapKey(
         'LegislationYuan',
         'LawVersions',
         Uint8List.fromList(_u64(lawId)),
         Uint8List.fromList(_u32(version)),
-      ))}',
+      ),
     );
     if (raw == null) return null;
     final v = decodeLawVersion(raw);
@@ -89,13 +87,13 @@ class LegislationApi {
     final key = '$lawId:$version';
     final cached = _versionLabelCache[key];
     if (!forceRefresh && cached != null) return cached;
-    final raw = await _chainRpc.fetchStorage(
-      '0x${_hex(_storageDoubleMapKey(
+    final raw = await _readStorage(
+      _storageDoubleMapKey(
         'LegislationYuan',
         'LawVersionLabels',
         Uint8List.fromList(_u64(lawId)),
         Uint8List.fromList(_u32(version)),
-      ))}',
+      ),
     );
     if (raw == null) return null;
     final label = decodeLawVersionLabel(raw);
@@ -108,9 +106,11 @@ class LegislationApi {
   Future<ImmutableManifest?> immutableManifest(
       {bool forceRefresh = false}) async {
     if (!forceRefresh && _manifestCache != null) return _manifestCache;
-    final key =
-        '0x${_hex(_storageValueKey('LegislationYuan', 'ConstitutionImmutableManifest'))}';
-    final raw = await _chainRpc.fetchStorage(key);
+    final key = _storageValueKey(
+      'LegislationYuan',
+      'ConstitutionImmutableManifest',
+    );
+    final raw = await _readStorage(key);
     if (raw == null) return null;
     await _writeRaw(_manifestKey, raw);
     return _manifestCache = decodeImmutableManifest(raw);
@@ -172,6 +172,11 @@ class LegislationApi {
     return Uint8List.fromList([...p, ...s]);
   }
 
+  Future<Uint8List?> _readStorage(Uint8List key) async {
+    final finalized = await _chain.getFinalizedHead();
+    return _chain.getStorage(finalized, key);
+  }
+
   Uint8List _storageMapKey(String pallet, String item, Uint8List keyData) {
     final p = Hasher.twoxx128.hashString(pallet);
     final s = Hasher.twoxx128.hashString(item);
@@ -220,7 +225,7 @@ class LegislationApi {
 
   Future<Uint8List?> _readRaw(String key) async {
     try {
-      return WalletIsar.instance.read((isar) async {
+      return await WalletIsar.instance.read((isar) async {
         final row =
             await isar.walletLegislationSnapshotEntitys.getByStateKey(key);
         final value = row?.rawHex;

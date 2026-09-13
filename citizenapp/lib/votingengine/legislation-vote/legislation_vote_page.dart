@@ -1,18 +1,18 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
 import 'package:citizenapp/qr/qr_protocols.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/signer/qr_signer.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/votingengine/internal-vote/proposal_vote_widgets.dart';
 import 'package:citizenapp/votingengine/legislation-vote/legislation_vote_query_service.dart';
 import 'package:citizenapp/votingengine/legislation-vote/legislation_vote_service.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 立法提案表决页(LegislationVote sub-pallet)。
@@ -33,7 +33,7 @@ class LegislationVotePage extends StatefulWidget {
   final int proposalId;
 
   /// 当前公民登录态下可用于签名的管理员钱包(由上层注入)。
-  final List<WalletProfile> adminWallets;
+  final List<CitizenWalletStateAccount> adminWallets;
 
   final LegislationVoteService? voteService;
   final LegislationVoteQueryService? queryService;
@@ -43,10 +43,9 @@ class LegislationVotePage extends StatefulWidget {
 }
 
 class _LegislationVotePageState extends State<LegislationVotePage> {
-  late final LegislationVoteService _vote =
-      widget.voteService ?? LegislationVoteService();
-  late final LegislationVoteQueryService _query =
-      widget.queryService ?? LegislationVoteQueryService();
+  late final LegislationVoteService _vote;
+  late final LegislationVoteQueryService _query;
+  bool _dependenciesReady = false;
 
   LegProposalState? _state;
   LegRepresentativeMeta? _representativeMeta;
@@ -54,8 +53,8 @@ class _LegislationVotePageState extends State<LegislationVotePage> {
   ({int yes, int no}) _representativeTally = (yes: 0, no: 0);
   ({int yes, int no}) _referendumTally = (yes: 0, no: 0);
 
-  List<WalletProfile> _votableWallets = const [];
-  WalletProfile? _selectedWallet;
+  List<CitizenWalletStateAccount> _votableWallets = const [];
+  CitizenWalletStateAccount? _selectedWallet;
   bool _loading = true;
   bool _submitting = false;
   String? _error;
@@ -63,6 +62,28 @@ class _LegislationVotePageState extends State<LegislationVotePage> {
   @override
   void initState() {
     super.initState();
+    if (widget.voteService != null && widget.queryService != null) {
+      _vote = widget.voteService!;
+      _query = widget.queryService!;
+      _dependenciesReady = true;
+      _load();
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    final sdk = context.read<CitizenSdk>();
+    _vote =
+        widget.voteService ??
+        LegislationVoteService(
+          chain: sdk.chain,
+          transactions: sdk.transactions,
+        );
+    _query =
+        widget.queryService ?? LegislationVoteQueryService(chain: sdk.chain);
+    _dependenciesReady = true;
     _load();
   }
 
@@ -70,20 +91,24 @@ class _LegislationVotePageState extends State<LegislationVotePage> {
     if (showSpinner && mounted) setState(() => _loading = true);
     try {
       final state = await _query.fetchProposalState(widget.proposalId);
-      final representativeMeta =
-          await _query.fetchRepresentativeMeta(widget.proposalId);
-      final legislationMeta =
-          await _query.fetchLegislationMeta(widget.proposalId);
+      final representativeMeta = await _query.fetchRepresentativeMeta(
+        widget.proposalId,
+      );
+      final legislationMeta = await _query.fetchLegislationMeta(
+        widget.proposalId,
+      );
       final representativeTally = representativeMeta == null
           ? (yes: 0, no: 0)
           : await _query.fetchRepresentativeTally(
-              widget.proposalId, representativeMeta.currentBody);
+              widget.proposalId,
+              representativeMeta.currentBody,
+            );
       final refTally = representativeMeta?.rule == 2
           ? await _query.fetchReferendumTally(widget.proposalId)
           : (yes: 0, no: 0);
 
       // 代表机构阶段按 body_index 检查席位票据，其余阶段交由链端校验身份。
-      final votable = <WalletProfile>[];
+      final votable = <CitizenWalletStateAccount>[];
       if (state?.stage == LegStage.representative &&
           representativeMeta != null) {
         final body = representativeMeta.bodies[representativeMeta.currentBody];
@@ -136,60 +161,29 @@ class _LegislationVotePageState extends State<LegislationVotePage> {
     setState(() => _submitting = true);
     try {
       final publicKeyBytes = _hexDecode(wallet.accountId);
-      final balance = await ChainRpc().fetchFinalizedBalance(wallet.accountId);
-      if (balance <= 0) {
+      final balance = await context.read<CitizenSdk>().chain.getAccountBalance(
+        wallet.accountId,
+      );
+      if (balance.freeFen <= BigInt.zero) {
         throw StateError('当前钱包余额不足，无法支付链上手续费');
-      }
-
-      WalletManager? hot;
-      if (wallet.requiresHotSign) {
-        hot = WalletManager();
-      }
-      Future<Uint8List> signCallback(Uint8List payload) async {
-        if (hot != null) {
-          return hot.signWithWallet(wallet.walletIndex, payload);
-        }
-        final qrSigner = QrSigner();
-        final request = qrSigner.buildRequest(
-          requestId: QrSigner.generateRequestId(prefix: 'leg-'),
-          signerPublicKey: wallet.accountId,
-          payloadHex: '0x${_toHex(payload)}',
-          action: _qrAction(stage),
-        );
-        final requestJson = qrSigner.encodeRequest(request);
-        if (!mounted) throw Exception('页面已关闭');
-        final response = await Navigator.push<SignResponseEnvelope>(
-          context,
-          MaterialPageRoute(
-            builder: (_) => QrSignSessionPage(
-              request: request,
-              requestJson: requestJson,
-              expectedSignerPublicKey: wallet.accountId,
-            ),
-          ),
-        );
-        if (response == null) throw Exception('签名已取消');
-        return Uint8List.fromList(_hexDecode(response.body.signatureHex));
       }
 
       await _dispatch(
         stage: stage,
         approve: approve,
-        wallet: wallet,
         publicKeyBytes: publicKeyBytes,
-        sign: signCallback,
       );
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('提交成功')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('提交成功')));
       await _load(showSpinner: false);
     } on Object catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('提交失败：$e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('提交失败：$e')));
       }
     } finally {
       if (mounted) setState(() => _submitting = false);
@@ -199,16 +193,19 @@ class _LegislationVotePageState extends State<LegislationVotePage> {
   Future<void> _dispatch({
     required int stage,
     required bool approve,
-    required WalletProfile wallet,
     required Uint8List publicKeyBytes,
-    required Future<Uint8List> Function(Uint8List) sign,
   }) {
     final common = (
       proposalId: widget.proposalId,
       approve: approve,
-      fromSs58Address: wallet.ss58Address,
       signerPublicKey: Uint8List.fromList(publicKeyBytes),
-      sign: sign,
+    );
+    Future<String?> externalSigning(
+      CitizenTransactionExternalSigningPending pending,
+    ) => showCitizenSdkQrResponse(
+      context,
+      request: pending.qrRequest,
+      expiresAt: BigInt.from(pending.expiresAt.millisecondsSinceEpoch ~/ 1000),
     );
     switch (stage) {
       case LegStage.representative:
@@ -220,33 +217,29 @@ class _LegislationVotePageState extends State<LegislationVotePage> {
           proposalId: common.proposalId,
           voterRoleCode: meta.bodies[meta.currentBody].roleCode,
           approve: common.approve,
-          fromSs58Address: common.fromSs58Address,
           signerPublicKey: common.signerPublicKey,
-          sign: common.sign,
+          externalSigning: externalSigning,
         );
       case LegStage.sign:
         return _vote.executiveSign(
           proposalId: common.proposalId,
           approve: common.approve,
-          fromSs58Address: common.fromSs58Address,
           signerPublicKey: common.signerPublicKey,
-          sign: common.sign,
+          externalSigning: externalSigning,
         );
       case LegStage.override_:
         return _vote.overrideSign(
           proposalId: common.proposalId,
           approve: common.approve,
-          fromSs58Address: common.fromSs58Address,
           signerPublicKey: common.signerPublicKey,
-          sign: common.sign,
+          externalSigning: externalSigning,
         );
       case LegStage.guard:
         return _vote.guardVote(
           proposalId: common.proposalId,
           approve: common.approve,
-          fromSs58Address: common.fromSs58Address,
           signerPublicKey: common.signerPublicKey,
-          sign: common.sign,
+          externalSigning: externalSigning,
         );
       default:
         return Future<void>.error(StateError('当前阶段不支持本端操作'));
@@ -254,21 +247,21 @@ class _LegislationVotePageState extends State<LegislationVotePage> {
   }
 
   int _qrAction(int stage) => switch (stage) {
-        LegStage.representative => QrActions.legislationRepresentativeVote,
-        LegStage.sign => QrActions.legislationExecutiveSign,
-        LegStage.override_ => QrActions.legislationOverrideSign,
-        LegStage.guard => QrActions.legislationGuardVote,
-        _ => 0,
-      };
+    LegStage.representative => QrActions.legislationRepresentativeVote,
+    LegStage.sign => QrActions.legislationExecutiveSign,
+    LegStage.override_ => QrActions.legislationOverrideSign,
+    LegStage.guard => QrActions.legislationGuardVote,
+    _ => 0,
+  };
 
   String _stageLabel(int stage) => switch (stage) {
-        LegStage.representative => '代表机构表决',
-        LegStage.referendum => '特别案公投',
-        LegStage.sign => '行政首长签署',
-        LegStage.override_ => '三人会签',
-        LegStage.guard => '护宪大法官终审',
-        _ => '未知阶段',
-      };
+    LegStage.representative => '代表机构表决',
+    LegStage.referendum => '特别案公投',
+    LegStage.sign => '行政首长签署',
+    LegStage.override_ => '三人会签',
+    LegStage.guard => '护宪大法官终审',
+    _ => '未知阶段',
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -302,8 +295,10 @@ class _LegislationVotePageState extends State<LegislationVotePage> {
     final state = _state;
     if (_error != null || state == null) {
       return Center(
-        child: Text(_error ?? '提案不存在',
-            style: const TextStyle(color: AppTheme.textTertiary)),
+        child: Text(
+          _error ?? '提案不存在',
+          style: const TextStyle(color: AppTheme.textTertiary),
+        ),
       );
     }
     final representativeMeta = _representativeMeta;
@@ -313,7 +308,9 @@ class _LegislationVotePageState extends State<LegislationVotePage> {
       padding: EdgeInsets.all(AppLayout.scaledValue(16)),
       children: [
         ProposalStatusBadge(
-            status: state.status, proposalId: widget.proposalId),
+          status: state.status,
+          proposalId: widget.proposalId,
+        ),
         SizedBox(height: AppLayout.scaledValue(16)),
         _infoCard(state, representativeMeta, legislationMeta),
         SizedBox(height: AppLayout.scaledValue(12)),
@@ -374,15 +371,21 @@ class _LegislationVotePageState extends State<LegislationVotePage> {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text('当前计票',
-                style: TextStyle(
-                    fontSize: AppLayout.scaledValue(15),
-                    fontWeight: FontWeight.w700,
-                    color: AppTheme.primaryDark)),
-            Text('赞成 ${t.yes}　反对 ${t.no}',
-                style: TextStyle(
-                    fontSize: AppLayout.scaledValue(14),
-                    fontWeight: FontWeight.w600)),
+            Text(
+              '当前计票',
+              style: TextStyle(
+                fontSize: AppLayout.scaledValue(15),
+                fontWeight: FontWeight.w700,
+                color: AppTheme.primaryDark,
+              ),
+            ),
+            Text(
+              '赞成 ${t.yes}　反对 ${t.no}',
+              style: TextStyle(
+                fontSize: AppLayout.scaledValue(14),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           ],
         ),
       ),
@@ -400,9 +403,10 @@ class _LegislationVotePageState extends State<LegislationVotePage> {
       child: Text(
         '特别案需立法公投表决。请在「立法投票」入口凭 CID 资格参与，本页仅展示进度。',
         style: TextStyle(
-            fontSize: AppLayout.scaledValue(13),
-            height: 1.5,
-            color: AppTheme.textSecondary),
+          fontSize: AppLayout.scaledValue(13),
+          height: 1.5,
+          color: AppTheme.textSecondary,
+        ),
       ),
     );
   }
@@ -413,28 +417,34 @@ class _LegislationVotePageState extends State<LegislationVotePage> {
       children: [
         SizedBox(
           width: AppLayout.scaledValue(72),
-          child: Text(k,
-              style: TextStyle(
-                  fontSize: AppLayout.scaledValue(13),
-                  color: AppTheme.textTertiary)),
+          child: Text(
+            k,
+            style: TextStyle(
+              fontSize: AppLayout.scaledValue(13),
+              color: AppTheme.textTertiary,
+            ),
+          ),
         ),
         Expanded(
-          child: Text(v,
-              style: TextStyle(
-                  fontSize: AppLayout.scaledValue(13),
-                  fontWeight: FontWeight.w600,
-                  color: AppTheme.textPrimary)),
+          child: Text(
+            v,
+            style: TextStyle(
+              fontSize: AppLayout.scaledValue(13),
+              fontWeight: FontWeight.w600,
+              color: AppTheme.textPrimary,
+            ),
+          ),
         ),
       ],
     );
   }
 
   static String _representativeRuleLabel(int rule) => switch (rule) {
-        0 => '常规规则',
-        1 => '重要规则',
-        2 => '特别规则',
-        _ => '未知',
-      };
+    0 => '常规规则',
+    1 => '重要规则',
+    2 => '特别规则',
+    _ => '未知',
+  };
 
   // ──── 工具 ────
 
@@ -453,7 +463,4 @@ class _LegislationVotePageState extends State<LegislationVotePage> {
     }
     return out;
   }
-
-  String _toHex(Uint8List b) =>
-      b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
 }

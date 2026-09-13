@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:citizenapp/transaction/offchain-transaction/pages/clearing_bank_settings_page.dart';
+import 'package:citizenapp/transaction/offchain-transaction/services/clearing_bank_directory.dart';
+import '../support/fake_citizen_sdk.dart';
 
 /// `ClearingBankSettingsPage` 基础渲染测试。
 ///
@@ -21,10 +23,11 @@ void main() {
   testWidgets('renders AppBar title, search field and empty hint',
       (tester) async {
     await tester.pumpWidget(
-      const MaterialApp(
+      MaterialApp(
         home: ClearingBankSettingsPage(
           accountId: accountId,
           ss58Address: ss58Address,
+          directory: ClearingBankDirectory(chain: TestCitizenChain()),
         ),
       ),
     );

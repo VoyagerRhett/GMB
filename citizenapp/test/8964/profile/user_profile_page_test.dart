@@ -5,18 +5,20 @@ import 'package:citizenapp/8964/profile/user_profile_page.dart';
 import 'package:citizenapp/8964/profile/widgets/collapsible_header.dart';
 import 'package:citizenapp/8964/profile/widgets/profile_category_tabs.dart';
 import 'package:citizenapp/my/membership/membership_revision.dart';
-import 'package:citizenapp/my/myid/current_user_context.dart';
+import 'package:citizenapp/my/membership/subscription_service.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 
 import 'fake_profile.dart';
 
 /// 身份账户缓存 fake：resolve/accountId 返回 null，让 _resolveOwnAccount 回退成
 /// 「非本人」（行为与迁移前一致）；避免 instance 触发真链读/真 Isar。
-class _NullIdentityCache extends CurrentUserContext {
+class _NullMembershipSnapshotService implements SubscriptionService {
   @override
-  Future<CurrentUser?> resolve() async => null;
+  Future<MembershipDisplaySnapshot?> readDisplaySnapshot(String cidNumber) async =>
+      null;
+
   @override
-  Future<String?> accountId() async => null;
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 Widget _wrap({required bool isSelf}) => MaterialApp(
@@ -26,16 +28,12 @@ Widget _wrap({required bool isSelf}) => MaterialApp(
     api: FakeProfileApi(sampleProfile()),
     cache: FakeProfileCache(),
     sessionProvider: FakeSessionProvider(fakeSession()),
+    subscriptionService: _NullMembershipSnapshotService(),
+    viewerAccountLoader: () async => null,
   ),
 );
 
 void main() {
-  setUp(() {
-    CurrentUserContext.debugInstance = _NullIdentityCache();
-  });
-
-  tearDown(CurrentUserContext.resetDebugInstance);
-
   testWidgets('renders 4 counted category tabs without a photo tab', (
     tester,
   ) async {
@@ -123,6 +121,8 @@ void main() {
           api: api,
           cache: FakeProfileCache(),
           sessionProvider: FakeSessionProvider(fakeSession()),
+          subscriptionService: _NullMembershipSnapshotService(),
+          viewerAccountLoader: () async => null,
         ),
       ),
     );

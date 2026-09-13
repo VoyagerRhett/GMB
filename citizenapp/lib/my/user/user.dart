@@ -1,3 +1,7 @@
+import 'package:provider/provider.dart';
+
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:async';
 import 'dart:io';
 
@@ -16,6 +20,7 @@ import 'package:citizenapp/8964/profile/user_profile_page.dart';
 import 'package:citizenapp/8964/profile/widgets/profile_avatar.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/my/myid/current_user_context.dart';
+import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
 import 'package:citizenapp/my/myid/identity_badge_snapshot_store.dart';
 import 'package:citizenapp/my/creator/creator_page.dart';
 import 'package:citizenapp/my/creator/creator_service.dart';
@@ -28,20 +33,20 @@ import 'package:citizenapp/isar/user_isar.dart';
 import 'package:citizenapp/security/app_lock_service.dart';
 import 'package:citizenapp/security/pin_input_page.dart';
 import 'package:citizenapp/security/secure_storage.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/my/user/contact_book_page.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/biometric_auth_text.dart';
 import 'package:citizenapp/update/app_update.dart';
 import 'package:citizenapp/update/update_badge.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:citizenapp/wallet/pages/wallet_page.dart';
 
 class MyTab extends StatefulWidget {
   const MyTab({
     super.key,
     this.showSettingsUpdateDot = false,
-    this.walletManager,
+    this.wallet,
     this.badgeSnapshotStore,
     this.profileApi,
     this.profileCache,
@@ -50,10 +55,11 @@ class MyTab extends StatefulWidget {
     this.squareApi,
     this.subscriptionService,
     this.creatorService,
+    this.currentUserContext,
   });
 
   final bool showSettingsUpdateDot;
-  final WalletManager? walletManager;
+  final CitizenSdkWallet? wallet;
   final IdentityBadgeSnapshotStore? badgeSnapshotStore;
   final CitizenProfileApi? profileApi;
   final CitizenProfileCache? profileCache;
@@ -62,20 +68,21 @@ class MyTab extends StatefulWidget {
   final SquareApiClient? squareApi;
   final SubscriptionService? subscriptionService;
   final CreatorService? creatorService;
+  final CurrentUserContext? currentUserContext;
 
   @override
   State<MyTab> createState() => _ProfilePageState();
 }
 
 class _ProfilePageState extends State<MyTab> {
-  late final WalletManager _walletManager;
+  late final CitizenSdkWallet _wallet;
   late final IdentityBadgeSnapshotStore _badgeSnapshotStore;
   late final CitizenProfileApi _profileApi;
   late final CitizenProfileCache _profileCache;
   late final CitizenProfileMediaCache _profileMediaCache;
   late final SquareSessionProvider _sessionProvider;
 
-  WalletProfile? _defaultWallet;
+  CitizenWalletStateAccount? _defaultWallet;
   String? _defaultWalletIdentityLevel;
   CitizenProfile? _publicProfile;
   CitizenProfileMediaSnapshot _publicProfileMedia =
@@ -87,6 +94,9 @@ class _ProfilePageState extends State<MyTab> {
 
   /// 默认钱包的会员购买态（档位色 + 对勾）；best-effort，读失败为 null。
   late final SubscriptionService _subscriptionService;
+  late final CurrentUserContext _currentUserContext;
+  AccountSecurityService? _accountSecurity;
+  bool _dependenciesReady = false;
   SquareMembershipState? _membership;
   MembershipDisplayDecision _membershipDecision =
       MembershipDisplayDecision.inactiveConfirmed;
@@ -143,28 +153,61 @@ class _ProfilePageState extends State<MyTab> {
   @override
   void initState() {
     super.initState();
-    _walletManager = widget.walletManager ?? WalletManager();
     _badgeSnapshotStore =
         widget.badgeSnapshotStore ?? IdentityBadgeSnapshotStore();
     _profileApi = widget.profileApi ?? CitizenProfileApi();
     _profileCache = widget.profileCache ?? const CitizenProfileCache();
     _profileMediaCache = widget.profileMediaCache ?? CitizenProfileMediaCache();
-    _sessionProvider = widget.sessionProvider ?? SquareSessionProvider.instance;
-    _subscriptionService =
-        widget.subscriptionService ??
-        SubscriptionService(api: widget.squareApi ?? SquareApiClient());
-    // 本页常驻 IndexedStack，initState 只跑一次；身份账户（CID 绑定账户）在
-    // 「我的钱包」被切换 / CID 换绑 / 增删改名时经 walletsRevision 广播，这里重读身份，
-    // 保证昵称、地址、认证勾和「我的主页」入参始终是当前身份账户。
-    WalletManager.walletsRevision.addListener(_onWalletsChanged);
     MembershipRevision.instance.listenable.addListener(_onMembershipChanged);
     CitizenProfileCache.revision.addListener(_onPublicProfileChanged);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    final injectedWallet = widget.wallet;
+    final injectedSession = widget.sessionProvider;
+    final injectedSubscription = widget.subscriptionService;
+    final injectedCurrentUser = widget.currentUserContext;
+    if (injectedWallet != null &&
+        injectedSession != null &&
+        injectedSubscription != null &&
+        injectedCurrentUser != null) {
+      _wallet = injectedWallet;
+      _sessionProvider = injectedSession;
+      _subscriptionService = injectedSubscription;
+      _currentUserContext = injectedCurrentUser;
+      _dependenciesReady = true;
+      _loadState();
+      return;
+    }
+    final sdk = context.read<CitizenSdk>();
+    final accountSecurity = context.read<AccountSecurityService>();
+    _wallet = widget.wallet ?? sdk.wallet;
+    _currentUserContext =
+        widget.currentUserContext ?? context.read<CurrentUserContext>();
+    _sessionProvider =
+        widget.sessionProvider ?? context.read<SquareSessionProvider>();
+    _subscriptionService = widget.subscriptionService ??
+        SubscriptionService(
+          wallet: _wallet,
+          chain: sdk.chain,
+          transactions: sdk.transactions,
+          identityResolver: context.read<FinalizedIdentityResolver>(),
+          sessionProvider: _sessionProvider,
+          api: widget.squareApi ?? SquareApiClient(),
+        );
+    // 本页常驻 IndexedStack；SDK 账户目录或 finalized CID 绑定变化后重读身份。
+    _accountSecurity = accountSecurity;
+    accountSecurity.revision.addListener(_onWalletsChanged);
+    _dependenciesReady = true;
     _loadState();
   }
 
   @override
   void dispose() {
-    WalletManager.walletsRevision.removeListener(_onWalletsChanged);
+    _accountSecurity?.revision.removeListener(_onWalletsChanged);
     MembershipRevision.instance.listenable.removeListener(_onMembershipChanged);
     CitizenProfileCache.revision.removeListener(_onPublicProfileChanged);
     super.dispose();
@@ -193,8 +236,8 @@ class _ProfilePageState extends State<MyTab> {
   Future<void> _onWalletsChanged() async {
     // revision 同时覆盖钱包列表与 finalized CID 绑定。注册前后默认账户可能完全相同，
     // 不能只比钱包 account_id；必须重读并比较 cid_number + 身份账户。
-    final wallet = await _walletManager.getDefaultWallet();
-    final identity = await CurrentUserContext.instance.resolve();
+    final wallet = (await _wallet.getState()).defaultAccount;
+    final identity = await _currentUserContext.resolve();
     if (!mounted) return;
     final identityAccountId = identity?.accountId ?? wallet?.accountId ?? '';
     final identityCidNumber = identity?.cidNumber ?? '';
@@ -208,9 +251,9 @@ class _ProfilePageState extends State<MyTab> {
 
   Future<void> _loadState() async {
     final generation = ++_loadGeneration;
-    final defaultWallet = await _walletManager.getDefaultWallet();
+    final defaultWallet = (await _wallet.getState()).defaultAccount;
     // CID 是快照归属主键；当前绑定账户只负责链读和签名。
-    final identity = await CurrentUserContext.instance.resolve();
+    final identity = await _currentUserContext.resolve();
     final identityAccountId =
         identity?.accountId ?? defaultWallet?.accountId ?? '';
     final identityCidNumber = identity?.cidNumber ?? '';
@@ -436,10 +479,10 @@ class _ProfilePageState extends State<MyTab> {
     }
     CurrentUser? identity;
     try {
-      identity = await CurrentUserContext.instance.resolve();
+      identity = await _currentUserContext.resolve();
       if (identity != null && !identity.isRegistered) {
         await _sessionProvider.ensureSession();
-        identity = await CurrentUserContext.instance.resolve();
+        identity = await _currentUserContext.resolve();
       }
     } on Exception {
       if (!mounted) return null;

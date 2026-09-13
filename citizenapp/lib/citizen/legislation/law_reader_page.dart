@@ -1,4 +1,6 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
 import 'package:citizenapp/citizen/legislation/data/law_models.dart';
 import 'package:citizenapp/citizen/legislation/data/legislation_api.dart';
@@ -25,7 +27,8 @@ class LawReaderPage extends StatefulWidget {
 }
 
 class _LawReaderPageState extends State<LawReaderPage> {
-  late final LegislationApi _api = widget.api ?? LegislationApi();
+  late final LegislationApi _api;
+  bool _dependenciesReady = false;
 
   Law? _law;
   LawVersion? _version;
@@ -47,6 +50,19 @@ class _LawReaderPageState extends State<LawReaderPage> {
   @override
   void initState() {
     super.initState();
+    if (widget.api != null) {
+      _api = widget.api!;
+      _dependenciesReady = true;
+      _load();
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    _api = LegislationApi(chain: context.read<CitizenSdk>().chain);
+    _dependenciesReady = true;
     _load();
   }
 

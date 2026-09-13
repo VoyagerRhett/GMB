@@ -1,41 +1,47 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:tatachat_sdk/tatachat_sdk.dart';
 
 import 'package:citizenapp/citizen/shared/account_derivation.dart'
     show ss58FromAccountIdText;
+import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/qr/pages/qr_scan_page.dart';
 import 'package:citizenapp/qr/pages/qr_sign_response_page.dart';
 import 'package:citizenapp/qr/qr_protocols.dart';
 import 'package:citizenapp/signer/square_action_sign_service.dart';
 import 'package:citizenapp/signer/citizen_identity_sign_service.dart';
 import 'package:citizenapp/signer/citizen_occupy_sign_service.dart';
-import 'package:citizenapp/signer/qr_signer.dart';
+import 'package:citizenapp/signer/app_business_qr_codec.dart';
 import 'package:citizenapp/my/myid/citizen_identity_chain_reader.dart';
 import 'package:citizenapp/my/myid/myid_service.dart';
+import 'package:citizenapp/my/myid/current_user_context.dart';
+import 'package:citizenapp/my/user/contact_service.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/security/local_data_key.dart';
 import 'package:citizenapp/transaction/offchain-transaction/services/offchain_scan_flow.dart';
-import 'package:citizenapp/wallet/core/secure_seed_store.dart';
-import 'package:citizenapp/wallet/core/seed_sign_error.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 聊天 tab「扫一扫」统一入口：扫码 → 按协议分派。
 ///
 /// - 收款 / 链下支付码 → 现有链下支付流程（用 [paymentWallet]）。
-/// - signRequest → 用 QR `u` 对应的本机 Account 签名，与付款钱包无关。
+/// - signRequest → 用 QR `u` 对应的本机 CitizenWalletStateAccount 签名，与付款钱包无关。
 /// - 未来其它类型只需在此加分支。
 ///
 /// 交易页不再走本分发器：那里的扫码收进收款地址输入框（[AddressScanButton]），
 /// 只填地址；签名请求（广场账户动作 / 公民身份 / 注册局占号换绑）统一由本入口承接。
 Future<void> openScanDispatchFlow({
   required BuildContext context,
-  required WalletProfile? paymentWallet,
-  Account? signingAccount,
+  required CitizenWalletStateAccount? paymentWallet,
+  CitizenWalletStateAccount? signingAccount,
 }) async {
   final scanned = await Navigator.of(context).push<Object?>(
     MaterialPageRoute(
-        builder: (_) => const QrScanPage(mode: QrScanMode.dispatch)),
+      builder: (_) => const QrScanPage(mode: QrScanMode.dispatch),
+    ),
   );
   if (scanned == null || !context.mounted) return;
 
@@ -59,18 +65,16 @@ Future<void> openScanDispatchFlow({
 
 /// 我的钱包账户卡“扫码签名”：保留扫码页原 UI，只把业务边界收紧为签名请求。
 ///
-/// 扫码页先按当前入口只接收签名请求；返回后仍由 [QrSigner.parseRequest]
-/// 校验字段和有效期。
+/// 扫码页先由 CitizenSDK 识别通用请求；CitizenApp 专用请求则由
+/// [AppBusinessQrCodec.parseRequest] 校验业务字段和有效期。
 Future<void> openAccountScanSignFlow({
   required BuildContext context,
-  required Account account,
+  required CitizenWalletStateAccount account,
 }) async {
   final scanned = await Navigator.of(context).push<String>(
     MaterialPageRoute(
-      builder: (_) => const QrScanPage(
-        mode: QrScanMode.signRequest,
-        customTitle: '扫码签名',
-      ),
+      builder: (_) =>
+          const QrScanPage(mode: QrScanMode.signRequest, customTitle: '扫码签名'),
     ),
   );
   if (scanned == null || !context.mounted) return;
@@ -80,13 +84,13 @@ Future<void> openAccountScanSignFlow({
 Future<void> _dispatchSignRequest(
   BuildContext context,
   String raw,
-  Account? requiredAccount,
+  CitizenWalletStateAccount? requiredAccount,
 ) async {
   final int action;
   try {
-    action = QrSigner().parseRequest(raw).body.action;
-  } on QrSignException catch (error) {
-    if (context.mounted) _snack(context, '请扫描签名请求二维码：${error.message}');
+    action = AppBusinessQrCodec().parseRequest(raw).body.action;
+  } on AppBusinessQrException catch (error) {
+    if (context.mounted) _snack(context, '请扫描公民 App 业务签名请求：${error.message}');
     return;
   }
   if (action == QrActions.citizenIdentity) {
@@ -101,16 +105,16 @@ Future<void> _dispatchSignRequest(
 Future<void> _handleSquareActionSignRequest(
   BuildContext context,
   String raw,
-  Account? requiredAccount,
+  CitizenWalletStateAccount? requiredAccount,
 ) async {
   final service = SquareActionSignService();
-  final walletManager = WalletManager();
+  final sdk = context.read<CitizenSdk>();
 
   final SquareActionSignPrep prep;
   try {
     prep = await service.prepare(
       raw,
-      walletManager,
+      sdk.wallet,
       requiredAccount: requiredAccount,
     );
   } on SquareActionSignException catch (e) {
@@ -125,13 +129,8 @@ Future<void> _handleSquareActionSignRequest(
   final String responseJson;
   try {
     // 动钱动权 → 读硬件金库、弹一次生物识别。
-    responseJson = await service.sign(prep, walletManager);
-  } on SecureSeedException catch (e) {
-    // 生物识别取消 / 无锁屏 / 金库错误：此前只捕 WalletAuthException，
-    // 这类异常会逃逸成无声失败（点签名后无任何反应）。
-    if (context.mounted) _snack(context, seedSignErrorMessage(e));
-    return;
-  } on WalletAuthException catch (e) {
+    responseJson = await service.sign(prep, sdk.signing, context);
+  } on AccountSecurityException catch (e) {
     if (context.mounted) _snack(context, e.message);
     return;
   } on Exception catch (e) {
@@ -157,14 +156,14 @@ Future<void> _handleSquareActionSignRequest(
 Future<void> _handleCitizenIdentitySignRequest(
   BuildContext context,
   String raw,
-  Account? signingAccount,
+  CitizenWalletStateAccount? signingAccount,
 ) async {
   final service = CitizenIdentitySignService();
-  final walletManager = WalletManager();
+  final sdk = context.read<CitizenSdk>();
   try {
     final prep = await service.prepare(
       raw,
-      walletManager,
+      sdk.wallet,
       requiredAccount: signingAccount,
     );
     if (!context.mounted) return;
@@ -173,33 +172,36 @@ Future<void> _handleCitizenIdentitySignRequest(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: Text(prep.actionLabel),
-        content:
-            Text(fields.map((field) => '${field.$1}：${field.$2}').join('\n')),
+        content: Text(
+          fields.map((field) => '${field.$1}：${field.$2}').join('\n'),
+        ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('取消')),
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('取消'),
+          ),
           FilledButton(
-              onPressed: () => Navigator.pop(dialogContext, true),
-              child: const Text('确认签名')),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('确认签名'),
+          ),
         ],
       ),
     );
     if (confirmed != true || !context.mounted) return;
-    final response = await service.sign(prep, walletManager);
+    final response = await service.sign(prep, sdk.signing, context);
     if (!context.mounted) return;
-    await Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => QrSignResponsePage(
-        responseJson: response,
-        actionLabel: prep.actionLabel,
-        reviewEntries: fields,
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => QrSignResponsePage(
+          responseJson: response,
+          actionLabel: prep.actionLabel,
+          reviewEntries: fields,
+        ),
       ),
-    ));
+    );
   } on CitizenIdentitySignException catch (error) {
     if (context.mounted) _snack(context, error.message);
-  } on SecureSeedException catch (error) {
-    if (context.mounted) _snack(context, seedSignErrorMessage(error));
-  } on WalletAuthException catch (error) {
+  } on AccountSecurityException catch (error) {
     if (context.mounted) _snack(context, error.message);
   } on Exception catch (error) {
     if (context.mounted) _snack(context, '签名失败：$error');
@@ -211,17 +213,19 @@ Future<void> _handleCitizenIdentitySignRequest(
 Future<void> _handleOccupySignRequest(
   BuildContext context,
   String raw,
-  Account? requiredAccount,
+  CitizenWalletStateAccount? requiredAccount,
 ) async {
-  final walletManager = WalletManager();
+  final sdk = context.read<CitizenSdk>();
+  final accountSecurity = context.read<AccountSecurityService>();
+  final currentUserContext = context.read<CurrentUserContext>();
   final service = CitizenOccupySignService();
 
   final selected =
-      requiredAccount ?? await _pickBindingAccount(context, walletManager);
+      requiredAccount ?? await _pickBindingAccount(context, sdk.wallet);
   if (selected == null || !context.mounted) return;
 
   try {
-    final prep = await service.prepare(raw, selected, walletManager);
+    final prep = await service.prepare(raw, selected, sdk.wallet);
     if (!context.mounted) return;
     final reviewEntries = <(String, String)>[
       ('创世哈希', prep.genesisHash),
@@ -232,8 +236,9 @@ Future<void> _handleOccupySignRequest(
       ('过期时间（Unix 秒）', prep.expiresAt.toString()),
       (prep.isOccupy ? '绑定账户' : '新绑定账户', prep.account.ss58Address),
     ];
-    final reviewText =
-        reviewEntries.map((entry) => '${entry.$1}：${entry.$2}').join('\n');
+    final reviewText = reviewEntries
+        .map((entry) => '${entry.$1}：${entry.$2}')
+        .join('\n');
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -246,17 +251,23 @@ Future<void> _handleOccupySignRequest(
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('取消')),
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('取消'),
+          ),
           FilledButton(
-              onPressed: () => Navigator.pop(dialogContext, true),
-              child: const Text('确认签名')),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('确认签名'),
+          ),
         ],
       ),
     );
     if (confirmed != true || !context.mounted) return;
-    final response = await service.sign(prep, walletManager);
+    final response = await service.sign(prep, sdk.signing, context);
     if (!prep.isOccupy && prep.currentAccount != null) {
+      if (!context.mounted) return;
+      final sessionProvider = context.read<SquareSessionProvider>();
+      final chain = context.read<CitizenSdk>().chain;
+      final chatRuntime = context.read<ChatSdk>();
       final source = AccountDataBinding(
         genesisHash: prep.genesisHash,
         cidNumber: prep.cidNumber,
@@ -269,31 +280,44 @@ Future<void> _handleOccupySignRequest(
         bindingRevision: source.bindingRevision + 1,
         accountId: prep.account.accountId,
       );
-      final handover = CidAccountDataHandover(walletManager: walletManager);
+      final handover = CidAccountDataHandover(
+        contactService: UserContactService(
+          accountSecurity: accountSecurity,
+          currentUserContext: currentUserContext,
+          sessionProvider: sessionProvider,
+          chainReader: CitizenIdentityChainReader(chain: chain),
+          autoSync: false,
+        ),
+        accountSecurity: accountSecurity,
+        chatRuntime: chatRuntime,
+      );
       await handover.stage(source: source, target: target);
       // 注册局后续冷签上链无需用户再次扫码；本 App 在后台只等待 finalized 目标绑定，
       // 命中后提交同一次扫码已暂存的新账户密文。退出 App 时公开交接清单仍可在下次
       // 身份门禁就位时续接，不依赖此前设备进程持续存活。
-      unawaited(_completeRegistryHandover(
-        walletManager: walletManager,
-        handover: handover,
-        target: target,
-        expiresAt: prep.expiresAt.toInt(),
-      ));
+      unawaited(
+        _completeRegistryHandover(
+          chain: chain,
+          accountSecurity: accountSecurity,
+          handover: handover,
+          target: target,
+          expiresAt: prep.expiresAt.toInt(),
+        ),
+      );
     }
     if (!context.mounted) return;
-    await Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => QrSignResponsePage(
-        responseJson: response,
-        actionLabel: prep.actionLabel,
-        reviewEntries: reviewEntries,
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => QrSignResponsePage(
+          responseJson: response,
+          actionLabel: prep.actionLabel,
+          reviewEntries: reviewEntries,
+        ),
       ),
-    ));
+    );
   } on CitizenOccupySignException catch (error) {
     if (context.mounted) _snack(context, error.message);
-  } on SecureSeedException catch (error) {
-    if (context.mounted) _snack(context, seedSignErrorMessage(error));
-  } on WalletAuthException catch (error) {
+  } on AccountSecurityException catch (error) {
     if (context.mounted) _snack(context, error.message);
   } on Exception catch (error) {
     if (context.mounted) _snack(context, '签名失败：$error');
@@ -301,21 +325,22 @@ Future<void> _handleOccupySignRequest(
 }
 
 Future<void> _completeRegistryHandover({
-  required WalletManager walletManager,
+  required CitizenChain chain,
+  required AccountSecurityService accountSecurity,
   required CidAccountDataHandover handover,
   required AccountDataBinding target,
   required int expiresAt,
 }) async {
-  final reader = CitizenIdentityChainReader();
+  final reader = CitizenIdentityChainReader(chain: chain);
   while (DateTime.now().millisecondsSinceEpoch ~/ 1000 <= expiresAt + 600) {
     try {
       final current = await reader.readBindingByCidNumber(target.cidNumber);
       if (current?.accountIdText == target.accountId &&
           current?.bindingRevision == target.bindingRevision) {
-        final previous = await walletManager.readAccountDataBindingForCid(
+        final previous = await accountSecurity.readAccountDataBindingForCid(
           target.cidNumber,
         );
-        await walletManager.activateAccountDataBinding(
+        await accountSecurity.activateAccountDataBinding(
           genesisHash: target.genesisHash,
           cidNumber: target.cidNumber,
           bindingRevision: target.bindingRevision,
@@ -328,7 +353,7 @@ Future<void> _completeRegistryHandover({
         // finalized 只完成公开绑定与数据交接；设备数据钥按真实数据缺钥生成，P-256
         // 子钥只在 Worker 明确报告未登记时登记，禁止在此额外读取目标账户 child。
         await handover.completeFinalizedBinding(target);
-        WalletManager.notifyIdentityBindingChanged();
+        accountSecurity.notifyIdentityBindingChanged();
         return;
       }
       if (current != null && current.bindingRevision > target.bindingRevision) {
@@ -343,27 +368,17 @@ Future<void> _completeRegistryHandover({
 
 /// 通用扫一扫遇到占号/换绑时，从唯一热钱包的全部账户中选一个；账户卡入口则直接
 /// 使用卡片账户，不进入本选择器。
-Future<Account?> _pickBindingAccount(
+Future<CitizenWalletStateAccount?> _pickBindingAccount(
   BuildContext context,
-  WalletManager walletManager,
+  CitizenSdkWallet wallet,
 ) async {
-  final wallets = await walletManager.getWallets();
-  WalletProfile? hotWallet;
-  for (final wallet in wallets) {
-    if (wallet.isHotWallet) {
-      hotWallet = wallet;
-      break;
-    }
-  }
-  final accounts = hotWallet == null
-      ? const <Account>[]
-      : await walletManager.getAccounts(hotWallet.accountId);
+  final accounts = (await wallet.getState()).accounts;
   if (!context.mounted) return null;
   if (accounts.isEmpty) {
-    _snack(context, '本机没有可绑定的热账户');
+    _snack(context, '本机没有可绑定的钱包账户');
     return null;
   }
-  return showModalBottomSheet<Account>(
+  return showModalBottomSheet<CitizenWalletStateAccount>(
     context: context,
     builder: (sheetContext) => SafeArea(
       child: Column(
@@ -371,14 +386,17 @@ Future<Account?> _pickBindingAccount(
         children: [
           Padding(
             padding: EdgeInsets.all(AppLayout.scaledValue(16)),
-            child: Text('选择要绑定到该 CID 的账户',
-                style: TextStyle(
-                    fontSize: AppLayout.scaled(context, 16),
-                    fontWeight: FontWeight.w600)),
+            child: Text(
+              '选择要绑定到该 CID 的账户',
+              style: TextStyle(
+                fontSize: AppLayout.scaled(context, 16),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           ),
           for (final account in accounts)
             ListTile(
-              title: Text(account.accountName),
+              title: Text(account.name),
               subtitle: Text(_shortAddress(account.ss58Address)),
               onTap: () => Navigator.of(sheetContext).pop(account),
             ),
@@ -390,7 +408,9 @@ Future<Account?> _pickBindingAccount(
 }
 
 Future<bool?> _showActionConfirm(
-    BuildContext context, SquareActionSignPrep prep) {
+  BuildContext context,
+  SquareActionSignPrep prep,
+) {
   final fieldLines = prep.decoded.reviewFields!
       .map((field) => '${field.label}：${field.value}')
       .join('\n');

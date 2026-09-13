@@ -11,6 +11,7 @@ import 'package:citizenapp/transaction/personal-manage/personal_pending_create_l
 import 'package:citizenapp/transaction/personal-manage/personal_proposal_history_service.dart';
 
 import '../../support/isar_test_env.dart';
+import '../../support/fake_citizen_sdk.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -25,7 +26,7 @@ void main() {
   });
 
   test('仅有 executed/rejected entity → 不命中,返回 null', () async {
-    final service = PersonalProposalHistoryService();
+    final service = PersonalProposalHistoryService(chain: TestCitizenChain());
     await service.recordOrUpdate(
       personalAccountId: personalAccount,
       proposalId: 5,
@@ -48,7 +49,7 @@ void main() {
   });
 
   test('voting 状态的 create entity 命中,返回 proposalId', () async {
-    final service = PersonalProposalHistoryService();
+    final service = PersonalProposalHistoryService(chain: TestCitizenChain());
     await service.recordOrUpdate(
       personalAccountId: personalAccount,
       proposalId: 99,
@@ -63,7 +64,7 @@ void main() {
   });
 
   test('voting 但 action != create(如 transfer)不命中', () async {
-    final service = PersonalProposalHistoryService();
+    final service = PersonalProposalHistoryService(chain: TestCitizenChain());
     await service.recordOrUpdate(
       personalAccountId: personalAccount,
       proposalId: 200,
@@ -78,7 +79,7 @@ void main() {
   });
 
   test('其他多签账户的 entity 不命中(filter 按地址过滤)', () async {
-    final service = PersonalProposalHistoryService();
+    final service = PersonalProposalHistoryService(chain: TestCitizenChain());
     const otherAccountId =
         '0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
     await service.recordOrUpdate(

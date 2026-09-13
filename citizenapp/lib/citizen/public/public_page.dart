@@ -1,3 +1,5 @@
+import 'package:provider/provider.dart';
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -80,7 +82,7 @@ class _PublicPageState extends State<PublicTab> {
   Future<String?> _resolveCidNumber() async {
     final provider = widget.cidNumberProvider;
     if (provider != null) return provider();
-    final identity = await CurrentUserContext.instance.resolve();
+    final identity = await context.read<CurrentUserContext>().resolve();
     return identity?.cidNumber;
   }
 

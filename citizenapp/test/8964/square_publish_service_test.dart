@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -12,10 +13,9 @@ import 'package:citizenapp/8964/services/square_post_deletion_coordinator.dart';
 import 'package:citizenapp/8964/services/square_post_store.dart';
 import 'package:citizenapp/8964/services/square_publish_service.dart';
 import 'package:citizenapp/8964/services/square_upload_service.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/wallet/core/sign_mode.dart';
 
 import '../support/isar_test_env.dart';
+import '../support/fake_citizen_sdk.dart';
 
 void main() {
   useIsolatedIsar();
@@ -31,6 +31,8 @@ void main() {
     final upload = _FakeUploader(order);
     final chain = _FakeChainPublisher(order);
     final service = SquarePublishService(
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
       uploadService: upload,
       chainService: chain,
       publicationConfirmer: _FakePublicationConfirmer(),
@@ -45,7 +47,7 @@ void main() {
         text: '竞选说明',
         mediaDrafts: [_media()],
         signLoginPayload: (_, __) async => '0x11',
-        signChainPayload: (_) async => Uint8List(64),
+        externalSigning: (_) async => 'QR_V1',
       ),
       throwsA(isA<SquarePublishException>()),
     );
@@ -61,6 +63,8 @@ void main() {
     final localWriter = _FakeLocalPostWriter();
     final stages = <SquarePublishStage>[];
     final service = SquarePublishService(
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
       uploadService: upload,
       chainService: chain,
       publicationConfirmer: _FakePublicationConfirmer(order),
@@ -74,7 +78,7 @@ void main() {
       text: '公文',
       mediaDrafts: [_media()],
       signLoginPayload: (_, __) async => '0x11',
-      signChainPayload: (_) async => Uint8List(64),
+      externalSigning: (_) async => 'QR_V1',
       onStage: stages.add,
     );
 
@@ -88,23 +92,26 @@ void main() {
     expect(localWriter.saved?.createdAt, 1800000000000);
     expect(order, ['prepare', 'upload', 'balance', 'chain', 'confirm']);
     expect(
-        stages,
-        containsAllInOrder([
-          SquarePublishStage.preparingStorage,
-          SquarePublishStage.uploadingMedia,
-          SquarePublishStage.completingStorage,
-          SquarePublishStage.checkingBalance,
-          SquarePublishStage.submittingChain,
-          SquarePublishStage.waitingInBlock,
-          SquarePublishStage.confirmingPost,
-          SquarePublishStage.completed,
-        ]));
+      stages,
+      containsAllInOrder([
+        SquarePublishStage.preparingStorage,
+        SquarePublishStage.uploadingMedia,
+        SquarePublishStage.completingStorage,
+        SquarePublishStage.checkingBalance,
+        SquarePublishStage.submittingChain,
+        SquarePublishStage.waitingInBlock,
+        SquarePublishStage.confirmingPost,
+        SquarePublishStage.completed,
+      ]),
+    );
   });
 
   test('修改内容时新发布确认成功后再删除旧内容', () async {
     final order = <String>[];
     final oldPostDeleter = _FakePostDeleteCoordinator(order);
     final service = SquarePublishService(
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
       uploadService: _FakeUploader(order),
       chainService: _FakeChainPublisher(order),
       publicationConfirmer: _FakePublicationConfirmer(order),
@@ -119,14 +126,20 @@ void main() {
       text: '修改后的公文',
       mediaDrafts: [_media()],
       signLoginPayload: (_, __) async => '0x11',
-      signChainPayload: (_) async => Uint8List(64),
+      externalSigning: (_) async => 'QR_V1',
       replacePostId: 'sqp_old',
     );
 
     expect(result.completionWarning, isNull);
     expect(oldPostDeleter.deletedPostId, 'sqp_old');
-    expect(order,
-        ['prepare', 'upload', 'balance', 'chain', 'confirm', 'delete_old']);
+    expect(order, [
+      'prepare',
+      'upload',
+      'balance',
+      'chain',
+      'confirm',
+      'delete_old',
+    ]);
   });
 
   test('最终余额不足时清理已完成上传且不提交链上', () async {
@@ -134,6 +147,8 @@ void main() {
     final upload = _FakeUploader(order);
     final chain = _FakeChainPublisher(order);
     final service = SquarePublishService(
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
       uploadService: upload,
       chainService: chain,
       publicationConfirmer: _FakePublicationConfirmer(order),
@@ -148,7 +163,7 @@ void main() {
         text: '余额不足的公文',
         mediaDrafts: [_media()],
         signLoginPayload: (_, __) async => '0x11',
-        signChainPayload: (_) async => Uint8List(64),
+        externalSigning: (_) async => 'QR_V1',
       ),
       throwsA(isA<SquarePublishException>()),
     );
@@ -164,6 +179,8 @@ void main() {
     final upload = _FakeUploader(order);
     final chain = _FakeChainPublisher(order)..throwOnPublish = true;
     final service = SquarePublishService(
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
       uploadService: upload,
       chainService: chain,
       publicationConfirmer: _FakePublicationConfirmer(order),
@@ -178,7 +195,7 @@ void main() {
         text: '链上未入块的公文',
         mediaDrafts: [_media()],
         signLoginPayload: (_, __) async => '0x11',
-        signChainPayload: (_) async => Uint8List(64),
+        externalSigning: (_) async => 'QR_V1',
       ),
       throwsA(isA<SquarePublishException>()),
     );
@@ -191,6 +208,8 @@ void main() {
     final order = <String>[];
     final chain = _FakeChainPublisher(order)..throwAfterSign = true;
     final service = SquarePublishService(
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
       uploadService: _FakeUploader(order),
       chainService: chain,
       publicationConfirmer: _FakePublicationConfirmer(order),
@@ -205,7 +224,7 @@ void main() {
         text: '终态不确定的公文',
         mediaDrafts: [_media()],
         signLoginPayload: (_, __) async => '0x11',
-        signChainPayload: (_) async => Uint8List(64),
+        externalSigning: (_) async => 'QR_V1',
       ),
       throwsA(
         isA<SquarePublishException>().having(
@@ -224,6 +243,8 @@ void main() {
     final localWriter = _FakeLocalPostWriter()..throwOnSave = true;
     SquareSession? scheduledSession;
     final service = SquarePublishService(
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
       uploadService: _FakeUploader(order),
       chainService: _FakeChainPublisher(order),
       publicationConfirmer: _FakePublicationConfirmer(order),
@@ -238,7 +259,7 @@ void main() {
       text: '远端已成功的公文',
       mediaDrafts: [_media()],
       signLoginPayload: (_, __) async => '0x11',
-      signChainPayload: (_) async => Uint8List(64),
+      externalSigning: (_) async => 'QR_V1',
     );
 
     expect(result.post.postId, 'sqp_test');
@@ -261,6 +282,8 @@ void main() {
     );
     final contentHash = sha256.convert(manifestBytes).toString();
     final service = SquarePublishService(
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
       uploadService: _FakeUploader(order, manifestBytes: manifestBytes),
       chainService: _FakeChainPublisher(order),
       publicationConfirmer: _FakePublicationConfirmer.withHash(
@@ -276,7 +299,7 @@ void main() {
       text: '真实本地副本',
       mediaDrafts: [_media()],
       signLoginPayload: (_, __) async => '0x11',
-      signChainPayload: (_) async => Uint8List(64),
+      externalSigning: (_) async => 'QR_V1',
     );
 
     final saved = await const SquarePostStore().read(
@@ -297,7 +320,7 @@ SquareIdentityState _identity({required String? cidNumber}) {
     cidNumber: cidNumber,
     walletIndex: 1,
     ss58Address: 'citizen_test_signer_ss58_address',
-    signMode: SignMode.hot,
+    signMode: CitizenWalletSignMode.hot,
   );
 }
 
@@ -334,8 +357,9 @@ class _FakeUploader implements SquareContentUploader {
     order.add('prepare');
     onStage?.call(SquarePublishStage.preparingStorage);
     final bytes = manifestBytes ?? Uint8List.fromList([1, 2, 3]);
-    final contentHash =
-        manifestBytes == null ? '11' * 32 : sha256.convert(bytes).toString();
+    final contentHash = manifestBytes == null
+        ? '11' * 32
+        : sha256.convert(bytes).toString();
     return SquarePreparedContent(
       session: const SquareSession(
         sessionToken: 'sqs_test',
@@ -363,7 +387,7 @@ class _FakeUploader implements SquareContentUploader {
             uploadUrl: 'http://127.0.0.1/media',
             uploadHeaders: {
               'content-type': 'image/webp',
-              'content-length': '1024'
+              'content-length': '1024',
             },
             derivativeKind: 'thumbnail',
             derivativeByteSize: 256,
@@ -372,7 +396,7 @@ class _FakeUploader implements SquareContentUploader {
             derivativeUploadUrl: 'http://127.0.0.1/thumbnail',
             derivativeUploadHeaders: {
               'content-type': 'image/webp',
-              'content-length': '256'
+              'content-length': '256',
             },
           ),
         ],
@@ -488,32 +512,32 @@ class _FakeChainPublisher implements SquarePostChainPublisher {
 
   @override
   Future<SquareChainPublishedResult> publishPost({
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
     required String postId,
     required SquarePostType postType,
     required String contentHashHex,
     required String storageReceiptId,
-    required Future<Uint8List> Function(Uint8List payload) sign,
-    TxPoolWatchCallback? onWatchEvent,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    )
+    externalSigning,
   }) async {
     called = true;
     order.add('chain');
     this.postId = postId;
     this.storageReceiptId = storageReceiptId;
     if (throwOnPublish) {
-      throw StateError('交易未入块');
+      throw const SquareChainPublishException(
+        '交易执行已确定失败',
+        canAbortUpload: true,
+      );
     }
     if (throwAfterSign) {
-      await sign(Uint8List.fromList([1, 2, 3]));
-      throw StateError('交易池订阅超时');
+      throw const SquareChainPublishException(
+        '交易终态尚未确定',
+        canAbortUpload: false,
+      );
     }
-    onWatchEvent?.call(const TxPoolWatchEvent(
-      kind: TxPoolWatchKind.inBlock,
-      description: 'inBlock',
-      raw: 'inBlock',
-      blockHashHex: '0xblock',
-    ));
     return const SquareChainPublishedResult(
       txHash: '0xtest',
       usedNonce: 1,

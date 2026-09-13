@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart'
     show SquareMembershipState, SquareSession;
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
@@ -11,27 +12,16 @@ import 'package:citizenapp/my/creator/models/creator_plan.dart';
 import 'package:citizenapp/my/membership/subscription_service.dart';
 import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
 import 'package:citizenapp/my/myid/citizen_identity_chain_reader.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart' show TxPoolWatchCallback;
-import 'package:citizenapp/rpc/subscription_rpc.dart';
-import 'package:citizenapp/wallet/core/default_account_service.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
-import 'package:citizenapp/wallet/core/sign_mode.dart';
+import 'package:citizenapp/my/membership/subscription_chain.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import '../../support/isar_test_env.dart';
+import '../../support/fake_citizen_sdk.dart';
 
 void main() {
   useIsolatedIsar();
-  // saveTiers 现按身份账户签名，会命中单例 FinalizedIdentityResolver.instance。
-  // 注入 fake（身份=账户0，与 _FakeWalletManager/_FakeSessionProvider 同账户），
-  // 避免真链读/真 Isar 导致 flaky。
-  setUp(() {
-    FinalizedIdentityResolver.debugInstance = _FakeIdentityCache();
-  });
-  tearDown(FinalizedIdentityResolver.resetDebugInstance);
-
   const session = SquareSession(
     sessionToken: 't',
     cidNumber: "CN220-CTZN2-198805200-2026",
@@ -156,9 +146,12 @@ void main() {
 
   test('创作者展示快照按 CID 持久化并完整往返', () async {
     final service = CreatorService(
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
       api: FakeCreatorApi(),
-      subscriptionRpc: _FakeSubscriptionRpc(),
-      walletManager: _FakeWalletManager(),
+      subscriptionChain: _FakeSubscriptionChain(),
+      wallet: _FakeWallet(),
+      identityResolver: _FakeIdentityCache(),
       sessionProvider: _FakeSessionProvider(),
       subscriptionService: _ActiveMembershipService(),
     );
@@ -193,13 +186,15 @@ void main() {
 
   test('链上 finalized 后 Cloudflare 失败只重试投影确认，不产生第二次链上签名', () async {
     final api = _FlakyCreatorApi()..failSave = true;
-    final rpc = _FakeSubscriptionRpc();
+    final rpc = _FakeSubscriptionChain();
     final sessionProvider = _FakeSessionProvider();
     final service = CreatorService(
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
       api: api,
-      subscriptionRpc: rpc,
-      walletManager: _FakeWalletManager(),
-      defaultAccountReader: _FakeDefaultAccountReader(),
+      subscriptionChain: rpc,
+      wallet: _FakeWallet(),
+      identityResolver: _FakeIdentityCache(),
       sessionProvider: sessionProvider,
       subscriptionService: _ActiveMembershipService(),
     );
@@ -220,11 +215,14 @@ void main() {
   });
 
   test('创作者刷新只使用 CitizenServe 会员与档位投影', () async {
-    final rpc = _FakeSubscriptionRpc();
+    final rpc = _FakeSubscriptionChain();
     final service = CreatorService(
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
       api: FakeCreatorApi(),
-      subscriptionRpc: rpc,
-      walletManager: _FakeWalletManager(),
+      subscriptionChain: rpc,
+      wallet: _FakeWallet(),
+      identityResolver: _FakeIdentityCache(),
       sessionProvider: _FakeSessionProvider(),
       subscriptionService: _ActiveMembershipService(),
     );
@@ -236,7 +234,7 @@ void main() {
   });
 
   test('仅改档位名只提交 call_index 6，不重写价格计划', () async {
-    final rpc = _FakeSubscriptionRpc();
+    final rpc = _FakeSubscriptionChain();
     final api = FakeCreatorApi(
       initialPlan: CreatorPlan(
         creatorCidNumber: _creatorCidNumber,
@@ -245,10 +243,12 @@ void main() {
       ),
     );
     final service = CreatorService(
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
       api: api,
-      subscriptionRpc: rpc,
-      walletManager: _FakeWalletManager(),
-      defaultAccountReader: _FakeDefaultAccountReader(),
+      subscriptionChain: rpc,
+      wallet: _FakeWallet(),
+      identityResolver: _FakeIdentityCache(),
       sessionProvider: _FakeSessionProvider(),
       subscriptionService: _ActiveMembershipService(),
     );
@@ -275,85 +275,90 @@ const _reboundAccountId =
     '0x1111111111111111111111111111111111111111111111111111111111111111';
 const _creatorCidNumber = 'CN220-CTZN2-198805200-2026';
 
-class _FakeSessionProvider extends SquareSessionProvider {
+class _FakeSessionProvider implements SquareSessionProvider {
   String accountId = _accountId;
 
   @override
   Future<SquareSession?> ensureSession() async => SquareSession(
-        sessionToken: 'creator-session',
-        cidNumber: _creatorCidNumber,
-        bindingRevision: 1,
-        accountId: accountId,
-        expiresAt: 9999999999999,
-      );
+    sessionToken: 'creator-session',
+    cidNumber: _creatorCidNumber,
+    bindingRevision: 1,
+    accountId: accountId,
+    expiresAt: 9999999999999,
+  );
+
+  @override
+  Future<SquareSessionResolution> resolveSession({bool refresh = false}) async {
+    final session = await ensureSession();
+    return SquareSessionResolution(SquareSessionStatus.ready, session: session);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// 身份账户单源 fake：身份=账户0（与钱包/会话同账户），offline、不链读。
-class _FakeIdentityCache extends FinalizedIdentityResolver {
+class _FakeIdentityCache implements FinalizedIdentityResolver {
   @override
   Future<FinalizedIdentity?> resolve() async => FinalizedIdentity(
-        accountId: _accountId,
-        ss58Address: _signerSs58Address,
-        snapshot: CitizenIdentityChainSnapshot(
-          cidNumber: _creatorCidNumber,
-          accountId: Uint8List(32),
-          bindingRevision: 1,
-          votingIdentity: null,
-        ),
-      );
+    accountId: _accountId,
+    ss58Address: _signerSs58Address,
+    snapshot: CitizenIdentityChainSnapshot(
+      cidNumber: _creatorCidNumber,
+      accountId: Uint8List(32),
+      bindingRevision: 1,
+      votingIdentity: null,
+    ),
+  );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _FakeWalletManager extends WalletManager {
+class _FakeWallet implements CitizenSdkWallet {
   @override
-  Future<WalletProfile?> getDefaultWallet() async => const WalletProfile(
+  Future<CitizenWalletState> getState() async => CitizenWalletState(
+    revision: BigInt.one,
+    hotProfile: null,
+    accounts: [
+      CitizenWalletStateAccount(
+        signMode: CitizenWalletSignMode.hot,
         walletIndex: 1,
-        walletName: 'creator',
-        walletIcon: '',
-        balance: 0,
+        accountIndex: 0,
+        name: 'creator',
         ss58Address: _signerSs58Address,
         accountId: _accountId,
-        alg: 'sr25519',
-        ss58: 2027,
-        createdAtMillis: 0,
-        source: 'test',
-        signMode: SignMode.hot,
-      );
+        createdAtMillis: BigInt.zero,
+        isDefault: true,
+      ),
+    ],
+  );
 
   @override
-  Future<Uint8List> signForAccountId(
-    String accountId,
-    Uint8List payload,
-  ) async =>
-      Uint8List(64);
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _FakeDefaultAccountReader implements DefaultAccountReader {
-  @override
-  Future<DefaultAccount?> getDefaultAccount() async => const DefaultAccount(
-        accountId: _accountId,
-        ss58Address: _signerSs58Address,
-        accountName: 'creator',
-        signMode: SignMode.hot,
-        walletIndex: 1,
-      );
-}
-
-class _ActiveMembershipService extends SubscriptionService {
+class _ActiveMembershipService implements SubscriptionService {
   @override
   Future<SquareMembershipState> authorizeMembership(
     SquareSession session, {
     bool forceRefresh = false,
-  }) async =>
-      const SquareMembershipState(
-        active: true,
-        paidUntil: 9999999999999,
-        membershipLevel: 'freedom',
-        subscriptionStatus: 'active',
-        subscriptionActive: true,
-      );
+  }) async => const SquareMembershipState(
+    active: true,
+    paidUntil: 9999999999999,
+    membershipLevel: 'freedom',
+    subscriptionStatus: 'active',
+    subscriptionActive: true,
+  );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _FakeSubscriptionRpc extends SubscriptionRpc {
+class _FakeSubscriptionChain extends SubscriptionChain {
+  _FakeSubscriptionChain()
+    : super(chain: TestCitizenChain(), transactions: TestCitizenTransactions());
+
   int setPlansCount = 0;
   int renameCount = 0;
   int signCount = 0;
@@ -364,32 +369,35 @@ class _FakeSubscriptionRpc extends SubscriptionRpc {
   Future<FinalizedSubscriptionSnapshot> fetchSubscriptionSnapshot({
     required String subscriberCidNumber,
     String? creatorCidNumber,
-  }) async =>
-      FinalizedSubscriptionSnapshot(
-        state: ChainSubscriptionState(
-          plan: const ChainSubscriptionPlan.platform('freedom'),
-          startedAt: 1000,
-          lastChargedAt: 1000,
-          lastChargedPriceFen: BigInt.one,
-          paidUntil: 3000,
-          status: 'active',
-          authorizedPriceFen: BigInt.one,
-          suspendReason: null,
-        ),
-        chainNowMs: 2000,
-        blockHashHex: '0x${List.filled(64, '0').join()}',
-      );
+  }) async => FinalizedSubscriptionSnapshot(
+    state: ChainSubscriptionState(
+      plan: const ChainSubscriptionPlan.platform('freedom'),
+      startedAt: 1000,
+      lastChargedAt: 1000,
+      lastChargedPriceFen: BigInt.one,
+      paidUntil: 3000,
+      status: 'active',
+      authorizedPriceFen: BigInt.one,
+      suspendReason: null,
+    ),
+    chainNowMs: 2000,
+    block: CitizenBlockRef(
+      hash: '0x${List.filled(64, '0').join()}',
+      number: BigInt.one,
+      finality: CitizenBlockFinality.finalized,
+    ),
+  );
 
   @override
   Future<FinalizedSubscriptionTransaction> setCreatorPlans({
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
     required List<CreatorTierInput> tiers,
-    required Future<Uint8List> Function(Uint8List payload) sign,
-    TxPoolWatchCallback? onWatchEvent,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    )
+    externalSigning,
   }) async {
     setPlansCount++;
-    await sign(Uint8List.fromList([1]));
     signCount++;
     return (
       txHash: '0x${List.filled(64, 'c').join()}',
@@ -400,15 +408,15 @@ class _FakeSubscriptionRpc extends SubscriptionRpc {
 
   @override
   Future<FinalizedSubscriptionTransaction> updateCreatorTierName({
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
     required String tierId,
     required String tierName,
-    required Future<Uint8List> Function(Uint8List payload) sign,
-    TxPoolWatchCallback? onWatchEvent,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    )
+    externalSigning,
   }) async {
     renameCount++;
-    await sign(Uint8List.fromList([2]));
     signCount++;
     currentTierName = tierName;
     return (
@@ -421,21 +429,20 @@ class _FakeSubscriptionRpc extends SubscriptionRpc {
   @override
   Future<List<ChainCreatorTier>> fetchCreatorPlans(
     String creatorCidNumber,
-  ) async =>
-      [
-        ChainCreatorTier(
-          tierId: 't1',
-          tierName: currentTierName,
-          pricesFen: {'monthly': BigInt.from(990)},
-        ),
-      ];
+  ) async => [
+    ChainCreatorTier(
+      tierId: 't1',
+      tierName: currentTierName,
+      pricesFen: {'monthly': BigInt.from(990)},
+    ),
+  ];
 
   @override
   Future<List<ChainCreatorTier>> fetchCreatorPlansAtBlock(
     String creatorCidNumber,
-    String blockHashHex,
+    CitizenBlockRef block,
   ) {
-    lastPlansBlockHash = blockHashHex;
+    lastPlansBlockHash = block.hash;
     return fetchCreatorPlans(creatorCidNumber);
   }
 }

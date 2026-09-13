@@ -1,10 +1,11 @@
 import 'dart:async';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
 import 'package:citizenapp/citizen/institution/institution_assignment_card.dart';
 import 'package:citizenapp/citizen/institution/institution_role_models.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
@@ -60,7 +61,12 @@ class _PublicInstitutionAdminListPageState
       return;
     }
     try {
-      final balances = await ChainRpc().fetchFinalizedBalances(accountIds);
+      final snapshots =
+          await context.read<CitizenSdk>().chain.getAccountBalances(accountIds);
+      final balances = <String, double>{
+        for (final snapshot in snapshots)
+          snapshot.accountId: snapshot.freeFen.toDouble() / 100,
+      };
       if (mounted) setState(() => _balanceByAccountId = balances);
     } catch (_) {
       // 只读管理员列表的余额失败不影响资料展示。

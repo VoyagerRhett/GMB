@@ -1,6 +1,9 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:polkadart_keyring/polkadart_keyring.dart' show Keyring;
@@ -12,21 +15,27 @@ import 'package:citizenapp/qr/pages/qr_scan_page.dart'
     show QrScanMode, QrScanPage;
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
 import 'package:citizenapp/qr/qr_protocols.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/signer/qr_signer.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/my/util/amount_format.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/models/admin_account.dart';
 
 import 'personal_manage_service.dart';
 import 'personal_proposal_history_service.dart';
+
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 个人多签账户创建页面（无需 CID）。
 class PersonalAccountCreatePage extends StatefulWidget {
-  const PersonalAccountCreatePage({super.key});
+  const PersonalAccountCreatePage({
+    super.key,
+    this.walletStateLoader,
+    this.manageService,
+  });
+
+  /// Widget 测试可只注入公开钱包目录；正式运行从根 CitizenSDK 读取。
+  final Future<CitizenWalletState> Function()? walletStateLoader;
+  final PersonalManageService? manageService;
 
   @override
   State<PersonalAccountCreatePage> createState() =>
@@ -38,12 +47,14 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
   final _amountController = TextEditingController();
   final _thresholdController = TextEditingController();
 
-  final _manageService = PersonalManageService();
+  PersonalManageService? _manageService;
+  late final Future<CitizenWalletState> Function() _walletStateLoader;
+  bool _dependenciesReady = false;
 
   bool _submitting = false;
   final List<AdminPerson> _admins = [];
-  WalletProfile? _selectedWallet;
-  List<WalletProfile> _wallets = [];
+  CitizenWalletStateAccount? _selectedWallet;
+  List<CitizenWalletStateAccount> _wallets = [];
 
   /// 创建人规范 AccountId（始终占管理员列表第一位，不可移除）。
   String? _creatorAccountId;
@@ -51,6 +62,26 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
   @override
   void initState() {
     super.initState();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    final injectedWalletLoader = widget.walletStateLoader;
+    if (injectedWalletLoader != null) {
+      _walletStateLoader = injectedWalletLoader;
+      _manageService = widget.manageService;
+      _dependenciesReady = true;
+      _loadWallets();
+      return;
+    }
+    final sdk = context.read<CitizenSdk>();
+    _walletStateLoader = sdk.wallet.getState;
+    _manageService =
+        widget.manageService ??
+        PersonalManageService(chain: sdk.chain, transactions: sdk.transactions);
+    _dependenciesReady = true;
     _loadWallets();
   }
 
@@ -63,8 +94,7 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
   }
 
   Future<void> _loadWallets() async {
-    final wm = WalletManager();
-    final wallets = await wm.getWallets();
+    final wallets = (await _walletStateLoader()).accounts;
     if (!mounted) return;
     setState(() {
       _wallets = wallets;
@@ -77,7 +107,7 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
   }
 
   /// 钱包切换时同步更新创建人在管理员列表中的位置。
-  void _syncCreatorAdmin(WalletProfile wallet) {
+  void _syncCreatorAdmin(CitizenWalletStateAccount wallet) {
     final accountId = wallet.accountId;
     // 移除旧创建人
     if (_creatorAccountId != null) {
@@ -87,11 +117,7 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
     _admins.removeWhere((admin) => admin.account_id == accountId); // 防重复
     _admins.insert(
       0,
-      AdminPerson(
-        account_id: accountId,
-        family_name: '管理',
-        given_name: '员',
-      ),
+      AdminPerson(account_id: accountId, family_name: '管理', given_name: '员'),
     );
   }
 
@@ -120,10 +146,11 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
     final result = await Navigator.push<String>(
       context,
       MaterialPageRoute(
-          builder: (_) => const QrScanPage(
-                mode: QrScanMode.userContactValue,
-                customTitle: '扫码添加管理员',
-              )),
+        builder: (_) => const QrScanPage(
+          mode: QrScanMode.userContactValue,
+          customTitle: '扫码添加管理员',
+        ),
+      ),
     );
     if (result == null || !mounted) return;
 
@@ -139,18 +166,18 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
       final env = QrEnvelope.parse(result.trim());
       if (env.kind != QrKind.userContact) {
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('请扫描用户主页中的用户码')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('请扫描用户主页中的用户码')));
         return;
       }
       final body = env.body as UserContactBody;
       await _promptAdminNamesAndAdd(body.accountId);
     } on FormatException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('二维码格式错误：$e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('二维码格式错误：$e')));
     }
   }
 
@@ -167,18 +194,16 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
   }
 
   void _addAdmin(AdminPerson admin) {
-    if (_admins.any(
-      (item) => item.account_id == admin.account_id,
-    )) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('该管理员已在列表中')),
-      );
+    if (_admins.any((item) => item.account_id == admin.account_id)) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('该管理员已在列表中')));
       return;
     }
     if (_admins.length >= 64) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('管理员数量已达上限（64）')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('管理员数量已达上限（64）')));
       return;
     }
     setState(() {
@@ -197,10 +222,12 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
   }
 
   Future<(String, String)?> _editNamesDialog({AdminPerson? admin}) async {
-    final familyController =
-        TextEditingController(text: admin?.family_name ?? '管理');
-    final givenController =
-        TextEditingController(text: admin?.given_name ?? '员');
+    final familyController = TextEditingController(
+      text: admin?.family_name ?? '管理',
+    );
+    final givenController = TextEditingController(
+      text: admin?.given_name ?? '员',
+    );
     final result = await showDialog<(String, String)>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -231,10 +258,10 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
             onPressed: () {
               final family = familyController.text.trim();
               final given = givenController.text.trim();
-              Navigator.pop(
-                dialogContext,
-                (family.isEmpty ? '管理' : family, given.isEmpty ? '员' : given),
-              );
+              Navigator.pop(dialogContext, (
+                family.isEmpty ? '管理' : family,
+                given.isEmpty ? '员' : given,
+              ));
             },
             child: const Text('确定'),
           ),
@@ -282,10 +309,10 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
     final next = current == null
         ? min
         : current < min
-            ? min
-            : current > max
-                ? max
-                : current;
+        ? min
+        : current > max
+        ? max
+        : current;
     _thresholdController.text = next.toString();
   }
 
@@ -318,14 +345,17 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
   }
 
   Future<String?> _checkCreatorBalance({
-    required WalletProfile wallet,
+    required CitizenWalletStateAccount wallet,
     required BigInt initialAmountFen,
   }) async {
-    final balanceYuan =
-        await ChainRpc().fetchFinalizedBalance(wallet.accountId);
+    final balance = await context.read<CitizenSdk>().chain.getAccountBalance(
+      wallet.accountId,
+    );
+    final balanceYuan = balance.freeFen.toDouble() / 100;
     final balanceFen = MultisigCreateAmountRules.yuanToFen(balanceYuan);
-    final requiredFen =
-        MultisigCreateAmountRules.requiredBalanceFen(initialAmountFen);
+    final requiredFen = MultisigCreateAmountRules.requiredBalanceFen(
+      initialAmountFen,
+    );
     if (balanceFen >= requiredFen) return null;
     return MultisigCreateAmountRules.insufficientBalanceMessage(
       actionLabel: '创建个人多签',
@@ -335,16 +365,22 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
   }
 
   Future<void> _submit() async {
+    final chain = context.read<CitizenSdk>().chain;
     final error = _validate();
     if (error != null) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(error)));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error)));
       return;
     }
 
     setState(() => _submitting = true);
 
     try {
+      final manageService = _manageService;
+      if (manageService == null) {
+        throw StateError('个人多签交易服务不可用');
+      }
       final wallet = _selectedWallet!;
       final nameText = _nameController.text.trim();
       final nameBytes = Uint8List.fromList(utf8.encode(nameText));
@@ -360,55 +396,28 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-              content: Text(balanceError), backgroundColor: AppTheme.danger),
+            content: Text(balanceError),
+            backgroundColor: AppTheme.danger,
+          ),
         );
         return;
       }
 
       final publicKeyBytes = _hexDecode(wallet.accountId);
 
-      // 热钱包：先认证，后续用本地签名；冷钱包：走 QR 签名。
-      WalletManager? hotWalletManager;
-      if (wallet.requiresHotSign) {
-        hotWalletManager = WalletManager();
-      }
-
-      Future<Uint8List> signCallback(Uint8List payload) async {
-        if (hotWalletManager != null) {
-          return await hotWalletManager.signWithWallet(
-              wallet.walletIndex, payload);
-        }
-        // 冷钱包 QR 签名
-        final qrSigner = QrSigner();
-        final request = qrSigner.buildRequest(
-          requestId: QrSigner.generateRequestId(prefix: 'personal-dq-'),
-          signerPublicKey: wallet.accountId,
-          payloadHex: '0x${_toHex(payload)}',
-          action: QrActions.personalCreate,
-        );
-        final requestJson = qrSigner.encodeRequest(request);
-        if (!mounted) throw Exception('页面已关闭');
-        final response = await Navigator.push<SignResponseEnvelope>(
-          context,
-          MaterialPageRoute(
-            builder: (_) => QrSignSessionPage(
-                request: request,
-                requestJson: requestJson,
-                expectedSignerPublicKey: wallet.accountId),
-          ),
-        );
-        if (response == null) throw Exception('签名已取消');
-        return Uint8List.fromList(_hexDecode(response.body.signatureHex));
-      }
-
-      final result = await _manageService.submitProposeCreatePersonal(
+      final result = await manageService.submitProposeCreatePersonal(
         accountName: nameBytes,
         admins: _admins,
         regularThreshold: regularThreshold,
         amountFen: amountFen,
-        fromSs58Address: wallet.ss58Address,
         signerPublicKey: Uint8List.fromList(publicKeyBytes),
-        sign: signCallback,
+        externalSigning: (pending) => showCitizenSdkQrResponse(
+          context,
+          request: pending.qrRequest,
+          expiresAt: BigInt.from(
+            pending.expiresAt.millisecondsSinceEpoch ~/ 1000,
+          ),
+        ),
       );
 
       final addrHex = result.accountId;
@@ -428,7 +437,7 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
 
       // 只有入块并确认 个人账户创建成功事件 事件后，才写本地
       // 创建提案；proposalId 使用链上事件返回值，不能再预测 NextProposalId。
-      await PersonalProposalHistoryService().recordOrUpdate(
+      await PersonalProposalHistoryService(chain: chain).recordOrUpdate(
         personalAccountId: addrHex,
         proposalId: result.proposalId,
         action: PersonalProposalAction.create,
@@ -449,7 +458,8 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-              '提案已确认 #${result.proposalId}：${_truncateAddress(result.txHash)}'),
+            '提案已确认 #${result.proposalId}：${_truncateAddress(result.txHash)}',
+          ),
           backgroundColor: AppTheme.primaryDark,
         ),
       );
@@ -472,10 +482,13 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
     return Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
-        title: Text('创建个人多签',
-            style: TextStyle(
-                fontSize: AppLayout.scaled(context, 17),
-                fontWeight: FontWeight.w700)),
+        title: Text(
+          '创建个人多签',
+          style: TextStyle(
+            fontSize: AppLayout.scaled(context, 17),
+            fontWeight: FontWeight.w700,
+          ),
+        ),
         centerTitle: true,
         backgroundColor: Colors.white,
         foregroundColor: AppTheme.primaryDark,
@@ -493,11 +506,12 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
             decoration: InputDecoration(
               hintText: '输入名称（如：家庭基金）',
               border: OutlineInputBorder(
-                  borderRadius:
-                      BorderRadius.circular(AppLayout.scaledValue(10))),
+                borderRadius: BorderRadius.circular(AppLayout.scaledValue(10)),
+              ),
               contentPadding: EdgeInsets.symmetric(
-                  horizontal: AppLayout.scaled(context, 12),
-                  vertical: AppLayout.scaled(context, 10)),
+                horizontal: AppLayout.scaled(context, 12),
+                vertical: AppLayout.scaled(context, 10),
+              ),
             ),
           ),
           if (preview != null) ...[
@@ -511,15 +525,21 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('派生多签账户：',
-                      style: TextStyle(
-                          fontSize: AppLayout.scaled(context, 12),
-                          color: AppTheme.primaryDark)),
+                  Text(
+                    '派生多签账户：',
+                    style: TextStyle(
+                      fontSize: AppLayout.scaled(context, 12),
+                      color: AppTheme.primaryDark,
+                    ),
+                  ),
                   SizedBox(height: AppLayout.scaled(context, 4)),
-                  Text(preview,
-                      style: TextStyle(
-                          fontSize: AppLayout.scaled(context, 12),
-                          fontFamily: 'monospace')),
+                  Text(
+                    preview,
+                    style: TextStyle(
+                      fontSize: AppLayout.scaled(context, 12),
+                      fontFamily: 'monospace',
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -537,34 +557,44 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
               leading: CircleAvatar(
                 radius: AppLayout.scaled(context, 14),
                 backgroundColor: AppTheme.primaryDark.withValues(alpha: 0.08),
-                child: Text('${entry.key + 1}',
-                    style: TextStyle(
-                        fontSize: AppLayout.scaled(context, 11),
-                        fontWeight: FontWeight.w600,
-                        color: AppTheme.primaryDark)),
+                child: Text(
+                  '${entry.key + 1}',
+                  style: TextStyle(
+                    fontSize: AppLayout.scaled(context, 11),
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.primaryDark,
+                  ),
+                ),
               ),
               title: Row(
                 children: [
                   Flexible(
-                      child: Text(_truncateAddress(ss58),
-                          style: TextStyle(
-                              fontSize: AppLayout.scaled(context, 13)))),
+                    child: Text(
+                      _truncateAddress(ss58),
+                      style: TextStyle(fontSize: AppLayout.scaled(context, 13)),
+                    ),
+                  ),
                   if (isCreator) ...[
                     SizedBox(width: AppLayout.scaled(context, 6)),
                     Container(
                       padding: EdgeInsets.symmetric(
-                          horizontal: AppLayout.scaled(context, 5),
-                          vertical: 1),
+                        horizontal: AppLayout.scaled(context, 5),
+                        vertical: 1,
+                      ),
                       decoration: BoxDecoration(
                         color: AppTheme.success.withValues(alpha: 0.1),
-                        borderRadius:
-                            BorderRadius.circular(AppLayout.scaledValue(6)),
+                        borderRadius: BorderRadius.circular(
+                          AppLayout.scaledValue(6),
+                        ),
                       ),
-                      child: Text('创建人',
-                          style: TextStyle(
-                              fontSize: AppLayout.scaled(context, 10),
-                              fontWeight: FontWeight.w600,
-                              color: AppTheme.success)),
+                      child: Text(
+                        '创建人',
+                        style: TextStyle(
+                          fontSize: AppLayout.scaled(context, 10),
+                          fontWeight: FontWeight.w600,
+                          color: AppTheme.success,
+                        ),
+                      ),
                     ),
                   ],
                 ],
@@ -575,15 +605,19 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
                 children: [
                   IconButton(
                     tooltip: '编辑姓名',
-                    icon: Icon(Icons.edit_outlined,
-                        size: AppLayout.scaled(context, 18)),
+                    icon: Icon(
+                      Icons.edit_outlined,
+                      size: AppLayout.scaled(context, 18),
+                    ),
                     onPressed: () => _editAdminNames(entry.key),
                   ),
                   if (!isCreator)
                     IconButton(
-                      icon: Icon(Icons.close,
-                          size: AppLayout.scaled(context, 18),
-                          color: AppTheme.danger),
+                      icon: Icon(
+                        Icons.close,
+                        size: AppLayout.scaled(context, 18),
+                        color: AppTheme.danger,
+                      ),
                       onPressed: () => _removeAdmin(entry.key),
                     ),
                 ],
@@ -604,26 +638,32 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
             decoration: InputDecoration(
               hintText: '最低 1.11 元',
               border: OutlineInputBorder(
-                  borderRadius:
-                      BorderRadius.circular(AppLayout.scaledValue(10))),
+                borderRadius: BorderRadius.circular(AppLayout.scaledValue(10)),
+              ),
               contentPadding: EdgeInsets.symmetric(
-                  horizontal: AppLayout.scaled(context, 12),
-                  vertical: AppLayout.scaled(context, 10)),
+                horizontal: AppLayout.scaled(context, 12),
+                vertical: AppLayout.scaled(context, 10),
+              ),
             ),
           ),
           if (_wallets.length > 1) ...[
             SizedBox(height: AppLayout.scaled(context, 20)),
             _buildSectionTitle('签名钱包'),
             SizedBox(height: AppLayout.scaled(context, 8)),
-            DropdownButtonFormField<WalletProfile>(
+            DropdownButtonFormField<CitizenWalletStateAccount>(
               initialValue: _selectedWallet,
               items: _wallets
-                  .map((w) => DropdownMenuItem(
+                  .map(
+                    (w) => DropdownMenuItem(
                       value: w,
                       child: Text(
-                          '${w.walletName} (${_truncateAddress(w.ss58Address)})',
-                          style: TextStyle(
-                              fontSize: AppLayout.scaled(context, 13)))))
+                        '${w.name} (${_truncateAddress(w.ss58Address)})',
+                        style: TextStyle(
+                          fontSize: AppLayout.scaled(context, 13),
+                        ),
+                      ),
+                    ),
+                  )
                   .toList(),
               onChanged: (w) {
                 if (w != null) {
@@ -635,12 +675,16 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
                 }
               },
               decoration: InputDecoration(
-                  border: OutlineInputBorder(
-                      borderRadius:
-                          BorderRadius.circular(AppLayout.scaledValue(10))),
-                  contentPadding: EdgeInsets.symmetric(
-                      horizontal: AppLayout.scaled(context, 12),
-                      vertical: AppLayout.scaled(context, 10))),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(
+                    AppLayout.scaledValue(10),
+                  ),
+                ),
+                contentPadding: EdgeInsets.symmetric(
+                  horizontal: AppLayout.scaled(context, 12),
+                  vertical: AppLayout.scaled(context, 10),
+                ),
+              ),
             ),
           ],
           SizedBox(height: AppLayout.scaled(context, 28)),
@@ -649,23 +693,33 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
             child: ElevatedButton(
               onPressed: _submitting ? null : _submit,
               style: ElevatedButton.styleFrom(
-                  backgroundColor: AppTheme.primaryDark,
-                  foregroundColor: Colors.white,
-                  padding: EdgeInsets.symmetric(
-                      vertical: AppLayout.scaled(context, 14)),
-                  shape: RoundedRectangleBorder(
-                      borderRadius:
-                          BorderRadius.circular(AppLayout.scaledValue(12)))),
+                backgroundColor: AppTheme.primaryDark,
+                foregroundColor: Colors.white,
+                padding: EdgeInsets.symmetric(
+                  vertical: AppLayout.scaled(context, 14),
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(
+                    AppLayout.scaledValue(12),
+                  ),
+                ),
+              ),
               child: _submitting
                   ? SizedBox(
                       width: AppLayout.scaled(context, 18),
                       height: AppLayout.scaled(context, 18),
                       child: const CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white))
-                  : Text('发起创建提案',
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : Text(
+                      '发起创建提案',
                       style: TextStyle(
-                          fontSize: AppLayout.scaled(context, 16),
-                          fontWeight: FontWeight.w600)),
+                        fontSize: AppLayout.scaled(context, 16),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
             ),
           ),
         ],
@@ -674,54 +728,57 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
   }
 
   Widget _buildSectionTitle(String title, {String? note}) => Row(
-        children: [
-          Text(title,
-              style: TextStyle(
-                  fontSize: AppLayout.scaledValue(14),
-                  fontWeight: FontWeight.w600,
-                  color: AppTheme.primaryDark)),
-          if (note != null) ...[
-            SizedBox(width: AppLayout.scaledValue(8)),
-            Text(
-              note,
-              style: TextStyle(
-                fontSize: AppLayout.scaledValue(12),
-                color: AppTheme.textTertiary,
-              ),
-            ),
-          ],
-        ],
-      );
+    children: [
+      Text(
+        title,
+        style: TextStyle(
+          fontSize: AppLayout.scaledValue(14),
+          fontWeight: FontWeight.w600,
+          color: AppTheme.primaryDark,
+        ),
+      ),
+      if (note != null) ...[
+        SizedBox(width: AppLayout.scaledValue(8)),
+        Text(
+          note,
+          style: TextStyle(
+            fontSize: AppLayout.scaledValue(12),
+            color: AppTheme.textTertiary,
+          ),
+        ),
+      ],
+    ],
+  );
 
   /// 管理员扫码入口属于列表操作，固定收进标题行右侧，避免独立按钮挤占列表纵向空间。
   Widget _buildAdminSectionHeader() => Row(
-        children: [
-          Expanded(
-            child: Text(
-              '管理员列表（${_admins.length}/64）',
-              style: TextStyle(
-                fontSize: AppLayout.scaledValue(14),
-                fontWeight: FontWeight.w600,
-                color: AppTheme.primaryDark,
-              ),
-            ),
+    children: [
+      Expanded(
+        child: Text(
+          '管理员列表（${_admins.length}/64）',
+          style: TextStyle(
+            fontSize: AppLayout.scaledValue(14),
+            fontWeight: FontWeight.w600,
+            color: AppTheme.primaryDark,
           ),
-          IconButton(
-            key: const ValueKey('personal-admin-scan-button'),
-            tooltip: '扫码添加管理员',
-            onPressed: _addAdminByQr,
-            icon: SvgPicture.asset(
-              'assets/icons/scan-line.svg',
-              width: AppLayout.scaled(context, 20),
-              height: AppLayout.scaled(context, 20),
-              colorFilter: const ColorFilter.mode(
-                AppTheme.primaryDark,
-                BlendMode.srcIn,
-              ),
-            ),
+        ),
+      ),
+      IconButton(
+        key: const ValueKey('personal-admin-scan-button'),
+        tooltip: '扫码添加管理员',
+        onPressed: _addAdminByQr,
+        icon: SvgPicture.asset(
+          'assets/icons/scan-line.svg',
+          width: AppLayout.scaled(context, 20),
+          height: AppLayout.scaled(context, 20),
+          colorFilter: const ColorFilter.mode(
+            AppTheme.primaryDark,
+            BlendMode.srcIn,
           ),
-        ],
-      );
+        ),
+      ),
+    ],
+  );
 
   Widget _buildThresholdPreview() {
     final count = _admins.length;
@@ -753,8 +810,9 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
                 borderRadius: BorderRadius.circular(AppLayout.scaledValue(10)),
               ),
               contentPadding: EdgeInsets.symmetric(
-                  horizontal: AppLayout.scaledValue(12),
-                  vertical: AppLayout.scaledValue(10)),
+                horizontal: AppLayout.scaledValue(12),
+                vertical: AppLayout.scaledValue(10),
+              ),
             ),
           ),
           SizedBox(height: AppLayout.scaledValue(8)),
@@ -765,37 +823,39 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
   }
 
   Widget _buildThresholdRow(String label, String value) => Row(
-        children: [
-          Expanded(
-            child: Text(label,
-                style: TextStyle(
-                    fontSize: AppLayout.scaledValue(13),
-                    color: AppTheme.textSecondary)),
+    children: [
+      Expanded(
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: AppLayout.scaledValue(13),
+            color: AppTheme.textSecondary,
           ),
-          Text(value,
-              style: TextStyle(
-                  fontSize: AppLayout.scaledValue(13),
-                  fontWeight: FontWeight.w700,
-                  color: AppTheme.primaryDark)),
-        ],
-      );
+        ),
+      ),
+      Text(
+        value,
+        style: TextStyle(
+          fontSize: AppLayout.scaledValue(13),
+          fontWeight: FontWeight.w700,
+          color: AppTheme.primaryDark,
+        ),
+      ),
+    ],
+  );
 
   String _truncateAddress(String a) => a.length <= 14
       ? a
       : '${a.substring(0, 6)}...${a.substring(a.length - 6)}';
-  String _hexToSs58(String hex) => Keyring()
-      .encodeAddress(Uint8List.fromList(_hexDecode(hex)), kGmbSs58Prefix);
-  String _toHex(List<int> b) {
-    final s = StringBuffer();
-    for (final v in b) {
-      s.write(v.toRadixString(16).padLeft(2, '0'));
-    }
-    return s.toString();
-  }
-
+  String _hexToSs58(String hex) => Keyring().encodeAddress(
+    Uint8List.fromList(_hexDecode(hex)),
+    kGmbSs58Prefix,
+  );
   List<int> _hexDecode(String hex) {
     final h = hex.startsWith('0x') ? hex.substring(2) : hex;
-    return List.generate(h.length ~/ 2,
-        (i) => int.parse(h.substring(i * 2, i * 2 + 2), radix: 16));
+    return List.generate(
+      h.length ~/ 2,
+      (i) => int.parse(h.substring(i * 2, i * 2 + 2), radix: 16),
+    );
   }
 }

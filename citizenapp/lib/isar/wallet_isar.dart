@@ -9,96 +9,6 @@ import 'isar_core_bootstrap.dart';
 
 part 'wallet_isar.g.dart';
 
-@collection
-class WalletProfileEntity {
-  Id id = Isar.autoIncrement;
-
-  // 冲突必须由钱包事务显式分类并拒绝，禁止 Isar 静默替换另一只钱包。
-  @Index(unique: true)
-  late int walletIndex;
-
-  late String walletName;
-  late String walletIcon;
-  late double balance;
-
-  @Index(unique: true)
-  late String accountId;
-
-  /// 主指纹 = 账户0(`//0`)的 accountId,唯一标识这套助记词(一只钱包)。
-  ///
-  /// 无根多账户模型下,同一 masterId 下的全部账户([AccountEntity])共享一套助记词;
-  /// interim identity = 账户0,故热钱包的 masterId 恒等于本行 accountId。冷钱包无
-  /// 派生概念,masterId 亦取其 accountId。用于「account.masterId → 定位 walletIndex」。
-  @Index()
-  late String masterId;
-
-  @Index(unique: true)
-  late String ss58Address;
-
-  late String alg;
-  late int ss58;
-  late int createdAtMillis;
-  late String source;
-
-  /// 钱包账户签名模式。只允许 `hot` 或 `cold`；其它值保留为可见损坏事实并拒绝签名。
-  late String signMode;
-}
-
-/// 一只钱包(masterId)下按派生序号展开的一个账户(`//index`,含账户0 = `//0`)。
-///
-/// 无根模型:本行只存该账户的公开身份(accountId / ss58 / 序号 / 显示名),叶子私钥
-/// (child mini-secret)只落硬件金库([SecureSeedStore],按 accountId 分键)。同一
-/// masterId 下多行 = 一套助记词展开的多账户;账户0 是锚点,masterId = 账户0.accountId。
-@collection
-class AccountEntity {
-  Id id = Isar.autoIncrement;
-
-  /// 所属钱包主指纹(= 账户0 的 accountId);按此分组取一只钱包的全部账户。
-  @Index()
-  late String masterId;
-
-  /// 派生序号:`//index`(账户0 = 0,其余 1..1989)。
-  late int accountIndex;
-
-  /// 账户公钥 accountId(小写 `0x` + 64 位十六进制),全局唯一。
-  // 账户重复必须 fail-closed，不能借 `replace` 覆盖原账户的 masterId 归属。
-  @Index(unique: true)
-  late String accountId;
-
-  /// 账户本链 SS58 地址,全局唯一。
-  @Index(unique: true)
-  late String ss58Address;
-
-  /// 账户显示名(账户0 默认「账户0」,其余「账户<index>」)。
-  late String accountName;
-
-  /// 本地创建/发现时间(毫秒)。
-  late int createdAtMillis;
-}
-
-@collection
-class WalletSettingsEntity {
-  Id id = 0;
-
-  int? activeWalletIndex;
-
-  /// “我的钱包”中全部有效热、冷账户的唯一稳定顺序。
-  /// 第一项就是设备默认账户；不得另存第二个默认账户字段。
-  List<String> orderedAccountIds = const [];
-
-  int updatedAtMillis = 0;
-}
-
-/// 钱包或账户删除后尚待完成的平台偏好清理计划。
-///
-/// 删除事实与计划在同一 Wallet 事务提交；平台清理成功后才确认移除本行。
-@collection
-class WalletCleanupPlanStateEntity {
-  Id id = 0;
-
-  late String payloadJson;
-}
-
 /// CID 账户数据换绑的顶层意图。
 ///
 /// 该状态参与钱包签名与密钥归属切换，必须归 Wallet 域，不能放入通用 KV。
@@ -596,9 +506,9 @@ class LocalTxEntity {
   ///
   /// 钱包对应的链账户由 accountId 唯一，流水记录由 recordKey 唯一。
   /// 区块事件（收入等）记录使用 `accountId:blockHash:eventIndex`；本机提交交易
-  /// 使用状态无关的 `accountId:tx:txHash`——一笔交易全程只有这一条记录，状态在其
-  /// 上就地流转（pending→inBlock→finalized），最终性由 ChainTxMonitor 按 txHash
-  /// 精确认后就地翻已确认，绝不 re-key、绝不另建第二条。
+  /// 使用状态无关的 `accountId:tx:txHash`。本机提交记录通过
+  /// [executionId]、[callDataHash] 和 [txHash] 关联 CitizenSDK 执行事实；
+  /// CitizenApp 不根据交易池、超时或扫块自行猜测终态。
   @Index(unique: true, replace: true)
   late String recordKey;
 
@@ -643,6 +553,13 @@ class LocalTxEntity {
   /// 链上交易哈希。
   String? txHash;
 
+  /// CitizenSDK 为本机提交分配的唯一 execution 标识。
+  /// 链上被动收入事件没有 SDK execution，因此为 null。
+  String? executionId;
+
+  /// CitizenSDK 返回的 opaque RuntimeCall hash，只用于关联业务记录。
+  String? callDataHash;
+
   /// 链上区块号。
   int? blockNumber;
 
@@ -669,24 +586,6 @@ class LocalTxEntity {
   String? failureReason;
 }
 
-/// 钱包交易记录本机同步游标。
-///
-/// citizenapp 不扫描导入前历史。游标只记录该钱包进入本机后，
-/// 本机已经同步到哪个 finalized 区块，离线重开时只补这之后的缺口。
-@collection
-class WalletTxSyncCursorEntity {
-  Id id = Isar.autoIncrement;
-
-  late String ss58Address;
-
-  @Index(unique: true, replace: true)
-  late String accountId;
-
-  late int trackingStartBlock;
-  late int lastSyncedBlock;
-  late int createdAtMillis;
-  late int updatedAtMillis;
-}
 
 enum _WalletIsarLifecycle { active, closing, closed }
 
@@ -829,10 +728,6 @@ class WalletIsar {
   /// Wallet 域的唯一 schema 清单；正常打开与终态擦除必须使用同一真源。
   static const List<CollectionSchema<dynamic>> _schemas =
       <CollectionSchema<dynamic>>[
-    WalletProfileEntitySchema,
-    AccountEntitySchema,
-    WalletSettingsEntitySchema,
-    WalletCleanupPlanStateEntitySchema,
     WalletAccountDataHandoverEntitySchema,
     WalletAttestationEntitySchema,
     WalletAccountBalanceSnapshotEntitySchema,
@@ -849,7 +744,6 @@ class WalletIsar {
     PersonalAccountEntitySchema,
     PersonalAccountProposalEntitySchema,
     LocalTxEntitySchema,
-    WalletTxSyncCursorEntitySchema,
   ];
 
   /// 给低优先级后台任务判断是否让路；前台读写仍应直接排队执行。
@@ -1101,20 +995,8 @@ class WalletIsar {
     );
   }
 
-  /// 完成数据库打开后的目标设置初始化；不得扫描或删除任何业务 KV。
-  Future<Isar> _prepareOpened(Isar isar) async {
-    final settings = await isar.walletSettingsEntitys.get(0);
-    if (settings == null) {
-      await isar.writeTxn(() async {
-        await isar.walletSettingsEntitys.put(
-          WalletSettingsEntity()
-            ..id = 0
-            ..updatedAtMillis = DateTime.now().millisecondsSinceEpoch,
-        );
-      });
-    }
-    return isar;
-  }
+  /// 完成数据库打开；钱包公开目录已由 CitizenSDK 独立持有，本库只含 App 业务集合。
+  Future<Isar> _prepareOpened(Isar isar) async => isar;
 
   Future<void> resetForTest() async {
     if (!IsarCoreBootstrap.isFlutterTest) {

@@ -1,35 +1,52 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:citizenapp/transaction/personal-manage/personal_manage_models.dart';
 import 'package:citizenapp/transaction/personal-manage/personal_manage_service.dart';
 import 'package:citizenapp/transaction/personal-manage/personal_manage_storage_codec.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/models/admin_account.dart';
 
-class FakeChainRpc extends ChainRpc {
+import '../../support/fake_citizen_sdk.dart';
+
+class FakeChain extends TestCitizenChain {
   final Map<String, Uint8List?> responses = {};
   final List<String> requestedKeys = [];
 
   @override
-  Future<Uint8List?> fetchStorage(String storageKeyHex) async {
+  Future<CitizenBlockRef> getFinalizedHead() async => CitizenBlockRef(
+        hash: '0x${'11' * 32}',
+        number: BigInt.one,
+        finality: CitizenBlockFinality.finalized,
+      );
+
+  @override
+  Future<Uint8List?> getStorage(
+    CitizenBlockRef block,
+    Uint8List key,
+  ) async {
+    final storageKeyHex = _hex(key);
     requestedKeys.add(storageKeyHex);
     return responses[storageKeyHex];
   }
 
   @override
-  Future<Map<String, Uint8List?>> fetchStorageBatchChunked(
-    Iterable<String> storageKeyHexList, {
-    int chunkSize = 100,
-  }) async {
-    final result = <String, Uint8List?>{};
-    for (final key in storageKeyHexList) {
-      requestedKeys.add(key);
-      result[key] = responses[key];
+  Future<List<Uint8List?>> getStorageBatch(
+    CitizenBlockRef block,
+    List<Uint8List> keys,
+  ) async {
+    final result = <Uint8List?>[];
+    for (final key in keys) {
+      final keyHex = _hex(key);
+      requestedKeys.add(keyHex);
+      result.add(responses[keyHex]);
     }
     return result;
   }
+
+  String _hex(List<int> bytes) =>
+      '0x${bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join()}';
 }
 
 void main() {
@@ -94,16 +111,6 @@ void main() {
       tmp = tmp >> 8;
     }
     return out;
-  }
-
-  Uint8List extrinsicFailedEvent(int moduleIndex, int errorIndex) {
-    return Uint8List.fromList([
-      0x04, // Vec<EventRecord> 长度 = 1
-      0x00, 0, 0, 0, 0, // Phase::ApplyExtrinsic(0)
-      0x00, 0x01, // System::ExtrinsicFailed
-      0x03, moduleIndex, errorIndex, 0, 0, 0, // DispatchError::Module
-      0, 0, 0, 0, // DispatchInfo 余量，解析失败原因不依赖这些字段
-    ]);
   }
 
   Uint8List personalAccountBytes() {
@@ -181,7 +188,10 @@ void main() {
     });
 
     test('decodes current PersonalManage create ProposalData', () {
-      final service = PersonalManageService();
+      final service = PersonalManageService(
+        chain: TestCitizenChain(),
+        transactions: TestCitizenTransactions(),
+      );
       final inner = <int>[
         ...utf8.encode('per-mgmt'),
         0x00,
@@ -206,8 +216,8 @@ void main() {
     });
 
     test('fetchPersonalAccount reads PersonalManage current storage', () async {
-      final rpc = FakeChainRpc();
-      final service = PersonalManageService(chainRpc: rpc);
+      final rpc = FakeChain();
+      final service = PersonalManageService(chain: rpc, transactions: TestCitizenTransactions());
       final accountId = '0x${'22' * 32}';
       final personalKey =
           '0x${hexOf(PersonalManageStorageCodec.personalAccountsKey(accountId))}';
@@ -239,8 +249,8 @@ void main() {
 
     test('fetchPersonalAccountsBatch reads accounts in staged storage batches',
         () async {
-      final rpc = FakeChainRpc();
-      final service = PersonalManageService(chainRpc: rpc);
+      final rpc = FakeChain();
+      final service = PersonalManageService(chain: rpc, transactions: TestCitizenTransactions());
       final firstAccountId = '0x${'22' * 32}';
       final secondAccountId = '0x${'33' * 32}';
       String personalKey(String accountId) =>
@@ -292,24 +302,5 @@ void main() {
       ]);
     });
 
-    test('describes in-block PersonalManage dispatch failure', () {
-      final failure =
-          ChainRpc().findExtrinsicFailureInEvents(extrinsicFailedEvent(7, 5));
-
-      expect(failure, isNotNull);
-      expect(
-          failure!.description, contains('PersonalManage.InsufficientAmount'));
-      expect(failure.description, contains('余额不足'));
-    });
-
-    test('describes stale PersonalAdmins account failure', () {
-      final failure =
-          ChainRpc().findExtrinsicFailureInEvents(extrinsicFailedEvent(29, 11));
-
-      expect(failure, isNotNull);
-      expect(failure!.description,
-          contains('PersonalAdmins.InstitutionAlreadyExists'));
-      expect(failure.description, contains('当前状态'));
-    });
   });
 }

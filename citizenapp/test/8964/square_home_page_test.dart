@@ -1,8 +1,9 @@
 import 'dart:async';
-import 'dart:typed_data';
-
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import '../support/fake_citizen_sdk.dart';
 
 import 'package:citizenapp/8964/chain/square_chain_service.dart';
 import 'package:citizenapp/8964/compose/compose_page.dart';
@@ -18,56 +19,42 @@ import 'package:citizenapp/8964/profile/services/citizen_profile_cache.dart';
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/8964/profile/widgets/profile_avatar.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
-import 'package:citizenapp/8964/services/square_compose_signers.dart';
 import 'package:citizenapp/8964/services/square_identity_state.dart';
-import 'package:citizenapp/8964/services/square_publish_service.dart';
 import 'package:citizenapp/my/myid/current_user_context.dart';
 import 'package:citizenapp/my/membership/membership_revision.dart';
-import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/identity_badge.dart';
-import 'package:citizenapp/wallet/core/default_account_service.dart';
-import 'package:citizenapp/wallet/core/sign_mode.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'profile/fake_profile.dart';
 
 /// 身份账户缓存 fake:resolve 返回 null,让 loadCurrent 回退 wallet.accountId
 /// 使用测试默认账户快照，避免 instance 访问真实本地钱包/Isar。
-class _NullIdentityCache extends CurrentUserContext {
+class _NullIdentityCache implements CurrentUserContext {
   @override
   Future<CurrentUser?> resolve() async => null;
   @override
   Future<String?> accountId() async => null;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _FakeWalletManager extends WalletManager {
-  _FakeWalletManager(this.wallet);
+class _FakeWallet implements CitizenSdkWallet {
+  _FakeWallet(this.wallet);
 
-  final WalletProfile? wallet;
-
-  @override
-  Future<WalletProfile?> getWallet() async => wallet;
+  final CitizenWalletStateAccount? wallet;
 
   @override
-  Future<WalletProfile?> getDefaultWallet() async => wallet;
-}
-
-class _RecordingSignWalletManager extends WalletManager {
-  String? signedAccountId;
-  Uint8List? signedPayload;
+  Future<CitizenWalletState> getState() async => CitizenWalletState(
+        revision: BigInt.one,
+        hotProfile: null,
+        accounts: wallet == null ? const [] : [wallet!],
+      );
 
   @override
-  Future<Uint8List> signForAccountId(
-    String accountId,
-    Uint8List payload,
-  ) async {
-    signedAccountId = accountId;
-    signedPayload = Uint8List.fromList(payload);
-    return Uint8List.fromList(List<int>.filled(64, 0x5a));
-  }
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _StaticProfileMediaCache extends CitizenProfileMediaCache {
@@ -76,54 +63,45 @@ class _StaticProfileMediaCache extends CitizenProfileMediaCache {
       const CitizenProfileMediaSnapshot(avatarPath: '/tmp/synced-avatar.png');
 }
 
-class _FakeDefaultAccountReader implements DefaultAccountReader {
-  const _FakeDefaultAccountReader(this.account);
-
-  final DefaultAccount? account;
-
-  @override
-  Future<DefaultAccount?> getDefaultAccount() async => account;
-}
-
-const _registeredWallet = WalletProfile(
+final _registeredWallet = CitizenWalletStateAccount(
+  signMode: CitizenWalletSignMode.hot,
   walletIndex: 1,
-  walletName: '测试钱包',
-  walletIcon: '',
-  balance: 0,
-  ss58Address: 'citizen_test_account_id',
-  accountId:
-      '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-  alg: 'sr25519',
-  ss58: 2027,
-  createdAtMillis: 1,
-  source: 'test',
-  signMode: SignMode.hot,
-);
-
-const _registeredDefaultAccount = DefaultAccount(
-  accountId:
-      '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-  ss58Address: 'citizen_test_account_id',
-  accountName: '测试钱包',
-  signMode: SignMode.hot,
-  walletIndex: 1,
-  masterId: 'test',
   accountIndex: 0,
+  name: '测试钱包',
+  ss58Address: 'citizen_test_account_id',
+  accountId:
+      '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  createdAtMillis: BigInt.one,
+  isDefault: true,
 );
 
 SquareIdentityService _registeredIdentityService({
   _FakeSquareChainService? chainService,
 }) => SquareIdentityService(
-  walletManager: _FakeWalletManager(_registeredWallet),
-  defaultAccountReader: const _FakeDefaultAccountReader(
-    _registeredDefaultAccount,
-  ),
+  wallet: _FakeWallet(_registeredWallet),
+  currentUserContext: _NullIdentityCache(),
   chainService:
       chainService ?? _FakeSquareChainService('CN220-CTZN2-100000001-2026'),
 );
 
+SquareIdentityService _emptyIdentityService() => SquareIdentityService(
+      wallet: _FakeWallet(null),
+      currentUserContext: _NullIdentityCache(),
+      chainService: _FakeSquareChainService(null),
+    );
+
+SquareIdentityService _unregisteredIdentityService() => SquareIdentityService(
+      wallet: _FakeWallet(_registeredWallet),
+      currentUserContext: _UnregisteredIdentityCache(),
+      chainService: _FakeSquareChainService(null),
+    );
+
 class _FakeSquareChainService extends SquareChainService {
-  _FakeSquareChainService(this.cidNumber);
+  _FakeSquareChainService(this.cidNumber)
+      : super(
+          chain: TestCitizenChain(),
+          transactions: TestCitizenTransactions(),
+        );
 
   final String? cidNumber;
   int fetchIdentityCount = 0;
@@ -145,7 +123,7 @@ class _FakeSquareChainService extends SquareChainService {
   }
 }
 
-class _StaticComposeIdentityService extends SquareIdentityService {
+class _StaticComposeIdentityService implements SquareIdentityService {
   const _StaticComposeIdentityService();
 
   @override
@@ -155,19 +133,25 @@ class _StaticComposeIdentityService extends SquareIdentityService {
           '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       cidNumber: 'CN220-CTZN2-100000001-2026',
       displayName: '不应显示的用户昵称',
-      signMode: SignMode.hot,
+      signMode: CitizenWalletSignMode.hot,
       identityLevel: 'voting',
     );
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _DelayedComposeIdentityService extends SquareIdentityService {
+class _DelayedComposeIdentityService implements SquareIdentityService {
   final Completer<SquareIdentityState> completer =
       Completer<SquareIdentityState>();
 
   @override
   Future<SquareIdentityState> loadCurrent({bool readLiveChain = true}) =>
       completer.future;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _RecordingDraftRepository implements SquareComposeDraftRepository {
@@ -204,11 +188,14 @@ class _FakeFeedSource implements SquareFeedSource {
 }
 
 /// 模拟后台通知在创建会话时抛出非 Exception 错误，验证 unawaited 边界完整。
-class _ThrowingSessionProvider extends SquareSessionProvider {
+class _ThrowingSessionProvider implements SquareSessionProvider {
   @override
   Future<SquareSession?> ensureSession() async {
     throw StateError('session unavailable');
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// 保持生产路径类型判断成立，但不访问真实 Worker。
@@ -224,23 +211,29 @@ class _FakeSquareApiClient extends SquareApiClient {
 }
 
 /// 未注册：当前默认账户的本地绑定为空，不回退其他账户。
-class _UnregisteredIdentityCache extends CurrentUserContext {
+class _UnregisteredIdentityCache implements CurrentUserContext {
   @override
-  Future<CurrentUser?> resolve() async => const CurrentUser(
-    account: DefaultAccount(
+  Future<CurrentUser?> resolve() async => CurrentUser(
+    account: CitizenWalletStateAccount(
+      signMode: CitizenWalletSignMode.hot,
+      walletIndex: 1,
+      accountIndex: 0,
       accountId:
           '0x1111111111111111111111111111111111111111111111111111111111111111',
       ss58Address: 'ss58-demo',
-      accountName: '默认账户',
-      signMode: SignMode.hot,
-      walletIndex: 1,
+      name: '默认账户',
+      createdAtMillis: BigInt.one,
+      isDefault: true,
     ),
     binding: null,
   );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// Worker 真源判定:登录挑战对未绑定账户回 403 cid_not_bound。
-class _CidNotBoundSessionProvider extends SquareSessionProvider {
+class _CidNotBoundSessionProvider implements SquareSessionProvider {
   @override
   Future<SquareSession?> ensureSession() async {
     throw const SquareApiException(
@@ -249,6 +242,9 @@ class _CidNotBoundSessionProvider extends SquareSessionProvider {
       errorCode: 'cid_not_bound',
     );
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// 记录最近一次请求的分类，用于断言分类切换真的按 feedKind 重新拉流。
@@ -339,10 +335,7 @@ Widget _wrap(Widget child) {
 void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
-    CurrentUserContext.debugInstance = _NullIdentityCache();
   });
-
-  tearDown(CurrentUserContext.resetDebugInstance);
 
   testWidgets('feed 未返回时直接显示广场页面且不使用整页转圈', (tester) async {
     final feedSource = _PendingFeedSource();
@@ -350,9 +343,7 @@ void main() {
     await tester.pumpWidget(
       _wrap(
         SquareHomePage(
-          identityService: SquareIdentityService(
-            walletManager: _FakeWalletManager(null),
-          ),
+          identityService: _emptyIdentityService(),
           feedSource: feedSource,
         ),
       ),
@@ -379,9 +370,7 @@ void main() {
   });
 
   testWidgets('广场只替换人物坦克背景且保留分类、发布与切换行为', (tester) async {
-    final identityService = SquareIdentityService(
-      walletManager: _FakeWalletManager(null),
-    );
+    final identityService = _emptyIdentityService();
     final feedSource = _RecordingFeedSource();
 
     await tester.pumpWidget(
@@ -461,9 +450,7 @@ void main() {
     await tester.pumpWidget(
       _wrap(
         SquareHomePage(
-          identityService: SquareIdentityService(
-            walletManager: _FakeWalletManager(null),
-          ),
+          identityService: _emptyIdentityService(),
           feedSource: feedSource,
         ),
       ),
@@ -500,9 +487,7 @@ void main() {
     await tester.pumpWidget(
       _wrap(
         SquareHomePage(
-          identityService: SquareIdentityService(
-            walletManager: _FakeWalletManager(null),
-          ),
+          identityService: _emptyIdentityService(),
           feedSource: _RecordingFeedSource(),
           seedPosts: seed,
         ),
@@ -777,7 +762,7 @@ void main() {
         accountId:
             '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
         cidNumber: 'CN220-CTZN2-100000001-2026',
-        signMode: SignMode.hot,
+        signMode: CitizenWalletSignMode.hot,
       ),
     );
     await tester.pumpAndSettle();
@@ -881,9 +866,7 @@ void main() {
       await tester.pumpWidget(
         _wrap(
           SquareHomePage(
-            identityService: SquareIdentityService(
-              walletManager: _FakeWalletManager(null),
-            ),
+            identityService: _emptyIdentityService(),
             feedSource: feedSource,
             seedPosts: [_seedPost(id: 's1', text: '种子SS')],
           ),
@@ -907,9 +890,7 @@ void main() {
     await tester.pumpWidget(
       _wrap(
         SquareHomePage(
-          identityService: SquareIdentityService(
-            walletManager: _FakeWalletManager(null),
-          ),
+          identityService: _emptyIdentityService(),
           feedSource: _FakeSquareApiClient(),
           sessionProvider: _ThrowingSessionProvider(),
         ),
@@ -926,14 +907,10 @@ void main() {
   });
 
   testWidgets('本机无绑定 → 仍由 Worker 判定未注册并显示统一注册引导', (tester) async {
-    CurrentUserContext.debugInstance = _UnregisteredIdentityCache();
-
     await tester.pumpWidget(
       _wrap(
         SquareHomePage(
-          identityService: SquareIdentityService(
-            walletManager: _FakeWalletManager(null),
-          ),
+          identityService: _unregisteredIdentityService(),
           feedSource: _FakeSquareApiClient(),
           sessionProvider: _CidNotBoundSessionProvider(),
         ),
@@ -953,9 +930,7 @@ void main() {
     await tester.pumpWidget(
       _wrap(
         SquareHomePage(
-          identityService: SquareIdentityService(
-            walletManager: _FakeWalletManager(null),
-          ),
+          identityService: _emptyIdentityService(),
           feedSource: _FakeSquareApiClient(),
           sessionProvider: _CidNotBoundSessionProvider(),
         ),
@@ -969,73 +944,4 @@ void main() {
     expect(find.text('广场内容加载失败'), findsNothing);
   });
 
-  testWidgets('广场链签按 SignMode 精确分流且缺失模式拒绝', (tester) async {
-    late BuildContext pageContext;
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Builder(
-          builder: (context) {
-            pageContext = context;
-            return const SizedBox.shrink();
-          },
-        ),
-      ),
-    );
-
-    const accountId =
-        '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-    final hotWalletManager = _RecordingSignWalletManager();
-    final hotSigner = SquareComposeSigners(
-      context: pageContext,
-      identity: const SquareIdentityState(
-        accountId: accountId,
-        signMode: SignMode.hot,
-      ),
-      walletManager: hotWalletManager,
-    );
-    final hotPayload = Uint8List.fromList(<int>[1, 2, 3]);
-    final signature = await hotSigner.signChain(hotPayload);
-    expect(signature, hasLength(64));
-    expect(hotWalletManager.signedAccountId, accountId);
-    expect(hotWalletManager.signedPayload, orderedEquals(hotPayload));
-
-    final coldWalletManager = _RecordingSignWalletManager();
-    final coldSigner = SquareComposeSigners(
-      context: pageContext,
-      identity: const SquareIdentityState(
-        accountId: accountId,
-        signMode: SignMode.cold,
-      ),
-      walletManager: coldWalletManager,
-    );
-    final coldResult = coldSigner.signChain(Uint8List.fromList(<int>[4, 5]));
-    final coldExpectation = expectLater(
-      coldResult,
-      throwsA(isA<SquarePublishException>()),
-    );
-    await tester.pumpAndSettle();
-    expect(find.byType(QrSignSessionPage), findsOneWidget);
-    expect(coldWalletManager.signedAccountId, isNull);
-    Navigator.of(pageContext).pop();
-    await tester.pumpAndSettle();
-    await coldExpectation;
-
-    final invalidWalletManager = _RecordingSignWalletManager();
-    final invalidSigner = SquareComposeSigners(
-      context: pageContext,
-      identity: const SquareIdentityState(accountId: accountId),
-      walletManager: invalidWalletManager,
-    );
-    await expectLater(
-      invalidSigner.signChain(Uint8List.fromList(<int>[6])),
-      throwsA(
-        isA<SquarePublishException>().having(
-          (error) => error.message,
-          'message',
-          contains('签名模式无效'),
-        ),
-      ),
-    );
-    expect(invalidWalletManager.signedAccountId, isNull);
-  });
 }

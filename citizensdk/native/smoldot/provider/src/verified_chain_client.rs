@@ -6,7 +6,9 @@ use citizen_sdk_contracts::{
     ExportedChainState, ExtrinsicWatchEvent, FinalizedBlockRef, Hash32, RuntimeContext,
     RuntimeVersion, SignedExtrinsic, StateImportReceipt, SubmittedExtrinsic, VerifiedBlockHeader,
     VerifiedBlockRef, VerifiedChainClient, MAX_FINALIZED_BLOCKS_PER_BATCH, MAX_HEADER_DIGEST_BYTES,
-    MAX_STORAGE_BATCH_KEYS, MAX_STORAGE_BATCH_KEY_BYTES, MAX_STORAGE_KEY_BYTES,
+    MAX_RUNTIME_API_ARGUMENT_BYTES, MAX_RUNTIME_API_METHOD_BYTES, MAX_RUNTIME_API_OUTPUT_BYTES,
+    MAX_STORAGE_BATCH_KEYS, MAX_STORAGE_BATCH_KEY_BYTES, MAX_STORAGE_KEYS_PAGE_BYTES,
+    MAX_STORAGE_KEYS_PAGE_LIMIT, MAX_STORAGE_KEY_BYTES,
 };
 use futures_channel::mpsc;
 use serde_json::{json, Value};
@@ -113,17 +115,107 @@ impl VerifiedChainClient for SmoldotVerifiedChainClient {
                     || subscription_result(&value, &id).is_none() { continue; }
                 // RPC header 只是唤醒信号，证明来自已有 typed verified snapshot。
                 match finalized_head(&running).await {
-                    Ok(block) if previous != Some(block) => {
+                    Ok(block) if previous.is_none() => {
                         previous = Some(block);
                         pending = Some(Ok(block));
                     }
-                    Ok(_) => {}
+                    Ok(block) if previous == Some(block) => {}
+                    Ok(block) if previous.is_some_and(|value| block.number() > value.number()) => {
+                        previous = Some(block);
+                        pending = Some(Ok(block));
+                    }
+                    Ok(_) => {
+                        pending = Some(Err(contract_error(
+                            ContractErrorCode::Integrity,
+                            "smoldot verified finalized head 倒退或同高度换 hash",
+                        )));
+                    }
                     Err(error) => { pending = Some(Err(error)); }
                 }
             }
             if let Err(error) = running.rpc.unsubscribe_finalized_heads(&id).await { lease.fail(error); }
         });
         Box::pin(receiver)
+    }
+
+    fn get_storage_keys_paged(
+        &self,
+        block: FinalizedBlockRef,
+        prefix: Vec<u8>,
+        start_key: Option<Vec<u8>>,
+        limit: u32,
+    ) -> ContractFuture<'_, Vec<Vec<u8>>> {
+        let running = self.running();
+        Box::pin(async move {
+            validate_storage_keys_page_request(&prefix, start_key.as_deref(), limit)?;
+            let running = running?;
+            let exact = finalized_block_at(&running, block.number()).await?;
+            if exact != block {
+                return Err(contract_error(
+                    ContractErrorCode::Integrity,
+                    "storage keys page 的 finalized block 已变化",
+                ));
+            }
+            let value = running
+                .rpc
+                .request(
+                    "state_getKeysPaged",
+                    json!([
+                        format!("0x{}", hex::encode(&prefix)),
+                        limit,
+                        start_key
+                            .as_ref()
+                            .map(|key| format!("0x{}", hex::encode(key))),
+                        hash_hex(block.hash()),
+                    ]),
+                )
+                .await?;
+            parse_storage_keys_page(&value, &prefix, start_key.as_deref(), limit)
+        })
+    }
+
+    fn call_runtime_api(
+        &self,
+        block: VerifiedBlockRef,
+        method: String,
+        arguments: Vec<u8>,
+    ) -> ContractFuture<'_, Vec<u8>> {
+        let running = self.running();
+        Box::pin(async move {
+            validate_runtime_api_request(&method, &arguments)?;
+            let running = running?;
+            let exact = match block.finality() {
+                BlockFinality::Finalized => {
+                    finalized_block_at(&running, block.number()).await?.into()
+                }
+                BlockFinality::Best => best_head(&running).await?,
+            };
+            if exact != block {
+                return Err(contract_error(
+                    ContractErrorCode::Integrity,
+                    "Runtime API block 已变化或不属于当前 verified 链",
+                ));
+            }
+            let value = running
+                .rpc
+                .request(
+                    "state_call",
+                    json!([
+                        method,
+                        format!("0x{}", hex::encode(arguments)),
+                        hash_hex(block.hash()),
+                    ]),
+                )
+                .await?;
+            let output = parse_hex_value(&value, "Runtime API output")?;
+            if output.len() > MAX_RUNTIME_API_OUTPUT_BYTES {
+                return Err(contract_error(
+                    ContractErrorCode::Decode,
+                    "Runtime API output 超过 64 MiB",
+                ));
+            }
+            Ok(output)
+        })
     }
 
     fn get_finalized_block_at(&self, number: u64) -> ContractFuture<'_, FinalizedBlockRef> {
@@ -728,6 +820,108 @@ fn validate_storage_keys(keys: &[Vec<u8>]) -> ContractResult<()> {
     Ok(())
 }
 
+fn validate_storage_keys_page_request(
+    prefix: &[u8],
+    start_key: Option<&[u8]>,
+    limit: u32,
+) -> ContractResult<()> {
+    if prefix.is_empty() || prefix.len() > MAX_STORAGE_KEY_BYTES {
+        return Err(contract_error(
+            ContractErrorCode::InvalidArgument,
+            "storage keys page prefix 必须包含 1..4 KiB 字节",
+        ));
+    }
+    if start_key.is_some_and(|key| key.is_empty() || key.len() > MAX_STORAGE_KEY_BYTES) {
+        return Err(contract_error(
+            ContractErrorCode::InvalidArgument,
+            "storage keys page start_key 必须为空或包含 1..4 KiB 字节",
+        ));
+    }
+    if limit == 0 || limit > MAX_STORAGE_KEYS_PAGE_LIMIT {
+        return Err(contract_error(
+            ContractErrorCode::InvalidArgument,
+            "storage keys page limit 必须位于 1..1000",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_storage_keys_page(
+    value: &Value,
+    prefix: &[u8],
+    start_key: Option<&[u8]>,
+    limit: u32,
+) -> ContractResult<Vec<Vec<u8>>> {
+    let values = value.as_array().ok_or_else(|| {
+        contract_error(ContractErrorCode::Decode, "state_getKeysPaged 结果不是数组")
+    })?;
+    if values.len() > limit as usize {
+        return Err(contract_error(
+            ContractErrorCode::Integrity,
+            "state_getKeysPaged 返回数量超过请求 limit",
+        ));
+    }
+    let mut total = 0_usize;
+    let mut keys = Vec::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        let key = parse_hex_value(value, "storage key")?;
+        if key.is_empty()
+            || key.len() > MAX_STORAGE_KEY_BYTES
+            || !key.starts_with(prefix)
+            || start_key.is_some_and(|start| key.as_slice() <= start)
+        {
+            return Err(contract_error(
+                ContractErrorCode::Integrity,
+                format!("state_getKeysPaged 第 {index} 项不属于请求页面"),
+            ));
+        }
+        if keys
+            .last()
+            .is_some_and(|previous: &Vec<u8>| previous >= &key)
+        {
+            return Err(contract_error(
+                ContractErrorCode::Integrity,
+                "state_getKeysPaged 结果不是严格升序",
+            ));
+        }
+        total = total.checked_add(key.len()).ok_or_else(|| {
+            contract_error(ContractErrorCode::Integrity, "storage keys page 长度溢出")
+        })?;
+        if total > MAX_STORAGE_KEYS_PAGE_BYTES {
+            return Err(contract_error(
+                ContractErrorCode::Integrity,
+                "storage keys page 聚合字节超过 4 MiB",
+            ));
+        }
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
+fn validate_runtime_api_request(method: &str, arguments: &[u8]) -> ContractResult<()> {
+    let bytes = method.as_bytes();
+    let separator = bytes.iter().position(|byte| *byte == b'_');
+    let valid_character = |byte: &u8| byte.is_ascii_alphanumeric() || *byte == b'_';
+    if bytes.is_empty()
+        || bytes.len() > MAX_RUNTIME_API_METHOD_BYTES
+        || !bytes[0].is_ascii_alphabetic()
+        || !bytes.iter().all(valid_character)
+        || separator.is_none_or(|index| index == 0 || index + 1 == bytes.len())
+    {
+        return Err(contract_error(
+            ContractErrorCode::InvalidArgument,
+            "Runtime API method 必须是 1..128 ASCII 的 Trait_method",
+        ));
+    }
+    if arguments.len() > MAX_RUNTIME_API_ARGUMENT_BYTES {
+        return Err(contract_error(
+            ContractErrorCode::InvalidArgument,
+            "Runtime API arguments 超过 1 MiB",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_storage_batch_len(expected: usize, actual: usize) -> ContractResult<()> {
     if actual != expected {
         return Err(contract_error(
@@ -1284,6 +1478,60 @@ mod tests {
             MAX_STORAGE_BATCH_KEY_BYTES / MAX_STORAGE_KEY_BYTES + 1
         ];
         assert!(validate_storage_keys(&too_large).is_err());
+    }
+
+    #[test]
+    fn storage_key_pages_enforce_prefix_cursor_order_count_and_bytes() {
+        assert!(validate_storage_keys_page_request(&[1], None, 1).is_ok());
+        assert!(validate_storage_keys_page_request(
+            &vec![1; MAX_STORAGE_KEY_BYTES],
+            Some(&[1, 0]),
+            MAX_STORAGE_KEYS_PAGE_LIMIT,
+        )
+        .is_ok());
+        assert!(validate_storage_keys_page_request(&[], None, 1).is_err());
+        assert!(validate_storage_keys_page_request(&[1], None, 0).is_err());
+        assert!(
+            validate_storage_keys_page_request(&[1], None, MAX_STORAGE_KEYS_PAGE_LIMIT + 1,)
+                .is_err()
+        );
+
+        let page = json!(["0x0101", "0x0102"]);
+        assert_eq!(
+            parse_storage_keys_page(&page, &[1], None, 2).unwrap(),
+            vec![vec![1, 1], vec![1, 2]],
+        );
+        let next_page = json!(["0x0102"]);
+        assert_eq!(
+            parse_storage_keys_page(&next_page, &[1], Some(&[1, 1]), 2).unwrap(),
+            vec![vec![1, 2]],
+        );
+        assert!(
+            parse_storage_keys_page(&page, &[1], Some(&[1, 1]), 2).is_err(),
+            "排他 start_key 不能在下一页重复返回",
+        );
+        assert!(parse_storage_keys_page(&page, &[2], None, 2).is_err());
+        assert!(parse_storage_keys_page(&json!(["0x0102", "0x0101"]), &[1], None, 2).is_err());
+        assert!(parse_storage_keys_page(&page, &[1], None, 1).is_err());
+    }
+
+    #[test]
+    fn runtime_api_request_is_bounded_opaque_and_requires_trait_method_shape() {
+        assert!(validate_runtime_api_request("CitizenApi_items", &[]).is_ok());
+        let longest = format!("A_{}", "b".repeat(MAX_RUNTIME_API_METHOD_BYTES - 2));
+        let maximum_arguments = vec![0; MAX_RUNTIME_API_ARGUMENT_BYTES];
+        assert!(validate_runtime_api_request(&longest, &maximum_arguments).is_ok());
+        for invalid in ["", "CitizenApi", "_items", "CitizenApi-items"] {
+            assert!(
+                validate_runtime_api_request(invalid, &[]).is_err(),
+                "{invalid}"
+            );
+        }
+        assert!(validate_runtime_api_request(
+            "CitizenApi_items",
+            &vec![0; MAX_RUNTIME_API_ARGUMENT_BYTES + 1],
+        )
+        .is_err());
     }
 
     #[test]

@@ -3,6 +3,8 @@ PODS:
     - Flutter
   - camera_avfoundation (0.0.1):
     - Flutter
+  - citizen_sdk (1.0.0):
+    - Flutter
   - tatachat_sdk (1.0.0)
   - DKImagePickerController/Core (4.3.9):
     - DKImagePickerController/ImageDataManager
@@ -86,8 +88,6 @@ PODS:
   - flutter_webrtc (1.4.0):
     - Flutter
     - WebRTC-SDK (= 144.7559.09)
-  - gmb_hardware_secretvault (1.0.0):
-    - Flutter
   - GoogleDataTransport (10.1.0):
     - nanopb (~> 3.30910.0)
     - PromisesObjC (~> 2.4)
@@ -169,7 +169,6 @@ PODS:
   - shared_preferences_foundation (0.0.1):
     - Flutter
     - FlutterMacOS
-  - smoldot_ffi (1.0.0)
   - SwiftyGif (5.4.5)
   - url_launcher_ios (0.0.1):
     - Flutter
@@ -186,6 +185,7 @@ PODS:
 DEPENDENCIES:
   - audio_session (from `.symlinks/plugins/audio_session/ios`)
   - camera_avfoundation (from `.symlinks/plugins/camera_avfoundation/ios`)
+  - citizen_sdk (from `.symlinks/plugins/citizen_sdk/darwin`)
   - tatachat_sdk (from `.symlinks/plugins/tatachat_sdk/ios`)
   - emoji_picker_flutter (from `.symlinks/plugins/emoji_picker_flutter/ios`)
   - file_picker (from `.symlinks/plugins/file_picker/ios`)
@@ -196,7 +196,6 @@ DEPENDENCIES:
   - flutter_keyboard_visibility_temp_fork (from `.symlinks/plugins/flutter_keyboard_visibility_temp_fork/ios`)
   - flutter_secure_storage_darwin (from `.symlinks/plugins/flutter_secure_storage_darwin/darwin`)
   - flutter_webrtc (from `.symlinks/plugins/flutter_webrtc/ios`)
-  - gmb_hardware_secretvault (from `.symlinks/plugins/gmb_hardware_secretvault/ios`)
   - image_picker_ios (from `.symlinks/plugins/image_picker_ios/ios`)
   - is_ios_simulator (from `.symlinks/plugins/is_ios_simulator/ios`)
   - isar_community_flutter_libs (from `.symlinks/plugins/isar_community_flutter_libs/ios`)
@@ -208,7 +207,6 @@ DEPENDENCIES:
   - record_ios (from `.symlinks/plugins/record_ios/ios`)
   - saver_gallery (from `.symlinks/plugins/saver_gallery/ios`)
   - shared_preferences_foundation (from `.symlinks/plugins/shared_preferences_foundation/darwin`)
-  - smoldot_ffi (from `smoldot`)
   - url_launcher_ios (from `.symlinks/plugins/url_launcher_ios/ios`)
   - video_compress (from `.symlinks/plugins/video_compress/ios`)
   - video_player_avfoundation (from `.symlinks/plugins/video_player_avfoundation/darwin`)
@@ -239,6 +237,8 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/audio_session/ios"
   camera_avfoundation:
     :path: ".symlinks/plugins/camera_avfoundation/ios"
+  citizen_sdk:
+    :path: ".symlinks/plugins/citizen_sdk/darwin"
   tatachat_sdk:
     :path: ".symlinks/plugins/tatachat_sdk/ios"
   emoji_picker_flutter:
@@ -259,8 +259,6 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/flutter_secure_storage_darwin/darwin"
   flutter_webrtc:
     :path: ".symlinks/plugins/flutter_webrtc/ios"
-  gmb_hardware_secretvault:
-    :path: ".symlinks/plugins/gmb_hardware_secretvault/ios"
   image_picker_ios:
     :path: ".symlinks/plugins/image_picker_ios/ios"
   is_ios_simulator:
@@ -283,8 +281,6 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/saver_gallery/ios"
   shared_preferences_foundation:
     :path: ".symlinks/plugins/shared_preferences_foundation/darwin"
-  smoldot_ffi:
-    :path: smoldot
   url_launcher_ios:
     :path: ".symlinks/plugins/url_launcher_ios/ios"
   video_compress:
@@ -297,6 +293,7 @@ EXTERNAL SOURCES:
 SPEC CHECKSUMS:
   audio_session: 9bb7f6c970f21241b19f5a3658097ae459681ba0
   camera_avfoundation: 968a9a5323c79a99c166ad9d7866bfd2047b5a9b
+  citizen_sdk: f0de482cce6fd7147d2127cc740463ea97fe45cc
   tatachat_sdk: 22416d2ab0a9520087e71aba829ad0c6c5a8e3af
   DKImagePickerController: 946cec48c7873164274ecc4624d19e3da4c1ef3c
   DKPhotoGallery: b3834fecb755ee09a593d7c9e389d8b5d6deed60
@@ -314,7 +311,6 @@ SPEC CHECKSUMS:
   flutter_keyboard_visibility_temp_fork: 95b2d534bacf6ac62e7fcbe5c2a9e2c2a17ce06f
   flutter_secure_storage_darwin: acdb3f316ed05a3e68f856e0353b133eec373a23
   flutter_webrtc: 3ee86aa10e0313c38c93fdb215dd86e77014f96a
-  gmb_hardware_secretvault: 9cc8b4f68812094c1beb5e0cb37d8d51bc781d64
   GoogleDataTransport: aae35b7ea0c09004c3797d53c8c41f66f219d6a7
   GoogleUtilities: 766ace00c6b10d8148408f329d10c4f051931850
   image_picker_ios: e0ece4aa2a75771a7de3fa735d26d90817041326
@@ -334,7 +330,6 @@ SPEC CHECKSUMS:
   SDWebImage: e9fc87c1aab89a8ab1bbd74eba378c6f53be8abf
   SDWebImageWebPCoder: 0e06e365080397465cc73a7a9b472d8a3bd0f377
   shared_preferences_foundation: 7036424c3d8ec98dfe75ff1667cb0cd531ec82bb
-  smoldot_ffi: d5e44ba09e1c9e97cc6e0b19126f16c98295e161
   SwiftyGif: 706c60cf65fa2bc5ee0313beece843c8eb8194d4
   url_launcher_ios: 7a95fa5b60cc718a708b8f2966718e93db0cef1b
   video_compress: f2133a07762889d67f0711ac831faa26f956980e
@@ -342,6 +337,6 @@ SPEC CHECKSUMS:
   WebRTC-SDK: e6006119cd730d6315d875e4a421b6cc8bb88833
   webview_flutter_wkwebview: 8ebf4fded22593026f7dbff1fbff31ea98573c8d
 
-PODFILE CHECKSUM: 416f58a5d9ce68335abe18df6e3a6d76fee250cb
+PODFILE CHECKSUM: e89c6e5add7949c861fcb65d18f0bf30e82dda79
 
 COCOAPODS: 1.17.0

@@ -11,12 +11,15 @@
 //   - 多签 Active:无按钮(创建已完成)
 //
 // "激活"行为本质是 votingengine `internal_vote(proposal_id, approve=true)`,
-// 沿用现有 [MultisigProposalDetailPage] 的 QrSigner 签名 + InternalVoteService 投票流程,
+// 沿用现有 [MultisigProposalDetailPage] 的 AppBusinessQrCodec 签名 + InternalVoteService 投票流程,
 // 不引入新的签名逻辑。
+
+import 'package:citizen_sdk/citizen_sdk.dart';
 
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:polkadart_keyring/polkadart_keyring.dart' show Keyring;
 
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
@@ -26,8 +29,6 @@ import 'package:citizenapp/citizen/shared/proposal/proposal_query_service.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_context.dart';
 import 'package:citizenapp/citizen/shared/institution_manage_detail_page.dart';
 import 'package:citizenapp/ui/app_theme.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
-
 import 'personal_manage_models.dart';
 import 'personal_pending_create_lookup.dart';
 import 'package:citizenapp/ui/app_layout.dart';
@@ -67,7 +68,7 @@ class PersonalAdminListPage extends StatefulWidget {
   final List<AdminPerson> admins;
 
   /// 用户本地能签名的 admin 钱包子集(由调用方过滤好)。
-  final List<WalletProfile> adminWallets;
+  final List<CitizenWalletStateAccount> adminWallets;
 
   /// 创建人规范 AccountId。req 3 未实现时只有创建者本机已知。
   final String? creatorAccountId;
@@ -79,7 +80,8 @@ class PersonalAdminListPage extends StatefulWidget {
 class _PersonalAdminListPageState extends State<PersonalAdminListPage> {
   static final _keyring = Keyring();
 
-  final ProposalQueryService _proposalService = ProposalQueryService();
+  late final ProposalQueryService _proposalService;
+  bool _dependenciesReady = false;
   final PersonalPendingCreateLookup _lookup = PersonalPendingCreateLookup();
 
   bool _loading = true;
@@ -90,6 +92,16 @@ class _PersonalAdminListPageState extends State<PersonalAdminListPage> {
   @override
   void initState() {
     super.initState();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    _proposalService = ProposalQueryService(
+      chain: context.read<CitizenSdk>().chain,
+    );
+    _dependenciesReady = true;
     _load();
   }
 

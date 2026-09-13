@@ -279,6 +279,8 @@ constexpr std::size_t kMaximumRequestCopiedBytes = kMaximumBytes + 4096;
 constexpr std::size_t kMaximumStorageKeyBytes = 4 * 1024;
 constexpr std::size_t kMaximumStorageBatchKeys = 1024;
 constexpr std::size_t kMaximumStorageBatchKeyBytes = 1024 * 1024;
+constexpr std::size_t kMaximumStorageKeysPageItems = 1000;
+constexpr std::size_t kMaximumStorageKeysPageBytes = 4 * 1024 * 1024;
 constexpr std::size_t kMaximumHeaderDigestBytes = 1024 * 1024;
 constexpr std::size_t kMaximumBlockBodyExtrinsics = 16 * 1024;
 constexpr std::size_t kMaximumBlockBodyBytes = 64 * 1024 * 1024;
@@ -290,13 +292,14 @@ constexpr const char *kMethods[] = {
     "open", "start", "stop", "close", "getCapabilities", "getFinalizedHead",
     "getSyncStatus", "getBestHead", "getFinalizedBlockAt", "resolveFinalizedBlock",
     "getBlockHeader", "getBlockBody", "getRuntimeContext", "getStorage", "getStorageBatch",
+    "getStorageKeysPaged", "callRuntimeApi",
     "getSystemEvents", "exportState", "importState", "getGenesisHash",
     "getAccountBalance", "getAccountBalances", "getAccountNonce", "getFeeSnapshot", "getWalletProfile", "viewAccountPrivateKey",
     "getWalletState", "importColdAccountId", "importColdAccountSs58",
     "reorderWalletAccountsWithoutDefaultChange", "renameAccount", "deleteAccount",
     "createWallet", "importWallet", "addWalletAccounts", "setActiveWalletAccount",
     "renameWalletAccount", "deleteWalletAccount", "deleteWallet",
-    "reconcileWalletCleanup", "signWalletPayload", "beginSigning",
+    "reconcileWalletCleanup", "signWalletPayload", "deriveApplicationKey", "beginSigning",
     "consumeExternalSignature", "cancelSigning", "beginDefaultAccountChange",
     "consumeDefaultAccountChange", "verifySignature", "prepareTransaction",
     "cancelPreparedTransaction", "executePreparedTransaction",
@@ -306,13 +309,27 @@ constexpr const char *kMethods[] = {
     "qrConsumeSignResponse", "qrCancelSignRequest", "qrEncodeAccountId",
     "qrDecodeLuminance", "qrEncode", "qrScan", "signQrRequest",
 };
-static_assert(std::size(kMethods) == 62);
+static_assert(std::size(kMethods) == 65);
 
 [[noreturn]] void fail(citizensdk_error_code_t code, const char *message) {
   throw ContractFailure(code, message);
 }
 void require(bool condition, citizensdk_error_code_t code, const char *message) {
   if (!condition) fail(code, message);
+}
+
+bool valid_runtime_api_method(const std::string &value) noexcept {
+  if (value.empty() || value.size() > 128 ||
+      !((value[0] >= 'A' && value[0] <= 'Z') ||
+        (value[0] >= 'a' && value[0] <= 'z'))) return false;
+  bool separator = false;
+  for (std::size_t index = 1; index < value.size(); ++index) {
+    const char byte = value[index];
+    if (byte == '_') { separator = separator || index + 1 < value.size(); continue; }
+    if (!((byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') ||
+          (byte >= '0' && byte <= '9'))) return false;
+  }
+  return separator;
 }
 
 // Decode Unicode scalars ourselves: GLib's NUL-terminated validation API is
@@ -860,6 +877,36 @@ DecodedRequest decode_request(const std::string &name, FlValue *arguments) {
         }
         break;
       }
+      case Method::get_storage_keys_paged: {
+        (void)list(root, 7); result.block = request_block(fields[3]);
+        const auto *prefix = std::get_if<Value::Bytes>(&fields[4].data);
+        require(result.block.finality == CITIZENSDK_FINALITY_FINALIZED &&
+                    prefix != nullptr && !prefix->empty() &&
+                    prefix->size() <= kMaximumStorageKeyBytes,
+                CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                "Storage key page requires a finalized block and nonempty prefix");
+        result.payload = *prefix;
+        if (!std::holds_alternative<std::monostate>(fields[5].data)) {
+          const auto *start = std::get_if<Value::Bytes>(&fields[5].data);
+          require(start != nullptr && !start->empty() &&
+                      start->size() <= kMaximumStorageKeyBytes,
+                  CITIZENSDK_ERROR_INVALID_ARGUMENT, "Storage page start key is invalid");
+          result.storage_start_key = *start;
+        }
+        const auto limit = integer(fields[6]);
+        require(limit >= 1 && limit <= 1000, CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                "Storage key page limit must be 1..1000");
+        result.storage_keys_limit = static_cast<uint32_t>(limit); break;
+      }
+      case Method::call_runtime_api: {
+        (void)list(root, 6); result.block = request_block(fields[3]);
+        result.runtime_api_method = string(fields[4], 1, 128);
+        const auto *arguments = std::get_if<Value::Bytes>(&fields[5].data);
+        require(valid_runtime_api_method(result.runtime_api_method) &&
+                    arguments != nullptr && arguments->size() <= 1024 * 1024,
+                CITIZENSDK_ERROR_INVALID_ARGUMENT, "Runtime API request is invalid");
+        result.payload = *arguments; break;
+      }
       case Method::import_state: {
         (void)list(root, 6);
         const auto version = integer(fields[3]);
@@ -944,6 +991,17 @@ DecodedRequest decode_request(const std::string &name, FlValue *arguments) {
         require(bytes != nullptr && bytes->size() <= kMaximumBytes,
                 CITIZENSDK_ERROR_INVALID_ARGUMENT, "Signing payload must be bytes of at most 16 MiB");
         result.payload = *bytes; break;
+      }
+      case Method::derive_application_key: {
+        (void)list(root, 6); result.account_id = account(fields[3]);
+        const auto *salt = std::get_if<Value::Bytes>(&fields[4].data);
+        const auto *info = std::get_if<Value::Bytes>(&fields[5].data);
+        require(salt != nullptr && salt->size() == 32 && info != nullptr &&
+                    !info->empty() && info->size() <= 256,
+                CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                "Application key salt/info is invalid");
+        result.application_key_salt = *salt;
+        result.application_key_info = *info; break;
       }
       case Method::begin_signing: {
         (void)list(root, 10); result.account_id = account(fields[3]);
@@ -1139,8 +1197,14 @@ Value response(const std::string &session, int64_t sequence, Value value) {
 Value event(const std::string &session, int64_t sequence,
             const std::string &type, Value payload) {
   if (type == "historyChanged") (void)list(payload, 0);
+  if (type == "finalizedBlockChanged") {
+    const auto &items = list(payload, 1);
+    require(semantic_block(items[0]).finalized, CITIZENSDK_ERROR_INTEGRITY,
+            "Finalized event must carry one finalized block");
+  }
   require(sequence > 0 && (type == "historyChanged" || type == "lifecycleChanged" ||
-                          type == "capabilitiesChanged"),
+                          type == "capabilitiesChanged" ||
+                          type == "finalizedBlockChanged"),
           CITIZENSDK_ERROR_INTEGRITY, "Invalid event envelope");
   (void)response(session, sequence, payload);
   return tuple({Value::integer(kProtocolVersion), Value::string(session), Value::integer(sequence),
@@ -1801,6 +1865,16 @@ Value copy_public_result(Method method, citizensdk_result_handle_t result) {
     case Method::get_storage_batch:
       (void)inspect_result(result, CITIZENSDK_RESULT_STORAGE_BATCH);
       return checked(tuple({copy_storage_batch(result)}));
+    case Method::get_storage_keys_paged:
+      (void)inspect_result(result, CITIZENSDK_RESULT_STORAGE_BATCH);
+      return checked(tuple({copy_storage_batch(result)}));
+    case Method::call_runtime_api: {
+      (void)inspect_result(result, CITIZENSDK_RESULT_STORAGE_VALUE);
+      auto value = copy_storage(result);
+      require(!std::holds_alternative<std::monostate>(value.data),
+              CITIZENSDK_ERROR_INTEGRITY, "Runtime API output is absent");
+      return checked(tuple({std::move(value)}));
+    }
     case Method::export_state:
       (void)inspect_result(result, CITIZENSDK_RESULT_EXPORTED_STATE);
       return checked(tuple({copy_exported_state(result)}));
@@ -1846,6 +1920,12 @@ Value copy_public_result(Method method, citizensdk_result_handle_t result) {
     case Method::sign_wallet_payload: {
       (void)inspect_result(result, CITIZENSDK_RESULT_SIGNATURE);
       Value::Bytes bytes(64); check_code(citizensdk_result_get_signature(result, bytes.data()));
+      return checked(tuple({Value::bytes(std::move(bytes))}));
+    }
+    case Method::derive_application_key: {
+      (void)inspect_result(result, CITIZENSDK_RESULT_APPLICATION_KEY);
+      Value::Bytes bytes(32);
+      check_code(citizensdk_result_get_application_key(result, bytes.data()));
       return checked(tuple({Value::bytes(std::move(bytes))}));
     }
     case Method::begin_signing: case Method::consume_external_signature:
@@ -1998,6 +2078,29 @@ void validate_public_value(Method method, const Value &value) {
         }
         return;
       }
+      case Method::get_storage_keys_paged: {
+        const auto *items = std::get_if<Value::List>(&item.data);
+        require(items != nullptr && items->size() <= kMaximumStorageKeysPageItems,
+                CITIZENSDK_ERROR_INTEGRITY, "Storage key page exceeds its item limit");
+        std::size_t total = 0;
+        std::optional<Value::Bytes> previous;
+        for (const auto &entry : *items) {
+          const auto *bytes = std::get_if<Value::Bytes>(&entry.data);
+          require(bytes != nullptr && !bytes->empty() &&
+                      bytes->size() <= kMaximumStorageKeyBytes &&
+                      bytes->size() <= kMaximumStorageKeysPageBytes - total &&
+                      (!previous || *previous < *bytes),
+                  CITIZENSDK_ERROR_INTEGRITY, "Storage key page is invalid");
+          total += bytes->size(); previous = *bytes;
+        }
+        return;
+      }
+      case Method::call_runtime_api: {
+        const auto *bytes = std::get_if<Value::Bytes>(&item.data);
+        require(bytes != nullptr && bytes->size() <= kMaximumBlockBodyBytes,
+                CITIZENSDK_ERROR_INTEGRITY, "Runtime API output exceeds 64 MiB");
+        return;
+      }
       case Method::export_state: {
         const auto &state = semantic_tuple(item, 3);
         require(semantic_int(state[0], UINT32_MAX) > 0 &&
@@ -2055,6 +2158,12 @@ void validate_public_value(Method method, const Value &value) {
         const auto *bytes = std::get_if<Value::Bytes>(&item.data);
         require(bytes != nullptr && bytes->size() == 64, CITIZENSDK_ERROR_INTEGRITY,
                 "sr25519 public signature must be 64 bytes"); return;
+      }
+      case Method::derive_application_key: {
+        const auto *bytes = std::get_if<Value::Bytes>(&item.data);
+        require(bytes != nullptr && bytes->size() == 32,
+                CITIZENSDK_ERROR_INTEGRITY,
+                "Application key must contain exactly 32 bytes"); return;
       }
       case Method::begin_signing: case Method::consume_external_signature: {
         const auto &outcome = semantic_tuple(item, 7);

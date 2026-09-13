@@ -41,8 +41,9 @@ inline constexpr const char *kEventChannel = "citizen/sdk/events/v1";
 inline constexpr int64_t kProtocolVersion = 1;
 
 // Flutter 只接收固定 tuple 的公开值；禁止把秘密、裸句柄或指针混入该值树。
-// Only these public values may cross the Flutter boundary. No native handle,
-// pointer, prepared-wallet token or secret-bearing alternative exists here.
+// Only these explicitly contracted values may cross the Flutter boundary. No
+// native handle, pointer or prepared-wallet token exists here. The application
+// key result is the sole intentional secret and is copied directly to its caller.
 // Value owns its entire tree and can be moved from a Core callback to the UI
 // thread; FlValue and the Flutter messenger stay on the UI thread.
 struct Value final {
@@ -62,14 +63,15 @@ enum class Method {
   open, start, stop, close, get_capabilities, get_finalized_head,
   get_sync_status, get_best_head, get_finalized_block_at,
   resolve_finalized_block, get_block_header, get_block_body,
-  get_runtime_context, get_storage, get_storage_batch, get_system_events,
+  get_runtime_context, get_storage, get_storage_batch, get_storage_keys_paged,
+  call_runtime_api, get_system_events,
   export_state, import_state, get_genesis_hash,
   get_account_balance, get_account_balances, get_account_nonce, get_fee_snapshot, get_wallet_profile, view_account_private_key,
   get_wallet_state, import_cold_account_id, import_cold_account_ss58,
   reorder_wallet_accounts_without_default_change, rename_account, delete_account,
   create_wallet, import_wallet, add_wallet_accounts, set_active_wallet_account,
   rename_wallet_account, delete_wallet_account, delete_wallet,
-  reconcile_wallet_cleanup, sign_wallet_payload, begin_signing,
+  reconcile_wallet_cleanup, sign_wallet_payload, derive_application_key, begin_signing,
   consume_external_signature, cancel_signing, begin_default_account_change,
   consume_default_account_change, verify_signature, prepare_transaction,
   cancel_prepared_transaction, execute_prepared_transaction,
@@ -94,6 +96,9 @@ struct DecodedRequest final {
   uint64_t block_number{};
   uint32_t state_format_version{};
   std::vector<std::vector<uint8_t>> storage_keys;
+  std::optional<std::vector<uint8_t>> storage_start_key;
+  uint32_t storage_keys_limit{};
+  std::string runtime_api_method;
   std::vector<uint8_t> state_database;
   citizensdk_account_id_t account_id{};
   uint32_t word_count{};
@@ -101,6 +106,8 @@ struct DecodedRequest final {
   std::string name;
   std::vector<uint8_t> payload;
   std::vector<uint8_t> signature;
+  std::vector<uint8_t> application_key_salt;
+  std::vector<uint8_t> application_key_info;
   citizensdk_signing_transform_t signing_transform{};
   citizensdk_external_signer_transport_t external_signer_transport{};
   std::vector<uint8_t> signing_domain;

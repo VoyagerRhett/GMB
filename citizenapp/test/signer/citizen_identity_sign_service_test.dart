@@ -1,38 +1,58 @@
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
+import 'package:citizenapp/qr/bodies/sign_request_body.dart';
+import 'package:citizenapp/qr/envelope.dart';
 import 'package:citizenapp/qr/qr_protocols.dart';
 import 'package:citizenapp/signer/citizen_identity_sign_service.dart';
-import 'package:citizenapp/signer/qr_signer.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-class _FakeWalletManager extends WalletManager {
-  _FakeWalletManager({this.account});
+class _FakeWallet implements CitizenSdkWallet {
+  _FakeWallet({this.account});
 
-  final Account? account;
+  final CitizenWalletStateAccount? account;
+
+  @override
+  Future<CitizenWalletState> getState() async => CitizenWalletState(
+        revision: BigInt.one,
+        hotProfile: null,
+        accounts: account == null ? const [] : [account!],
+      );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _FakeSigning implements CitizenSigning {
   String? signedAccountId;
 
   @override
-  Future<Account?> getAccountByAccountId(String accountId) async =>
-      account?.accountId == accountId ? account : null;
+  Future<CitizenSigningOutcome> begin(CitizenSigningIntent intent) async {
+    signedAccountId = intent.accountId;
+    return CitizenSigningCompleted(
+      accountId: intent.accountId,
+      payloadHash: '0x${'00' * 32}',
+      signature: Uint8List(64),
+    );
+  }
 
   @override
-  Future<Uint8List> signForAccountId(
-      String accountId, Uint8List payload) async {
-    signedAccountId = accountId;
-    return Uint8List(64);
-  }
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 String _request({required int action, required List<int> payload}) {
-  final signer = QrSigner();
-  return signer.encodeRequest(signer.buildRequest(
-    requestId: QrSigner.generateRequestId(prefix: 'citizen-'),
-    signerPublicKey: '0x${'11' * 32}',
-    payloadHex:
-        '0x${payload.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join()}',
-    action: action,
-  ));
+  return QrEnvelope<SignRequestBody>(
+    kind: QrKind.signRequest,
+    id: 'citizen-request-000001',
+    issuedAt: 1800000000,
+    expiresAt: 1900000000,
+    body: SignRequestBody.fromHex(
+      action: action,
+      signerPublicKeyHex: '0x${'11' * 32}',
+      payloadHex:
+          '0x${payload.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join()}',
+    ),
+  ).toRawJson();
 }
 
 List<int> _u32Le(int value) => [
@@ -94,7 +114,7 @@ void main() {
     await expectLater(
       service.prepare(
         _request(action: QrActions.login, payload: Uint8List(1)),
-        _FakeWalletManager(),
+        _FakeWallet(),
       ),
       throwsA(isA<CitizenIdentitySignException>()),
     );
@@ -104,7 +124,7 @@ void main() {
     await expectLater(
       service.prepare(
         _request(action: QrActions.citizenIdentity, payload: Uint8List(1)),
-        _FakeWalletManager(),
+        _FakeWallet(),
       ),
       throwsA(
         isA<CitizenIdentitySignException>().having(
@@ -123,7 +143,7 @@ void main() {
           action: QrActions.citizenIdentity,
           payload: _votingIdentityPayload(),
         ),
-        _FakeWalletManager(),
+        _FakeWallet(),
       ),
       throwsA(
         isA<CitizenIdentitySignException>().having(
@@ -136,26 +156,30 @@ void main() {
   });
 
   test('卡片指定账户与请求一致时按该 account_id 签名', () async {
-    final account = Account(
-      masterId: '0x${'22' * 32}',
+    final account = CitizenWalletStateAccount(
+      signMode: CitizenWalletSignMode.hot,
+      walletIndex: 0,
       accountIndex: 5,
       accountId: '0x${'11' * 32}',
       ss58Address: 'w5CitizenAccount',
-      accountName: '账户5',
+      name: '账户5',
+      createdAtMillis: BigInt.zero,
+      isDefault: true,
     );
-    final walletManager = _FakeWalletManager(account: account);
+    final wallet = _FakeWallet(account: account);
+    final signing = _FakeSigning();
     final raw = _request(
       action: QrActions.citizenIdentity,
       payload: _validAuthorizationBytes(),
     );
     final prep = await service.prepare(
       raw,
-      walletManager,
+      wallet,
       requiredAccount: account,
     );
-    await service.sign(prep, walletManager);
+    await service.sign(prep, signing, null);
     expect(prep.account.accountIndex, 5);
-    expect(walletManager.signedAccountId, account.accountId);
+    expect(signing.signedAccountId, account.accountId);
     // 防重放三件套必须原样解出来并展示，不能只是"跳过了外层字节"。
     expect(prep.decoded.genesisHashHex, '0x${'aa' * 32}');
     expect(prep.decoded.expectedIdentityVersion, _expectedIdentityVersion);

@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:polkadart/polkadart.dart' show Hasher;
 import 'package:citizenapp/citizen/shared/institution_code_label.dart';
 import 'package:citizenapp/citizen/shared/institution_info.dart';
@@ -8,18 +9,17 @@ import 'package:citizenapp/citizen/shared/proposal/proposal_models.dart';
 import 'package:citizenapp/citizen/institution/institution_role_models.dart';
 import 'package:citizenapp/citizen/institution/institution_role_storage_codec.dart';
 import 'package:citizenapp/votingengine/internal-vote/internal_vote_query_service.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
 
 /// VotingEngine / InternalVote 通用查询服务。
 ///
 /// 提案状态、投票计数、快照和 NextProposalId 都是投票引擎
 /// 通用状态，不能借用具体业务 service 暴露给其他模块。
 class ProposalQueryService {
-  ProposalQueryService({ChainRpc? chainRpc})
-      : _rpc = chainRpc ?? ChainRpc(),
-        _internalVoteQuery = InternalVoteQueryService(chainRpc: chainRpc);
+  ProposalQueryService({required CitizenChain chain})
+    : _chain = chain,
+      _internalVoteQuery = InternalVoteQueryService(chain: chain);
 
-  final ChainRpc _rpc;
+  final CitizenChain _chain;
   final InternalVoteQueryService _internalVoteQuery;
 
   /// 与 runtime `MaxActiveProposals = 10` 对齐的提案主体上限。
@@ -28,7 +28,7 @@ class ProposalQueryService {
   /// 查询 NextProposalId（投票引擎全局递增 ID）。
   Future<int> fetchNextProposalId() async {
     final key = _buildStorageValueKey('VotingEngine', 'NextProposalId');
-    final data = await _rpc.fetchStorage('0x${_hexEncode(key)}');
+    final data = await _readStorage(key);
     if (data == null || data.length != 8) return 0;
     return _decodeU64(data);
   }
@@ -40,7 +40,7 @@ class ProposalQueryService {
       'Proposals',
       _u64ToLeBytes(proposalId),
     );
-    final data = await _rpc.fetchStorage('0x${_hexEncode(key)}');
+    final data = await _readStorage(key);
     if (data == null) return null;
     return decodeProposalMeta(proposalId, data)?.status;
   }
@@ -52,9 +52,23 @@ class ProposalQueryService {
       'Proposals',
       _u64ToLeBytes(proposalId),
     );
-    final data = await _rpc.fetchStorage('0x${_hexEncode(key)}');
+    final data = await _readStorage(key);
     if (data == null) return null;
     return decodeProposalMeta(proposalId, data);
+  }
+
+  /// 读取 `VotingEngine::ProposalData` 的 opaque 业务字节。
+  ///
+  /// 具体 PersonalManage／机构治理语义仍由各 App 业务解码器负责；本服务仅统一
+  /// App 侧 storage key，底层 finalized 读取继续由 CitizenSDK 执行。
+  Future<Uint8List?> fetchProposalData(int proposalId) {
+    return _readStorage(
+      _buildStorageKey(
+        'VotingEngine',
+        'ProposalData',
+        _u64ToLeBytes(proposalId),
+      ),
+    );
   }
 
   /// 查询并严格解码提案绑定的 VotePlan。
@@ -64,7 +78,7 @@ class ProposalQueryService {
       'ProposalVotePlans',
       _u64ToLeBytes(proposalId),
     );
-    final data = await _rpc.fetchStorage('0x${_hexEncode(key)}');
+    final data = await _readStorage(key);
     return data == null
         ? null
         : InstitutionRoleStorageCodec.decodeVotePlan(data);
@@ -114,8 +128,9 @@ class ProposalQueryService {
       final executionAccountIdTag = data[offset++];
       if (executionAccountIdTag == 1) {
         if (offset + 32 > data.length) return null;
-        executionAccountId =
-            Uint8List.fromList(data.sublist(offset, offset + 32));
+        executionAccountId = Uint8List.fromList(
+          data.sublist(offset, offset + 32),
+        );
         offset += 32;
       } else if (executionAccountIdTag != 0) {
         return null;
@@ -147,7 +162,7 @@ class ProposalQueryService {
       'InternalTallies',
       _u64ToLeBytes(proposalId),
     );
-    final data = await _rpc.fetchStorage('0x${_hexEncode(key)}');
+    final data = await _readStorage(key);
     if (data == null || data.length != 8) return (yes: 0, no: 0);
     return (yes: _decodeU32(data, 0), no: _decodeU32(data, 4));
   }
@@ -159,7 +174,7 @@ class ProposalQueryService {
       'InternalThresholdSnapshot',
       _u64ToLeBytes(proposalId),
     );
-    final data = await _rpc.fetchStorage('0x${_hexEncode(key)}');
+    final data = await _readStorage(key);
     if (data == null || data.length != 4) return null;
     return _decodeU32(data, 0);
   }
@@ -175,7 +190,7 @@ class ProposalQueryService {
       _u64ToLeBytes(proposalId),
       proposalSubjectKey(institution),
     );
-    final data = await _rpc.fetchStorage('0x${_hexEncode(key)}');
+    final data = await _readStorage(key);
     if (data == null) {
       throw StateError('提案 $proposalId 缺少 VotingEngine::AdminSnapshot');
     }
@@ -216,17 +231,13 @@ class ProposalQueryService {
       _u64ToLeBytes(proposalId),
       subject.toBytes(),
     );
-    final data = await _rpc.fetchStorage('0x${_hexEncode(key)}');
+    final data = await _readStorage(key);
     if (data == null) {
-      throw StateError(
-        '提案 $proposalId 缺少岗位 $voterRoleCode 的 VoterSnapshot',
-      );
+      throw StateError('提案 $proposalId 缺少岗位 $voterRoleCode 的 VoterSnapshot');
     }
     final decoded = decodeAdminSnapshot(data);
     if (decoded == null || decoded.isEmpty) {
-      throw const FormatException(
-        'VotingEngine::VoterSnapshot SCALE 数据无效',
-      );
+      throw const FormatException('VotingEngine::VoterSnapshot SCALE 数据无效');
     }
     return decoded;
   }
@@ -256,11 +267,13 @@ class ProposalQueryService {
         role.roleCode,
       );
       for (final accountId in accountIds) {
-        tickets.add(EligibleVoterTicket(
-          voterAccountId: accountId,
-          cidNumber: role.cidNumber,
-          voterRoleCode: role.roleCode,
-        ));
+        tickets.add(
+          EligibleVoterTicket(
+            voterAccountId: accountId,
+            cidNumber: role.cidNumber,
+            voterRoleCode: role.roleCode,
+          ),
+        );
       }
     }
     if (tickets.isEmpty) {
@@ -287,9 +300,7 @@ class ProposalQueryService {
   }
 
   /// 个人多签历史同步入口；个人多签没有 CID，只能以 AccountId 为主体。
-  Future<List<int>> fetchActivePersonalProposalIds(
-    String personalAccountId,
-  ) {
+  Future<List<int>> fetchActivePersonalProposalIds(String personalAccountId) {
     return _fetchActiveProposalIdsBySubjectKey(
       personalAccountSubjectKey(personalAccountId),
     );
@@ -303,7 +314,7 @@ class ProposalQueryService {
       'ActiveProposalsBySubject',
       subjectKey,
     );
-    final data = await _rpc.fetchStorage('0x${_hexEncode(key)}');
+    final data = await _readStorage(key);
     if (data == null) return const [];
     final decoded = decodeActiveProposalIds(data);
     if (decoded == null) {
@@ -337,6 +348,13 @@ class ProposalQueryService {
     return _internalVoteQuery.fetchTicketVotesBatch(proposalId, tickets);
   }
 
+  /// 每个公开查询都先锁定一个 SDK 验证的 finalized 块，业务 key 仍由
+  /// VotingEngine 模块生成，不将 pallet 语义下沉到 CitizenSDK。
+  Future<Uint8List?> _readStorage(Uint8List key) async {
+    final finalized = await _chain.getFinalizedHead();
+    return _chain.getStorage(finalized, key);
+  }
+
   Uint8List _buildStorageValueKey(String palletName, String storageName) {
     final palletHash = Hasher.twoxx128.hashString(palletName);
     final storageHash = Hasher.twoxx128.hashString(storageName);
@@ -354,8 +372,9 @@ class ProposalQueryService {
     final palletHash = Hasher.twoxx128.hashString(palletName);
     final storageHash = Hasher.twoxx128.hashString(storageName);
     final keyHash = _blake2128Concat(keyData);
-    final result =
-        Uint8List(palletHash.length + storageHash.length + keyHash.length);
+    final result = Uint8List(
+      palletHash.length + storageHash.length + keyHash.length,
+    );
     var offset = 0;
     result.setAll(offset, palletHash);
     offset += palletHash.length;
@@ -428,10 +447,7 @@ class ProposalQueryService {
 
   /// `ProposalSubject::PersonalAccount` 编码；AccountId 必须恰好 32 字节。
   static Uint8List personalAccountSubjectKey(String personalAccountId) {
-    return Uint8List.fromList([
-      1,
-      ...accountIdBytes(personalAccountId),
-    ]);
+    return Uint8List.fromList([1, ...accountIdBytes(personalAccountId)]);
   }
 
   /// 严格解码 `BoundedVec<AccountId32>` 管理员快照。
@@ -441,9 +457,7 @@ class ProposalQueryService {
       if (lenSize + count * 32 != data.length) return null;
       return List<String>.unmodifiable([
         for (var offset = lenSize; offset < data.length; offset += 32)
-          '0x${_hexEncode(
-            Uint8List.fromList(data.sublist(offset, offset + 32)),
-          )}',
+          '0x${_hexEncode(Uint8List.fromList(data.sublist(offset, offset + 32)))}',
       ]);
     } catch (_) {
       return null;
@@ -460,8 +474,11 @@ class ProposalQueryService {
       }
       return List<int>.unmodifiable([
         for (var offset = lenSize; offset < data.length; offset += 8)
-          ByteData.sublistView(data, offset, offset + 8)
-              .getUint64(0, Endian.little),
+          ByteData.sublistView(
+            data,
+            offset,
+            offset + 8,
+          ).getUint64(0, Endian.little),
       ]);
     } catch (_) {
       return null;
@@ -501,7 +518,8 @@ class ProposalQueryService {
       if (offset + 3 >= data.length) {
         throw const FormatException('Compact<u32> mode2 长度不足');
       }
-      final val = (data[offset] |
+      final val =
+          (data[offset] |
               (data[offset + 1] << 8) |
               (data[offset + 2] << 16) |
               (data[offset + 3] << 24)) >>

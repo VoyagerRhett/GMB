@@ -1,6 +1,6 @@
 import 'dart:typed_data';
 
-import 'package:citizenapp/rpc/pallet_registry.dart';
+import 'package:citizenapp/citizen/shared/pallet_registry.dart';
 import 'package:polkadart/scale_codec.dart' show ByteOutput, CompactBigIntCodec;
 
 /// CitizenApp-owned encoder for `OnchainTransaction.transfer_with_remark`.

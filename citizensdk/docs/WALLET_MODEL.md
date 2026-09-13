@@ -77,7 +77,7 @@ reconcile；通用签名当前由独立 SigningService 承担。create 不是“
 清理进入最多 64 项的可重放队列，不能命中当前钱包或另一代秘密。
 
 第 1.2 步已把上述统一状态投影到产品 C ABI、Dart、Android、Darwin、Linux 与 Windows。
-产品 C ABI v1 当前共 117 个函数，既有结构、数值与默认构造保持。新增模块校验、显式模块构造
+产品 C ABI v1 当前共 121 个函数，既有结构、数值与默认构造保持。新增模块校验、显式模块构造
 和无实例纯验签入口，以及四个链查询/结果入口；所有构造都进入同一私有装配。官方绑定按 modules 创建同一 Rust 服务，
 chain/history 才需要 public store，wallet/signing 才需要配套 secure store 与 KEK/DEK Vault。
 未选 wallet 的调用必须在访问钱包管理服务或展示 UI 前拒绝。

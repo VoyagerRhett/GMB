@@ -36,9 +36,14 @@ private final class CitizenSDKRecursiveLockProbe: @unchecked Sendable {
 }
 
 final class CitizenSDKLifecycleTests: XCTestCase {
-    func testHistoryEventPreservesSequenceWithoutSnapshotOrResultOwnership() {
+    func testHistoryEventPreservesSequenceWithoutSnapshotOrResultOwnership() throws {
         XCTAssertEqual(CitizenSDKEvent.historyChanged(sequence: 7), .historyChanged(sequence: 7))
         XCTAssertNotEqual(CitizenSDKEvent.historyChanged(sequence: 7), .historyChanged(sequence: 8))
+        let finalized = try CitizenBlockRef(
+            hash: Data(repeating: 3, count: 32), number: 9, finality: .finalized)
+        XCTAssertEqual(
+            CitizenSDKEvent.finalizedBlockChanged(sequence: 8, finalized: finalized),
+            .finalizedBlockChanged(sequence: 8, finalized: finalized))
     }
     private enum ProbeFailure: Error { case lifecycle, install }
 

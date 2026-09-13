@@ -23,7 +23,7 @@ void main() {
     final sdk = await CitizenSdk.open();
 
     expect(sdk.chain, isA<CitizenChain>());
-    expect(sdk.wallet, isA<CitizenWallet>());
+    expect(sdk.wallet, isA<CitizenSdkWallet>());
     expect(sdk.signing, isA<CitizenSigning>());
     expect(sdk.transactions, isA<CitizenTransactions>());
     expect(sdk.history, isA<CitizenHistory>());
@@ -100,6 +100,34 @@ void main() {
     );
     await sdk.close();
   });
+
+  test('链分页、Runtime API 与应用派生钥只投影固定通用合同', () async {
+    final sdk = await CitizenSdk.open();
+    final block = CitizenBlockRef(
+      hash: '0x${'11' * 32}',
+      number: BigInt.from(7),
+      finality: CitizenBlockFinality.finalized,
+    );
+    final keys = await sdk.chain.getStorageKeysPaged(
+      block,
+      Uint8List.fromList(<int>[1]),
+      limit: 2,
+    );
+    final runtime = await sdk.chain.callRuntimeApi(
+      block,
+      'CitizenApi_items',
+      Uint8List(0),
+    );
+    final key = await sdk.wallet.deriveApplicationKey(
+      accountId: '0x${'22' * 32}',
+      salt: Uint8List(32),
+      info: Uint8List.fromList(<int>[1]),
+    );
+    expect(keys, hasLength(2));
+    expect(runtime, <int>[7, 8]);
+    expect(key, hasLength(32));
+    await sdk.close();
+  });
 }
 
 final String _qrAccount = '0x${'00' * 32}';
@@ -171,6 +199,29 @@ final class _FacadePlatform implements CitizenSdkPlatform {
           2,
           Uint8List.fromList(<int>[0, 255, 255, 0]),
         ],
+      ],
+      'getStorageKeysPaged' => <Object?>[
+        1,
+        'session-1',
+        arguments[2],
+        <Object?>[
+          <Uint8List>[
+            Uint8List.fromList(<int>[1, 1]),
+            Uint8List.fromList(<int>[1, 2]),
+          ],
+        ],
+      ],
+      'callRuntimeApi' => <Object?>[
+        1,
+        'session-1',
+        arguments[2],
+        <Object?>[Uint8List.fromList(<int>[7, 8])],
+      ],
+      'deriveApplicationKey' => <Object?>[
+        1,
+        'session-1',
+        arguments[2],
+        <Object?>[Uint8List(32)],
       ],
       _ => throw StateError('未预期 method：$method'),
     };

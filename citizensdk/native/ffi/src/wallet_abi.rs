@@ -57,14 +57,11 @@ pub(crate) struct CitizenSdkInternalPrivateKeyViewV1 {
 
 impl CitizenSdkInternalPrivateKeyViewV1 {
     fn authorize(&self, view_id: u64, host_operation_id: u64) -> i32 {
+        let Some(authorizing) = self.authorizing else {
+            return CitizenSdkErrorCode::Internal.as_i32();
+        };
         // SAFETY: open 完整验证此 SDK 私有表，阶段租约保证 context 直到 auth 排空都有效。
-        unsafe {
-            (self.authorizing.expect("validated authorizing"))(
-                self.context,
-                view_id,
-                host_operation_id,
-            )
-        }
+        unsafe { authorizing(self.context, view_id, host_operation_id) }
     }
 }
 
@@ -245,14 +242,12 @@ fn pump_private_key_view(slot: &Arc<PrivateKeyViewSlot>) -> FfiResult<()> {
             |error| FfiError::from(error).code,
             |_| CitizenSdkErrorCode::Ok,
         );
+        let settled = slot
+            .callbacks
+            .settled
+            .ok_or_else(|| FfiError::internal("安全查看 settled 回调缺失"))?;
         // SAFETY: open 已验证函数存在；Core notifying 租约阻止反调 finish 提前释放 context。
-        unsafe {
-            (slot.callbacks.settled.expect("validated settled"))(
-                slot.callbacks.context,
-                slot.view_id,
-                code as i32,
-            )
-        };
+        unsafe { settled(slot.callbacks.context, slot.view_id, code as i32) };
         slot.core.finish_notification()?;
     }
     if let Some(outcome) = slot.core.take_completion()? {
@@ -271,6 +266,10 @@ fn pump_private_key_view(slot: &Arc<PrivateKeyViewSlot>) -> FfiResult<()> {
 }
 
 fn enqueue_private_key_view(slot: &Arc<PrivateKeyViewSlot>) -> FfiResult<()> {
+    let display = slot
+        .callbacks
+        .display
+        .ok_or_else(|| FfiError::internal("安全查看 display 回调缺失"))?;
     let job = Arc::clone(slot);
     crate::requests::execute_private_view(move || {
         // 捕获整个阶段的 Rust panic，不打印秘密或 panic payload；授权 future 不做取消竞速。
@@ -279,7 +278,7 @@ fn enqueue_private_key_view(slot: &Arc<PrivateKeyViewSlot>) -> FfiResult<()> {
                 .drive(job.core.run_work(|bytes| {
                     // SAFETY: Core 已复核账户/代际/公钥/取消状态，bytes 仅在本次同步调用内有效。
                     let code = unsafe {
-                        (job.callbacks.display.expect("validated display"))(
+                        display(
                             job.callbacks.context,
                             job.view_id,
                             CitizenSdkBytesView {
@@ -979,7 +978,7 @@ pub unsafe extern "C" fn citizensdk_get_wallet_state(
             accept_and_write(runtime, out_request_id, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 let state = runtime.drive(runtime.engine().wallet_state())??;
-                Ok(ResultPayload::WalletState(state))
+                Ok(ResultPayload::WalletState(Box::new(state)))
             })
         })
     }
@@ -1015,7 +1014,7 @@ pub unsafe extern "C" fn citizensdk_import_cold_account_id(
                         .import_cold_wallet_account(account_id, name),
                 )??;
                 let state = runtime.drive(runtime.engine().wallet_state())??;
-                Ok(ResultPayload::WalletState(state))
+                Ok(ResultPayload::WalletState(Box::new(state)))
             })
         })
     }
@@ -1047,7 +1046,7 @@ pub unsafe extern "C" fn citizensdk_import_cold_account_ss58(
                 runtime.refresh_provider_capabilities()?;
                 runtime.drive(runtime.engine().import_cold_wallet_ss58(ss58_address, name))??;
                 let state = runtime.drive(runtime.engine().wallet_state())??;
-                Ok(ResultPayload::WalletState(state))
+                Ok(ResultPayload::WalletState(Box::new(state)))
             })
         })
     }
@@ -1091,7 +1090,7 @@ pub unsafe extern "C" fn citizensdk_reorder_wallet_accounts_without_default_chan
                             account_ids,
                         ),
                 )??;
-                Ok(ResultPayload::WalletState(state))
+                Ok(ResultPayload::WalletState(Box::new(state)))
             })
         })
     }
@@ -1123,7 +1122,7 @@ pub unsafe extern "C" fn citizensdk_rename_account(
                 runtime.refresh_provider_capabilities()?;
                 let state = runtime
                     .drive(runtime.engine().rename_wallet_account_any(account_id, name))??;
-                Ok(ResultPayload::WalletState(state))
+                Ok(ResultPayload::WalletState(Box::new(state)))
             })
         })
     }
@@ -1153,7 +1152,7 @@ pub unsafe extern "C" fn citizensdk_delete_account(
                 runtime.refresh_provider_capabilities()?;
                 let state =
                     runtime.drive(runtime.engine().delete_wallet_account_any(account_id))??;
-                Ok(ResultPayload::WalletState(state))
+                Ok(ResultPayload::WalletState(Box::new(state)))
             })
         })
     }
@@ -1635,6 +1634,58 @@ pub unsafe extern "C" fn citizensdk_sign_wallet_payload(
                 let signature =
                     runtime.drive(runtime.engine().sign_wallet_payload(account_id, message))??;
                 Ok(ResultPayload::Signature(signature))
+            })
+        })
+    }
+}
+
+#[no_mangle]
+/// Derives one 32-byte application key from an SDK-owned hot account.
+///
+/// `salt` and `info` are opaque application domains. The result remains in a zeroizing owned
+/// result until the caller copies it once and releases the result handle.
+///
+/// # Safety
+/// Input views and `out_request_id` must satisfy their ordinary ABI contracts.
+pub unsafe extern "C" fn citizensdk_derive_application_key(
+    handle: CitizenSdkHandle,
+    account_id: *const CitizenSdkAccountId,
+    salt: CitizenSdkBytesView,
+    info: CitizenSdkBytesView,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(all(feature = "wallet", feature = "signing")))]
+    {
+        let _ = (handle, account_id, salt, info, out_request_id);
+        ffi_status(|| {
+            Err(FfiError::new(
+                CitizenSdkErrorCode::Unsupported,
+                "当前构建不包含所需模块",
+            ))
+        })
+    }
+    #[cfg(all(feature = "wallet", feature = "signing"))]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            let account_id = account_id_from_pointer(account_id, "account_id")?;
+            let salt: [u8; 32] = copy_view(salt, "application key salt", 32)?
+                .try_into()
+                .map_err(|_| FfiError::invalid("application key salt must be 32 bytes"))?;
+            let info = copy_view(info, "application key info", 256)?;
+            if info.is_empty() {
+                return Err(FfiError::invalid(
+                    "application key info must contain 1..256 bytes",
+                ));
+            }
+            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let key = runtime.drive(
+                    runtime
+                        .engine()
+                        .derive_application_key(account_id, salt, info),
+                )??;
+                Ok(ResultPayload::ApplicationKey(Arc::new(key)))
             })
         })
     }
@@ -2541,6 +2592,33 @@ pub unsafe extern "C" fn citizensdk_result_get_signature(
         };
         ptr::copy_nonoverlapping(signature.as_bytes().as_ptr(), out_signature_64, 64);
         Ok(())
+    })
+}
+
+#[no_mangle]
+/// Copies a 32-byte application key from its zeroizing owned result.
+///
+/// # Safety
+/// `out_key_32` must be writable for exactly 32 bytes. The caller owns and must clear its copy.
+pub unsafe extern "C" fn citizensdk_result_get_application_key(
+    result: CitizenSdkResultHandle,
+    out_key_32: *mut u8,
+) -> i32 {
+    ffi_status(|| {
+        require_output(out_key_32, "out_key_32")?;
+        let owned = ownership::get(result)?;
+        let ResultPayload::ApplicationKey(key) = owned.payload else {
+            return Err(wrong_result("application key"));
+        };
+        key.with_secret(|bytes| {
+            if bytes.len() != 32 {
+                return Err(FfiError::internal(
+                    "application key result length is not 32 bytes",
+                ));
+            }
+            ptr::copy_nonoverlapping(bytes.as_ptr(), out_key_32, 32);
+            Ok(())
+        })
     })
 }
 

@@ -351,6 +351,20 @@ internal enum CitizenSDKNativeCodec {
         }
     }
 
+    /// Copies the secret result exactly once into caller-owned memory. Core
+    /// zeroizes its retained result when the operation releases the handle.
+    static func applicationKey(_ result: UInt64) throws -> Data {
+        try inspect(result, kind: 29) {
+            var bytes = Data(count: 32)
+            let code = bytes.withUnsafeMutableBytes {
+                citizensdk_result_get_application_key(
+                    result, $0.bindMemory(to: UInt8.self).baseAddress)
+            }
+            try CitizenSDKChecks.requireOK(code, "Core application key result is invalid")
+            return bytes
+        }
+    }
+
     static func signingOutcome(_ result: UInt64) throws -> CitizenSigningOutcome {
         try inspect(result, kind: 22) {
             var info = citizensdk_signing_outcome_info_t()

@@ -12,9 +12,14 @@ import 'package:citizenapp/ui/app_layout.dart';
 ///
 /// 仅负责公民域二级导航分发；具体业务分别下沉到 all/legislation/election/governance/public。
 class CitizenTabPage extends StatefulWidget {
-  const CitizenTabPage({super.key, this.onPendingVoteCountChanged});
+  const CitizenTabPage({
+    super.key,
+    this.onPendingVoteCountChanged,
+    this.proposalContent,
+  });
 
   final ValueChanged<int>? onPendingVoteCountChanged;
+  final Widget? proposalContent;
 
   @override
   State<CitizenTabPage> createState() => _CitizenTabPageState();
@@ -57,8 +62,9 @@ class _CitizenTabPageState extends State<CitizenTabPage> {
                   ),
                   Container(
                     padding: EdgeInsets.symmetric(
-                        horizontal: AppLayout.scaled(context, 10),
-                        vertical: AppLayout.scaled(context, 5)),
+                      horizontal: AppLayout.scaled(context, 10),
+                      vertical: AppLayout.scaled(context, 5),
+                    ),
                     decoration: BoxDecoration(
                       color: AppTheme.primary.withAlpha(10),
                       borderRadius: BorderRadius.circular(AppTheme.radiusMd),
@@ -85,9 +91,8 @@ class _CitizenTabPageState extends State<CitizenTabPage> {
   Widget _buildTabContent() {
     switch (_selectedTab) {
       case 0: // 提案:全局治理提案流。
-        return ProposalTab(
-          onPendingVoteCountChanged: _onPendingVoteCountChanged,
-        );
+        return widget.proposalContent ??
+            ProposalTab(onPendingVoteCountChanged: _onPendingVoteCountChanged);
       case 1: // 立法(P3 接法律浏览)
         return const LegislationTab();
       case 2: // 选举(P8 接选举活动视图)
@@ -141,7 +146,8 @@ class _StyledTabs extends StatelessWidget {
                   duration: const Duration(milliseconds: 200),
                   curve: Curves.easeInOut,
                   padding: EdgeInsets.symmetric(
-                      vertical: AppLayout.scaled(context, 8)),
+                    vertical: AppLayout.scaled(context, 8),
+                  ),
                   decoration: BoxDecoration(
                     color: i == selectedIndex
                         ? AppTheme.surfaceCard

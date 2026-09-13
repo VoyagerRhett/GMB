@@ -12,6 +12,7 @@
 #include <limits>
 #include <thread>
 #include <utility>
+#include <vector>
 #include "citizen_sdk_host_record.hpp"
 #include "citizen_sdk_input_limits.hpp"
 
@@ -599,7 +600,10 @@ WalletWindow::WalletWindow(WindowLease parent, const ValidatedWalletRequest &req
   impl_->class_name = L"CitizenSDK.Wallet." + std::to_wstring(reinterpret_cast<UINT_PTR>(impl_.get()));
   register_class(impl_->class_name, impl_->module, Impl::procedure);
   impl_->registered = true;
-  impl_->hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, impl_->class_name.c_str(), L"CitizenSDK 钱包",
+  const wchar_t *window_title = impl_->private_key_mode ? L"查看私钥" :
+      request.kind == CITIZENSDK_WALLET_FLOW_CREATE ? L"创建钱包" :
+      request.kind == CITIZENSDK_WALLET_FLOW_IMPORT ? L"输入助记词" : L"添加账户";
+  impl_->hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, impl_->class_name.c_str(), window_title,
       WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 620, 800,
       static_cast<HWND>(impl_->parent.get()), nullptr, impl_->module, impl_.get());
   require(impl_->hwnd != nullptr, CITIZENSDK_ERROR_UNAVAILABLE, "CitizenSDK wallet window is unavailable");
@@ -607,10 +611,10 @@ WalletWindow::WalletWindow(WindowLease parent, const ValidatedWalletRequest &req
           CITIZENSDK_ERROR_UNAVAILABLE, "CitizenSDK sensitive display protection is unavailable");
   impl_->status = control(impl_->hwnd, impl_->module, L"STATIC", L"", SS_LEFT, 0, 20, 18, 570, 90);
   if (impl_->private_key_mode) {
-    SetWindowTextW(impl_->hwnd, L"CitizenSDK 账户私钥安全查看");
+    SetWindowTextW(impl_->hwnd, L"查看私钥");
     SetWindowTextW(impl_->status,
-        L"私钥可控制此账户全部资产。确认周围无人且无录屏后，进行设备认证。"
-        L"不可复制、选择或导出；离开查看窗口、隐藏或锁屏即永久清除。");
+        L"私钥泄露将导致该账户资产被盗（仅该账户，不影响本钱包其他账户）。\r\n\r\n"
+        L"确认要查看吗？");
     // 仅公开账户审阅文本；秘密仍只进入下方可擦除自绘缓冲。
     std::wstring account_text = L"账户：0x";
     constexpr wchar_t account_digits[] = L"0123456789abcdef";
@@ -624,7 +628,7 @@ WalletWindow::WalletWindow(WindowLease parent, const ValidatedWalletRequest &req
         impl_->hwnd, kPrivateKey, 20, 155, 570, 140, false, true);
     impl_->private_key->set_read_only(true);
     impl_->action_button = control(impl_->hwnd, impl_->module, L"BUTTON",
-        L"我已了解风险，认证并查看", BS_DEFPUSHBUTTON | WS_TABSTOP, kAction,
+        L"查看", BS_DEFPUSHBUTTON | WS_TABSTOP, kAction,
         250, 350, 340, 40);
     control(impl_->hwnd, impl_->module, L"BUTTON", L"取消",
         BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL, 20, 350, 130, 40);
@@ -648,10 +652,16 @@ WalletWindow::WalletWindow(WindowLease parent, const ValidatedWalletRequest &req
   control(impl_->hwnd, impl_->module, L"STATIC", L"助记词数量", SS_LEFT, 0, 20, 370, 120, 24);
   impl_->word_count = control(impl_->hwnd, impl_->module, L"COMBOBOX", L"",
       CBS_DROPDOWNLIST | WS_TABSTOP, kWordCount, 150, 365, 120, 120);
-  for (const wchar_t *count : {L"12", L"18", L"24"})
+  const std::vector<const wchar_t *> counts = request.kind == CITIZENSDK_WALLET_FLOW_CREATE
+      ? std::vector<const wchar_t *>{L"12 · 推荐", L"24"}
+      : std::vector<const wchar_t *>{L"12", L"18", L"24"};
+  for (const wchar_t *count : counts)
     SendMessageW(impl_->word_count, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(count));
-  const uint32_t selected_words = request.word_count == 0 ? 12 : request.word_count;
-  const int selected = selected_words == 12 ? 0 : selected_words == 18 ? 1 : selected_words == 24 ? 2 : -1;
+  const uint32_t selected_words = request.kind == CITIZENSDK_WALLET_FLOW_CREATE &&
+      request.word_count == 18 ? 12 : request.word_count == 0 ? 12 : request.word_count;
+  const int selected = request.kind == CITIZENSDK_WALLET_FLOW_CREATE
+      ? selected_words == 12 ? 0 : selected_words == 24 ? 1 : -1
+      : selected_words == 12 ? 0 : selected_words == 18 ? 1 : selected_words == 24 ? 2 : -1;
   require(selected >= 0, CITIZENSDK_ERROR_INVALID_ARGUMENT,
           "CitizenSDK wallet word count is unsupported");
   SendMessageW(impl_->word_count, CB_SETCURSEL, selected, 0);
@@ -676,15 +686,33 @@ WalletWindow::WalletWindow(WindowLease parent, const ValidatedWalletRequest &req
       kAction, 340, 680, 250, 40);
   control(impl_->hwnd, impl_->module, L"BUTTON", L"取消", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL, 20, 680, 130, 40);
   if (request.kind == CITIZENSDK_WALLET_FLOW_CREATE) {
-    SetWindowTextW(impl_->status, L"助记词只在本设备生成，显示后必须离线备份。\n设备 TPM 金库口令将在提交时由 CitizenSDK 单独询问。");
-    SetWindowTextW(impl_->action_button, L"生成钱包");
+    std::wstring host_application = L"当前应用";
+    const HWND owner = static_cast<HWND>(impl_->parent.get());
+    const int title_size = owner == nullptr ? 0 : GetWindowTextLengthW(owner);
+    if (title_size > 0 && title_size <= 256) {
+      host_application.assign(static_cast<std::size_t>(title_size) + 1, L'\0');
+      if (GetWindowTextW(owner, host_application.data(), title_size + 1) == title_size) {
+        host_application.resize(static_cast<std::size_t>(title_size));
+        if (host_application.size() < 3 ||
+            host_application.compare(host_application.size() - 3, 3, L"App") != 0)
+          host_application += L"App";
+      } else {
+        host_application = L"当前应用";
+      }
+    }
+    const std::wstring intro = L"钱包账户是 " + host_application +
+        L" 唯一的账户，请务必妥善保存助记词和钱包密码（如设置），若丢失或遗忘将永久无法找回。";
+    SetWindowTextW(impl_->status, intro.c_str());
+    SetWindowTextW(impl_->action_button, L"创建钱包");
     ShowWindow(static_cast<HWND>(impl_->mnemonic->native_handle()), SW_HIDE);
     ShowWindow(impl_->mnemonic_state, SW_HIDE);
     ShowWindow(impl_->suggestions, SW_HIDE);
     ShowWindow(impl_->suggestion_apply, SW_HIDE);
   } else {
-    SetWindowTextW(impl_->status, L"助记词与钱包密码只在本机 CitizenSDK 原生界面和 Rust Core 内使用。");
-    SetWindowTextW(impl_->action_button, request.kind == CITIZENSDK_WALLET_FLOW_IMPORT ? L"导入钱包" : L"添加账户");
+    SetWindowTextW(impl_->status, request.kind == CITIZENSDK_WALLET_FLOW_IMPORT ? L"" :
+        L"无根设备不保存助记词或密码，追加账户需重新录入两者校验归属。");
+    SetWindowTextW(impl_->action_button,
+        request.kind == CITIZENSDK_WALLET_FLOW_IMPORT ? L"确认导入" : L"确认添加");
   }
   if (request.kind != CITIZENSDK_WALLET_FLOW_ADD_ACCOUNTS) {
     ShowWindow(impl_->next_account, SW_HIDE);
@@ -736,16 +764,19 @@ void WalletWindow::show_prepared_mnemonic(const SensitiveBuffer &mnemonic) {
   impl_->mnemonic->set_read_only(true);
   ShowWindow(static_cast<HWND>(impl_->mnemonic->native_handle()), SW_SHOW);
   ShowWindow(impl_->mnemonic_state, SW_SHOW);
-  ShowWindow(impl_->backup, SW_SHOW);
+  SendMessageW(impl_->backup, BM_SETCHECK, BST_CHECKED, 0);
+  ShowWindow(impl_->backup, SW_HIDE);
   ShowWindow(static_cast<HWND>(impl_->password->native_handle()), SW_HIDE);
   ShowWindow(impl_->word_count, SW_HIDE);
   ShowWindow(impl_->suggestions, SW_HIDE);
   ShowWindow(impl_->suggestion_apply, SW_HIDE);
   ShowWindow(impl_->next_account, SW_HIDE);
   ShowWindow(impl_->account_indices, SW_HIDE);
-  SetWindowTextW(impl_->action_button, L"确认备份并创建");
+  SetWindowTextW(impl_->action_button, L"我已备份");
   SetWindowTextW(impl_->status,
-      L"请断网抄写并在离线安全位置核对助记词。热钱包不保存助记词，关闭后无法再次显示。若使用了非空钱包密码，还必须单独记住；不同密码会得到不同账户。设备 TPM 认证是独立的金库保护，不是钱包密码。");
+      L"公民不保存助记词，关闭本弹窗后将无法再次显示。\r\n"
+      L"请立即手抄备份，或在「公民钱包」中妥善保管——这是恢复钱包与追加其他账户的唯一凭证。"
+      L"设置过钱包密码时，还必须单独备份密码。\r\n不支持复制，不支持截屏。");
   EnableWindow(impl_->action_button, TRUE);
   impl_->busy = false;
 }
@@ -785,7 +816,9 @@ void WalletWindow::show_private_key(const SensitiveBuffer &private_key) {
   impl_->private_key->set_utf8(visible);
   visible.clear(); text.clear();
   impl_->private_key_visible = true;
-  SetWindowTextW(impl_->action_button, L"清除并关闭");
+  SetWindowTextW(impl_->status,
+      L"请手抄备份，不支持复制；导出即等于该账户控制权");
+  SetWindowTextW(impl_->action_button, L"关闭");
   EnableWindow(impl_->action_button, TRUE);
   impl_->busy = false;
 }
@@ -800,6 +833,8 @@ citizensdk_wallet_word_count_t WalletWindow::word_count() const {
           "CitizenSDK wallet word count control is unavailable");
   const LRESULT selected = SendMessageW(impl_->word_count, CB_GETCURSEL, 0, 0);
   if (selected == 0) return CITIZENSDK_WALLET_WORDS_12;
+  if (impl_->kind == CITIZENSDK_WALLET_FLOW_CREATE && selected == 1)
+    return CITIZENSDK_WALLET_WORDS_24;
   if (selected == 1) return CITIZENSDK_WALLET_WORDS_18;
   if (selected == 2) return CITIZENSDK_WALLET_WORDS_24;
   throw HostError(CITIZENSDK_ERROR_INVALID_ARGUMENT,

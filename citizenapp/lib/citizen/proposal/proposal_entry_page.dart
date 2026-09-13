@@ -1,5 +1,7 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'package:flutter/material.dart';
-import 'package:smoldot/smoldot.dart' show LightClientStatusSnapshot;
+import 'package:provider/provider.dart';
 
 import 'package:citizenapp/citizen/proposal/election/election_proposal_page.dart';
 import 'package:citizenapp/citizen/proposal/grandpa-key/grandpa_key_page.dart';
@@ -18,8 +20,6 @@ import 'package:citizenapp/citizen/proposal/runtime-upgrade/runtime_upgrade_page
 import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_page.dart';
 import 'package:citizenapp/transaction/multisig-transfer/safety_fund_transfer_page.dart';
 import 'package:citizenapp/transaction/multisig-transfer/sweep_to_main_page.dart';
-import 'package:citizenapp/rpc/smoldot_client.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 提案类型选择页(个人多签/创世治理机构/注册机构账户统一入口)。
@@ -45,7 +45,7 @@ class ProposalEntryPage extends StatefulWidget {
   final Color badgeColor;
 
   /// 当前用户已激活的管理员钱包列表。
-  final List<WalletProfile> adminWallets;
+  final List<CitizenWalletStateAccount> adminWallets;
 
   /// 用户是否已激活管理员身份。
   final bool isActivated;
@@ -55,7 +55,7 @@ class ProposalEntryPage extends StatefulWidget {
 }
 
 class _ProposalEntryPageState extends State<ProposalEntryPage> {
-  LightClientStatusSnapshot? _chainProgress;
+  CitizenChainSyncStatus? _chainProgress;
   String? _chainProgressError;
 
   @override
@@ -69,8 +69,9 @@ class _ProposalEntryPageState extends State<ProposalEntryPage> {
         title: Text(
           '发起提案',
           style: TextStyle(
-              fontSize: AppLayout.scaled(context, 17),
-              fontWeight: FontWeight.w700),
+            fontSize: AppLayout.scaled(context, 17),
+            fontWeight: FontWeight.w700,
+          ),
         ),
         centerTitle: true,
         backgroundColor: Colors.white,
@@ -97,12 +98,15 @@ class _ProposalEntryPageState extends State<ProposalEntryPage> {
                       height: AppLayout.scaled(context, 36),
                       decoration: BoxDecoration(
                         color: widget.badgeColor.withValues(alpha: 0.12),
-                        borderRadius:
-                            BorderRadius.circular(AppLayout.scaledValue(10)),
+                        borderRadius: BorderRadius.circular(
+                          AppLayout.scaledValue(10),
+                        ),
                       ),
-                      child: Icon(widget.icon,
-                          size: AppLayout.scaled(context, 18),
-                          color: widget.badgeColor),
+                      child: Icon(
+                        widget.icon,
+                        size: AppLayout.scaled(context, 18),
+                        color: widget.badgeColor,
+                      ),
                     ),
                     SizedBox(width: AppLayout.scaled(context, 10)),
                     Expanded(
@@ -117,12 +121,14 @@ class _ProposalEntryPageState extends State<ProposalEntryPage> {
                     ),
                     Container(
                       padding: EdgeInsets.symmetric(
-                          horizontal: AppLayout.scaled(context, 8),
-                          vertical: AppLayout.scaled(context, 2)),
+                        horizontal: AppLayout.scaled(context, 8),
+                        vertical: AppLayout.scaled(context, 2),
+                      ),
                       decoration: BoxDecoration(
                         color: widget.badgeColor.withValues(alpha: 0.10),
-                        borderRadius:
-                            BorderRadius.circular(AppLayout.scaledValue(10)),
+                        borderRadius: BorderRadius.circular(
+                          AppLayout.scaledValue(10),
+                        ),
                       ),
                       child: Text(
                         OrgType.label(widget.institution.orgType),
@@ -140,25 +146,30 @@ class _ProposalEntryPageState extends State<ProposalEntryPage> {
               // ──── 未激活签名钱包提示 ────
               if (!widget.isActivated)
                 Padding(
-                  padding:
-                      EdgeInsets.only(bottom: AppLayout.scaled(context, 16)),
+                  padding: EdgeInsets.only(
+                    bottom: AppLayout.scaled(context, 16),
+                  ),
                   child: Container(
                     padding: EdgeInsets.symmetric(
-                        horizontal: AppLayout.scaled(context, 12),
-                        vertical: AppLayout.scaled(context, 8)),
+                      horizontal: AppLayout.scaled(context, 12),
+                      vertical: AppLayout.scaled(context, 8),
+                    ),
                     decoration: BoxDecoration(
                       color: AppTheme.textTertiary.withValues(alpha: 0.08),
-                      borderRadius:
-                          BorderRadius.circular(AppLayout.scaledValue(10)),
+                      borderRadius: BorderRadius.circular(
+                        AppLayout.scaledValue(10),
+                      ),
                       border: Border.all(
                         color: AppTheme.textTertiary.withValues(alpha: 0.2),
                       ),
                     ),
                     child: Row(
                       children: [
-                        Icon(Icons.info_outline,
-                            size: AppLayout.scaled(context, 16),
-                            color: AppTheme.textTertiary),
+                        Icon(
+                          Icons.info_outline,
+                          size: AppLayout.scaled(context, 16),
+                          color: AppTheme.textTertiary,
+                        ),
                         SizedBox(width: AppLayout.scaled(context, 8)),
                         Expanded(
                           child: Text(
@@ -175,25 +186,30 @@ class _ProposalEntryPageState extends State<ProposalEntryPage> {
                 ),
               if (widget.isActivated && _proposalBlockedReason != null)
                 Padding(
-                  padding:
-                      EdgeInsets.only(bottom: AppLayout.scaled(context, 16)),
+                  padding: EdgeInsets.only(
+                    bottom: AppLayout.scaled(context, 16),
+                  ),
                   child: Container(
                     padding: EdgeInsets.symmetric(
-                        horizontal: AppLayout.scaled(context, 12),
-                        vertical: AppLayout.scaled(context, 8)),
+                      horizontal: AppLayout.scaled(context, 12),
+                      vertical: AppLayout.scaled(context, 8),
+                    ),
                     decoration: BoxDecoration(
                       color: AppTheme.warning.withValues(alpha: 0.08),
-                      borderRadius:
-                          BorderRadius.circular(AppLayout.scaledValue(10)),
+                      borderRadius: BorderRadius.circular(
+                        AppLayout.scaledValue(10),
+                      ),
                       border: Border.all(
                         color: AppTheme.warning.withValues(alpha: 0.2),
                       ),
                     ),
                     child: Row(
                       children: [
-                        Icon(Icons.sync_problem,
-                            size: AppLayout.scaled(context, 16),
-                            color: AppTheme.warning),
+                        Icon(
+                          Icons.sync_problem,
+                          size: AppLayout.scaled(context, 16),
+                          color: AppTheme.warning,
+                        ),
                         SizedBox(width: AppLayout.scaled(context, 8)),
                         Expanded(
                           child: Text(
@@ -232,27 +248,33 @@ class _ProposalEntryPageState extends State<ProposalEntryPage> {
   }
 
   ProposalSubject get _subject => ProposalSubject.fromInstitution(
-        institution: widget.institution,
-        institutionCode: widget.institutionCode,
-      );
+    institution: widget.institution,
+    institutionCode: widget.institutionCode,
+  );
 
   /// 按主体能力 registry 取可发起提案,逐项渲染卡片。
   List<Widget> _buildProposalCards(bool enabled) {
-    final capabilities =
-        ProposalCapabilityRegistry.capabilitiesForSubject(_subject);
+    final capabilities = ProposalCapabilityRegistry.capabilitiesForSubject(
+      _subject,
+    );
     final out = <Widget>[];
     for (final capability in capabilities) {
       out.add(SizedBox(height: AppLayout.scaledValue(8)));
       out.add(_cardFor(capability.kind, enabled));
     }
     if (out.isEmpty) {
-      out.add(Padding(
-        padding: EdgeInsets.only(top: AppLayout.scaledValue(8)),
-        child: Text('本机构暂无可发起的提案',
+      out.add(
+        Padding(
+          padding: EdgeInsets.only(top: AppLayout.scaledValue(8)),
+          child: Text(
+            '本机构暂无可发起的提案',
             style: TextStyle(
-                fontSize: AppLayout.scaledValue(13),
-                color: AppTheme.textTertiary)),
-      ));
+              fontSize: AppLayout.scaledValue(13),
+              color: AppTheme.textTertiary,
+            ),
+          ),
+        ),
+      );
     }
     return out;
   }
@@ -263,119 +285,154 @@ class _ProposalEntryPageState extends State<ProposalEntryPage> {
     switch (kind) {
       case ProposalKind.transfer:
         return _typeCard(
-            Icons.send_outlined,
-            '转账',
-            '从机构主账户向指定地址发起转账提案',
-            AppTheme.primary,
-            enabled,
-            () => _checkAndOpenProposal(
-                context,
-                () => MultisigTransferPage(
-                    institution: widget.institution,
-                    icon: widget.icon,
-                    badgeColor: widget.badgeColor,
-                    adminWallets: widget.adminWallets)));
+          Icons.send_outlined,
+          '转账',
+          '从机构主账户向指定地址发起转账提案',
+          AppTheme.primary,
+          enabled,
+          () => _checkAndOpenProposal(
+            context,
+            () => MultisigTransferPage(
+              institution: widget.institution,
+              icon: widget.icon,
+              badgeColor: widget.badgeColor,
+              adminWallets: widget.adminWallets,
+            ),
+          ),
+        );
       case ProposalKind.feeTransfer:
         return _typeCard(
-            Icons.account_balance_wallet_outlined,
-            '手续费划转',
-            '从机构费用账户向本机构主账户划转手续费',
-            AppTheme.info,
-            enabled,
-            () => _checkAndOpenProposal(
-                context,
-                () => SweepToMainPage(
-                    institution: widget.institution,
-                    icon: widget.icon,
-                    badgeColor: widget.badgeColor,
-                    adminWallets: widget.adminWallets)));
+          Icons.account_balance_wallet_outlined,
+          '手续费划转',
+          '从机构费用账户向本机构主账户划转手续费',
+          AppTheme.info,
+          enabled,
+          () => _checkAndOpenProposal(
+            context,
+            () => SweepToMainPage(
+              institution: widget.institution,
+              icon: widget.icon,
+              badgeColor: widget.badgeColor,
+              adminWallets: widget.adminWallets,
+            ),
+          ),
+        );
       case ProposalKind.adminsChange:
         return _typeCard(
-            Icons.swap_horiz,
-            '换管理员',
-            '提议更换本机构管理员',
-            AppTheme.accent,
-            enabled,
-            () => _checkAndOpenProposal(
-                context,
-                () => AdminsChangePage(
-                    institution: widget.institution,
-                    accountIdentity: AdminAccountIdentity.fromInstitution(
-                        widget.institution),
-                    adminWallets: widget.adminWallets)));
+          Icons.swap_horiz,
+          '换管理员',
+          '提议更换本机构管理员',
+          AppTheme.accent,
+          enabled,
+          () => _checkAndOpenProposal(
+            context,
+            () => AdminsChangePage(
+              institution: widget.institution,
+              accountIdentity: AdminAccountIdentity.fromInstitution(
+                widget.institution,
+              ),
+              adminWallets: widget.adminWallets,
+            ),
+          ),
+        );
       case ProposalKind.safetyFundTransfer:
         return _typeCard(
-            Icons.shield_outlined,
-            '安全基金转账',
-            '从国家储委会安全基金账户向指定地址发起转账提案',
-            AppTheme.warning,
-            enabled,
-            () => _checkAndOpenProposal(
-                context,
-                () => SafetyFundTransferPage(
-                    institution: widget.institution,
-                    icon: widget.icon,
-                    badgeColor: widget.badgeColor,
-                    adminWallets: widget.adminWallets)));
+          Icons.shield_outlined,
+          '安全基金转账',
+          '从国家储委会安全基金账户向指定地址发起转账提案',
+          AppTheme.warning,
+          enabled,
+          () => _checkAndOpenProposal(
+            context,
+            () => SafetyFundTransferPage(
+              institution: widget.institution,
+              icon: widget.icon,
+              badgeColor: widget.badgeColor,
+              adminWallets: widget.adminWallets,
+            ),
+          ),
+        );
       case ProposalKind.resolutionIssuance:
         return _typeCard(
-            Icons.account_balance,
-            '决议发行',
-            '发起公民币发行决议,需联合投票:内部投票阶段+联合公投阶段',
-            AppTheme.primaryDark,
-            enabled,
-            () => _checkAndOpenProposal(
-                context, () => const ResolutionIssuancePage()));
+          Icons.account_balance,
+          '决议发行',
+          '发起公民币发行决议,需联合投票:内部投票阶段+联合公投阶段',
+          AppTheme.primaryDark,
+          enabled,
+          () => _checkAndOpenProposal(
+            context,
+            () => const ResolutionIssuancePage(),
+          ),
+        );
       case ProposalKind.resolutionDestroy:
         return _typeCard(
-            Icons.delete_outline,
-            '决议销毁',
-            '提议销毁机构持有的资产',
-            AppTheme.danger,
-            enabled,
-            () => _checkAndOpenProposal(
-                context, () => const ResolutionDestroyPage()));
+          Icons.delete_outline,
+          '决议销毁',
+          '提议销毁机构持有的资产',
+          AppTheme.danger,
+          enabled,
+          () => _checkAndOpenProposal(
+            context,
+            () => const ResolutionDestroyPage(),
+          ),
+        );
       case ProposalKind.runtimeUpgrade:
         return _typeCard(
-            Icons.arrow_upward,
-            '协议升级',
-            '查看协议升级说明及流程',
-            AppTheme.info,
-            enabled,
-            () => Navigator.of(context).push(MaterialPageRoute(
-                builder: (_) =>
-                    RuntimeUpgradePage(adminWallets: widget.adminWallets))));
+          Icons.arrow_upward,
+          '协议升级',
+          '查看协议升级说明及流程',
+          AppTheme.info,
+          enabled,
+          () => Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) =>
+                  RuntimeUpgradePage(adminWallets: widget.adminWallets),
+            ),
+          ),
+        );
       case ProposalKind.grandpaKey:
         return _typeCard(
-            Icons.vpn_key_outlined,
-            '验证密钥',
-            '更换 GRANDPA 共识验证密钥(本机构内部投票)',
-            const Color(0xFF4527A0),
-            enabled,
-            () => _checkAndOpenProposal(context, () => const GrandpaKeyPage()));
+          Icons.vpn_key_outlined,
+          '验证密钥',
+          '更换 GRANDPA 共识验证密钥(本机构内部投票)',
+          const Color(0xFF4527A0),
+          enabled,
+          () => _checkAndOpenProposal(context, () => const GrandpaKeyPage()),
+        );
       case ProposalKind.legislation:
         return _typeCard(
-            Icons.gavel_outlined,
-            '发起立法',
-            '立法 / 修法 / 废法在电脑节点端发起,本端查看 + 投票',
-            AppTheme.primaryDark,
-            enabled,
-            () => Navigator.of(context).push(MaterialPageRoute(
-                builder: (_) => const LegislationIntroPage())));
+          Icons.gavel_outlined,
+          '发起立法',
+          '立法 / 修法 / 废法在电脑节点端发起,本端查看 + 投票',
+          AppTheme.primaryDark,
+          enabled,
+          () => Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => const LegislationIntroPage()),
+          ),
+        );
       case ProposalKind.election:
         return _typeCard(
-            Icons.how_to_vote_outlined,
-            '发起选举',
-            '发起选举提案',
-            AppTheme.accent,
-            enabled,
-            () => _checkAndOpenProposal(
-                context, () => const ElectionProposalPage()));
+          Icons.how_to_vote_outlined,
+          '发起选举',
+          '发起选举提案',
+          AppTheme.accent,
+          enabled,
+          () => _checkAndOpenProposal(
+            context,
+            () => const ElectionProposalPage(),
+          ),
+        );
     }
   }
 
-  Widget _typeCard(IconData icon, String title, String subtitle, Color color,
-      bool enabled, VoidCallback onTap) {
+  Widget _typeCard(
+    IconData icon,
+    String title,
+    String subtitle,
+    Color color,
+    bool enabled,
+    VoidCallback onTap,
+  ) {
     return _ProposalTypeCard(
       icon: icon,
       title: title,
@@ -396,16 +453,19 @@ class _ProposalEntryPageState extends State<ProposalEntryPage> {
     final blockedReason = _proposalBlockedReason;
     if (blockedReason != null) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(blockedReason)),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(blockedReason)));
       }
       return;
     }
     try {
-      final service = ProposalLimitService();
-      final activeIds =
-          await service.fetchActiveProposalIds(widget.institution);
+      final service = ProposalLimitService(
+        chain: context.read<CitizenSdk>().chain,
+      );
+      final activeIds = await service.fetchActiveProposalIds(
+        widget.institution,
+      );
       if (!context.mounted) return;
 
       if (activeIds.length >=
@@ -439,23 +499,19 @@ class _ProposalEntryPageState extends State<ProposalEntryPage> {
           Navigator.of(context).pop(true);
         }
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${name ?? "该"}功能开发中')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('${name ?? "该"}功能开发中')));
       }
     } catch (e) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            SmoldotClientManager.instance.buildUserFacingError(e),
-          ),
-        ),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('公民链状态暂时不可用')));
     }
   }
 
-  void _handleChainProgressChanged(LightClientStatusSnapshot? progress) {
+  void _handleChainProgressChanged(CitizenChainSyncStatus? progress) {
     if (!mounted) return;
     setState(() {
       _chainProgress = progress;
@@ -474,7 +530,7 @@ class _ProposalEntryPageState extends State<ProposalEntryPage> {
     if (progress == null) {
       return _chainProgressError ?? '正在读取区块链状态，请稍后再试';
     }
-    if (!progress.hasPeers) {
+    if (progress.peerCount == BigInt.zero) {
       return '轻节点尚未连接到区块链网络，暂不能发起提案';
     }
     if (progress.isSyncing) {
@@ -524,8 +580,9 @@ class _ProposalTypeCard extends StatelessWidget {
           opacity: enabled ? 1.0 : 0.5,
           child: Padding(
             padding: EdgeInsets.symmetric(
-                horizontal: AppLayout.scaled(context, 14),
-                vertical: AppLayout.scaled(context, 12)),
+              horizontal: AppLayout.scaled(context, 14),
+              vertical: AppLayout.scaled(context, 12),
+            ),
             child: Row(
               children: [
                 Container(
@@ -533,12 +590,15 @@ class _ProposalTypeCard extends StatelessWidget {
                   height: AppLayout.scaled(context, 40),
                   decoration: BoxDecoration(
                     color: effectiveColor.withValues(alpha: 0.10),
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(10)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(10),
+                    ),
                   ),
-                  child: Icon(icon,
-                      size: AppLayout.scaled(context, 20),
-                      color: effectiveColor),
+                  child: Icon(
+                    icon,
+                    size: AppLayout.scaled(context, 20),
+                    color: effectiveColor,
+                  ),
                 ),
                 SizedBox(width: AppLayout.scaled(context, 12)),
                 Expanded(
@@ -557,19 +617,22 @@ class _ProposalTypeCard extends StatelessWidget {
                       Text(
                         subtitle,
                         style: TextStyle(
-                            fontSize: AppLayout.scaled(context, 12),
-                            color: AppTheme.textTertiary),
+                          fontSize: AppLayout.scaled(context, 12),
+                          color: AppTheme.textTertiary,
+                        ),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
                     ],
                   ),
                 ),
-                Icon(Icons.chevron_right,
-                    size: AppLayout.scaled(context, 20),
-                    color: enabled
-                        ? AppTheme.textTertiary
-                        : AppTheme.textTertiary.withValues(alpha: 0.3)),
+                Icon(
+                  Icons.chevron_right,
+                  size: AppLayout.scaled(context, 20),
+                  color: enabled
+                      ? AppTheme.textTertiary
+                      : AppTheme.textTertiary.withValues(alpha: 0.3),
+                ),
               ],
             ),
           ),

@@ -11,11 +11,10 @@ import 'package:citizenapp/8964/services/square_request_signer.dart';
 import 'package:citizenapp/chat/chat_product_configuration.dart';
 import 'package:citizenapp/chat/chat_product_policy.dart';
 import 'package:citizenapp/my/myid/current_user_context.dart';
-import 'package:citizenapp/rpc/chain_bootstrap_api.dart';
+import 'package:citizenapp/security/chain_bootstrap_api.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/security/local_data_key.dart';
-import 'package:citizenapp/wallet/core/default_account_service.dart';
-import 'package:citizenapp/wallet/core/device_subkey.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/security/device_subkey.dart';
 import 'package:tatachat_sdk/tatachat_sdk.dart';
 
 /// Maps CitizenServe's product error contract without leaking it into TataChatSDK.
@@ -158,9 +157,9 @@ typedef ChatPushTokenProvider = Future<sdk.ChatPushToken> Function();
 /// 把公民钱包用途钥映射为 TataChatSDK 的中性用途钥接口。
 final class CitizenChatStorageKeyProvider
     implements sdk.ChatStorageKeyProvider {
-  CitizenChatStorageKeyProvider(this.walletManager);
+  CitizenChatStorageKeyProvider(this.accountSecurity);
 
-  final WalletManager walletManager;
+  final AccountSecurityService accountSecurity;
 
   static sdk.ChatDataBinding toChatBinding(AccountDataBinding binding) =>
       sdk.ChatDataBinding(
@@ -192,7 +191,7 @@ final class CitizenChatStorageKeyProvider
     required String currentAccountId,
     String? expectedKeyDomain,
   }) async {
-    final binding = await walletManager.accountDataBindingForAccountId(
+    final binding = await accountSecurity.accountDataBindingForAccountId(
       currentAccountId,
     );
     if (binding.cidNumber != ownerUserId ||
@@ -208,7 +207,7 @@ final class CitizenChatStorageKeyProvider
     sdk.ChatDataBinding binding,
     List<({sdk.ChatStorageKeyPurpose purpose, String? context})> requests,
   ) =>
-      walletManager.readDataKeysForBinding(
+      accountSecurity.readDataKeysForBinding(
         toCitizenBinding(binding),
         requests
             .map(
@@ -225,7 +224,7 @@ final class CitizenChatStorageKeyProvider
     sdk.ChatDataBinding binding,
     List<({sdk.ChatStorageKeyPurpose purpose, String? context})> requests,
   ) =>
-      walletManager.deriveDataKeysForBindingHandover(
+      accountSecurity.deriveDataKeysForBindingHandover(
         toCitizenBinding(binding),
         requests
             .map(
@@ -241,16 +240,16 @@ final class CitizenChatStorageKeyProvider
 /// CitizenApp 身份、会员、Firebase 与 CitizenServe 的唯一宿主适配。
 final class CitizenChatRuntimeHost implements sdk.ChatRuntimeHost {
   CitizenChatRuntimeHost({
-    required this.walletManager,
+    required this.accountSecurity,
     required this.currentUserContext,
     required this.bootstrapApi,
     required this.squareApiClient,
     required this.deviceSubkey,
     required this.pushService,
     this.loginSigner,
-  }) : keyProvider = CitizenChatStorageKeyProvider(walletManager);
+  }) : keyProvider = CitizenChatStorageKeyProvider(accountSecurity);
 
-  final WalletManager walletManager;
+  final AccountSecurityService accountSecurity;
   final CurrentUserContext currentUserContext;
   final ChainBootstrapApi bootstrapApi;
   final SquareApiClient squareApiClient;
@@ -275,7 +274,7 @@ final class CitizenChatRuntimeHost implements sdk.ChatRuntimeHost {
   Future<AccountDataBinding> _bindingForLogin(
     SquareLoginContext context,
   ) async {
-    final existing = await walletManager.readAccountDataBindingForAccountId(
+    final existing = await accountSecurity.readAccountDataBindingForAccountId(
       context.accountId,
     );
     if (existing != null &&
@@ -310,7 +309,7 @@ final class CitizenChatRuntimeHost implements sdk.ChatRuntimeHost {
 
   Future<void> _registerMissingDevice(SquareLoginContext context) async {
     final binding = await _bindingForLogin(context);
-    await walletManager.registerDeviceSubkeyForBinding(binding);
+    await accountSecurity.registerDeviceSubkeyForBinding(binding);
     currentUserContext.invalidate();
   }
 
@@ -318,18 +317,15 @@ final class CitizenChatRuntimeHost implements sdk.ChatRuntimeHost {
   Future<sdk.ChatRuntimeAccount?> currentAccount({
     String? expectedAccountId,
   }) async {
-    final defaultAccount = await DefaultAccountService(
-      walletManager: walletManager,
-    ).getDefaultAccount();
-    if (defaultAccount == null) return null;
+    final current = await currentUserContext.resolve();
+    if (current == null) return null;
+    final defaultAccount = current.account;
     if (expectedAccountId != null &&
         defaultAccount.accountId != expectedAccountId) {
       throw StateError('身份账户已切换，请重新进入聊天');
     }
 
-    var binding = await walletManager.readAccountDataBindingForAccountId(
-      defaultAccount.accountId,
-    );
+    var binding = current.binding;
     if (binding == null) {
       final session = await squareApiClient.ensureSession(
         accountId: defaultAccount.accountId,
@@ -343,7 +339,7 @@ final class CitizenChatRuntimeHost implements sdk.ChatRuntimeHost {
           accountId: session.accountId,
         ),
       );
-      await walletManager.activateAccountDataBinding(
+      await accountSecurity.activateAccountDataBinding(
         genesisHash: binding.genesisHash,
         cidNumber: binding.cidNumber,
         bindingRevision: binding.bindingRevision,
@@ -360,7 +356,7 @@ final class CitizenChatRuntimeHost implements sdk.ChatRuntimeHost {
       userId: binding.cidNumber,
       bindingRevision: binding.bindingRevision,
       accountId: binding.accountId,
-      displayName: defaultAccount.accountName,
+      displayName: defaultAccount.name,
     );
   }
 
@@ -453,22 +449,12 @@ final class CitizenChatRuntimeHost implements sdk.ChatRuntimeHost {
   }
 }
 
-sdk.ChatSdk? _citizenChatRuntime;
-
-/// CitizenApp 前台共享的唯一 TataChatSDK 实例。
-///
-/// 产品层只负责组合身份、会员、推送与签名依赖；聊天状态、
-/// 协议与生命周期始终由 [sdk.ChatSdk] 自身持有。
-sdk.ChatSdk get citizenChatRuntime =>
-    _citizenChatRuntime ??= createCitizenChatRuntime();
-
 /// 使用 CitizenApp 产品依赖创建真实的 [sdk.ChatSdk]。
 ///
-/// 前台通常使用 [citizenChatRuntime]；后台 isolate 和测试可通过本工厂
-/// 创建独立实例，不会产生第二套 SDK 类型。
 sdk.ChatSdk createCitizenChatRuntime({
+  required AccountSecurityService accountSecurity,
+  required CurrentUserContext currentUserContext,
   sdk.ChatStore? store,
-  WalletManager? walletManager,
   SharedPreferences? preferences,
   SquareApiClient? squareApiClient,
   ChatLoginSigner? loginSigner,
@@ -479,14 +465,13 @@ sdk.ChatSdk createCitizenChatRuntime({
   sdk.ChatServiceTransportFactory? transportFactory,
   ChatPushService? pushService,
   ChatPushTokenProvider? pushTokenProvider,
-  CurrentUserContext? currentUserContext,
   ChainBootstrapApi? bootstrapApi,
   Future<Directory> Function()? documentsDirectoryProvider,
   bool receiveOnly = false,
 }) =>
     sdk.ChatSdk(
       host: createCitizenChatRuntimeHost(
-        walletManager: walletManager,
+        accountSecurity: accountSecurity,
         squareApiClient: squareApiClient,
         loginSigner: loginSigner,
         deviceSubkey: deviceSubkey,
@@ -506,23 +491,19 @@ sdk.ChatSdk createCitizenChatRuntime({
 
 /// 构造 SDK 需要的 CitizenApp 产品宿主，仅供组合与测试注入。
 sdk.ChatRuntimeHost createCitizenChatRuntimeHost({
-  WalletManager? walletManager,
+  required AccountSecurityService accountSecurity,
+  required CurrentUserContext currentUserContext,
   SquareApiClient? squareApiClient,
   ChatLoginSigner? loginSigner,
   DeviceSubkey? deviceSubkey,
   ChatPushService? pushService,
   ChatPushTokenProvider? pushTokenProvider,
-  CurrentUserContext? currentUserContext,
   ChainBootstrapApi? bootstrapApi,
 }) {
-  final manager = walletManager ?? WalletManager();
   final push = pushService ?? ChatPushService(tokenProvider: pushTokenProvider);
   final host = CitizenChatRuntimeHost(
-    walletManager: manager,
-    currentUserContext: currentUserContext ??
-        (walletManager == null
-            ? CurrentUserContext.instance
-            : CurrentUserContext(walletManager: manager)),
+    accountSecurity: accountSecurity,
+    currentUserContext: currentUserContext,
     bootstrapApi: bootstrapApi ?? ChainBootstrapApi(),
     squareApiClient: squareApiClient ?? SquareApiClient(),
     deviceSubkey: deviceSubkey ?? DeviceSubkey(),

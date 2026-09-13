@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:isolate';
 import 'dart:math';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/foundation.dart';
 import 'package:pointycastle/digests/sha256.dart';
 import 'package:pointycastle/key_derivators/api.dart';
@@ -13,11 +14,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../8964/compose/drafts/compose_draft_media.dart';
 import '../8964/profile/services/citizen_profile_cache.dart';
 import '../isar/social_isar.dart';
+
 import 'package:tatachat_sdk/tatachat_sdk.dart';
+
 import '../isar/app_isar.dart';
 import '../isar/user_isar.dart';
 import '../isar/wallet_isar.dart';
-import '../wallet/core/wallet_manager.dart';
+import 'account_security_service.dart';
 import 'secure_storage.dart';
 
 /// 全量本机数据擦除没有完整成功。
@@ -25,7 +28,7 @@ import 'secure_storage.dart';
 /// [failures] 会保留每个失败数据域，调用方不得把部分擦除当成成功退出。
 class AppDataWipeException implements Exception {
   AppDataWipeException(List<String> failures)
-      : failures = List<String>.unmodifiable(failures);
+    : failures = List<String>.unmodifiable(failures);
 
   final List<String> failures;
 
@@ -75,7 +78,7 @@ class AppLockService {
   static const Duration lockDuration = Duration(hours: 24);
   static const Duration _wipeStepTimeout = Duration(seconds: 6);
   static Future<AppPinVerificationResult> Function(String)?
-      _debugVerifyPinForTest;
+  _debugVerifyPinForTest;
   static Future<bool> Function()? _debugIsLockedForTest;
   static Future<void> Function()? _debugRemovePinForTest;
   static Future<void> Function()? _debugWipeAllDataForTest;
@@ -129,7 +132,11 @@ class AppLockService {
   /// 返回可区分验证通过、密码错误、24h 锁定和数据已擦除的终态。
   /// 错误达到 [maxFailAttempts] 次时自动触发 24h 锁定。
   /// 锁定达到 [maxLockCount] 次时调用 [wipeAllData] 清空数据。
-  static Future<AppPinVerificationResult> verifyPin(String pin) async {
+  static Future<AppPinVerificationResult> verifyPin(
+    String pin, {
+    required CitizenSdkWallet? wallet,
+    required AccountSecurityService? accountSecurity,
+  }) async {
     final debugVerify = _debugVerifyPinForTest;
     if (debugVerify != null) {
       _requireFlutterTest();
@@ -159,21 +166,33 @@ class AppLockService {
     if (await _matchesDuressModePin(pin)) {
       return AppPinVerificationResult.duressMode;
     }
-    return _recordRejectedPin();
+    return _recordRejectedPin(wallet, accountSecurity);
   }
 
   /// 只验证普通应用锁密码，供关闭应用锁使用；该入口永不触发防共匪模式。
-  static Future<AppPinVerificationResult> verifyNormalPin(String pin) async {
+  static Future<AppPinVerificationResult> verifyNormalPin(
+    String pin, {
+    required CitizenSdkWallet? wallet,
+    required AccountSecurityService? accountSecurity,
+  }) async {
     final debugVerify = _debugVerifyPinForTest;
     if (debugVerify != null) {
       _requireFlutterTest();
       return debugVerify(pin);
     }
     if (await isLocked()) return AppPinVerificationResult.locked;
-    return _verifyNormalPin(pin);
+    return _verifyNormalPin(
+      pin,
+      wallet: wallet,
+      accountSecurity: accountSecurity,
+    );
   }
 
-  static Future<AppPinVerificationResult> _verifyNormalPin(String pin) async {
+  static Future<AppPinVerificationResult> _verifyNormalPin(
+    String pin, {
+    required CitizenSdkWallet? wallet,
+    required AccountSecurityService? accountSecurity,
+  }) async {
     final storedHash = await appSecureStorage.read(key: _keyPinHash);
     final storedSalt = await appSecureStorage.read(key: _keyPinSalt);
     if (storedHash == null || storedSalt == null) {
@@ -191,10 +210,13 @@ class AppLockService {
       return AppPinVerificationResult.verified;
     }
 
-    return _recordRejectedPin();
+    return _recordRejectedPin(wallet, accountSecurity);
   }
 
-  static Future<AppPinVerificationResult> _recordRejectedPin() async {
+  static Future<AppPinVerificationResult> _recordRejectedPin(
+    CitizenSdkWallet? wallet,
+    AccountSecurityService? accountSecurity,
+  ) async {
     // 两类密码均未命中后，才累计一次普通应用锁错误。
     final failCount = await _readInt(_keyFailCount) + 1;
     await appSecureStorage.write(
@@ -211,7 +233,7 @@ class AppLockService {
       await appSecureStorage.write(key: _keyFailCount, value: '0');
 
       if (lockCount >= maxLockCount) {
-        await wipeAllData();
+        await wipeAllData(wallet: wallet, accountSecurity: accountSecurity);
         return AppPinVerificationResult.dataWiped;
       }
 
@@ -334,6 +356,9 @@ class AppLockService {
   /// pending 会无 PIN 重试全量擦除；无论重试成功还是失败，当前
   /// 进程都只能显示擦除终态并退出，不得继续构造 ChatSdk。
   static Future<AppDataWipeStartupResult> recoverPersistentWipeAtStartup({
+    required CitizenSdkWallet? wallet,
+    required AccountSecurityService? accountSecurity,
+    Future<void> Function()? debugDeleteCitizenSdkWallet,
     Future<void> Function()? debugDeleteSecureStorage,
     Future<void> Function()? debugClearSharedPreferences,
     Future<Directory> Function()? debugChatDocumentsDirectoryProvider,
@@ -376,6 +401,9 @@ class AppLockService {
             case ChatPersistentWipeState.pending:
               try {
                 await wipeAllData(
+                  wallet: wallet,
+                  accountSecurity: accountSecurity,
+                  debugDeleteCitizenSdkWallet: debugDeleteCitizenSdkWallet,
                   debugDeleteSecureStorage: debugDeleteSecureStorage,
                   debugClearSharedPreferences: debugClearSharedPreferences,
                   debugChatDocumentsDirectoryProvider:
@@ -424,6 +452,9 @@ class AppLockService {
   /// Documents 下的 `chat/` 子树，跨 isolate marker 保留到进程退出。
   /// 全部尝试结束后通过 [AppDataWipeException] 聚合暴露失败。
   static Future<void> wipeAllData({
+    required CitizenSdkWallet? wallet,
+    required AccountSecurityService? accountSecurity,
+    Future<void> Function()? debugDeleteCitizenSdkWallet,
     Future<void> Function()? debugDeleteSecureStorage,
     Future<void> Function()? debugClearSharedPreferences,
     Future<Directory> Function()? debugChatDocumentsDirectoryProvider,
@@ -473,11 +504,20 @@ class AppLockService {
     var walletSecretsDeleted = _walletHardwareSecretsDeletedInProcess;
     if (!walletSecretsDeleted) {
       final walletFailureCountBefore = failures.length;
-      await _attemptWipe(
-        'WalletHardwareSecrets',
-        () => WalletManager().wipeAllLocalSecretsBeforeDatabaseDeletion(),
-        failures,
-      );
+      await _attemptWipe('CitizenSdkWallet', () async {
+        final debugDelete = debugDeleteCitizenSdkWallet;
+        if (debugDelete != null) {
+          _requireFlutterTest();
+          await debugDelete();
+          return;
+        }
+        final sdkWallet = wallet;
+        final security = accountSecurity;
+        if (sdkWallet == null || security == null) {
+          throw StateError('CitizenSDK 钱包擦除依赖未提供');
+        }
+        await _wipeCitizenSdkWallet(sdkWallet, security);
+      }, failures);
       walletSecretsDeleted = failures.length == walletFailureCountBefore;
       if (walletSecretsDeleted) {
         _walletHardwareSecretsDeletedInProcess = true;
@@ -505,7 +545,7 @@ class AppLockService {
     }
     if (walletSecretsDeleted) {
       await _attemptWipe(
-        'WalletIsar',
+        'WalletBusinessIsar',
         WalletIsar.instance.closeAndDeleteFromDisk,
         failures,
       );
@@ -568,6 +608,26 @@ class AppLockService {
     if (failures.isNotEmpty) {
       throw AppDataWipeException(failures);
     }
+  }
+
+  static Future<void> _wipeCitizenSdkWallet(
+    CitizenSdkWallet wallet,
+    AccountSecurityService accountSecurity,
+  ) async {
+    final before = await wallet.getState();
+    final walletIndexes = before.accounts.map((account) => account.walletIndex);
+    for (final account in before.accounts.where(
+      (account) => account.signMode == CitizenWalletSignMode.cold,
+    )) {
+      await wallet.deleteAccount(account.accountId);
+    }
+    await wallet.delete();
+    await wallet.reconcileCleanup();
+    final after = await wallet.getState();
+    if (after.accounts.isNotEmpty || after.hotProfile != null) {
+      throw StateError('CitizenSDK 钱包擦除后仍存在账户');
+    }
+    await accountSecurity.wipeAllDeviceMaterial(walletIndexes);
   }
 
   static Future<void> _deleteAndVerifySecureStorage() async {

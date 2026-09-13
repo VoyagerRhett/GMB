@@ -6,7 +6,8 @@ import 'dart:typed_data';
 
 import 'package:tatachat_sdk/tatachat_sdk.dart';
 import 'package:citizenapp/security/local_data_key.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/security/account_security_service.dart';
+import 'package:citizenapp/my/myid/current_user_context.dart';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:fixnum/fixnum.dart';
 import 'package:isar_community/isar.dart';
@@ -40,7 +41,7 @@ class _TestBinding extends AccountDataBinding implements ChatDataBinding {
       };
 }
 
-class _HandoverWalletManager extends WalletManager {
+class _HandoverWalletManager implements AccountSecurityService {
   _HandoverWalletManager(_TestBinding sourceBinding)
       : sourceBinding = sourceBinding,
         activeBinding = sourceBinding;
@@ -98,6 +99,14 @@ class _HandoverWalletManager extends WalletManager {
     List<({String? context, LocalKeyPurpose purpose})> requests,
   ) =>
       readDataKeysForBinding(binding, requests);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _UnusedCurrentUserContext implements CurrentUserContext {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _FailingTargetHandoverWalletManager extends _HandoverWalletManager {
@@ -151,8 +160,8 @@ class _FailOnceCommitChatStore extends ChatStore {
 
 /// 把一条来源绑定消息暂停在摘要已加密、尚未写入 ChatIsar 的窗口。
 class _PausingSummaryChatCrypto extends ChatCrypto {
-  _PausingSummaryChatCrypto(WalletManager walletManager)
-      : super(CitizenChatStorageKeyProvider(walletManager));
+  _PausingSummaryChatCrypto(AccountSecurityService accountSecurity)
+      : super(CitizenChatStorageKeyProvider(accountSecurity));
 
   Completer<void>? _paused;
   Completer<void>? _resume;
@@ -286,7 +295,8 @@ void main() {
     await store.activateBindingFence(handoverSource);
     final runtime = createCitizenChatRuntime(
       store: store,
-      walletManager: manager,
+      accountSecurity: manager,
+      currentUserContext: _UnusedCurrentUserContext(),
       documentsDirectoryProvider: () async => root,
     );
     final sourceDirectory = bindingDirectory(root, handoverSource);

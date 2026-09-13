@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:tatachat_sdk/tatachat_sdk.dart' as sdk;
-import 'package:citizenapp/chat/tatachat_sdk_adapter.dart';
 import 'package:citizenapp/log/app_log.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -207,8 +206,9 @@ Future<void> chatRuntimeBackgroundHandler(RemoteMessage message) async {
     await sdk.ChatRuntimeCore.runStartupPreflight<void>(
       operation: () async {
         await ensureChatFirebaseReady();
+        // 后台 isolate 不得另开第二个 CitizenSDK 钱包 owner。只持久记录无内容唤醒，
+        // 前台唯一 ChatSdk 实例恢复后从同一邮箱继续补拉端到端密文。
         await ChatPushService.storeWake();
-        await createCitizenChatRuntime(receiveOnly: true).handleWake();
       },
     );
   } catch (error) {

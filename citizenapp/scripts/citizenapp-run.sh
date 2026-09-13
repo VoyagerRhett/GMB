@@ -9,7 +9,7 @@
 # 就是这么来的。塔塔控制台的「编译iOS端 / 编译Android端」两个按钮各自传死这个参数。
 #
 # 调用方可提供独立缓存目录；没有 TataConsole 时使用系统临时目录。
-# 固定使用 smoldot 轻节点连接区块链（无需 RPC 服务器）。
+# 公民链轻节点、交易和链存储全部由 CitizenSDK Flutter plugin 提供。
 set -euo pipefail
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 while [[ -L "$SCRIPT_PATH" ]]; do
@@ -147,7 +147,7 @@ fi
 
 # 构造 dart-define 参数
 DART_DEFINES=()
-echo "[Build模式] smoldot轻节点 · 目标平台 $PLATFORM"
+echo "[Build模式] CitizenSDK · 目标平台 $PLATFORM"
 
 # Flutter只负责在当前缓存根生成产品自己的Android配置和插件清单；真正的Gradle
 # 从产品真实android目录启动，所有可写状态仍由既有环境变量指向本任务缓存。
@@ -188,7 +188,7 @@ print(",".join(base64.b64encode(f"{name}={value[key]}".encode()).decode() for na
     cd "$APP_ROOT/android"
     ANDROID_HOME="$android_sdk" ANDROID_SDK_ROOT="$android_sdk" JAVA_HOME="$java_home" PATH="$java_home/bin:$PATH" \
     TATA_CONSOLE_FLUTTER_GRADLE_ROOT="$flutter_sdk/packages/flutter_tools/gradle" \
-    FLUTTER_ROOT="$flutter_sdk" "$APP_ROOT/android/gradlew" --no-daemon --stacktrace --no-problems-report \
+    FLUTTER_ROOT="$flutter_sdk" "$APP_ROOT/android/gradlew" --offline --no-daemon --stacktrace --no-problems-report \
       --init-script "${TATA_CONSOLE_GRADLE_INIT_SCRIPT:?CitizenApp缺少Gradle缓存初始化脚本}" \
       --project-cache-dir "$BUILD_WORK_DIR/gradle-project" \
       -Ptarget-platform=android-arm64 \
@@ -202,13 +202,6 @@ print(",".join(base64.b64encode(f"{name}={value[key]}".encode()).decode() for na
   )
 }
 
-# ── chainspec.json 是从链端 plain SSOT + 创世状态包派生的轻节点创世 ──
-# 节点 SSOT = citizenchain/node/citizenchain.json;App 资产只保留
-# genesis.stateRootHash 轻形态。正式创世请先跑 citizenchain/scripts/bake-chainspec.sh
-# 同步 plain SSOT、App 轻形态和 genesis-state;runtime 升级走链上 system.setCode。
-# 可执行冻结契约由 check-chainspec-frozen.sh 负责。
-bash "$SCRIPT_DIR/check-chainspec-frozen.sh"
-
 # 这里曾有一句 `pkill -9 -f flutter_tools.snapshot`，用途是清掉上一轮残留的 flutter。
 # 已删除：`-f` 匹配全命令行，而 `flutter_tools.snapshot` 是每一个 flutter 命令的实际执行体，
 # 那一枪不区分产品、不区分平台、也不区分是不是本次运行的——公民钱包正在跑的编译、
@@ -216,19 +209,16 @@ bash "$SCRIPT_DIR/check-chainspec-frozen.sh"
 # 它要解决的残留问题已经由塔塔控制台承接：所有动作子进程都在独立进程组里启动，
 # 「停止」与塔塔控制台退出都按进程组终止整棵进程树，不会再留下脱缰的 flutter。
 
-# Rust 的 iOS、Android 与宿主产物分别位于不同 target 子目录。禁止设备构建执行根级
-# `cargo clean` 或产品级等待；Cargo 自身负责并发依赖锁，最终平台库也复制到不同目录。
-echo "==> 编译 Rust 原生库（${PLATFORM}）..."
-"$SCRIPT_DIR/build-smoldot-native.sh" "$PLATFORM"
-# Smoldot 和 TataChatSDK 分别生成自己的原生产物；iOS 由静态 Smoldot Framework 与
-# 动态 TataChatSDK XCFramework 隔离 Rust runtime，Android 继续使用两个独立 .so。
+# CitizenSDK 原生产物只由其 Flutter plugin/产品流程管理；CitizenApp 不编译、
+# 复制或验收第二份链库。TataChatSDK 仍按聊天产品自有流程构建。
 if [[ "$PLATFORM" == ios ]]; then
   # CocoaPods 插件根也属于本任务，不再把原生产物链接写进共享 SDK 源码。
-  [[ -f "$TATA_CONSOLE_CACHE_DIR/dependencies/tatachatsdk/ios/tatachat_sdk.podspec" ]] || {
+  TATACHATSDK_PACKAGE_IOS_DIR="$TATA_CONSOLE_FLUTTER_ROOT/../../TATA/tatachatsdk/ios"
+  [[ -f "$TATACHATSDK_PACKAGE_IOS_DIR/tatachat_sdk.podspec" ]] || {
     echo 'CitizenApp 本端 TataChatSDK iOS 插件配置缺失' >&2
     exit 1
   }
-  TATACHATSDK_PACKAGE_IOS_DIR="$TATA_CONSOLE_CACHE_DIR/dependencies/tatachatsdk/ios" \
+  TATACHATSDK_PACKAGE_IOS_DIR="$TATACHATSDK_PACKAGE_IOS_DIR" \
     "$TATACHATSDK_ROOT/scripts/build-native.sh" "$PLATFORM"
 else
   "$TATACHATSDK_ROOT/scripts/build-native.sh" "$PLATFORM"
@@ -236,16 +226,15 @@ fi
 
 echo "==> 清理 ${PLATFORM} 平台构建产物..."
 clean_platform_build_outputs
-echo "==> 获取依赖..."
-flutter pub get
+echo "==> 使用塔塔依赖库已物化的离线依赖..."
+flutter pub get --offline --enforce-lockfile
 
 # Build不选择、不安装、不启动设备，只读取当前产品源码并生成中央产物。
 # `--release`只是本机优化配置，不表示或触发正式Release流程。
 echo "==> 编译本机优化安装包..."
 if [[ "$PLATFORM" == ios ]]; then
-  flutter build ios --release ${DART_DEFINES[@]+"${DART_DEFINES[@]}"}
+  flutter build ios --no-pub --release ${DART_DEFINES[@]+"${DART_DEFINES[@]}"}
   IOS_APP="$BUILD_DIR/ios/iphoneos/Runner.app"
-  "$SCRIPT_DIR/build-smoldot-native.sh" verify-ios-package "$IOS_APP"
   "$TATACHATSDK_ROOT/scripts/build-native.sh" verify-ios-package "$IOS_APP"
   verify_ios_release_localization "$IOS_APP"
   retain_ios_local_artifact "$IOS_APP"
@@ -258,7 +247,6 @@ elif [[ "$PLATFORM" == android ]]; then
     echo "Android 本机无私钥 APK 不存在" >&2
     exit 1
   }
-  "$SCRIPT_DIR/build-smoldot-native.sh" verify-android-package "$ANDROID_APK"
   "$TATACHATSDK_ROOT/scripts/build-native.sh" verify-android-package "$ANDROID_APK"
   verify_android_release_localization "$ANDROID_APK"
   echo "==> Android无私钥候选完成，正在交给原生安全进程完成Build签名。"

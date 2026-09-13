@@ -1,20 +1,21 @@
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:provider/provider.dart';
 
 import 'package:citizenapp/my/myid/citizen_identity_chain_reader.dart';
 import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
 import 'package:citizenapp/my/myid/myid_service.dart';
 import 'package:citizenapp/my/myid/register_identity_flow.dart';
 import 'package:citizenapp/ui/app_theme.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 
 const _accountId =
     '0x1111111111111111111111111111111111111111111111111111111111111111';
 
 /// 已注册:resolve 返回带链上闭环快照的身份。
-class _RegisteredCache extends FinalizedIdentityResolver {
+class _RegisteredCache implements FinalizedIdentityResolver {
   @override
   Future<FinalizedIdentity?> resolve() async => FinalizedIdentity(
         accountId: _accountId,
@@ -26,30 +27,40 @@ class _RegisteredCache extends FinalizedIdentityResolver {
           votingIdentity: null,
         ),
       );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// 未注册:resolve 命中缓存但快照为空(链读结论=全账户未占号,回退账户0)。
-class _UnregisteredCache extends FinalizedIdentityResolver {
+class _UnregisteredCache implements FinalizedIdentityResolver {
   @override
   Future<FinalizedIdentity?> resolve() async => const FinalizedIdentity(
         accountId: _accountId,
         ss58Address: 'ss58-demo',
         snapshot: null,
       );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// 链读失败:fail-closed,绝不冒充"未注册"。
-class _ThrowingCache extends FinalizedIdentityResolver {
+class _ThrowingCache implements FinalizedIdentityResolver {
   @override
   Future<FinalizedIdentity?> resolve() async => throw Exception('链读失败');
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// 注册流程 fake:余额充足,占号直接成功。与 myid_page_test 同款口径。
-class _FlowService extends MyIdService {
+class _FlowService implements MyIdService {
   int registerCalls = 0;
 
   @override
-  Future<List<Account>> listBindableAccounts() async => const <Account>[];
+  Future<List<CitizenWalletStateAccount>> listBindableAccounts() async =>
+      const <CitizenWalletStateAccount>[];
 
   @override
   Future<({BigInt balanceFen, BigInt requiredFen})>
@@ -60,27 +71,41 @@ class _FlowService extends MyIdService {
 
   @override
   Future<String> registerAnonymousCid({
+    required BuildContext? context,
     required String institution,
     String? bindAccountId,
   }) async {
     registerCalls++;
     return 'CN220-CTZN2-100000009-2026';
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// 挂一个按钮驱动 [ensureCidRegisteredOrPrompt],把返回值收进 [results]。
-Widget _harness(List<bool> results, MyIdService service) {
-  return MaterialApp(
-    theme: AppTheme.lightTheme,
-    home: Scaffold(
-      body: Builder(
-        builder: (context) => TextButton(
-          onPressed: () async {
-            results.add(
-              await ensureCidRegisteredOrPrompt(context, myIdService: service),
-            );
-          },
-          child: const Text('触发动作'),
+Widget _harness(
+  List<bool> results,
+  MyIdService service,
+  FinalizedIdentityResolver resolver,
+) {
+  return Provider<FinalizedIdentityResolver>.value(
+    value: resolver,
+    child: MaterialApp(
+      theme: AppTheme.lightTheme,
+      home: Scaffold(
+        body: Builder(
+          builder: (context) => TextButton(
+            onPressed: () async {
+              results.add(
+                await ensureCidRegisteredOrPrompt(
+                  context,
+                  myIdService: service,
+                ),
+              );
+            },
+            child: const Text('触发动作'),
+          ),
         ),
       ),
     ),
@@ -88,12 +113,11 @@ Widget _harness(List<bool> results, MyIdService service) {
 }
 
 void main() {
-  tearDown(FinalizedIdentityResolver.resetDebugInstance);
-
   testWidgets('已注册 → 放行返回 true,不弹注册面板', (tester) async {
-    FinalizedIdentityResolver.debugInstance = _RegisteredCache();
     final results = <bool>[];
-    await tester.pumpWidget(_harness(results, _FlowService()));
+    await tester.pumpWidget(
+      _harness(results, _FlowService(), _RegisteredCache()),
+    );
 
     await tester.tap(find.text('触发动作'));
     await tester.pumpAndSettle();
@@ -103,9 +127,10 @@ void main() {
   });
 
   testWidgets('未注册 → 就地弹统一注册面板并返回 false', (tester) async {
-    FinalizedIdentityResolver.debugInstance = _UnregisteredCache();
     final results = <bool>[];
-    await tester.pumpWidget(_harness(results, _FlowService()));
+    await tester.pumpWidget(
+      _harness(results, _FlowService(), _UnregisteredCache()),
+    );
 
     await tester.tap(find.text('触发动作'));
     await tester.pumpAndSettle();
@@ -123,10 +148,9 @@ void main() {
 
   testWidgets('未注册 → 面板内确认占号:只提交一次，缓存收敛归服务层', (tester) async {
     final cache = _UnregisteredCache();
-    FinalizedIdentityResolver.debugInstance = cache;
     final service = _FlowService();
     final results = <bool>[];
-    await tester.pumpWidget(_harness(results, service));
+    await tester.pumpWidget(_harness(results, service, cache));
 
     await tester.tap(find.text('触发动作'));
     await tester.pumpAndSettle();
@@ -140,9 +164,10 @@ void main() {
   });
 
   testWidgets('身份链读失败 → fail-closed 提示,不弹面板不放行', (tester) async {
-    FinalizedIdentityResolver.debugInstance = _ThrowingCache();
     final results = <bool>[];
-    await tester.pumpWidget(_harness(results, _FlowService()));
+    await tester.pumpWidget(
+      _harness(results, _FlowService(), _ThrowingCache()),
+    );
 
     await tester.tap(find.text('触发动作'));
     await tester.pumpAndSettle();

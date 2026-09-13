@@ -10,14 +10,16 @@
 // `_buildProposalCard:520`),带 statusColor 边框 + 36×36 状态图标 + 标题/子标题 +
 // 右侧状态徽章。Card 之间 8px 间距。
 
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
 import 'package:citizenapp/citizen/shared/institution_info.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_context.dart';
 import 'package:citizenapp/citizen/shared/institution_manage_detail_page.dart';
 import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_detail_page.dart';
 import 'package:citizenapp/ui/app_theme.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 
 import 'personal_proposal_history_service.dart';
 import 'package:citizenapp/ui/app_layout.dart';
@@ -30,7 +32,7 @@ class PersonalProposalListSection extends StatefulWidget {
   });
 
   final InstitutionInfo institution;
-  final List<WalletProfile> adminWallets;
+  final List<CitizenWalletStateAccount> adminWallets;
 
   @override
   State<PersonalProposalListSection> createState() =>
@@ -39,8 +41,8 @@ class PersonalProposalListSection extends StatefulWidget {
 
 class _PersonalProposalListSectionState
     extends State<PersonalProposalListSection> {
-  final PersonalProposalHistoryService _service =
-      PersonalProposalHistoryService();
+  late final PersonalProposalHistoryService _service;
+  bool _dependenciesReady = false;
 
   bool _loading = true;
   List<PersonalAccountProposalView> _items = const [];
@@ -48,6 +50,16 @@ class _PersonalProposalListSectionState
   @override
   void initState() {
     super.initState();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    _service = PersonalProposalHistoryService(
+      chain: context.read<CitizenSdk>().chain,
+    );
+    _dependenciesReady = true;
     _load();
   }
 

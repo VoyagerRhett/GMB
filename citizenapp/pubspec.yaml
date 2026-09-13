@@ -1,14 +1,18 @@
 name: citizenapp
-description: CitizenApp light-node mobile client built with Flutter.
+description: CitizenApp mobile client using CitizenSDK blockchain capabilities.
 publish_to: "none"
 version: 1.0.0+1
 
 environment:
-  sdk: ">=3.3.0 <4.0.0"
+  sdk: ">=3.8.0 <4.0.0"
 
 dependencies:
   flutter:
     sdk: flutter
+  # 钱包、签名、唯一 QR_V1、轻节点、链读取、交易与 execution history
+  # 统一由同仓 CitizenSDK 提供；CitizenApp 只保留产品 UI 和业务语义。
+  citizen_sdk:
+    path: ../citizensdk
   cupertino_icons: ^1.0.8
   http: ^1.2.2
   shared_preferences: ^2.5.5
@@ -16,16 +20,8 @@ dependencies:
   # 0.7.1 与本产品使用的 polkadart 0.7.x 共同依赖 ss58 1.x；0.7.2 已切到
   # ss58 2.x，会造成解依赖冲突。两款移动产品统一锁定同一兼容版本。
   polkadart_keyring: 0.7.1
-  bip39_mnemonic: 4.0.1
-  # 通过本产品内部适配器接入扫码设备。
-  gmb_scanner_flutter:
-    path: packages/scanner-flutter
-  # 本产品内部的钱包 password 规则与交互实现。
-  gmb_wallet_password:
-    path: packages/wallet-password
-  # 本产品内部的 StrongBox/TEE 与 Secure Enclave 钱包严档金库。
-  gmb_hardware_secretvault:
-    path: packages/hardware-secretvault
+  # 扫码设备适配已归入 lib/qr/scanner，不再保留内部 package 包装层。
+  mobile_scanner: ^7.1.4
   qr: ^3.0.2
   qr_flutter: ^4.1.0
   flutter_svg: ^2.3.0
@@ -47,9 +43,6 @@ dependencies:
   crypto: ^3.0.3
   # 应用锁使用标准 PBKDF2-HMAC-SHA256 实现，避免手写循环产生额外分配。
   pointycastle: ^4.0.0
-  # 切换为仓库内本地 fork，后续 Dart FFI 能力扩展随主仓库一起演进。
-  smoldot:
-    path: smoldot/dart
   # isar 3.1 上游已停更且预编译 .so 未 16KB 对齐;改用社区维护分支 isar_community
   # (沿用 isar 3.x API 与 DB 格式,不迁移数据;libisar.so 已 16KB 对齐)。
   isar_community: ^3.3.2
@@ -57,12 +50,9 @@ dependencies:
   path_provider: ^2.1.6
   saver_gallery: 4.1.0
   file_picker: ^10.3.10
-  # sr25519 纯 Dart 实现已彻底移除(全仓唯一 sr25519 实现 = 原生 schnorrkel,
-  # 见 lib/wallet/core/native_sr25519.dart)。它仍作为 polkadart_keyring 的传递
-  # 依赖存在(仅供其 SS58 地址编解码),但**禁止再直接 import**,以免二次分叉出
-  # 第二套签名实现。
+  # CitizenApp 不实现 sr25519；钱包签名与验签全部由 CitizenSDK 提供。
+  # polkadart_keyring 仅用于 App 现有 SS58 地址编解码，禁止用它另造签名实现。
   protobuf: ^6.0.0
-  ffi: ^2.2.0
   path: ^1.9.1
   fixnum: ^1.1.1
   flutter_chat_ui: ^2.11.1
@@ -105,8 +95,6 @@ flutter:
     - assets/badges/
     - assets/topup/walletconnect.html
     - assets/topup/walletconnect.bundle.js
-    - assets/chainspec.json
-    - assets/light_sync_state.json
     - assets/public_institutions/
     - assets/admin_divisions/
     - assets/admin_divisions/cities/

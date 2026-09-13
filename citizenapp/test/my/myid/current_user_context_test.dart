@@ -1,142 +1,156 @@
 import 'dart:async';
+import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:citizenapp/my/myid/current_user_context.dart';
+import 'package:citizenapp/security/account_data_key_provision.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/security/local_data_key.dart';
-import 'package:citizenapp/wallet/core/default_account_service.dart';
-import 'package:citizenapp/wallet/core/sign_mode.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 
-const _hotAccountId =
+const _hotId =
     '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-const _coldAccountId =
+const _coldId =
     '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 
-const _hot = DefaultAccount(
-  accountId: _hotAccountId,
-  ss58Address: 'hot-ss58',
-  accountName: '热账户',
-  signMode: SignMode.hot,
-  walletIndex: 1,
-);
-const _cold = DefaultAccount(
-  accountId: _coldAccountId,
-  ss58Address: 'cold-ss58',
-  accountName: '冷账户',
-  signMode: SignMode.cold,
-  walletIndex: 2,
-);
-
-AccountDataBinding _binding(String accountId, String cidNumber) =>
-    AccountDataBinding(
-      genesisHash: '0x${'11' * 32}',
-      cidNumber: cidNumber,
-      bindingRevision: 1,
-      accountId: accountId,
-    );
-
 void main() {
-  tearDown(() {
-    CurrentUserContext.resetDebugInstance();
-  });
+  late AccountSecurityService security;
 
-  test('只读取第一名默认账户的精确绑定，禁止扫描其它有 CID 的账户', () async {
+  setUp(() {
+    security = AccountSecurityService(
+      wallet: _FakeWallet(_account(_hotId, CitizenWalletSignMode.hot)),
+      signing: _UnusedSigning(),
+      subkeyRegistrar: _registerNothing,
+      coldDeviceBindingSigner: _rejectColdBinding,
+      coldAccountDataKeyProvider: _rejectColdKeys,
+    );
+  });
+  tearDown(() => security.dispose());
+
+  test('只读取 SDK 顺序第一账户的精确绑定', () async {
     final requested = <String>[];
     final context = CurrentUserContext(
-      defaultAccountReader: const _DefaultReader(_hot),
+      wallet: _FakeWallet(_account(_hotId, CitizenWalletSignMode.hot)),
+      accountSecurity: security,
       bindingReader: (accountId) async {
         requested.add(accountId);
-        return accountId == _coldAccountId
-            ? _binding(_coldAccountId, 'CID-COLD')
-            : null;
+        return null;
       },
     );
-
-    final current = await context.resolve();
-
-    expect(current!.accountId, _hotAccountId);
-    expect(current.isRegistered, isFalse);
-    expect(requested, [_hotAccountId]);
+    expect((await context.resolve())!.accountId, _hotId);
+    expect(requested, [_hotId]);
   });
 
-  test('冷钱包可以成为当前默认用户', () async {
+  test('冷账户可以成为当前默认用户', () async {
     final context = CurrentUserContext(
-      defaultAccountReader: const _DefaultReader(_cold),
-      bindingReader: (_) async => _binding(_coldAccountId, 'CID-COLD'),
+      wallet: _FakeWallet(_account(_coldId, CitizenWalletSignMode.cold)),
+      accountSecurity: security,
+      bindingReader: (_) async => _binding(_coldId, 'CID-COLD'),
     );
-
     final current = await context.resolve();
-
-    expect(current!.account.isColdAccount, isTrue);
+    expect(current!.account.signMode, CitizenWalletSignMode.cold);
     expect(current.cidNumber, 'CID-COLD');
   });
 
-  test('同一钱包 revision 并发读取合并且后续命中缓存', () async {
+  test('并发读取合并，显式失效后重新精确读取', () async {
     var calls = 0;
     final completer = Completer<AccountDataBinding?>();
     final context = CurrentUserContext(
-      defaultAccountReader: const _DefaultReader(_hot),
+      wallet: _FakeWallet(_account(_hotId, CitizenWalletSignMode.hot)),
+      accountSecurity: security,
       bindingReader: (_) {
-        calls++;
-        return completer.future;
+        calls += 1;
+        return calls == 1
+            ? completer.future
+            : Future.value(_binding(_hotId, 'CID-HOT'));
       },
     );
-
     final reads = [context.resolve(), context.resolve(), context.resolve()];
-    completer.complete(_binding(_hotAccountId, 'CID-HOT'));
-    final results = await Future.wait(reads);
+    completer.complete(_binding(_hotId, 'CID-HOT'));
+    await Future.wait(reads);
     await context.resolve();
-
-    expect(results.map((item) => item!.cidNumber), everyElement('CID-HOT'));
     expect(calls, 1);
-  });
-
-  test('walletsRevision 变化后精确重读当前默认账户', () async {
-    var calls = 0;
-    final context = CurrentUserContext(
-      defaultAccountReader: const _DefaultReader(_hot),
-      bindingReader: (_) async {
-        calls++;
-        return _binding(_hotAccountId, 'CID-HOT');
-      },
-    );
-    await context.resolve();
-    WalletManager.walletsRevision.value++;
-    await context.resolve();
-    expect(calls, 2);
-  });
-
-  test('显式失效不会删除绑定，只触发下一次精确重读', () async {
-    var calls = 0;
-    final binding = _binding(_hotAccountId, 'CID-HOT');
-    final context = CurrentUserContext(
-      defaultAccountReader: const _DefaultReader(_hot),
-      bindingReader: (_) async {
-        calls++;
-        return binding;
-      },
-    );
-    await context.resolve();
     context.invalidate();
-    expect((await context.resolve())!.binding, same(binding));
+    expect((await context.resolve())!.cidNumber, 'CID-HOT');
     expect(calls, 2);
   });
 
-  test('没有任何默认账户时返回 null', () async {
+  test('SDK 账户目录为空时返回 null', () async {
     final context = CurrentUserContext(
-      defaultAccountReader: const _DefaultReader(null),
+      wallet: _FakeWallet(null),
+      accountSecurity: security,
       bindingReader: (_) async => throw StateError('不应读取绑定'),
     );
     expect(await context.resolve(), isNull);
   });
 }
 
-class _DefaultReader implements DefaultAccountReader {
-  const _DefaultReader(this.account);
+CitizenWalletStateAccount _account(
+  String accountId,
+  CitizenWalletSignMode mode,
+) =>
+    CitizenWalletStateAccount(
+      signMode: mode,
+      walletIndex: 0,
+      accountIndex: mode == CitizenWalletSignMode.hot ? 0 : null,
+      accountId: accountId,
+      ss58Address: '${mode.name}-ss58',
+      name: mode.name,
+      createdAtMillis: BigInt.zero,
+      isDefault: true,
+    );
 
-  final DefaultAccount? account;
+AccountDataBinding _binding(String accountId, String cid) => AccountDataBinding(
+      genesisHash: '0x${'11' * 32}',
+      cidNumber: cid,
+      bindingRevision: 1,
+      accountId: accountId,
+    );
+
+final class _FakeWallet implements CitizenSdkWallet {
+  _FakeWallet(this.account);
+  final CitizenWalletStateAccount? account;
 
   @override
-  Future<DefaultAccount?> getDefaultAccount() async => account;
+  Future<CitizenWalletState> getState() async => CitizenWalletState(
+        revision: BigInt.one,
+        hotProfile: null,
+        accounts: account == null ? const [] : [account!],
+      );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
+
+final class _UnusedSigning implements CitizenSigning {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+Future<void> _registerNothing({
+  required String cidNumber,
+  required int bindingRevision,
+  required String accountId,
+  required Future<String> Function({
+    required Uint8List payload,
+    required Uint8List signingMessage,
+    required String devicePublicKey,
+    required int issuedAtMillis,
+  }) signBinding,
+}) async {}
+
+Future<String> _rejectColdBinding({
+  required AccountDataBinding binding,
+  required Uint8List payload,
+  required Uint8List signingMessage,
+  required String devicePublicKey,
+  required int issuedAtMillis,
+}) =>
+    throw UnimplementedError();
+
+Future<List<Uint8List>> _rejectColdKeys({
+  required AccountDataBinding binding,
+  required List<DataKeyRequest> requests,
+}) =>
+    throw UnimplementedError();

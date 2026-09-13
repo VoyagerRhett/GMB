@@ -1,8 +1,10 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:citizenapp/log/app_log.dart';
-import 'package:smoldot/smoldot.dart' show LightClientStatusSnapshot;
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/widgets/chain_progress_banner.dart';
 import 'package:flutter/services.dart';
@@ -18,10 +20,8 @@ import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_servi
 import 'package:citizenapp/transaction/shared/account_balance_snapshot_store.dart';
 import 'package:citizenapp/qr/widgets/address_scan_button.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/rpc/transfer_rpc.dart' show TransferRpc;
-import 'package:citizenapp/qr/qr_protocols.dart';
-import 'package:citizenapp/signer/qr_signer.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/security/account_security_service.dart';
+import 'package:citizenapp/transaction/onchain-transaction/onchain_transfer_call.dart';
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
@@ -40,7 +40,7 @@ class MultisigTransferPage extends StatefulWidget {
   final Color badgeColor;
 
   /// 当前用户导入的、属于此机构的管理员钱包列表。
-  final List<WalletProfile> adminWallets;
+  final List<CitizenWalletStateAccount> adminWallets;
 
   @override
   State<MultisigTransferPage> createState() => _MultisigTransferPageState();
@@ -62,11 +62,11 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
   double _estimatedFee = 0.0;
   String? _addressError;
   String? _amountError;
-  LightClientStatusSnapshot? _chainProgress;
+  CitizenChainSyncStatus? _chainProgress;
   String? _chainProgressError;
 
   late final String _fromSs58;
-  late WalletProfile _selectedWallet;
+  late CitizenWalletStateAccount _selectedWallet;
 
   @override
   void initState() {
@@ -95,6 +95,7 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
   }
 
   Future<void> _fetchBalance() async {
+    final sdk = context.read<CitizenSdk>();
     final store = AccountBalanceSnapshotStore.instance;
     final local = await store.read(widget.institution.mainAccountId);
     if (local != null && mounted) {
@@ -105,7 +106,10 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
       if (local.isFresh(AccountBalanceSnapshotStore.displayTtl)) return;
     }
     try {
-      final service = MultisigTransferService();
+      final service = MultisigTransferService(
+        chain: sdk.chain,
+        transactions: sdk.transactions,
+      );
       final balance = await service.fetchInstitutionBalance(widget.institution);
       try {
         await store.put(
@@ -141,7 +145,7 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
     final amount = AmountFormat.tryParse(_amountController.text);
     setState(() {
       if (amount != null && amount > 0) {
-        _estimatedFee = TransferRpc.estimateTransferFeeYuan(amount);
+        _estimatedFee = OnchainTransferCall.estimateTransferFeeYuan(amount);
       } else {
         _estimatedFee = 0.0;
       }
@@ -162,8 +166,9 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
     }
     // 检查是否与机构地址相同
     final beneficiaryBytes = Keyring().decodeAddress(address);
-    final institutionBytes =
-        Uint8List.fromList(_hexToBytes(widget.institution.mainAccountId));
+    final institutionBytes = Uint8List.fromList(
+      _hexToBytes(widget.institution.mainAccountId),
+    );
     if (_bytesEqual(beneficiaryBytes, institutionBytes)) {
       setState(() => _addressError = '收款地址不能与机构地址相同');
       return false;
@@ -179,16 +184,18 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
       return false;
     }
     if (_availableBalance != null) {
-      final fee = TransferRpc.estimateTransferFeeYuan(amount);
+      final fee = OnchainTransferCall.estimateTransferFeeYuan(amount);
       const ed = 1.11;
       // 机构账户只承担本金；执行手续费由同 CID 费用账户承担。
       // 个人多签没有机构费用账户，仍由个人多签资金账户承担本金与执行费。
       final isInstitution = widget.institution.accounts != null;
       final required = amount + ed + (isInstitution ? 0 : fee);
       if (required > _availableBalance!) {
-        setState(() => _amountError = isInstitution
-            ? '机构主账户余额不足（转账后须保留 ${AmountFormat.format(ed, symbol: '')} 元 ED，手续费由机构费用账户另付）'
-            : '余额不足（需保留 ${AmountFormat.format(ed, symbol: '')} 元 ED + ${AmountFormat.format(fee, symbol: '')} 元手续费）');
+        setState(
+          () => _amountError = isInstitution
+              ? '机构主账户余额不足（转账后须保留 ${AmountFormat.format(ed, symbol: '')} 元 ED，手续费由机构费用账户另付）'
+              : '余额不足（需保留 ${AmountFormat.format(ed, symbol: '')} 元 ED + ${AmountFormat.format(fee, symbol: '')} 元手续费）',
+        );
         return false;
       }
     }
@@ -211,9 +218,9 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
   Future<void> _submit() async {
     final blockedReason = _submitBlockedReason;
     if (blockedReason != null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(blockedReason)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(blockedReason)));
       return;
     }
 
@@ -223,88 +230,63 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
     final isPersonal = isPersonalAccountIdentity(widget.institution.cidNumber);
     final proposerRoleCode = _proposerRoleCodeController.text.trim();
     if (!isPersonal && proposerRoleCode.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请输入当前任职且拥有转账提案权限的岗位码')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('请输入当前任职且拥有转账提案权限的岗位码')));
       return;
     }
 
     final wallet = _selectedWallet;
     final amountYuan = AmountFormat.tryParse(_amountController.text) ?? 0;
     final accounts = widget.institution.accounts;
+    final sdk = context.read<CitizenSdk>();
     final balanceBlockedReason = accounts == null
         ? await MultisigTransferBalanceGuard.checkAdminWalletBalance(
             wallet: wallet,
             requiredFeeYuan:
                 MultisigTransferBalanceGuard.onchainOperationFeeYuan,
             actionLabel: '发起个人多签转账提案',
+            chain: sdk.chain,
           )
         : await MultisigTransferBalanceGuard.checkInstitutionFeeAccountBalance(
             feeAccountId: accounts.feeAccountId,
             actionLabel: '发起机构多签转账提案',
-            additionalDebitYuan:
-                TransferRpc.estimateTransferFeeYuan(amountYuan),
+            additionalDebitYuan: OnchainTransferCall.estimateTransferFeeYuan(
+              amountYuan,
+            ),
+            chain: sdk.chain,
           );
     if (balanceBlockedReason != null) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(balanceBlockedReason)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(balanceBlockedReason)));
       return;
     }
 
     setState(() => _submitting = true);
 
     try {
-      // 多签管理员的转账提案签名:
-      // 多签管理员(个人 + 机构)支持冷热钱包双路径,与 personal_account_create_page 对齐;
-      // 治理机构(NRC/PRC/PRB)和区块链软件端管理员才只支持冷钱包(QR)。
-      // 这里按目标钱包账户精确分流：Hot 本机签名，Cold 扫码签名。
-      WalletManager? hotWalletManager;
-      if (wallet.requiresHotSign) {
-        hotWalletManager = WalletManager();
-      }
-
-      Future<Uint8List> signCallback(Uint8List payload) async {
-        if (hotWalletManager != null) {
-          return await hotWalletManager.signWithWallet(
-              wallet.walletIndex, payload);
-        }
-        // 冷钱包 QR 签名
-        final qrSigner = QrSigner();
-        final request = qrSigner.buildRequest(
-          requestId: QrSigner.generateRequestId(prefix: 'propose-'),
-          signerPublicKey: wallet.accountId,
-          payloadHex: '0x${_toHex(payload)}',
-          action: QrActions.multisigTransfer,
-        );
-        final requestJson = qrSigner.encodeRequest(request);
-        if (!mounted) throw Exception('页面已关闭');
-        final response = await Navigator.push<SignResponseEnvelope>(
-          context,
-          MaterialPageRoute(
-            builder: (_) => QrSignSessionPage(
-                request: request,
-                requestJson: requestJson,
-                expectedSignerPublicKey: wallet.accountId),
-          ),
-        );
-        if (response == null) throw Exception('签名已取消');
-        return Uint8List.fromList(_hexToBytes(response.body.signatureHex));
-      }
-
       final signerPublicKey = Uint8List.fromList(_hexToBytes(wallet.accountId));
 
-      final service = MultisigTransferService();
+      final service = MultisigTransferService(
+        chain: sdk.chain,
+        transactions: sdk.transactions,
+      );
       final submitResult = await service.submitProposeTransfer(
         institution: widget.institution,
         proposerRoleCode: isPersonal ? null : proposerRoleCode,
         beneficiaryAddress: _beneficiaryController.text.trim(),
         amountYuan: amountYuan,
         remark: _remarkController.text,
-        fromSs58Address: wallet.ss58Address,
         signerPublicKey: signerPublicKey,
-        sign: signCallback,
+        externalSigning: (pending) => showCitizenSdkQrResponse(
+          context,
+          request: pending.qrRequest,
+          expiresAt: BigInt.from(
+            pending.expiresAt.millisecondsSinceEpoch ~/ 1000,
+          ),
+        ),
       );
 
       // 仅个人多签写入本地个人提案历史；机构按 CID 路由。
@@ -315,25 +297,25 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
       );
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('提案创建成功')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('提案创建成功')));
       Navigator.of(context).pop(true);
-    } on WalletAuthException catch (e) {
+    } on AccountSecurityException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.message)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.message)));
     } on FormatException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('提交失败：${e.message}')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('提交失败：${e.message}')));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('提交失败：$e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('提交失败：$e')));
     } finally {
       if (mounted) {
         setState(() => _submitting = false);
@@ -350,6 +332,7 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
     required double amountYuan,
   }) async {
     try {
+      final chain = context.read<CitizenSdk>().chain;
       if (!isPersonalAccountIdentity(widget.institution.cidNumber)) {
         return;
       }
@@ -364,17 +347,14 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
       });
       if (personal == null) return;
 
-      await PersonalProposalHistoryService().recordOrUpdate(
+      await PersonalProposalHistoryService(chain: chain).recordOrUpdate(
         personalAccountId: personalAccountId,
         proposalId: proposalId,
         action: PersonalProposalAction.transfer,
         status: PersonalProposalStatus.voting,
         yesVotes: 0,
         noVotes: 0,
-        snapshot: {
-          'beneficiary': beneficiary,
-          'amount_yuan': amountYuan,
-        },
+        snapshot: {'beneficiary': beneficiary, 'amount_yuan': amountYuan},
       );
     } catch (e) {
       // 写入失败不阻断主流程(链端已成功)，但本地提案历史会缺该记录，
@@ -383,7 +363,7 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
     }
   }
 
-  void _handleChainProgressChanged(LightClientStatusSnapshot? progress) {
+  void _handleChainProgressChanged(CitizenChainSyncStatus? progress) {
     if (!mounted) return;
     setState(() {
       _chainProgress = progress;
@@ -405,7 +385,7 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
     if (progress == null) {
       return _chainProgressError ?? '正在读取区块链状态，请稍后再试';
     }
-    if (!progress.hasPeers) {
+    if (progress.peerCount == BigInt.zero) {
       return '轻节点尚未连接到区块链网络，暂不能提交转账提案';
     }
     if (progress.isSyncing) {
@@ -425,8 +405,9 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
         title: Text(
           '发起转账提案',
           style: TextStyle(
-              fontSize: AppLayout.scaled(context, 17),
-              fontWeight: FontWeight.w700),
+            fontSize: AppLayout.scaled(context, 17),
+            fontWeight: FontWeight.w700,
+          ),
         ),
         centerTitle: true,
         backgroundColor: Colors.white,
@@ -484,28 +465,33 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
                 decoration: InputDecoration(
                   hintText: '输入 SS58 格式地址',
                   hintStyle: TextStyle(
-                      color: AppTheme.textTertiary,
-                      fontSize: AppLayout.scaled(context, 14)),
+                    color: AppTheme.textTertiary,
+                    fontSize: AppLayout.scaled(context, 14),
+                  ),
                   filled: true,
                   fillColor: AppTheme.surfaceMuted,
                   enabledBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.border),
                   ),
                   focusedBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.primaryDark),
                   ),
                   errorBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.danger),
                   ),
                   focusedErrorBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.danger),
                   ),
                   errorText: _addressError,
@@ -524,34 +510,40 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
               SizedBox(height: AppLayout.scaled(context, 6)),
               TextField(
                 controller: _amountController,
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
                 inputFormatters: [ThousandSeparatorFormatter()],
                 decoration: InputDecoration(
                   hintText: '最低 1.11 元',
                   hintStyle: TextStyle(
-                      color: AppTheme.textTertiary,
-                      fontSize: AppLayout.scaled(context, 14)),
+                    color: AppTheme.textTertiary,
+                    fontSize: AppLayout.scaled(context, 14),
+                  ),
                   filled: true,
                   fillColor: AppTheme.surfaceMuted,
                   enabledBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.border),
                   ),
                   focusedBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.primaryDark),
                   ),
                   errorBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.danger),
                   ),
                   focusedErrorBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.danger),
                   ),
                   errorText: _amountError,
@@ -576,9 +568,9 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
                 _loadingBalance
                     ? '查询中...'
                     : _availableBalance != null
-                        ? '${AmountFormat.format(_availableBalance!, symbol: '')} 元'
-                            '${_balanceStale ? '（链上刷新失败，金额可能已过期）' : ''}'
-                        : '查询失败',
+                    ? '${AmountFormat.format(_availableBalance!, symbol: '')} 元'
+                          '${_balanceStale ? '（链上刷新失败，金额可能已过期）' : ''}'
+                    : '查询失败',
               ),
               SizedBox(height: AppLayout.scaled(context, 16)),
 
@@ -591,18 +583,21 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
                 decoration: InputDecoration(
                   hintText: '最多 256 字节',
                   hintStyle: TextStyle(
-                      color: AppTheme.textTertiary,
-                      fontSize: AppLayout.scaled(context, 14)),
+                    color: AppTheme.textTertiary,
+                    fontSize: AppLayout.scaled(context, 14),
+                  ),
                   filled: true,
                   fillColor: AppTheme.surfaceMuted,
                   enabledBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.border),
                   ),
                   focusedBorder: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(8)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(8),
+                    ),
                     borderSide: const BorderSide(color: AppTheme.primaryDark),
                   ),
                 ),
@@ -618,8 +613,9 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
                   style: FilledButton.styleFrom(
                     backgroundColor: AppTheme.primaryDark,
                     shape: RoundedRectangleBorder(
-                      borderRadius:
-                          BorderRadius.circular(AppLayout.scaledValue(10)),
+                      borderRadius: BorderRadius.circular(
+                        AppLayout.scaledValue(10),
+                      ),
                     ),
                   ),
                   onPressed: _canSubmit ? _submit : null,
@@ -674,8 +670,9 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
       return Container(
         width: double.infinity,
         padding: EdgeInsets.symmetric(
-            horizontal: AppLayout.scaledValue(12),
-            vertical: AppLayout.scaledValue(12)),
+          horizontal: AppLayout.scaledValue(12),
+          vertical: AppLayout.scaledValue(12),
+        ),
         decoration: BoxDecoration(
           color: AppTheme.success.withValues(alpha: 0.06),
           borderRadius: BorderRadius.circular(AppLayout.scaledValue(8)),
@@ -683,8 +680,11 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
         ),
         child: Row(
           children: [
-            Icon(Icons.verified_user,
-                size: AppLayout.scaledValue(16), color: AppTheme.success),
+            Icon(
+              Icons.verified_user,
+              size: AppLayout.scaledValue(16),
+              color: AppTheme.success,
+            ),
             SizedBox(width: AppLayout.scaledValue(8)),
             Expanded(
               child: Text(
@@ -719,8 +719,11 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
               value: w.walletIndex,
               child: Row(
                 children: [
-                  Icon(Icons.verified_user,
-                      size: AppLayout.scaledValue(14), color: AppTheme.success),
+                  Icon(
+                    Icons.verified_user,
+                    size: AppLayout.scaledValue(14),
+                    color: AppTheme.success,
+                  ),
                   SizedBox(width: AppLayout.scaledValue(6)),
                   Expanded(
                     child: Text(
@@ -739,8 +742,9 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
           onChanged: (index) {
             if (index == null) return;
             setState(() {
-              _selectedWallet =
-                  wallets.firstWhere((w) => w.walletIndex == index);
+              _selectedWallet = wallets.firstWhere(
+                (w) => w.walletIndex == index,
+              );
             });
           },
         ),
@@ -758,8 +762,11 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
             color: widget.badgeColor.withValues(alpha: 0.12),
             borderRadius: BorderRadius.circular(AppLayout.scaledValue(10)),
           ),
-          child: Icon(widget.icon,
-              size: AppLayout.scaledValue(18), color: widget.badgeColor),
+          child: Icon(
+            widget.icon,
+            size: AppLayout.scaledValue(18),
+            color: widget.badgeColor,
+          ),
         ),
         SizedBox(width: AppLayout.scaledValue(10)),
         Expanded(
@@ -792,8 +799,9 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
     return Container(
       width: double.infinity,
       padding: EdgeInsets.symmetric(
-          horizontal: AppLayout.scaledValue(12),
-          vertical: AppLayout.scaledValue(14)),
+        horizontal: AppLayout.scaledValue(12),
+        vertical: AppLayout.scaledValue(14),
+      ),
       decoration: BoxDecoration(
         color: AppTheme.surfaceMuted,
         borderRadius: BorderRadius.circular(AppLayout.scaledValue(8)),
@@ -817,8 +825,9 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
         Text(
           label,
           style: TextStyle(
-              fontSize: AppLayout.scaledValue(13),
-              color: AppTheme.textSecondary),
+            fontSize: AppLayout.scaledValue(13),
+            color: AppTheme.textSecondary,
+          ),
         ),
         Text(
           value,
@@ -834,17 +843,6 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
 }
 
 // ──── 工具函数 ────
-
-String _toHex(List<int> bytes) {
-  const chars = '0123456789abcdef';
-  final buf = StringBuffer();
-  for (final b in bytes) {
-    buf
-      ..write(chars[(b >> 4) & 0x0f])
-      ..write(chars[b & 0x0f]);
-  }
-  return buf.toString();
-}
 
 List<int> _hexToBytes(String input) {
   final text = input.startsWith('0x') ? input.substring(2) : input;

@@ -126,6 +126,26 @@ public final class CitizenSdk: @unchecked Sendable {
     public func storageBatch(_ block: CitizenBlockRef, keys: [Data]) async throws -> [Data?] {
         try await native.storageBatch(block, keys: CitizenSDKInputLimits.storageKeys(keys)).value()
     }
+    public func storageKeysPaged(_ finalizedBlock: CitizenBlockRef, prefix: Data,
+                                 startKey: Data? = nil, limit: UInt32 = 1_000) async throws -> [Data] {
+        guard finalizedBlock.finality == .finalized, (1...4_096).contains(prefix.count),
+              startKey.map({ (1...4_096).contains($0.count) }) ?? true,
+              (1...1_000).contains(limit) else {
+            throw CitizenSDKError(.invalidArgument, "storage keys page request is invalid")
+        }
+        return try await native.storageKeysPaged(
+            finalizedBlock, prefix: prefix, startKey: startKey, limit: limit).value()
+    }
+    public func callRuntimeAPI(_ block: CitizenBlockRef, method: String,
+                               arguments: Data) async throws -> Data {
+        guard (1...128).contains(method.utf8.count),
+              method.range(of: #"^[A-Za-z][A-Za-z0-9_]*_[A-Za-z0-9_]+$"#,
+                           options: .regularExpression) != nil,
+              arguments.count <= 1_024 * 1_024 else {
+            throw CitizenSDKError(.invalidArgument, "Runtime API request is invalid")
+        }
+        return try await native.callRuntimeAPI(block, method: method, arguments: arguments).value()
+    }
     public func systemEvents(_ finalizedBlock: CitizenBlockRef) async throws -> Data? {
         guard finalizedBlock.finality == .finalized else {
             throw CitizenSDKError(.invalidArgument, "System.Events requires a finalized block")
@@ -154,6 +174,17 @@ public final class CitizenSdk: @unchecked Sendable {
     public func feeSnapshot() async throws -> CitizenFeeSnapshot { try await native.feeSnapshot().value() }
     public func walletProfile() async throws -> CitizenWalletProfile? { try await native.walletProfile().value() }
     public func walletState() async throws -> CitizenWalletState { try await native.walletState().value() }
+
+    /// Derives one app-scoped 32-byte key from an SDK hot account without
+    /// exposing the account private key. Cold accounts remain external signers.
+    public func deriveApplicationKey(accountID: Data, salt: Data, info: Data) async throws -> Data {
+        let checkedAccountID = try CitizenSDKInputLimits.accountID(accountID)
+        guard salt.count == 32, (1...256).contains(info.count) else {
+            throw CitizenSDKError(.invalidArgument, "application key salt/info is invalid")
+        }
+        return try await native.deriveApplicationKey(
+            accountID: checkedAccountID, salt: salt, info: info).value()
+    }
 
     public func importColdAccount(accountID: Data, name: String) async throws -> CitizenWalletState {
         let checkedID = try CitizenSDKInputLimits.accountID(accountID)

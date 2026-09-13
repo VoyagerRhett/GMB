@@ -1,11 +1,17 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:tatachat_sdk/tatachat_sdk.dart';
 
 import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
+import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/my/myid/myid_service.dart';
+import 'package:citizenapp/my/myid/current_user_context.dart';
 import 'package:citizenapp/my/myid/widgets/register_identity_sheet.dart';
 import 'package:citizenapp/transaction/onchain-topup/onchain_topup_page.dart';
 import 'package:citizenapp/ui/app_theme.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 
 /// 注册身份流程的全 App 唯一入口。
 ///
@@ -30,8 +36,24 @@ Future<bool> startCidRegistrationFlow(
   MyIdService? myIdService,
   ValueChanged<bool>? onSubmitting,
 }) async {
-  final service = myIdService ?? MyIdService();
-  final List<Account> accounts;
+  late final MyIdService service;
+  if (myIdService != null) {
+    service = myIdService;
+  } else {
+    final sdk = context.read<CitizenSdk>();
+    service = MyIdService(
+      wallet: sdk.wallet,
+      signing: sdk.signing,
+      chain: sdk.chain,
+      transactions: sdk.transactions,
+      accountSecurity: context.read<AccountSecurityService>(),
+      currentUserContext: context.read<CurrentUserContext>(),
+      identityResolver: context.read<FinalizedIdentityResolver>(),
+      sessionProvider: context.read<SquareSessionProvider>(),
+      chatRuntime: () => context.read<ChatSdk>(),
+    );
+  }
+  final List<CitizenWalletStateAccount> accounts;
   try {
     accounts = await service.listBindableAccounts();
   } on Exception catch (error) {
@@ -49,6 +71,7 @@ Future<bool> startCidRegistrationFlow(
   onSubmitting?.call(true);
   try {
     final cid = await service.registerAnonymousCid(
+      context: context,
       institution: choice.institution,
       bindAccountId: choice.bindAccountId,
     );
@@ -76,10 +99,13 @@ Future<bool> startCidRegistrationFlow(
 Future<bool> ensureCidRegisteredOrPrompt(
   BuildContext context, {
   MyIdService? myIdService,
+  FinalizedIdentityResolver? identityResolver,
 }) async {
   final FinalizedIdentity? identity;
   try {
-    identity = await FinalizedIdentityResolver.instance.resolve();
+    identity =
+        await (identityResolver ?? context.read<FinalizedIdentityResolver>())
+            .resolve();
   } on Exception {
     if (!context.mounted) return false;
     _showSnack(context, '暂时无法验证身份，请稍后重试');
@@ -116,11 +142,7 @@ Future<bool> _ensureAffordable(
     affordability = await service.fetchRegistrationAffordability(bindAccountId);
   } on Object catch (error) {
     if (!context.mounted) return false;
-    _showSnack(
-      context,
-      '余额读取失败,请重试:${_describeError(error)}',
-      isError: true,
-    );
+    _showSnack(context, '余额读取失败,请重试:${_describeError(error)}', isError: true);
     return false;
   }
   final requiredFen = affordability.requiredFen;
@@ -139,7 +161,7 @@ Future<bool> _ensureAffordable(
 String _formatFen(BigInt fen) => (fen / BigInt.from(100)).toStringAsFixed(2);
 
 String _describeError(Object error) {
-  if (error is WalletAuthException) return error.message;
+  if (error is AccountSecurityException) return error.message;
   final text = error.toString();
   const prefix = 'Exception: ';
   return text.startsWith(prefix) ? text.substring(prefix.length) : text;

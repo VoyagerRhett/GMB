@@ -1,7 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:citizenapp/8964/services/square_api_client.dart';
-import 'package:citizenapp/wallet/core/device_subkey.dart';
+import 'package:citizenapp/security/device_subkey.dart';
 
 /// 对设备绑定证明消息（`signing_message` 的 32 字节摘要）做 sr25519 主钥签名，
 /// 返回 `0x` hex 签名。
@@ -63,15 +63,13 @@ Future<String> acquireDeviceBindingTurnstileToken({
 /// 仅在 Worker 明确返回 `device_not_registered` 后调用：读取当前绑定账户 child 完成
 /// 一次鉴权签名。钱包创建、CID finalized、页面进入与后台预热均不得调用。
 class DeviceSubkeyRegistrar {
-  static TurnstileTokenProvider? turnstileTokenProvider;
-
   DeviceSubkeyRegistrar({
     DeviceSubkey? deviceSubkey,
     SquareApiClient? apiClient,
     TurnstileTokenProvider? turnstileToken,
   })  : _subkey = deviceSubkey ?? DeviceSubkey(),
         _api = apiClient ?? SquareApiClient(),
-        _turnstileToken = turnstileToken ?? turnstileTokenProvider;
+        _turnstileToken = turnstileToken;
 
   final DeviceSubkey _subkey;
   final SquareApiClient _api;

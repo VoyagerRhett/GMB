@@ -11,13 +11,13 @@
 
 import 'dart:convert';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/foundation.dart';
 import 'package:isar_community/isar.dart';
 import 'package:polkadart/polkadart.dart' show Hasher;
 
 import 'package:citizenapp/isar/wallet_isar.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_query_service.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
 
 /// 提案动作类型常量(对齐 Isar entity action 字段)。
 class PersonalProposalAction {
@@ -81,13 +81,12 @@ class PersonalAccountProposalView {
 
 class PersonalProposalHistoryService {
   PersonalProposalHistoryService({
-    ChainRpc? chainRpc,
+    required CitizenChain chain,
     ProposalQueryService? proposalService,
-  })  : _rpc = chainRpc ?? ChainRpc(),
-        _proposalService =
-            proposalService ?? ProposalQueryService(chainRpc: chainRpc);
+  }) : _chain = chain,
+       _proposalService = proposalService ?? ProposalQueryService(chain: chain);
 
-  final ChainRpc _rpc;
+  final CitizenChain _chain;
   final ProposalQueryService _proposalService;
 
   /// 拉取该多签的全部提案(活跃 + 历史),按 createdAt desc 排序。
@@ -107,7 +106,7 @@ class PersonalProposalHistoryService {
 
     // 链可达性正向探针:只有确认链已同步可达时,才允许把「链上查不到」判为幽灵
     // 并清理本机记录;离线/未同步一律保留本机 Isar 历史(容错回退→仅返回 Isar)。
-    final chainReachable = await _rpc.isFinalizedChainReachable();
+    final chainReachable = (await _chain.getSyncStatus()).isUsable;
 
     // Step 1: 链上活跃提案逐个同步到 Isar(防止其他设备发起的提案在本机无记录)。
     for (final pid in activeIds) {
@@ -130,7 +129,7 @@ class PersonalProposalHistoryService {
   ) async {
     try {
       // 离线/未同步无法确认提案是否真在链上,一律不判幽灵,避免误删本机记录。
-      if (!await _rpc.isFinalizedChainReachable()) return false;
+      if (!(await _chain.getSyncStatus()).isUsable) return false;
       final entities = await WalletIsar.instance.read((isar) {
         return isar.personalAccountProposalEntitys
             .filter()
@@ -140,8 +139,9 @@ class PersonalProposalHistoryService {
             .findAll();
       });
       for (final e in entities) {
-        final chainStatus =
-            await _proposalService.fetchProposalStatus(e.proposalId);
+        final chainStatus = await _proposalService.fetchProposalStatus(
+          e.proposalId,
+        );
         if (chainStatus == null) return true;
       }
     } catch (_) {
@@ -169,8 +169,9 @@ class PersonalProposalHistoryService {
 
       for (final e in votingEntities) {
         try {
-          final chainStatus =
-              await _proposalService.fetchProposalStatus(e.proposalId);
+          final chainStatus = await _proposalService.fetchProposalStatus(
+            e.proposalId,
+          );
           if (chainStatus == null) {
             // 仅当链确认可达却查不到该提案时,才判为「本机幽灵创建提案」并清理;
             // 离线/未同步则保留本机记录,避免误删待投票提案(数据丢失)。
@@ -245,8 +246,9 @@ class PersonalProposalHistoryService {
       entity.status = status;
       entity.yesVotes = yesVotes;
       entity.noVotes = noVotes;
-      entity.finalStatusAtMillis =
-          isFinal ? (existing?.finalStatusAtMillis ?? now) : null;
+      entity.finalStatusAtMillis = isFinal
+          ? (existing?.finalStatusAtMillis ?? now)
+          : null;
       if (snapshot != null) {
         entity.snapshotJson = jsonEncode(snapshot);
       } else if (existing != null) {
@@ -263,7 +265,7 @@ class PersonalProposalHistoryService {
     String personalAccountId,
   ) async {
     try {
-      return _proposalService.fetchActivePersonalProposalIds(
+      return await _proposalService.fetchActivePersonalProposalIds(
         personalAccountId,
       );
     } catch (_) {
@@ -276,8 +278,9 @@ class PersonalProposalHistoryService {
     int proposalId,
   ) async {
     try {
-      final chainStatus =
-          await _proposalService.fetchProposalStatus(proposalId);
+      final chainStatus = await _proposalService.fetchProposalStatus(
+        proposalId,
+      );
       final tally = await _proposalService.fetchVoteTally(proposalId);
       final statusStr = mapChainStatus(chainStatus);
 
@@ -372,7 +375,8 @@ class PersonalProposalHistoryService {
         'ProposalData',
         _u64ToLeBytes(proposalId),
       );
-      return await _rpc.fetchStorage('0x${_hexEncode(key)}');
+      final finalized = await _chain.getFinalizedHead();
+      return await _chain.getStorage(finalized, key);
     } catch (_) {
       return null;
     }
@@ -401,9 +405,7 @@ class PersonalProposalHistoryService {
     }
   }
 
-  PersonalAccountProposalView _entityToView(
-    PersonalAccountProposalEntity e,
-  ) {
+  PersonalAccountProposalView _entityToView(PersonalAccountProposalEntity e) {
     Map<String, dynamic>? snapshot;
     if (e.snapshotJson != null && e.snapshotJson!.isNotEmpty) {
       try {
@@ -426,18 +428,13 @@ class PersonalProposalHistoryService {
 
   // ──── 编码 / 哈希工具(对齐 votingengine storage key) ────
 
-  Uint8List _buildStorageKey(
-    String pallet,
-    String storage,
-    Uint8List keyData,
-  ) {
+  Uint8List _buildStorageKey(String pallet, String storage, Uint8List keyData) {
     final palletHash = Hasher.twoxx128.hashString(pallet);
     final storageHash = Hasher.twoxx128.hashString(storage);
     final keyHash = Hasher.blake2b128.hash(keyData);
-    final result = Uint8List(palletHash.length +
-        storageHash.length +
-        keyHash.length +
-        keyData.length);
+    final result = Uint8List(
+      palletHash.length + storageHash.length + keyHash.length + keyData.length,
+    );
     var offset = 0;
     result.setAll(offset, palletHash);
     offset += palletHash.length;
@@ -448,9 +445,6 @@ class PersonalProposalHistoryService {
     result.setAll(offset, keyData);
     return result;
   }
-
-  String _hexEncode(Uint8List bytes) =>
-      bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
   (int, int) _decodeCompact(Uint8List data, int offset) {
     if (offset < 0 || offset >= data.length) {

@@ -1,6 +1,8 @@
 import 'dart:async';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
 import 'package:citizenapp/8964/chain/square_chain_service.dart';
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
@@ -11,9 +13,10 @@ import 'package:citizenapp/my/membership/membership_detail_page.dart';
 import 'package:citizenapp/my/membership/membership_revision.dart';
 import 'package:citizenapp/my/membership/subscription_service.dart';
 import 'package:citizenapp/my/myid/register_identity_flow.dart';
+import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
 import 'package:citizenapp/ui/identity_badge.dart';
 import 'package:citizenapp/ui/app_theme.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 会员三档固定顺序（与价格升序一致，ADR-037，与身份彻底解耦）：
@@ -32,13 +35,16 @@ class MembershipPage extends StatefulWidget {
     SquareChainService? chainService,
     SquareSessionProvider? sessionProvider,
     SubscriptionService? subscriptionService,
+    FinalizedIdentityResolver? identityResolver,
   }) : _chainService = chainService,
        _sessionProvider = sessionProvider,
-       _subscriptionService = subscriptionService;
+       _subscriptionService = subscriptionService,
+       _identityResolver = identityResolver;
 
   final SquareChainService? _chainService;
   final SquareSessionProvider? _sessionProvider;
   final SubscriptionService? _subscriptionService;
+  final FinalizedIdentityResolver? _identityResolver;
 
   @override
   State<MembershipPage> createState() => _MembershipPageState();
@@ -46,12 +52,12 @@ class MembershipPage extends StatefulWidget {
 
 class _MembershipPageState extends State<MembershipPage>
     with SingleTickerProviderStateMixin {
-  late final SquareChainService _chainService =
-      widget._chainService ?? SquareChainService();
-  late final SquareSessionProvider _sessionProvider =
-      widget._sessionProvider ?? SquareSessionProvider.instance;
-  late final SubscriptionService _subscriptionService =
-      widget._subscriptionService ?? SubscriptionService();
+  late final SquareChainService _chainService;
+  late final SquareSessionProvider _sessionProvider;
+  late final SubscriptionService _subscriptionService;
+  late final FinalizedIdentityResolver _identityResolver;
+  AccountSecurityService? _accountSecurity;
+  bool _dependenciesReady = false;
   late final AnimationController _snapController;
   Animation<double>? _snapAnim;
 
@@ -97,14 +103,56 @@ class _MembershipPageState extends State<MembershipPage>
           final anim = _snapAnim;
           if (anim != null && mounted) setState(() => _page = anim.value);
         });
-    WalletManager.walletsRevision.addListener(_onIdentityChanged);
     MembershipRevision.instance.listenable.addListener(_onMembershipChanged);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    final injectedSession = widget._sessionProvider;
+    final injectedSubscription = widget._subscriptionService;
+    final injectedChain = widget._chainService;
+    final injectedIdentity = widget._identityResolver;
+    if (injectedSession != null &&
+        injectedSubscription != null &&
+        injectedChain != null &&
+        injectedIdentity != null) {
+      _chainService = injectedChain;
+      _sessionProvider = injectedSession;
+      _subscriptionService = injectedSubscription;
+      _identityResolver = injectedIdentity;
+      _dependenciesReady = true;
+      unawaited(_load());
+      return;
+    }
+    final sdk = context.read<CitizenSdk>();
+    _chainService =
+        widget._chainService ??
+        SquareChainService(chain: sdk.chain, transactions: sdk.transactions);
+    final accountSecurity = context.read<AccountSecurityService>();
+    _sessionProvider =
+        widget._sessionProvider ?? context.read<SquareSessionProvider>();
+    _subscriptionService =
+        widget._subscriptionService ??
+        SubscriptionService(
+          wallet: sdk.wallet,
+          chain: sdk.chain,
+          transactions: sdk.transactions,
+          identityResolver: context.read<FinalizedIdentityResolver>(),
+          sessionProvider: _sessionProvider,
+        );
+    _identityResolver =
+        widget._identityResolver ?? context.read<FinalizedIdentityResolver>();
+    _accountSecurity = accountSecurity;
+    accountSecurity.revision.addListener(_onIdentityChanged);
+    _dependenciesReady = true;
     unawaited(_load());
   }
 
   @override
   void dispose() {
-    WalletManager.walletsRevision.removeListener(_onIdentityChanged);
+    _accountSecurity?.revision.removeListener(_onIdentityChanged);
     MembershipRevision.instance.listenable.removeListener(_onMembershipChanged);
     _snapController.dispose();
     super.dispose();
@@ -190,7 +238,7 @@ class _MembershipPageState extends State<MembershipPage>
     Object? refreshError;
     try {
       // 普通会员展示直接建立 Cloudflare 会话。首次安装没有本机绑定时由登录挑战
-      // 的 finalized 用户投影恢复；不得以本机缓存未命中武断判未注册或启动 smoldot。
+      // 的 finalized 用户投影恢复；不得以本机缓存未命中武断判未注册或额外启动节点。
       final resolution = await _sessionProvider.resolveSession();
       _sessionStatus = resolution.status;
       final session = resolution.session;
@@ -345,7 +393,12 @@ class _MembershipPageState extends State<MembershipPage>
       return;
     }
     // 未注册 CID:就地弹全 App 统一注册面板;占号成功后订阅由用户重新发起。
-    if (!await ensureCidRegisteredOrPrompt(context)) return;
+    if (!await ensureCidRegisteredOrPrompt(
+      context,
+      identityResolver: _identityResolver,
+    )) {
+      return;
+    }
     if (!mounted) return;
     setState(() => _busy = true);
     try {

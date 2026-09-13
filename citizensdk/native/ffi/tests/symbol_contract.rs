@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-const EXPECTED_EXPORTS: [&str; 117] = [
+const EXPECTED_EXPORTS: [&str; 121] = [
     "citizensdk_abi_version",
     "citizensdk_add_wallet_accounts",
     "citizensdk_begin_default_account_change",
     "citizensdk_begin_signing",
+    "citizensdk_call_runtime_api",
     "citizensdk_cancel_signing_session",
     "citizensdk_cancel_request",
     "citizensdk_commit_wallet_creation",
@@ -18,6 +19,7 @@ const EXPECTED_EXPORTS: [&str; 117] = [
     "citizensdk_verify_signature",
     "citizensdk_delete_wallet",
     "citizensdk_delete_wallet_account",
+    "citizensdk_derive_application_key",
     "citizensdk_destroy",
     "citizensdk_export_state",
     "citizensdk_execute_prepared_transaction",
@@ -36,6 +38,7 @@ const EXPECTED_EXPORTS: [&str; 117] = [
     "citizensdk_get_runtime_context_at",
     "citizensdk_get_storage_at",
     "citizensdk_get_storage_batch_at",
+    "citizensdk_get_storage_keys_paged",
     "citizensdk_get_sync_status",
     "citizensdk_get_system_events_at",
     "citizensdk_get_transaction_history",
@@ -91,6 +94,7 @@ const EXPECTED_EXPORTS: [&str; 117] = [
     "citizensdk_result_get_transaction_history_record",
     "citizensdk_result_get_runtime_context",
     "citizensdk_result_get_signature",
+    "citizensdk_result_get_application_key",
     "citizensdk_result_get_signing_outcome",
     "citizensdk_result_get_storage_batch_count",
     "citizensdk_result_get_sync_status",
@@ -239,8 +243,8 @@ fn rust_and_c_publish_exactly_the_reviewed_product_symbols() {
     let wallet = rust_exports(include_str!("../src/wallet_abi.rs"));
     let qr = rust_exports(include_str!("../src/qr_abi.rs"));
     let transaction = rust_exports(include_str!("../src/transaction_abi.rs"));
-    assert_eq!(rust.len(), 50, "base Rust export count changed");
-    assert_eq!(wallet.len(), 48, "wallet Rust export count changed");
+    assert_eq!(rust.len(), 52, "base Rust export count changed");
+    assert_eq!(wallet.len(), 50, "wallet Rust export count changed");
     for export in wallet {
         assert!(
             rust.insert(export.clone()),
@@ -269,8 +273,8 @@ fn rust_and_c_publish_exactly_the_reviewed_product_symbols() {
         .into_keys()
         .collect();
 
-    assert_eq!(rust.len(), 117, "Rust export count changed");
-    assert_eq!(header.len(), 117, "C declaration count changed");
+    assert_eq!(rust.len(), 121, "Rust export count changed");
+    assert_eq!(header.len(), 121, "C declaration count changed");
     assert_eq!(rust, expected, "Rust export set changed");
     assert_eq!(header, expected, "C declaration set changed");
     assert!(!rust.contains("citizensdk_set_default_wallet_account"));

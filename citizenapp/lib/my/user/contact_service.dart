@@ -15,7 +15,7 @@ import 'package:citizenapp/my/myid/current_user_context.dart';
 import 'package:citizenapp/isar/user_isar.dart';
 import 'package:citizenapp/security/local_cipher.dart';
 import 'package:citizenapp/security/local_data_key.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 
 /// 通讯录唯一业务模型。
 ///
@@ -130,7 +130,7 @@ class ContactSyncState {
 }
 
 /// 联系人端到端加密器。AES-GCM 保护内容与完整性，HMAC 生成不透明 contact_id；
-/// 两把钥匙均由 WalletManager 从当前绑定账户 child 域隔离派生，本类接触不到账户秘密。
+/// 两把钥匙均经 AccountSecurityService 调用 CitizenSDK 应用派生钥，本类接触不到账户秘密。
 class ContactCryptor {
   ContactCryptor({
     required String ownerCidNumber,
@@ -235,14 +235,14 @@ class ContactCryptor {
 /// Cloudflare 只接收 [SquareEncryptedContact]，网络失败不会阻塞本地增删改。
 class UserContactService {
   UserContactService({
-    WalletManager? walletManager,
-    SquareSessionProvider? sessionProvider,
+    required AccountSecurityService accountSecurity,
+    required CurrentUserContext currentUserContext,
+    required SquareSessionProvider sessionProvider,
+    required CitizenIdentityChainReader chainReader,
     SquareApiClient? apiClient,
-    CurrentUserContext? currentUserContext,
-    CitizenIdentityChainReader? chainReader,
     bool autoSync = true,
-  })  : _walletManager = walletManager ?? WalletManager(),
-        _sessionProvider = sessionProvider ?? SquareSessionProvider.instance,
+  })  : _accountSecurity = accountSecurity,
+        _sessionProvider = sessionProvider,
         _apiClient = apiClient ?? SquareApiClient(),
         _currentUserContext = currentUserContext,
         _chainReader = chainReader,
@@ -254,21 +254,20 @@ class UserContactService {
   static const String _handoverPrefix = 'user.contact.handover:';
   static const String _inaccessiblePrefix = 'user.contact.inaccessible:';
 
-  final WalletManager _walletManager;
+  final AccountSecurityService _accountSecurity;
   final SquareSessionProvider _sessionProvider;
   final SquareApiClient _apiClient;
-  final CurrentUserContext? _currentUserContext;
-  CitizenIdentityChainReader? _chainReader;
+  final CurrentUserContext _currentUserContext;
+  final CitizenIdentityChainReader _chainReader;
   final bool _autoSync;
 
   /// 只有刷新联系人绑定、转账等权限动作才创建链读入口。
-  /// 普通通讯录/Chat 搜索只读本地密文，构造服务时不得启动 smoldot。
+  /// 普通通讯录/Chat 搜索只读本地密文，构造服务时不得建立第二节点。
   CitizenIdentityChainReader get _finalizedIdentityReader =>
-      _chainReader ??= CitizenIdentityChainReader();
+      _chainReader;
 
   /// 通讯录永久归属 CID；当前绑定账户负责派生本绑定版本密钥和云会话鉴权。
-  CurrentUserContext get _currentUser =>
-      _currentUserContext ?? CurrentUserContext.instance;
+  CurrentUserContext get _currentUser => _currentUserContext;
 
   final ValueNotifier<ContactSyncState> syncState =
       ValueNotifier<ContactSyncState>(
@@ -542,9 +541,9 @@ class UserContactService {
       });
 
       sourceCloudKeys =
-          await _walletManager.contactKeyMaterialForBinding(source);
+          await _accountSecurity.contactKeyMaterialForBinding(source);
       targetCloudKeys =
-          await _walletManager.contactKeyMaterialForBinding(target);
+          await _accountSecurity.contactKeyMaterialForBinding(target);
       final sourceCryptor = ContactCryptor(
         ownerCidNumber: source.cidNumber,
         bindingRevision: source.bindingRevision,
@@ -697,7 +696,7 @@ class UserContactService {
     }
     ContactKeyMaterial? targetKeys;
     try {
-      targetKeys = await _walletManager.contactKeyMaterialForBinding(target);
+      targetKeys = await _accountSecurity.contactKeyMaterialForBinding(target);
       final targetCryptor = ContactCryptor(
         ownerCidNumber: target.cidNumber,
         bindingRevision: target.bindingRevision,
@@ -808,7 +807,7 @@ class UserContactService {
     await _setSyncState(owner, ContactSyncPhase.syncing);
     ContactKeyMaterial? keys;
     try {
-      keys = await _walletManager.ensureContactKeyMaterialForAccountId(
+      keys = await _accountSecurity.ensureContactKeyMaterialForAccountId(
         owner.accountId,
       );
       final session = await _sessionProvider.ensureSession();
@@ -920,12 +919,12 @@ class UserContactService {
     var identity = await _currentUser.resolve();
     if (identity != null && !identity.isRegistered) {
       // 首次安装/重新导入可能还没有本机公开绑定；普通通讯录通过 Cloudflare
-      // finalized 用户投影建立会话并恢复绑定，禁止为此启动 smoldot。
+      // finalized 用户投影建立会话并恢复绑定，禁止为此建立第二节点。
       await _sessionProvider.ensureSession();
       identity = await _currentUser.resolve();
     }
     if (identity == null || !identity.isRegistered) {
-      throw const WalletAuthException('请先注册 CID 身份');
+      throw const AccountSecurityException('请先注册 CID 身份');
     }
     return _ContactOwner(
       cidNumber: requireCidNumber(identity.cidNumber),
@@ -1053,13 +1052,13 @@ class UserContactService {
   /// 用 `LocalKeyPurpose.contactsLocal` 而**不复用云端通讯录钥**:两者域隔离,
   /// 本地密文被拿到也不等于同时暴露云端密文。
   Future<Uint8List> _localKvKey(_ContactOwner owner) =>
-      _walletManager.readDataKeyForCurrentBinding(
+      _accountSecurity.readDataKeyForCurrentBinding(
         owner.accountId,
         LocalKeyPurpose.contactsLocal,
       );
 
   Future<Uint8List> _localKvKeyForBinding(AccountDataBinding binding) async {
-    return (await _walletManager.deriveDataKeysForBindingHandover(
+    return (await _accountSecurity.deriveDataKeysForBindingHandover(
       binding,
       const <({LocalKeyPurpose purpose, String? context})>[
         (purpose: LocalKeyPurpose.contactsLocal, context: null),

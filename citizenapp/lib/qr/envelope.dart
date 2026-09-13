@@ -6,7 +6,6 @@ import 'package:citizenapp/qr/bodies/sign_request_body.dart';
 import 'package:citizenapp/qr/bodies/sign_response_body.dart';
 import 'package:citizenapp/qr/bodies/user_contact_body.dart';
 import 'package:citizenapp/qr/bodies/user_transfer_body.dart';
-import 'package:citizenapp/qr/bodies/account_id_code_body.dart';
 import 'package:citizenapp/qr/bodies/account_data_key_response_body.dart';
 
 /// QR_V1 统一 envelope。
@@ -72,6 +71,10 @@ class QrEnvelope<T extends QrBody> {
   }
 
   static QrEnvelope<QrBody> fromJson(Map<String, dynamic> data) {
+    if (data['p'] == QrProtocol.qrV1 &&
+        data['k'] == QrKind.accountIdCode.code) {
+      throw const FormatException('通用账户码必须由 CitizenSDK 解析');
+    }
     GeneratedQrBodySchema.validateEnvelope(data);
     final kind = QrKind.fromWire(data['k']);
 
@@ -99,7 +102,7 @@ class QrEnvelope<T extends QrBody> {
       case QrKind.userTransfer:
         body = UserTransferBody.fromJson(bodyRaw);
       case QrKind.accountIdCode:
-        body = AccountIdCodeBody.fromJson(bodyRaw);
+        throw const FormatException('通用账户码必须由 CitizenSDK 解析');
       case QrKind.accountDataKeyResponse:
         body = AccountDataKeyResponseBody.fromJson(bodyRaw);
     }

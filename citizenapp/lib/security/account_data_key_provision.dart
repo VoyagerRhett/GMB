@@ -2,11 +2,11 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
+import 'package:cryptography/cryptography.dart';
 import 'package:polkadart/polkadart.dart' show Hasher;
 import 'package:citizenapp/qr/bodies/account_data_key_response_body.dart';
 import 'package:citizenapp/security/local_data_key.dart';
-import 'package:citizenapp/security/native_account_crypto.dart';
-import 'package:citizenapp/signer/qr_signer.dart';
 import 'package:citizenapp/signer/signing.dart';
 
 typedef DataKeyRequest = ({LocalKeyPurpose purpose, String? context});
@@ -27,24 +27,32 @@ class AccountDataKeyProvisionSession {
   final Uint8List payload;
   final Uint8List _recipientSecret;
 
-  static AccountDataKeyProvisionSession create({
+  static final X25519 _x25519 = X25519();
+  static final Hkdf _sessionKdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
+  static final AesGcm _aesGcm = AesGcm.with256bits();
+  static final List<int> _provisionInfo = utf8.encode(
+    'citizenapp.account-data/provision',
+  );
+
+  static Future<AccountDataKeyProvisionSession> create({
     required AccountDataBinding binding,
     required List<DataKeyRequest> requests,
     required int expiresAt,
     List<int>? recipientSecret,
     List<int>? requestNonce,
-  }) {
+  }) async {
     binding.validate();
     _validateRequests(requests);
-    final secret = Uint8List.fromList(
-      recipientSecret ?? _randomBytes(NativeAccountCrypto.keyLength),
-    );
+    final secret = Uint8List.fromList(recipientSecret ?? _randomBytes(32));
     final nonce = requestNonce ?? _randomBytes(16);
     if (secret.length != 32 || nonce.length != 16) {
       secret.fillRange(0, secret.length, 0);
       throw const AccountDataKeyException('用途钥会话随机数长度无效');
     }
-    final recipientPublicKey = NativeAccountCrypto.x25519PublicKey(secret);
+    final keyPair = await _x25519.newKeyPairFromSeed(secret);
+    final recipientPublicKey = Uint8List.fromList(
+      (await keyPair.extractPublicKey()).bytes,
+    );
     final payload = encodeAccountDataKeyProvisionRequest(
       binding: binding,
       recipientPublicKey: recipientPublicKey,
@@ -62,7 +70,7 @@ class AccountDataKeyProvisionSession {
   }
 
   /// 验签后解封 `k=6`，并逐项核对用途编号、context 和32字节密钥。
-  List<Uint8List> open(AccountDataKeyResponseBody body) {
+  Future<List<Uint8List>> open(AccountDataKeyResponseBody body) async {
     if (body.signerPublicKeyHex != binding.accountId) {
       throw const AccountDataKeyException('用途钥响应签名账户不一致');
     }
@@ -72,23 +80,60 @@ class AccountDataKeyProvisionSession {
       nonce: body.encryptionNonceBytes,
       ciphertext: body.ciphertextBytes,
     );
-    if (!QrSigner.verifySr25519Signature(
-      signerPublicKeyHex: binding.accountId,
-      signatureHex: body.signatureHex,
-      message: signingMessage(
+    if (!await CitizenSigning.verify(
+      accountId: binding.accountId,
+      signature: _hexBytes(body.signatureHex),
+      payload: signingMessage(
         opTag: kOpSignAccountDataKeyProvision,
         scalePayload: authorization,
       ),
     )) {
       throw const AccountDataKeyException('用途钥响应签名无效');
     }
-    final plaintext = NativeAccountCrypto.open(
-      recipientSecret: _recipientSecret,
-      senderPublicKey: body.keyExchangePublicKeyBytes,
-      nonce: body.encryptionNonceBytes,
-      ciphertext: body.ciphertextBytes,
-      aad: payload,
+    final recipientKeyPair = await _x25519.newKeyPairFromSeed(_recipientSecret);
+    final shared = await _x25519.sharedSecretKey(
+      keyPair: recipientKeyPair,
+      remotePublicKey: SimplePublicKey(
+        body.keyExchangePublicKeyBytes,
+        type: KeyPairType.x25519,
+      ),
     );
+    final sharedBytes = Uint8List.fromList(await shared.extractBytes());
+    if (sharedBytes.every((byte) => byte == 0)) {
+      sharedBytes.fillRange(0, sharedBytes.length, 0);
+      throw const AccountDataKeyException('X25519 对端公钥无效');
+    }
+    final salt = await Sha256().hash(payload);
+    late final SecretKey sessionKey;
+    try {
+      sessionKey = await _sessionKdf.deriveKey(
+        secretKey: SecretKey(sharedBytes),
+        nonce: salt.bytes,
+        info: _provisionInfo,
+      );
+    } finally {
+      sharedBytes.fillRange(0, sharedBytes.length, 0);
+    }
+    final ciphertext = body.ciphertextBytes;
+    if (ciphertext.length <= 16) {
+      throw const AccountDataKeyException('用途钥密文长度无效');
+    }
+    late final Uint8List plaintext;
+    try {
+      plaintext = Uint8List.fromList(
+        await _aesGcm.decrypt(
+          SecretBox(
+            ciphertext.sublist(0, ciphertext.length - 16),
+            nonce: body.encryptionNonceBytes,
+            mac: Mac(ciphertext.sublist(ciphertext.length - 16)),
+          ),
+          secretKey: sessionKey,
+          aad: payload,
+        ),
+      );
+    } on SecretBoxAuthenticationError {
+      throw const AccountDataKeyException('用途钥密文验证失败');
+    }
     try {
       return decodeAccountDataKeyBundle(plaintext, requests);
     } finally {
@@ -97,6 +142,19 @@ class AccountDataKeyProvisionSession {
   }
 
   void dispose() => _recipientSecret.fillRange(0, _recipientSecret.length, 0);
+
+  static Uint8List _hexBytes(String value) {
+    final text = value.startsWith('0x') ? value.substring(2) : value;
+    if (text.length.isOdd) throw const AccountDataKeyException('签名格式无效');
+    final output = Uint8List(text.length ~/ 2);
+    for (var index = 0; index < output.length; index++) {
+      output[index] = int.parse(
+        text.substring(index * 2, index * 2 + 2),
+        radix: 16,
+      );
+    }
+    return output;
+  }
 }
 
 Uint8List encodeAccountDataKeyProvisionRequest({

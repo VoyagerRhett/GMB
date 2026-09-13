@@ -218,7 +218,7 @@ hash 逐头回溯，核对响应 hash、完整 SCALE header hash、高度与父�
 返回值都不是 finalized 证明；独立有界 proof-derived cache 只降低重复回溯成本。这样既关闭
 异步重组 TOCTOU，也允许重启后补扫旧块。
 
-当前产品 C ABI 共 117 个公开函数，既有结构、数值与默认构造行为保持；
+当前产品 C ABI 共 121 个公开函数，既有结构、数值与默认构造行为保持；
 新增模块校验、显式模块构造和无实例验签三个入口，另补早期四个链查询/结果入口、九个 QR
 协议/会话入口、统一钱包与通用签名入口，并在第 1.4 步增加十个安全链读取入口、第 1.5 步增加
 三个通用交易准备入口，并在第 1.6 步增加四个通用交易执行入口。官方绑定使用
@@ -323,7 +323,7 @@ result、独立 callback thread、64 项有界事件队列和稳定错误码。�
 
 失败 result 还保存八项闭集 `FailureStage`。该维度从 Contracts 经 Engine 和 C getter
 投影到五端，既不修改 result struct，也不进入 Host vtable 或持久化 schema；平台不得从
-message 猜测阶段。Flutter 继续使用原 62 个方法，只把 stage 和当前 method 加入固定错误 tuple。
+message 猜测阶段。Flutter 使用固定 65 个方法，只把 stage 和当前 method 加入固定错误 tuple。
 
 Capability revision 由 Engine 单调持有，链 ready 只读取 smoldot 自身 verified
 `is_usable`。Provider 内部固定 RPC allowlist，不对 ABI 暴露方法名。坏导入使当前组合进入

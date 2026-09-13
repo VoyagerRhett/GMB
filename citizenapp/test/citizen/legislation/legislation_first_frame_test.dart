@@ -13,6 +13,7 @@ import 'package:citizenapp/citizen/legislation/legislation_tab.dart';
 import 'package:citizenapp/citizen/public/data/public_institution_repository.dart';
 
 import '../public/public_nav_harness.dart';
+import '../../support/fake_citizen_sdk.dart';
 
 class _PendingInstitutionRepository extends InstitutionRepository {
   _PendingInstitutionRepository(PublicInstitutionRepository directory)
@@ -26,6 +27,8 @@ class _PendingInstitutionRepository extends InstitutionRepository {
 }
 
 class _PendingLawListApi extends LegislationApi {
+  _PendingLawListApi() : super(chain: TestCitizenChain());
+
   final Completer<List<int>> completer = Completer<List<int>>();
 
   @override
@@ -33,6 +36,8 @@ class _PendingLawListApi extends LegislationApi {
 }
 
 class _PendingLawReaderApi extends LegislationApi {
+  _PendingLawReaderApi() : super(chain: TestCitizenChain());
+
   final Completer<Law?> completer = Completer<Law?>();
 
   @override

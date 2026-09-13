@@ -1,13 +1,16 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:polkadart_keyring/polkadart_keyring.dart' show Keyring;
-import 'package:citizenapp/rpc/chain_rpc.dart';
 import 'package:citizenapp/transaction/offchain-transaction/rpc/offchain_clearing_rpc.dart';
 import 'package:citizenapp/transaction/offchain-transaction/models/payment_intent.dart';
 import 'package:citizenapp/transaction/offchain-transaction/services/clearing_bank_directory.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
+import 'package:citizenapp/signer/signing.dart' show kOpSignL3Pay;
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 扫码支付清算体系付款确认页。
@@ -42,7 +45,7 @@ class OffchainClearingPayPage extends StatefulWidget {
   });
 
   /// 付款方当前钱包(仅支持热钱包)。
-  final WalletProfile wallet;
+  final CitizenWalletStateAccount wallet;
 
   /// 商户 QR `UserTransferBody.ss58Address` 收款方 SS58 展示地址。
   final String toSs58Address;
@@ -87,8 +90,9 @@ class _OffchainClearingPayPageState extends State<OffchainClearingPayPage> {
   // 提交结果
   String? _resultTxId;
 
-  late final OffchainClearingBankRpc _nodeRpc =
-      OffchainClearingBankRpc(widget.clearingNodeWssUrl);
+  late final OffchainClearingBankRpc _nodeRpc = OffchainClearingBankRpc(
+    widget.clearingNodeWssUrl,
+  );
 
   @override
   void initState() {
@@ -104,6 +108,7 @@ class _OffchainClearingPayPageState extends State<OffchainClearingPayPage> {
   }
 
   Future<void> _loadPrerequisites() async {
+    final chain = context.read<CitizenSdk>().chain;
     try {
       // 1. 付款方绑定的清算行
       final payerBank = await _nodeRpc.queryUserBank(widget.wallet.ss58Address);
@@ -113,8 +118,9 @@ class _OffchainClearingPayPageState extends State<OffchainClearingPayPage> {
       }
 
       // 2. 付款前重新确认收款方仍有链上清算行声明，主账户只按链统一原语派生。
-      final endpoint = await ClearingBankDirectory()
-          .fetchEndpoint(widget.recipientBankCidNumber);
+      final endpoint = await ClearingBankDirectory(
+        chain: chain,
+      ).fetchEndpoint(widget.recipientBankCidNumber);
       if (endpoint == null) {
         _setError('收款方清算行未在链上声明节点,无法付款');
         return;
@@ -133,8 +139,8 @@ class _OffchainClearingPayPageState extends State<OffchainClearingPayPage> {
       _minFeeFen = rate.minFeeFen;
 
       // 5. 当前块高
-      final latest = await ChainRpc().fetchLatestBlock();
-      _currentBlockNumber = latest.blockNumber;
+      final latest = await chain.getBestHead();
+      _currentBlockNumber = latest.number.toInt();
 
       if (mounted) {
         setState(() => _state = _PageState.ready);
@@ -197,8 +203,9 @@ class _OffchainClearingPayPageState extends State<OffchainClearingPayPage> {
       }
       final recipient = _decodeAccount(widget.toSs58Address);
       final payerBankCidBytes = Uint8List.fromList(utf8.encode(_payerBankCid!));
-      final recipientBankCidBytes =
-          Uint8List.fromList(utf8.encode(_recipientBankCid!));
+      final recipientBankCidBytes = Uint8List.fromList(
+        utf8.encode(_recipientBankCid!),
+      );
 
       final intent = NodePaymentIntent(
         txId: NodePaymentIntent.randomTxId(),
@@ -282,8 +289,11 @@ class _OffchainClearingPayPageState extends State<OffchainClearingPayPage> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.error_outline,
-                size: AppLayout.scaledValue(48), color: Colors.red),
+            Icon(
+              Icons.error_outline,
+              size: AppLayout.scaledValue(48),
+              color: Colors.red,
+            ),
             SizedBox(height: AppLayout.scaledValue(16)),
             Text(_errorMessage, textAlign: TextAlign.center),
             SizedBox(height: AppLayout.scaledValue(16)),
@@ -304,15 +314,21 @@ class _OffchainClearingPayPageState extends State<OffchainClearingPayPage> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.check_circle_outline,
-                size: AppLayout.scaledValue(48), color: Colors.green),
+            Icon(
+              Icons.check_circle_outline,
+              size: AppLayout.scaledValue(48),
+              color: Colors.green,
+            ),
             SizedBox(height: AppLayout.scaledValue(16)),
             const Text('支付已受理,清算行会在下一批次上链'),
             SizedBox(height: AppLayout.scaledValue(8)),
-            SelectableText('tx_id: ${_resultTxId ?? ''}',
-                style: TextStyle(
-                    fontFamily: 'monospace',
-                    fontSize: AppLayout.scaledValue(12))),
+            SelectableText(
+              'tx_id: ${_resultTxId ?? ''}',
+              style: TextStyle(
+                fontFamily: 'monospace',
+                fontSize: AppLayout.scaledValue(12),
+              ),
+            ),
             SizedBox(height: AppLayout.scaledValue(16)),
             ElevatedButton(
               onPressed: () => Navigator.pop(context),
@@ -327,8 +343,9 @@ class _OffchainClearingPayPageState extends State<OffchainClearingPayPage> {
   Widget _confirmView() {
     final amountFen = _parseAmountFen();
     final feeFen = (amountFen != null) ? _computeFeeFen(amountFen) : null;
-    final totalFen =
-        (amountFen != null && feeFen != null) ? amountFen + feeFen : null;
+    final totalFen = (amountFen != null && feeFen != null)
+        ? amountFen + feeFen
+        : null;
     return SingleChildScrollView(
       padding: EdgeInsets.all(AppLayout.scaledValue(16)),
       child: Column(
@@ -338,16 +355,14 @@ class _OffchainClearingPayPageState extends State<OffchainClearingPayPage> {
           if (_payerBankCid != null) _kv('付款方清算行', _payerBankCid!),
           _kv('收款方清算行', widget.recipientBankCidNumber),
           if (_payerBankCid != null && _recipientBankCid != null)
-            _kv(
-              '清算类型',
-              _payerBankCid == _recipientBankCid ? '同行' : '跨行',
-            ),
+            _kv('清算类型', _payerBankCid == _recipientBankCid ? '同行' : '跨行'),
           if (widget.memo != null && widget.memo!.isNotEmpty)
             _kv('备注', widget.memo!),
           Divider(height: AppLayout.scaledValue(32)),
           TextField(
             controller: _amountCtrl,
-            enabled: widget.initialAmountYuan == null ||
+            enabled:
+                widget.initialAmountYuan == null ||
                 widget.initialAmountYuan!.isEmpty,
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
             decoration: const InputDecoration(
@@ -383,10 +398,7 @@ class _OffchainClearingPayPageState extends State<OffchainClearingPayPage> {
             child: Text(key, style: const TextStyle(color: Colors.grey)),
           ),
           Expanded(
-            child: Text(
-              value,
-              style: const TextStyle(fontFamily: 'monospace'),
-            ),
+            child: Text(value, style: const TextStyle(fontFamily: 'monospace')),
           ),
         ],
       ),
@@ -406,8 +418,7 @@ class _OffchainClearingPayPageState extends State<OffchainClearingPayPage> {
 
   /// 热钱包 / 冷钱包统一签名入口。
   ///
-  /// - 热钱包:走 `WalletManager.signWithWallet(walletIndex, signingHash)`,
-  ///   每次触发一次生物/密码验证,直接返 64 字节签名。
+  /// - 热钱包:交给 CitizenSDK 按精确 account_id 完成设备认证与签名。
   /// - 清算行付款 payload 当前是 32 字节 signing_hash,冷钱包无法从 hash 独立还原
   ///   PaymentIntent 业务字段,因此不生成离线签名二维码。
   Future<Uint8List> _signSigningHash({
@@ -416,9 +427,14 @@ class _OffchainClearingPayPageState extends State<OffchainClearingPayPage> {
     required BigInt feeFen,
   }) async {
     final wallet = widget.wallet;
-    if (wallet.requiresHotSign) {
-      final manager = WalletManager();
-      return manager.signWithWallet(wallet.walletIndex, signingHash);
+    if (wallet.signMode == CitizenWalletSignMode.hot) {
+      return signCitizenPayload(
+        signing: context.read<CitizenSdk>().signing,
+        context: context,
+        accountId: wallet.accountId,
+        payload: signingHash,
+        action: kOpSignL3Pay,
+      );
     }
 
     throw Exception('清算行付款签名必须使用本机热钱包；冷钱包无法独立验证付款 hash');

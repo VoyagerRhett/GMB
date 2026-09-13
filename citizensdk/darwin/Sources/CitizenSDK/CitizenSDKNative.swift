@@ -270,6 +270,7 @@ internal actor CitizenSDKLifecycleSupervisor {
 internal final class CitizenSDKNative: @unchecked Sendable {
     private enum DeferredStateEvent: Sendable {
         case history(sequence: UInt64)
+        case finalized(sequence: UInt64, block: CitizenBlockRef)
         case capabilities(sequence: UInt64)
         case lifecycle(sequence: UInt64)
     }
@@ -482,6 +483,41 @@ internal final class CitizenSDKNative: @unchecked Sendable {
                             handle, pointer, buffer.baseAddress, UInt32(buffer.count), $0)
                     }, decode: CitizenSDKNativeCodec.storageBatch)
                 }
+            }
+        }
+    }
+    func storageKeysPaged(_ block: CitizenBlockRef, prefix: Data, startKey: Data?,
+                          limit: UInt32) throws -> CitizenSDKOperation<[Data]> {
+        var value = cBlock(block)
+        return try withUnsafePointer(to: &value) { pointer in
+            try Self.withViews([prefix, startKey ?? Data()]) { views in
+                try begin(accept: {
+                    citizensdk_get_storage_keys_paged(
+                        handle, pointer, views[0], startKey == nil ? 0 : 1,
+                        views[1], limit, $0)
+                }, decode: { result in
+                    let values = try CitizenSDKNativeCodec.storageBatch(result)
+                    guard values.allSatisfy({ $0 != nil }) else {
+                        throw CitizenSDKError(.integrity, "Core storage key page contains an absent key")
+                    }
+                    return values.compactMap { $0 }
+                })
+            }
+        }
+    }
+    func callRuntimeAPI(_ block: CitizenBlockRef, method: String, arguments: Data)
+        throws -> CitizenSDKOperation<Data> {
+        var value = cBlock(block)
+        return try withUnsafePointer(to: &value) { pointer in
+            try Self.withViews([Data(method.utf8), arguments]) { views in
+                try begin(accept: {
+                    citizensdk_call_runtime_api(handle, pointer, views[0], views[1], $0)
+                }, decode: { result in
+                    guard let output = try CitizenSDKNativeCodec.storage(result) else {
+                        throw CitizenSDKError(.integrity, "Core Runtime API output is absent")
+                    }
+                    return output
+                })
             }
         }
     }
@@ -739,6 +775,18 @@ internal final class CitizenSDKNative: @unchecked Sendable {
         return try withUnsafePointer(to: &account) { pointer in
             try withView(message) { view in
                 try begin(accept: { citizensdk_sign_wallet_payload(handle, pointer, view, $0) }, decode: CitizenSDKNativeCodec.signature)
+            }
+        }
+    }
+
+    func deriveApplicationKey(accountID: Data, salt: Data, info: Data)
+        throws -> CitizenSDKOperation<Data> {
+        var account = try cAccount(accountID)
+        return try withUnsafePointer(to: &account) { pointer in
+            try Self.withViews([salt, info]) { views in
+                try begin(accept: {
+                    citizensdk_derive_application_key(handle, pointer, views[0], views[1], $0)
+                }, decode: CitizenSDKNativeCodec.applicationKey)
             }
         }
     }
@@ -1480,6 +1528,22 @@ internal final class CitizenSDKNative: @unchecked Sendable {
             guard event.request_id == 0, event.result == 0,
                   event.capability_revision == 0, event.reserved == 0 else { return }
             enqueueDeferredStateEvent(.history(sequence: event.sequence))
+        case 6:
+            guard event.request_id == 0, event.result != 0,
+                  event.capability_revision == 0, event.reserved == 0 else {
+                if event.result != 0 { _ = citizensdk_result_release(event.result) }
+                return
+            }
+            do {
+                let block = try CitizenSDKNativeCodec.block(event.result)
+                guard block.finality == .finalized else {
+                    throw CitizenSDKError(.integrity, "Core finalized event carried a best block")
+                }
+                _ = citizensdk_result_release(event.result)
+                enqueueDeferredStateEvent(.finalized(sequence: event.sequence, block: block))
+            } catch {
+                _ = citizensdk_result_release(event.result)
+            }
         default:
             if event.result != 0 { _ = citizensdk_result_release(event.result) }
         }
@@ -1511,6 +1575,8 @@ internal final class CitizenSDKNative: @unchecked Sendable {
                 switch event {
                 case let .history(sequence):
                     publish(.historyChanged(sequence: sequence))
+                case let .finalized(sequence, block):
+                    publish(.finalizedBlockChanged(sequence: sequence, finalized: block))
                 case let .capabilities(sequence):
                     publish(.capabilitiesChanged(sequence: sequence, capabilities: try capabilities()))
                 case let .lifecycle(sequence):

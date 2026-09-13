@@ -148,8 +148,8 @@ class MultisigTransferProposalAdapter {
 
 /// 多签转账模块导出的提案数据源适配器。
 class MultisigTransferProposalFeed {
-  MultisigTransferProposalFeed({MultisigTransferService? service})
-      : _service = service ?? MultisigTransferService();
+  MultisigTransferProposalFeed({required MultisigTransferService service})
+      : _service = service;
 
   static const Duration _balanceCacheTtl = Duration(seconds: 10);
   static const Duration _proposalCacheTtl = Duration(seconds: 20);

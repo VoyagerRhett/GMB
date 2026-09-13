@@ -23,6 +23,8 @@ use citizen_sdk_contracts::{
     MAX_WALLET_ACCOUNT_INDEX,
 };
 use futures::lock::Mutex as AsyncMutex;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -36,7 +38,10 @@ const MAX_CAS_ATTEMPTS: usize = 32;
 const MAX_CLEANUP_QUEUE: usize = 64;
 
 static WALLET_OPERATION_GATE: OnceLock<AsyncMutex<()>> = OnceLock::new();
-static PRIVATE_KEY_VIEW_LEASES: OnceLock<Mutex<BTreeSet<(u32, [u8; 16])>>> = OnceLock::new();
+type PrivateKeyViewLeaseId = (u32, [u8; 16]);
+type PrivateKeyViewLeaseSet = Mutex<BTreeSet<PrivateKeyViewLeaseId>>;
+
+static PRIVATE_KEY_VIEW_LEASES: OnceLock<PrivateKeyViewLeaseSet> = OnceLock::new();
 
 fn wallet_operation_gate() -> &'static AsyncMutex<()> {
     WALLET_OPERATION_GATE.get_or_init(|| AsyncMutex::new(()))
@@ -189,6 +194,73 @@ impl SigningService {
         message: Vec<u8>,
     ) -> Result<Sr25519Signature, EngineError> {
         self.sign_guarded(account_id, message, &|| Ok(())).await
+    }
+
+    /// 使用当前热账户秘密执行一次通用 HKDF-SHA256。
+    ///
+    /// salt/info 的业务含义完全属于调用 App；本服务只复用与签名相同的账户归属、
+    /// 设备认证、金库解封、公钥复核和用后清理边界。
+    pub async fn derive_application_key(
+        &self,
+        account_id: AccountId32,
+        salt: [u8; 32],
+        info: Vec<u8>,
+    ) -> Result<SecretBuffer, EngineError> {
+        if info.is_empty() || info.len() > 256 {
+            return Err(error(
+                ContractErrorCode::InvalidArgument,
+                "应用派生钥 info 必须包含 1..256 字节",
+            ));
+        }
+        let salt = Zeroizing::new(salt);
+        let info = Zeroizing::new(info);
+        let _guard = wallet_operation_gate().lock().await;
+        require_secure_device(self.vault.as_ref()).await?;
+        let (profile, account) = current_account(self.profiles.as_ref(), account_id, None).await?;
+        let snapshot = self.encrypted_secrets.load(account.secret_ref()).await?;
+        let envelope = snapshot.envelope().cloned().ok_or_else(|| {
+            error(
+                ContractErrorCode::AuthenticationRequired,
+                "指定账户的设备密文不存在",
+            )
+        })?;
+        let secret = self.vault.open(account.secret_ref(), envelope).await?;
+        let (_, current) = current_account(
+            self.profiles.as_ref(),
+            account_id,
+            Some((profile.generation(), account.secret_ref().owner())),
+        )
+        .await?;
+        if current.secret_ref() != account.secret_ref() {
+            return Err(conflict("应用派生钥账户 SecretRef 已改变"));
+        }
+        let public_key = self.signer.public_key(&secret).await?;
+        if public_key.as_bytes() != account_id.as_bytes() {
+            return Err(error(
+                ContractErrorCode::Integrity,
+                "设备密文与应用派生钥 AccountId 不一致",
+            ));
+        }
+        let output = secret.with_secret(|bytes| -> Result<Vec<u8>, EngineError> {
+            let mut extract = Hmac::<Sha256>::new_from_slice(salt.as_slice()).map_err(|_| {
+                error(
+                    ContractErrorCode::Internal,
+                    "无法初始化应用派生钥 HKDF extract",
+                )
+            })?;
+            extract.update(bytes);
+            let prk = Zeroizing::new(extract.finalize().into_bytes().to_vec());
+            let mut expand = Hmac::<Sha256>::new_from_slice(prk.as_slice()).map_err(|_| {
+                error(
+                    ContractErrorCode::Internal,
+                    "无法初始化应用派生钥 HKDF expand",
+                )
+            })?;
+            expand.update(info.as_slice());
+            expand.update(&[1]);
+            Ok(expand.finalize().into_bytes().to_vec())
+        })?;
+        SecretBuffer::try_new(output).map_err(EngineError::from)
     }
 
     /// QR 在认证前后复查有效期与取消；已经派发的金库 future 必须实际排空。

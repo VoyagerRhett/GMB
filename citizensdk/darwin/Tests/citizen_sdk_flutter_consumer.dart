@@ -76,8 +76,12 @@ Future<void> _verify() async {
             lifecycleEvents.add(event.lifecycle);
           case CitizenSdkCapabilitiesChanged():
             capabilityEvents.add(event.snapshot);
+          case CitizenSdkFinalizedBlockChanged():
+            if (event.finalized.finality != CitizenBlockFinality.finalized) {
+              eventFailed = true;
+            }
           case CitizenSdkHistoryChanged():
-            // 历史变化是只读通知；本消费者不读取或修改历史数据。
+          // 历史变化是只读通知；本消费者不读取或修改历史数据。
         }
       },
       onError: (Object _, StackTrace __) {

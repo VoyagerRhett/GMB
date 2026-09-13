@@ -3,8 +3,8 @@ import 'dart:convert';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:citizenapp/wallet/core/device_data_key_vault.dart';
-import 'package:citizenapp/wallet/core/device_subkey.dart';
+import 'package:citizenapp/security/device_data_key_vault.dart';
+import 'package:citizenapp/security/device_subkey.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();

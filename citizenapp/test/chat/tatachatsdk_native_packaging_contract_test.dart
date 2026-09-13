@@ -13,16 +13,29 @@ void main() {
     expect(runner, contains('TATACHATSDK_PACKAGE_IOS_DIR='));
     expect(
       runner,
-      contains(r'TATACHATSDK_PACKAGE_IOS_DIR="$TATA_CONSOLE_CACHE_DIR/dependencies/tatachatsdk/ios"'),
+      contains(
+        r'TATACHATSDK_PACKAGE_IOS_DIR="$TATA_CONSOLE_FLUTTER_ROOT/../../TATA/tatachatsdk/ios"',
+      ),
     );
     expect(runner, contains(r'verify-ios-package "$IOS_APP"'));
-    expect(pubspec, contains('tatachat_sdk:\n    path: ../../TATA/tatachatsdk'));
-    // 依赖配置由控制台在本端生成，产品脚本不得创建或清理共享源码状态。
-    expect(runner, contains(r'$TATA_CONSOLE_FLUTTER_ROOT/pubspec_overrides.yaml'));
+    expect(
+      pubspec,
+      contains('tatachat_sdk:\n    path: ../../TATA/tatachatsdk'),
+    );
+    // path 依赖由控制台只读工程视图直接投影，不再创建第二份 override 配置。
+    expect(runner, isNot(contains('pubspec_overrides.yaml')));
     expect(runner, isNot(contains('cleanup_direct_source_state')));
     expect(runner, isNot(contains(r'rm -f "$TATACHATSDK_ROOT/ios/')));
-    expect(testRunner, contains(r'$TATA_CONSOLE_FLUTTER_ROOT/pubspec_overrides.yaml'));
+    expect(runner, contains('flutter pub get --offline --enforce-lockfile'));
+    expect(runner, contains('flutter build ios --no-pub --release'));
+    expect(runner, contains(r'android/gradlew" --offline'));
+    expect(runner, isNot(contains('\nflutter pub get\n')));
+    expect(testRunner, isNot(contains('pubspec_overrides.yaml')));
     expect(testRunner, isNot(contains('stage_gmb_mobile_source')));
+    expect(
+      testRunner,
+      contains(r'pub get --offline --enforce-lockfile'),
+    );
     expect(podfile, contains('TataChatSDK 通过自身 Flutter FFI plugin'));
     expect(lockfile, contains('- tatachat_sdk (1.0.0)'));
   });

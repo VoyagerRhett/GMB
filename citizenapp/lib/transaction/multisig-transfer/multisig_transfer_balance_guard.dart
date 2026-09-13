@@ -1,7 +1,6 @@
-import 'package:citizenapp/rpc/chain_rpc.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizenapp/my/util/amount_format.dart';
 import 'package:citizenapp/citizen/shared/multisig_create_amount_rules.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 
 /// 多签提案和实际投票的付款账户余额检查。
 class MultisigTransferBalanceGuard {
@@ -34,11 +33,10 @@ class MultisigTransferBalanceGuard {
     required String feeAccountId,
     required String actionLabel,
     double additionalDebitYuan = 0,
-    ChainRpc? chainRpc,
+    required CitizenChain chain,
   }) async {
-    final rpc = chainRpc ?? ChainRpc();
-    final balanceYuan =
-        await rpc.fetchFinalizedBalance(feeAccountId, forceFresh: true);
+    final balance = await chain.getAccountBalance(feeAccountId);
+    final balanceYuan = balance.freeFen.toDouble() / 100;
     final additionalDebitFen = BigInt.from((additionalDebitYuan * 100).round());
     final requiredYuan = institutionFeeAccountRequiredYuan(
       additionalDebitYuan: additionalDebitYuan,
@@ -55,15 +53,13 @@ class MultisigTransferBalanceGuard {
 
   /// 检查签名者付款路径：个人多签提案为 0.1 元，实际 cast 投票为 1 元。
   static Future<String?> checkAdminWalletBalance({
-    required WalletProfile wallet,
+    required CitizenWalletStateAccount wallet,
     required double requiredFeeYuan,
     required String actionLabel,
-    ChainRpc? chainRpc,
+    required CitizenChain chain,
   }) async {
-    final rpc = chainRpc ?? ChainRpc();
-    // (ADR-018 卡⑤)：转账前余额守卫必须读最新 finalized 余额,旁路缓存。
-    final balanceYuan =
-        await rpc.fetchFinalizedBalance(wallet.accountId, forceFresh: true);
+    final balance = await chain.getAccountBalance(wallet.accountId);
+    final balanceYuan = balance.freeFen.toDouble() / 100;
     final edYuan = MultisigCreateAmountRules.fenToYuan(
       MultisigCreateAmountRules.existentialDepositFen,
     );

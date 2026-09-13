@@ -1,9 +1,10 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'package:citizenapp/ui/app_layout.dart';
 import 'package:citizenapp/ui/app_theme.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:citizenapp/wallet/widgets/wallet_qr_dialog.dart';
 
 /// 钱包详情页主视觉中的身份区。
@@ -21,7 +22,7 @@ class WalletIdentityCard extends StatefulWidget {
     required this.onNameChanged,
   });
 
-  final WalletProfile wallet;
+  final CitizenWalletStateAccount wallet;
 
   /// 钱包名提交回调。外层负责持久化,Widget 内部已做 trim 和空值回滚。
   final Future<void> Function(String) onNameChanged;
@@ -31,7 +32,7 @@ class WalletIdentityCard extends StatefulWidget {
 }
 
 class _WalletIdentityCardState extends State<WalletIdentityCard> {
-  /// 当前展示态的钱包名(与 widget.wallet.walletName 同步,编辑提交后更新)。
+  /// 当前展示态的钱包名(与 widget.wallet.name 同步,编辑提交后更新)。
   late String _walletName;
 
   /// 是否处于编辑态。
@@ -43,7 +44,7 @@ class _WalletIdentityCardState extends State<WalletIdentityCard> {
   @override
   void initState() {
     super.initState();
-    _walletName = widget.wallet.walletName;
+    _walletName = widget.wallet.name;
     _nameController = TextEditingController(text: _walletName);
   }
 

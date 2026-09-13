@@ -1,23 +1,36 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:polkadart_keyring/polkadart_keyring.dart';
 import 'package:citizenapp/citizen/shared/institution_info.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_models.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_query_service.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
 import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_service.dart';
+import '../../support/fake_citizen_sdk.dart';
 
-class _RawStorageRpc extends ChainRpc {
-  _RawStorageRpc(this.value);
+class _RawStorageChain extends TestCitizenChain {
+  _RawStorageChain(this.value);
 
   final Uint8List value;
   final List<String> storageKeys = [];
 
   @override
-  Future<Uint8List?> fetchStorage(String storageKeyHex) async {
-    storageKeys.add(storageKeyHex);
+  Future<CitizenBlockRef> getFinalizedHead() async => CitizenBlockRef(
+        hash: '0x${'11' * 32}',
+        number: BigInt.one,
+        finality: CitizenBlockFinality.finalized,
+      );
+
+  @override
+  Future<Uint8List?> getStorage(
+    CitizenBlockRef block,
+    Uint8List key,
+  ) async {
+    storageKeys.add(
+      '0x${key.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join()}',
+    );
     return value;
   }
 }
@@ -83,7 +96,10 @@ void main() {
     return [...compactU32(bytes.length), ...bytes];
   }
 
-  final service = MultisigTransferService();
+  final service = MultisigTransferService(
+    chain: TestCitizenChain(),
+    transactions: TestCitizenTransactions(),
+  );
 
   test('机构 propose_transfer 当前 SCALE payload 的短备注必须可解码', () {
     final institutionAccountId = List<int>.filled(32, 0x11);
@@ -164,9 +180,7 @@ void main() {
       ...remark,
       ...proposer,
     ]);
-    final decoded = await MultisigTransferService(
-      chainRpc: _RawStorageRpc(raw),
-    ).fetchSafetyFundAction(4);
+    final decoded = await MultisigTransferService(chain: _RawStorageChain(raw), transactions: TestCitizenTransactions()).fetchSafetyFundAction(4);
 
     expect(decoded, isNotNull);
     expect(decoded!.actorCidNumber, actorCidNumber);
@@ -179,9 +193,7 @@ void main() {
 
     final trailing = Uint8List.fromList([...raw, 0]);
     expect(
-      await MultisigTransferService(
-        chainRpc: _RawStorageRpc(trailing),
-      ).fetchSafetyFundAction(4),
+      await MultisigTransferService(chain: _RawStorageChain(trailing), transactions: TestCitizenTransactions()).fetchSafetyFundAction(4),
       isNull,
     );
   });
@@ -196,9 +208,7 @@ void main() {
       ...u128Le(BigInt.from(800)),
       ...proposer,
     ]);
-    final decoded = await MultisigTransferService(
-      chainRpc: _RawStorageRpc(raw),
-    ).fetchSweepAction(5);
+    final decoded = await MultisigTransferService(chain: _RawStorageChain(raw), transactions: TestCitizenTransactions()).fetchSweepAction(5);
 
     expect(decoded, isNotNull);
     expect(decoded!.actorCidNumber, actorCidNumber);
@@ -211,9 +221,7 @@ void main() {
 
     final trailing = Uint8List.fromList([...raw, 0]);
     expect(
-      await MultisigTransferService(
-        chainRpc: _RawStorageRpc(trailing),
-      ).fetchSweepAction(5),
+      await MultisigTransferService(chain: _RawStorageChain(trailing), transactions: TestCitizenTransactions()).fetchSweepAction(5),
       isNull,
     );
   });
@@ -314,8 +322,8 @@ void main() {
       4, // Compact(1)
       ...List.filled(32, 0x33),
     ]);
-    final rpc = _RawStorageRpc(raw);
-    final query = ProposalQueryService(chainRpc: rpc);
+    final rpc = _RawStorageChain(raw);
+    final query = ProposalQueryService(chain: rpc);
     final institution = InstitutionInfo(
       cidFullName: '测试机构',
       cidShortName: '测试机构',

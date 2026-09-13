@@ -1,11 +1,9 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizenapp/8964/chain/square_chain_service.dart';
 import 'package:citizenapp/8964/profile/models/profile_presentation.dart';
 import 'package:citizenapp/8964/profile/services/citizen_profile_cache.dart';
 import 'package:citizenapp/my/myid/current_user_context.dart';
 import 'package:citizenapp/my/myid/identity_badge_snapshot_store.dart';
-import 'package:citizenapp/wallet/core/default_account_service.dart';
-import 'package:citizenapp/wallet/core/sign_mode.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 
 /// 广场身份状态。
 ///
@@ -30,7 +28,7 @@ class SquareIdentityState {
   final String? ss58Address;
 
   /// 当前身份账户的钱包签名模式；有账户却缺失模式时，所有钱包签名入口必须拒绝。
-  final SignMode? signMode;
+  final CitizenWalletSignMode? signMode;
 
   /// 链上身份档（徽章分色）：visitor/voting/candidate。
   final String? identityLevel;
@@ -55,22 +53,18 @@ class SquareIdentityState {
 
 class SquareIdentityService {
   const SquareIdentityService({
-    this.walletManager,
-    this.defaultAccountReader,
-    this.chainService,
+    required CitizenSdkWallet wallet,
+    required CurrentUserContext currentUserContext,
+    required this.chainService,
     this.badgeSnapshotStore,
-    this.currentUserContext,
     this.profileCache,
-  });
+  })  : _wallet = wallet,
+        _currentUserContext = currentUserContext;
 
-  final WalletManager? walletManager;
-
-  /// 默认账户只读真源；生产环境使用 [DefaultAccountService]，测试可注入同一契约的
-  /// 内存实现，禁止退回只识别热钱包的旧默认钱包接口。
-  final DefaultAccountReader? defaultAccountReader;
-  final SquareChainService? chainService;
+  final CitizenSdkWallet _wallet;
+  final SquareChainService chainService;
   final IdentityBadgeSnapshotStore? badgeSnapshotStore;
-  final CurrentUserContext? currentUserContext;
+  final CurrentUserContext _currentUserContext;
   final CitizenProfileCache? profileCache;
 
   /// 加载当前广场身份。
@@ -79,20 +73,17 @@ class SquareIdentityService {
   /// 即账户顺序第一项),`walletIndex` 只用于钱包主钥/设备数据钥硬件金库，P-256 设备
   /// 子钥按 CID 保存；公开昵称
   /// 只从 CID 资料缓存读取。[readLiveChain] 仅允许发布等主动链流程传 true;广场浏览必须传 false,
-  /// 只读 CID 级徽章快照，不能因此启动 smoldot（身份账户解析同样按此不链读）。
+  /// 只读 CID 级徽章快照，不能因此发起 CitizenSDK 链读。
   Future<SquareIdentityState> loadCurrent({bool readLiveChain = true}) async {
-    final manager = walletManager ?? WalletManager();
-    final defaultAccount = await (defaultAccountReader ??
-            DefaultAccountService(walletManager: manager))
-        .getDefaultAccount();
+    final defaultAccount = (await _wallet.getState()).defaultAccount;
     if (defaultAccount == null) {
       return const SquareIdentityState(accountId: '');
     }
     // 普通浏览只读默认账户的本机逐 CID 绑定；主动发布才进入下方 finalized 链读。
-    // 两条路径显式分离，禁止用布尔参数让同一个缓存暗中启动 smoldot。
+    // 两条路径显式分离，普通浏览不得因缓存未命中暗中发起链读。
     final current = readLiveChain
         ? null
-        : await (currentUserContext ?? CurrentUserContext.instance).resolve();
+        : await _currentUserContext.resolve();
     final identityAccountId = current?.accountId ?? defaultAccount.accountId;
     final identitySs58 = current?.ss58Address ?? defaultAccount.ss58Address;
 
@@ -102,8 +93,7 @@ class SquareIdentityService {
     final snapshotStore = badgeSnapshotStore ?? IdentityBadgeSnapshotStore();
     if (readLiveChain) {
       try {
-        final chainIdentity = await (chainService ?? SquareChainService())
-            .fetchIdentity(identityAccountId);
+        final chainIdentity = await chainService.fetchIdentity(identityAccountId);
         final liveCidNumber = chainIdentity.cidNumber?.trim();
         cidNumber = liveCidNumber == null || liveCidNumber.isEmpty
             ? null

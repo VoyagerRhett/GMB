@@ -1,9 +1,11 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_page.dart';
 import 'package:citizenapp/citizen/shared/institution_info.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_limit_service.dart';
 import 'package:citizenapp/ui/app_theme.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 多签转账入口卡片。
@@ -23,7 +25,7 @@ class MultisigTransferEntryCard extends StatelessWidget {
   final InstitutionInfo institution;
   final bool isPersonal;
   final bool enabled;
-  final Future<List<WalletProfile>> Function() loadAdminWallets;
+  final Future<List<CitizenWalletStateAccount>> Function() loadAdminWallets;
   final Future<void> Function()? onCreated;
 
   @override
@@ -111,7 +113,9 @@ class MultisigTransferEntryCard extends StatelessWidget {
       return;
     }
 
-    final limitService = ProposalLimitService();
+    final limitService = ProposalLimitService(
+      chain: context.read<CitizenSdk>().chain,
+    );
     final activeIds = await limitService.fetchActiveProposalIds(institution);
     if (!context.mounted) return;
     if (activeIds.length >= ProposalLimitService.maxActiveProposalsPerSubject) {

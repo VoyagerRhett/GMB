@@ -1,7 +1,4 @@
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
-import 'package:citizenapp/wallet/core/default_account_service.dart';
-import 'package:flutter/foundation.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
 
 import 'citizen_identity_chain_reader.dart';
 
@@ -35,34 +32,21 @@ class FinalizedIdentity {
 /// 私钥泄漏可换绑到新账户而 CID(及其通讯录/公文/文章/视频/粉丝)永不丢失。
 class FinalizedIdentityResolver {
   FinalizedIdentityResolver({
-    WalletManager? walletManager,
-    DefaultAccountReader? defaultAccountReader,
+    required CitizenSdkWallet wallet,
+    required CitizenChain chain,
     CitizenIdentityChainReader? chainReader,
-    ChainRpc? chainRpc,
-  })  : _defaultAccountReader = defaultAccountReader ??
-            DefaultAccountService(
-                walletManager: walletManager ?? WalletManager()),
+  })  : _wallet = wallet,
         _chainReader =
-            chainReader ?? CitizenIdentityChainReader(chainRpc: chainRpc);
+            chainReader ?? CitizenIdentityChainReader(chain: chain);
 
-  final DefaultAccountReader _defaultAccountReader;
+  final CitizenSdkWallet _wallet;
   final CitizenIdentityChainReader _chainReader;
-
-  static FinalizedIdentityResolver _instance = FinalizedIdentityResolver();
-  static FinalizedIdentityResolver get instance => _instance;
-
-  @visibleForTesting
-  static set debugInstance(FinalizedIdentityResolver resolver) =>
-      _instance = resolver;
-
-  @visibleForTesting
-  static void resetDebugInstance() => _instance = FinalizedIdentityResolver();
 
   /// 解析当前默认账户对应的用户。热、冷账户走同一条公开链读取路径。
   ///
   /// 链读异常**不吞**(上抛给调用方 fail-closed,绝不静默降级成访客/未注册)。
   Future<FinalizedIdentity?> resolve() async {
-    final account = await _defaultAccountReader.getDefaultAccount();
+    final account = (await _wallet.getState()).defaultAccount;
     if (account == null) return null;
     final snapshot = await _chainReader.readByAccountId(account.accountId);
     return FinalizedIdentity(

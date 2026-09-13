@@ -86,6 +86,10 @@ Future<void> _verify() async {
             lifecycleEvents.add(event.lifecycle);
           case CitizenSdkCapabilitiesChanged():
             capabilityEvents.add(event.snapshot);
+          case CitizenSdkFinalizedBlockChanged():
+            if (event.finalized.finality != CitizenBlockFinality.finalized) {
+              eventFailed = true;
+            }
         }
       },
       onError: (Object _, StackTrace __) {

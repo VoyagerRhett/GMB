@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:tatachat_sdk/tatachat_sdk.dart';
 
 import 'package:citizenapp/8964/models/square_models.dart';
 import 'package:citizenapp/8964/pages/square_article_detail_page.dart';
@@ -25,15 +28,13 @@ import 'package:citizenapp/8964/services/square_account_deletion_service.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/chat/chat_entry.dart';
 import 'package:citizenapp/my/myid/current_user_context.dart';
+import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
 import 'package:citizenapp/my/membership/membership_revision.dart';
 import 'package:citizenapp/my/membership/subscription_service.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
 import 'package:citizenapp/qr/qr_protocols.dart';
 import 'package:citizenapp/ui/app_theme.dart';
-import 'package:citizenapp/wallet/core/device_subkey.dart' show bytesToHex;
-import 'package:citizenapp/wallet/core/secure_seed_store.dart';
-import 'package:citizenapp/wallet/core/seed_sign_error.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/security/device_subkey.dart' show bytesToHex;
 
 /// 推特式用户主页。
 ///
@@ -102,7 +103,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
   late final CitizenProfileCache _cache;
   late final CitizenProfileMediaCache _mediaCache;
   late final SquareSessionProvider _sessionProvider;
-  late final SubscriptionService _subscriptionService;
+  SubscriptionService? _subscriptionService;
   late final DirectChatOpener _directChat;
   CitizenProfile? _profile;
   CitizenProfileMediaSnapshot _profileMedia =
@@ -117,6 +118,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
 
   /// 「他人视角」下看的是不是自己账户；true → 关注/私信/通知/订阅按钮置灰不可点。
   bool _isOwnAccount = false;
+  bool _dependenciesReady = false;
 
   @override
   void initState() {
@@ -124,8 +126,6 @@ class _UserProfilePageState extends State<UserProfilePage> {
     _api = widget.api ?? CitizenProfileApi();
     _cache = widget.cache ?? const CitizenProfileCache();
     _mediaCache = widget.mediaCache ?? CitizenProfileMediaCache();
-    _sessionProvider = widget.sessionProvider ?? SquareSessionProvider.instance;
-    _subscriptionService = widget.subscriptionService ?? SubscriptionService();
     _membershipDecision = widget.initialMembershipDecision;
     _membershipState = widget.initialMembershipState;
     _directChat = widget.onOpenDirectChat ?? openDirectChat;
@@ -134,11 +134,36 @@ class _UserProfilePageState extends State<UserProfilePage> {
         widget.initialProfileMedia ?? const CitizenProfileMediaSnapshot();
     // 「他人视角看的其实是自己」判定需要目标当前绑定账户（profile.account_id），
     // 故在资料加载后（_load）再算；注入了初始资料时先算一次。
+    MembershipRevision.instance.listenable.addListener(_onMembershipChanged);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    _sessionProvider =
+        widget.sessionProvider ?? context.read<SquareSessionProvider>();
+    final injectedSubscription = widget.subscriptionService;
+    if (injectedSubscription != null) {
+      _subscriptionService = injectedSubscription;
+    } else {
+      final sdk = context.read<CitizenSdk?>();
+      final identityResolver = context.read<FinalizedIdentityResolver?>();
+      if (sdk != null && identityResolver != null) {
+        _subscriptionService = SubscriptionService(
+          wallet: sdk.wallet,
+          chain: sdk.chain,
+          transactions: sdk.transactions,
+          identityResolver: identityResolver,
+          sessionProvider: _sessionProvider,
+        );
+      }
+    }
+    _dependenciesReady = true;
     if (_profile != null) {
       _resolveOwnAccount(_profile!.accountId);
       unawaited(_loadProfileMedia(_profile!));
     }
-    MembershipRevision.instance.listenable.addListener(_onMembershipChanged);
     if (widget.isSelf) unawaited(_loadConfirmedMembership());
     _load();
   }
@@ -163,8 +188,10 @@ class _UserProfilePageState extends State<UserProfilePage> {
   /// 本人徽章读取本地 CitizenServe 展示快照；没有快照时保持无会员展示。
   /// 他人主页使用 CitizenServe 当前 D1 公开资料，不存在第三种未知展示态。
   Future<void> _loadConfirmedMembership() async {
+    final subscriptionService = _subscriptionService;
+    if (subscriptionService == null) return;
     try {
-      final snapshot = await _subscriptionService.readDisplaySnapshot(
+      final snapshot = await subscriptionService.readDisplaySnapshot(
         widget.cidNumber,
       );
       if (!mounted || snapshot == null) return;
@@ -195,8 +222,9 @@ class _UserProfilePageState extends State<UserProfilePage> {
     final target = targetAccountId?.trim() ?? '';
     if (target.isEmpty) return;
     // 浏览者身份账户来自本机当前默认账户上下文，不为普通主页读取链。
-    final loadViewer = widget.viewerAccountLoader ??
-        () async => CurrentUserContext.instance.accountId();
+    final loadViewer =
+        widget.viewerAccountLoader ??
+        () async => context.read<CurrentUserContext>().accountId();
     try {
       final viewer = (await loadViewer())?.trim() ?? '';
       if (!mounted) return;
@@ -309,8 +337,8 @@ class _UserProfilePageState extends State<UserProfilePage> {
         : current.followers + 1;
     final nextMutualFollowing = current.isFollowedBy
         ? (wasFollowing
-            ? (current.mutualFollowing > 0 ? current.mutualFollowing - 1 : 0)
-            : current.mutualFollowing + 1)
+              ? (current.mutualFollowing > 0 ? current.mutualFollowing - 1 : 0)
+              : current.mutualFollowing + 1)
         : current.mutualFollowing;
     // 乐观更新。
     setState(() {
@@ -403,11 +431,13 @@ class _UserProfilePageState extends State<UserProfilePage> {
       _snack('资料尚未加载，请稍后再试');
       return;
     }
-    final walletManager = WalletManager();
-    final walletIndex = await walletManager.getDefaultWalletIndex();
+    final sdk = context.read<CitizenSdk>();
+    final walletState = await sdk.wallet.getState();
     if (!mounted) return;
-    if (walletIndex == null) {
-      _snack('未找到可用热钱包，无法注销');
+    if (!walletState.accounts.any(
+      (account) => account.accountId == selfAccountId,
+    )) {
+      _snack('未找到当前身份钱包账户，无法注销');
       return;
     }
 
@@ -432,16 +462,15 @@ class _UserProfilePageState extends State<UserProfilePage> {
     if (confirmed != true || !mounted) return;
 
     try {
-      final walletManager = WalletManager();
-      final signMode = await walletManager.signModeForAccountId(selfAccountId);
-      final walletSigner = WalletAccountSigner(walletManager: walletManager);
-      await SquareAccountDeletionService().deleteAccount(
+      await SquareAccountDeletionService(
+        chatRuntime: context.read<ChatSdk>(),
+      ).deleteAccount(
         cidNumber: widget.cidNumber,
         accountId: selfAccountId,
-        // 账户注销是钱包账户签名：Hot 读本机私钥，Cold 只走 CitizenWallet QR_V1。
-        // 设备子钥仍按 cid_number 精确删除，不进入 SignMode。
+        // 账户注销签名统一交给 CitizenSDK，冷热模式不在页面分支。
+        // 设备子钥仍按 cid_number 精确删除，不进入钱包签名模式。
         signAction: (message) async =>
-            '0x${bytesToHex(await walletSigner.sign(context: context, accountId: selfAccountId, signMode: signMode, payload: message, action: QrActions.squareAccountAction, requestPrefix: 'sqdel_'))}',
+            '0x${bytesToHex(await signCitizenPayload(signing: sdk.signing, context: context, accountId: selfAccountId, payload: message, action: QrActions.squareAccountAction))}',
       );
     } on SquareAccountLocalCleanupException catch (e) {
       // Worker 已经完成不可逆注销；此时不能误报“注销失败”诱导用户重复提交。
@@ -453,12 +482,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
     } on SquareApiException catch (e) {
       if (mounted) _snack('注销失败：${e.message}');
       return;
-    } on SecureSeedException catch (e) {
-      // 生物识别取消 / 无锁屏 / 金库错误：不属 WalletAuthException，
-      // 此前会逃逸成无声失败（点注销后无反应）。
-      if (mounted) _snack(seedSignErrorMessage(e));
-      return;
-    } on WalletAuthException catch (e) {
+    } on CitizenSdkException catch (e) {
       if (mounted) _snack('注销已取消：${e.message}');
       return;
     } on Exception catch (e) {
@@ -535,9 +559,8 @@ class _UserProfilePageState extends State<UserProfilePage> {
 
   String? _mediaUrl(String? objectKey, {CitizenProfile? profile}) =>
       objectKey == null
-          ? null
-          : _api.mediaUrl(objectKey,
-              updatedAt: (profile ?? _profile)?.updatedAt);
+      ? null
+      : _api.mediaUrl(objectKey, updatedAt: (profile ?? _profile)?.updatedAt);
 
   Map<String, String>? get _mediaHeaders => _session == null
       ? null
@@ -562,8 +585,8 @@ class _UserProfilePageState extends State<UserProfilePage> {
       fit: BoxFit.cover,
       frameBuilder: (context, child, frame, syncLoaded) =>
           syncLoaded || frame != null
-              ? child
-              : const ColoredBox(color: AppTheme.surfaceMuted),
+          ? child
+          : const ColoredBox(color: AppTheme.surfaceMuted),
       errorBuilder: (_, __, ___) =>
           const ColoredBox(color: AppTheme.surfaceMuted),
     );
@@ -579,6 +602,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
       key: ValueKey<String>('creator-subscribe:$creatorCidNumber'),
       creatorCidNumber: creatorCidNumber,
       enabled: !_isOwnAccount,
+      sessionProvider: _sessionProvider,
     );
   }
 
@@ -672,7 +696,8 @@ class _UserProfilePageState extends State<UserProfilePage> {
 
   @override
   Widget build(BuildContext context) {
-    final expandedHeight = _bannerHeight +
+    final expandedHeight =
+        _bannerHeight +
         ProfileCategoryTabs.height +
         ProfileHeaderCard.requiredHeight(context, bio: _profile?.bio ?? '');
     return DefaultTabController(

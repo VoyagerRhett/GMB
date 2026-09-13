@@ -1,12 +1,12 @@
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:citizenapp/my/util/amount_format.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
 import 'package:citizenapp/transaction/offchain-transaction/rpc/offchain_clearing_rpc.dart';
-import 'package:citizenapp/transaction/offchain-transaction/rpc/onchain_clearing_bank_rpc.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/transaction/offchain-transaction/services/onchain_clearing_bank_chain.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 扫码支付清算体系 Step 1 新增:**提现** 清算行主账户 → L3 自持账户。
@@ -23,7 +23,7 @@ class WithdrawPage extends StatefulWidget {
     this.wssUrl,
   });
 
-  /// L3 用户链账户主键(0x+64hex):按 SignMode 分流签名并构造 signerPublicKey。
+  /// L3 用户链账户主键(0x+64hex):由 CitizenSDK 分流签名并构造 signerPublicKey。
   final String accountId;
 
   /// L3 用户 SS58 地址(查询清算行存款余额、构造提现 extrinsic 的来源地址)。
@@ -58,8 +58,8 @@ class _WithdrawPageState extends State<WithdrawPage> {
 
   Future<void> _loadBalance() async {
     try {
-      final rpc = OffchainClearingBankRpc(widget.wssUrl!);
-      final v = await rpc.queryBalance(widget.ss58Address);
+      final chain = OffchainClearingBankRpc(widget.wssUrl!);
+      final v = await chain.queryBalance(widget.ss58Address);
       if (!mounted) return;
       setState(() => _balanceFen = v);
     } catch (e) {
@@ -81,8 +81,9 @@ class _WithdrawPageState extends State<WithdrawPage> {
             SizedBox(height: AppLayout.scaled(context, 16)),
             TextField(
               controller: _amountCtrl,
-              keyboardType:
-                  const TextInputType.numberWithOptions(decimal: true),
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
               decoration: const InputDecoration(
                 labelText: '提现金额(元)',
                 hintText: '例如 50.00',
@@ -103,7 +104,9 @@ class _WithdrawPageState extends State<WithdrawPage> {
             Text(
               '链上费:金额 × 0.1%(最低 0.1 元)',
               style: TextStyle(
-                  fontSize: AppLayout.scaled(context, 12), color: Colors.grey),
+                fontSize: AppLayout.scaled(context, 12),
+                color: Colors.grey,
+              ),
             ),
           ],
         ),
@@ -113,34 +116,38 @@ class _WithdrawPageState extends State<WithdrawPage> {
 
   Widget _buildBalanceLine() {
     if (widget.wssUrl == null || widget.wssUrl!.isEmpty) {
-      return const Text('当前清算行存款余额:未连接节点',
-          style: TextStyle(color: Colors.grey));
+      return const Text(
+        '当前清算行存款余额:未连接节点',
+        style: TextStyle(color: Colors.grey),
+      );
     }
     if (_balanceErr != null) {
-      return Text('查询余额失败:$_balanceErr',
-          style: const TextStyle(color: Colors.red));
+      return Text(
+        '查询余额失败:$_balanceErr',
+        style: const TextStyle(color: Colors.red),
+      );
     }
     if (_balanceFen == null) {
       return const Text('正在查询清算行存款余额...', style: TextStyle(color: Colors.grey));
     }
     final yuan = _balanceFen! / 100.0;
-    return Text('当前清算行存款余额:¥${AmountFormat.formatThousands(yuan)}',
-        style: TextStyle(fontSize: AppLayout.scaledValue(14)));
+    return Text(
+      '当前清算行存款余额:¥${AmountFormat.formatThousands(yuan)}',
+      style: TextStyle(fontSize: AppLayout.scaledValue(14)),
+    );
   }
 
   Future<void> _submit() async {
     final amountFen = _parseAmountToFen(_amountCtrl.text);
     if (amountFen == null || amountFen <= BigInt.zero) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请输入有效的提现金额(元)')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('请输入有效的提现金额(元)')));
       return;
     }
 
     if (widget.wssUrl == null || widget.wssUrl!.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请先绑定清算行')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('请先绑定清算行')));
       return;
     }
 
@@ -150,23 +157,17 @@ class _WithdrawPageState extends State<WithdrawPage> {
       if (publicKeyBytes.length != 32) {
         throw Exception('账户公钥必须是 32 字节');
       }
-      final walletManager = WalletManager();
-      final signMode =
-          await walletManager.signModeForAccountId(widget.accountId);
-      final walletSigner = WalletAccountSigner(walletManager: walletManager);
-
-      final rpc = OnchainClearingBankRpc();
-      final result = await rpc.withdraw(
-        fromSs58Address: widget.ss58Address,
+      final sdk = context.read<CitizenSdk>();
+      final chain = OnchainClearingBankChain(transactions: sdk.transactions);
+      final result = await chain.withdraw(
         signerPublicKey: Uint8List.fromList(publicKeyBytes),
         amountFen: amountFen,
-        sign: (payload) => walletSigner.sign(
-          context: context,
-          accountId: widget.accountId,
-          signMode: signMode,
-          payload: payload,
-          action: QrActions.withdrawClearingBank,
-          requestPrefix: 'wd_',
+        externalSigning: (pending) => showCitizenSdkQrResponse(
+          context,
+          request: pending.qrRequest,
+          expiresAt: BigInt.from(
+            pending.expiresAt.millisecondsSinceEpoch ~/ 1000,
+          ),
         ),
       );
 
@@ -175,10 +176,6 @@ class _WithdrawPageState extends State<WithdrawPage> {
         SnackBar(content: Text('提现已提交,tx=${_short(result.txHash)}')),
       );
       Navigator.pop(context, true);
-    } on WalletAuthException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(e.message)));
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)

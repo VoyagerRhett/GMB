@@ -9,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:citizenapp/8964/models/square_models.dart';
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/8964/profile/user_profile_page.dart';
+import 'package:citizenapp/my/membership/subscription_service.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/8964/services/square_post_store.dart';
 
@@ -19,19 +20,31 @@ Widget _page(
   bool withSession = true,
   bool isSelf = true,
   SquareSessionProvider? sessionProvider,
-}) =>
-    MaterialApp(
-      home: UserProfilePage(
-        cidNumber: fakeSession().cidNumber,
-        isSelf: isSelf,
-        api: api,
-        cache: FakeProfileCache(),
-        sessionProvider: sessionProvider ??
-            FakeSessionProvider(withSession ? fakeSession() : null),
-      ),
-    );
+}) => MaterialApp(
+  home: UserProfilePage(
+    cidNumber: fakeSession().cidNumber,
+    isSelf: isSelf,
+    api: api,
+    cache: FakeProfileCache(),
+    sessionProvider:
+        sessionProvider ??
+        FakeSessionProvider(withSession ? fakeSession() : null),
+    subscriptionService: _NullSubscriptionService(),
+    viewerAccountLoader: () async => null,
+  ),
+);
 
-class _DelayedSessionProvider extends SquareSessionProvider {
+class _NullSubscriptionService implements SubscriptionService {
+  @override
+  Future<MembershipDisplaySnapshot?> readDisplaySnapshot(
+    String cidNumber,
+  ) async => null;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _DelayedSessionProvider implements SquareSessionProvider {
   final Completer<SquareSession?> completer = Completer<SquareSession?>();
   int calls = 0;
 
@@ -40,18 +53,29 @@ class _DelayedSessionProvider extends SquareSessionProvider {
     calls++;
     return completer.future;
   }
+
+  @override
+  Future<SquareSessionResolution> resolveSession({bool refresh = false}) async {
+    final session = await ensureSession();
+    return session == null
+        ? const SquareSessionResolution(SquareSessionStatus.noWallet)
+        : SquareSessionResolution(SquareSessionStatus.ready, session: session);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _RefreshingSessionProvider extends SquareSessionProvider {
+class _RefreshingSessionProvider implements SquareSessionProvider {
   int refreshCalls = 0;
 
   SquareSession _session(String token) => SquareSession(
-        sessionToken: token,
-        cidNumber: fakeSession().cidNumber,
-        bindingRevision: 1,
-        accountId: kOwner,
-        expiresAt: DateTime.now().millisecondsSinceEpoch + 60000,
-      );
+    sessionToken: token,
+    cidNumber: fakeSession().cidNumber,
+    bindingRevision: 1,
+    accountId: kOwner,
+    expiresAt: DateTime.now().millisecondsSinceEpoch + 60000,
+  );
 
   @override
   Future<SquareSession?> ensureSession() async => _session('stale-token');
@@ -61,15 +85,26 @@ class _RefreshingSessionProvider extends SquareSessionProvider {
     refreshCalls++;
     return _session('fresh-token');
   }
+
+  @override
+  Future<SquareSessionResolution> resolveSession({bool refresh = false}) async {
+    final session = await (refresh ? refreshSession() : ensureSession());
+    return SquareSessionResolution(SquareSessionStatus.ready, session: session);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _IdentityUnavailableSessionProvider extends SquareSessionProvider {
+class _IdentityUnavailableSessionProvider implements SquareSessionProvider {
   @override
-  Future<SquareSessionResolution> resolveSession(
-          {bool refresh = false}) async =>
-      const SquareSessionResolution(
-        SquareSessionStatus.identityUnavailable,
-      );
+  Future<SquareSessionResolution> resolveSession({
+    bool refresh = false,
+  }) async =>
+      const SquareSessionResolution(SquareSessionStatus.identityUnavailable);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _PendingAuthorPostsApi extends FakeProfileApi {
@@ -86,8 +121,7 @@ class _PendingAuthorPostsApi extends FakeProfileApi {
     int limit = 20,
     int? cursor,
     SquareSession? session,
-  }) =>
-      completer.future;
+  }) => completer.future;
 }
 
 SquareLocalPost _localPost({
@@ -189,32 +223,32 @@ void main() {
   });
 
   testWidgets(
-      'videos tab requests video posts before pagination and renders tiles', (
-    tester,
-  ) async {
-    final api = FakeProfileApi(
-      sampleProfile(),
-      authorPosts: [
-        samplePost(
-          id: 'v1',
-          postType: SquarePostType.video,
-          media: const [
-            SquareMediaItem(mediaKind: SquareMediaKind.video, url: ''),
-          ],
-        ),
-      ],
-    );
-    await tester.pumpWidget(_page(api));
-    await tester.pumpAndSettle();
+    'videos tab requests video posts before pagination and renders tiles',
+    (tester) async {
+      final api = FakeProfileApi(
+        sampleProfile(),
+        authorPosts: [
+          samplePost(
+            id: 'v1',
+            postType: SquarePostType.video,
+            media: const [
+              SquareMediaItem(mediaKind: SquareMediaKind.video, url: ''),
+            ],
+          ),
+        ],
+      );
+      await tester.pumpWidget(_page(api));
+      await tester.pumpAndSettle();
 
-    await tester.tap(
-      find.byKey(const ValueKey<String>('profile-tab-videos')),
-    );
-    await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey<String>('profile-tab-videos')),
+      );
+      await tester.pumpAndSettle();
 
-    expect(api.authorPostTypes.last, SquarePostType.video);
-    expect(find.byIcon(Icons.play_circle_fill_rounded), findsWidgets);
-  });
+      expect(api.authorPostTypes.last, SquarePostType.video);
+      expect(find.byIcon(Icons.play_circle_fill_rounded), findsWidgets);
+    },
+  );
 
   testWidgets('articles tab renders article cards with title', (tester) async {
     final api = FakeProfileApi(
@@ -240,37 +274,37 @@ void main() {
   });
 
   testWidgets(
-      'posts tab includes text and images but excludes articles and videos', (
-    tester,
-  ) async {
-    final api = FakeProfileApi(
-      sampleProfile(),
-      authorPosts: [
-        samplePost(id: 'n1', text: '普通帖子正文'),
-        samplePost(
-          id: 'v1',
-          text: '视频配文',
-          postType: SquarePostType.video,
-          media: const [
-            SquareMediaItem(mediaKind: SquareMediaKind.video, url: ''),
-          ],
-        ),
-        samplePost(
-          id: 'a1',
-          postType: SquarePostType.article,
-          title: '文章标题',
-          text: '文章正文',
-        ),
-      ],
-    );
-    await tester.pumpWidget(_page(api));
-    await tester.pumpAndSettle();
+    'posts tab includes text and images but excludes articles and videos',
+    (tester) async {
+      final api = FakeProfileApi(
+        sampleProfile(),
+        authorPosts: [
+          samplePost(id: 'n1', text: '普通帖子正文'),
+          samplePost(
+            id: 'v1',
+            text: '视频配文',
+            postType: SquarePostType.video,
+            media: const [
+              SquareMediaItem(mediaKind: SquareMediaKind.video, url: ''),
+            ],
+          ),
+          samplePost(
+            id: 'a1',
+            postType: SquarePostType.article,
+            title: '文章标题',
+            text: '文章正文',
+          ),
+        ],
+      );
+      await tester.pumpWidget(_page(api));
+      await tester.pumpAndSettle();
 
-    expect(find.text('普通帖子正文'), findsOneWidget);
-    expect(find.text('视频配文'), findsNothing);
-    expect(find.text('文章正文'), findsNothing);
-    expect(api.authorPostTypes.first, SquarePostType.document);
-  });
+      expect(find.text('普通帖子正文'), findsOneWidget);
+      expect(find.text('视频配文'), findsNothing);
+      expect(find.text('文章正文'), findsNothing);
+      expect(api.authorPostTypes.first, SquarePostType.document);
+    },
+  );
 
   testWidgets('empty posts tab shows the empty label', (tester) async {
     await tester.pumpWidget(_page(FakeProfileApi(sampleProfile())));
@@ -318,9 +352,7 @@ void main() {
       throwOnAuthorPosts: true,
     );
 
-    await tester.pumpWidget(
-      _page(api, withSession: false, isSelf: false),
-    );
+    await tester.pumpWidget(_page(api, withSession: false, isSelf: false));
     await tester.pumpAndSettle();
 
     expect(api.localPostCalls, 0);

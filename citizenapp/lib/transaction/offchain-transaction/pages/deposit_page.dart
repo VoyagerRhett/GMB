@@ -1,11 +1,11 @@
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
-import 'package:citizenapp/transaction/offchain-transaction/rpc/onchain_clearing_bank_rpc.dart';
+import 'package:citizenapp/transaction/offchain-transaction/services/onchain_clearing_bank_chain.dart';
 import 'package:citizenapp/transaction/offchain-transaction/services/clearing_bank_prefs.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 扫码支付清算体系 Step 1 新增:**充值** L3 自持账户 → 清算行主账户。
@@ -13,7 +13,7 @@ import 'package:citizenapp/ui/app_layout.dart';
 ///
 /// - 调链上 `deposit(amount)`(call_index 31)。
 /// - 链上费按金额 0.1% 最低 0.1 元，由 runtime 唯一 `RuntimeFeeRouter` 指定签名者付款。
-/// - 钱包账户按 SignMode 严格分流：Hot 本机签名，Cold 交给 CitizenWallet 扫码签名。
+/// - 钱包账户由 CitizenSDK 严格分流：热账户本机签名，冷账户交给独立公民钱包扫码。
 class DepositPage extends StatefulWidget {
   const DepositPage({
     super.key,
@@ -124,23 +124,17 @@ class _DepositPageState extends State<DepositPage> {
       if (publicKeyBytes.length != 32) {
         throw Exception('账户公钥必须是 32 字节');
       }
-      final walletManager = WalletManager();
-      final signMode =
-          await walletManager.signModeForAccountId(widget.accountId);
-      final walletSigner = WalletAccountSigner(walletManager: walletManager);
-
-      final rpc = OnchainClearingBankRpc();
-      final result = await rpc.deposit(
-        fromSs58Address: widget.ss58Address,
+      final sdk = context.read<CitizenSdk>();
+      final chain = OnchainClearingBankChain(transactions: sdk.transactions);
+      final result = await chain.deposit(
         signerPublicKey: Uint8List.fromList(publicKeyBytes),
         amountFen: amountFen,
-        sign: (payload) => walletSigner.sign(
-          context: context,
-          accountId: widget.accountId,
-          signMode: signMode,
-          payload: payload,
-          action: QrActions.depositClearingBank,
-          requestPrefix: 'dep_',
+        externalSigning: (pending) => showCitizenSdkQrResponse(
+          context,
+          request: pending.qrRequest,
+          expiresAt: BigInt.from(
+            pending.expiresAt.millisecondsSinceEpoch ~/ 1000,
+          ),
         ),
       );
 
@@ -149,10 +143,6 @@ class _DepositPageState extends State<DepositPage> {
         SnackBar(content: Text('充值已提交,tx=${_short(result.txHash)}')),
       );
       Navigator.pop(context, true);
-    } on WalletAuthException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(e.message)));
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)

@@ -1,3 +1,7 @@
+import 'package:provider/provider.dart';
+
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -26,8 +30,8 @@ import 'package:citizenapp/citizen/shared/proposal/proposal_local_store.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_models.dart';
 import 'package:citizenapp/my/myid/current_user_context.dart';
 import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_proposal_adapter.dart';
+import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_service.dart';
 import 'package:citizenapp/ui/app_theme.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 统一机构详情页(ADR-028 决策 2/6)——替代公权 `PublicInstitutionDetailPage`
@@ -63,19 +67,13 @@ class InstitutionDetailPage extends StatefulWidget {
 }
 
 class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
-  late final InstitutionChainState _chainState =
-      widget.chainState ?? LiveInstitutionChainState();
-
-  final InstitutionAdminService _adminService = InstitutionAdminService();
-  final WalletManager _walletManager = WalletManager();
-  final MultisigTransferProposalFeed _multisigTransferFeed =
-      MultisigTransferProposalFeed();
-  final ActivationService _activationService = ActivationService();
-  late final ProposalContextResolver _contextResolver = ProposalContextResolver(
-    adminService: _adminService,
-    walletManager: _walletManager,
-    activationService: _activationService,
-  );
+  late final InstitutionChainState _chainState;
+  InstitutionAdminService? _adminService;
+  CitizenSdkWallet? _wallet;
+  MultisigTransferProposalFeed? _multisigTransferFeed;
+  ActivationService? _activationService;
+  ProposalContextResolver? _contextResolver;
+  bool _dependenciesReady = false;
 
   Institution? _inst;
 
@@ -99,7 +97,7 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
   List<InstitutionAdminView> _adminViews = const [];
 
   // 治理路径专用(管理员角色 / 激活 / 富提案列表)。
-  List<WalletProfile> _adminWallets = const [];
+  List<CitizenWalletStateAccount> _adminWallets = const [];
   bool _isCurrentUserAdmin = false;
   Set<String> _importedColdAccountIds = const {};
   Set<String> _activatedAccountIds = const {};
@@ -123,13 +121,58 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
   @override
   void initState() {
     super.initState();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    final sdk = context.read<CitizenSdk?>();
+    if (sdk == null) {
+      final injectedChainState = widget.chainState;
+      if (injectedChainState == null) {
+        throw StateError('机构详情缺少 CitizenSDK');
+      }
+      // 只读 Widget 夹具可直接注入已经完成链投影的 InstitutionChainState；
+      // 正式 App 根始终走下方唯一 CitizenSDK 实例。
+      _chainState = injectedChainState;
+      _dependenciesReady = true;
+      _load();
+      return;
+    }
+    final wallet = sdk.wallet;
+    _wallet = wallet;
+    final multisigService = MultisigTransferService(
+      chain: sdk.chain,
+      transactions: sdk.transactions,
+    );
+    final multisigFeed = MultisigTransferProposalFeed(service: multisigService);
+    _multisigTransferFeed = multisigFeed;
+    final adminService = InstitutionAdminService(chain: sdk.chain);
+    _adminService = adminService;
+    final activationService = ActivationService(adminService: adminService);
+    _activationService = activationService;
+    _chainState =
+        widget.chainState ??
+        LiveInstitutionChainState(
+          chain: sdk.chain,
+          transactions: sdk.transactions,
+          adminService: adminService,
+          feed: multisigFeed,
+        );
+    _contextResolver = ProposalContextResolver(
+      wallet: wallet,
+      adminService: adminService,
+      activationService: activationService,
+    );
+    _dependenciesReady = true;
     _load();
   }
 
   Future<String?> _resolveSubscriberCidNumber() async {
     final provider = widget.subscriberCidNumberProvider;
     if (provider != null) return provider();
-    final identity = await CurrentUserContext.instance.resolve();
+    final identity = await context.read<CurrentUserContext>().resolve();
     return identity?.cidNumber;
   }
 
@@ -143,7 +186,8 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
     }
     // 全机构统一开提案入口:固定治理档使用静态档(含安全基金等专户),其余机构
     // 由目录 CID 派生主体。是否能发起某类提案交给 ProposalCapabilityRegistry。
-    final govInfo = widget.repository.governanceInfo(inst.cidNumber) ??
+    final govInfo =
+        widget.repository.governanceInfo(inst.cidNumber) ??
         _infoFromInstitution(inst);
     final subscribed = subscriberCidNumber == null
         ? false
@@ -218,16 +262,25 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
   Future<void> _loadGovernanceAdminsAndRole({bool force = false}) async {
     final identity = _accountIdentity;
     final govInfo = _govInfo;
-    if (identity == null || govInfo == null) return;
+    final adminService = _adminService;
+    final contextResolver = _contextResolver;
+    final activationService = _activationService;
+    if (identity == null ||
+        govInfo == null ||
+        adminService == null ||
+        contextResolver == null ||
+        activationService == null) {
+      return;
+    }
     if (force) {
-      _adminService.clearCache(identity);
-      _contextResolver.clearWalletCache();
+      adminService.clearCache(identity);
+      contextResolver.clearWalletCache();
     }
     try {
       final results = await Future.wait<Object>([
-        _adminService.fetchAdminViews(identity, _inst!.cidNumber),
-        _contextResolver.resolve(knownInstitution: govInfo),
-        _activationService
+        adminService.fetchAdminViews(identity, _inst!.cidNumber),
+        contextResolver.resolve(knownInstitution: govInfo),
+        activationService
             .getActivatedAdmins(identity)
             .catchError((_) => <ActivatedAdmin>[]),
       ]);
@@ -264,11 +317,13 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
   Future<Set<String>> _loadImportedColdAccountIds(
     List<String> adminAccountIds,
   ) async {
+    final wallet = _wallet;
+    if (wallet == null) return const {};
     final coldAccountIds = <String>{};
     try {
-      final allWallets = await _walletManager.getWallets();
+      final allWallets = (await wallet.getState()).accounts;
       for (final w in allWallets) {
-        if (w.isColdWallet) {
+        if (w.signMode == CitizenWalletSignMode.cold) {
           if (adminAccountIds.contains(w.accountId)) {
             coldAccountIds.add(w.accountId);
           }
@@ -282,13 +337,17 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
 
   Future<void> _loadGovernanceProposals({bool force = false}) async {
     final govInfo = _govInfo;
-    if (govInfo == null) return;
+    final feed = _multisigTransferFeed;
+    if (govInfo == null || feed == null) return;
     try {
-      final proposals = await _multisigTransferFeed
-          .fetchInstitutionVisibleProposals(govInfo, forceRefresh: force);
+      final proposals = await feed.fetchInstitutionVisibleProposals(
+        govInfo,
+        forceRefresh: force,
+      );
       final summaries = proposals
           .map(
-              (p) => LocalProposalSummary.fromProposal(p, institution: govInfo))
+            (p) => LocalProposalSummary.fromProposal(p, institution: govInfo),
+          )
           .toList(growable: false);
       await ProposalLocalStore.instance.upsertSummaries(summaries);
       await ProposalLocalStore.instance.putInstitutionIndex(
@@ -333,15 +392,9 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
     final subscriberCidNumber = _subscriberCidNumber;
     if (inst == null || subscriberCidNumber == null) return;
     if (_subscribed) {
-      await widget.repository.unsubscribe(
-        subscriberCidNumber,
-        inst.cidNumber,
-      );
+      await widget.repository.unsubscribe(subscriberCidNumber, inst.cidNumber);
     } else {
-      await widget.repository.subscribe(
-        subscriberCidNumber,
-        inst.cidNumber,
-      );
+      await widget.repository.subscribe(subscriberCidNumber, inst.cidNumber);
     }
     if (!mounted) return;
     setState(() => _subscribed = !_subscribed);
@@ -416,38 +469,47 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
       ),
       child: Padding(
         padding: EdgeInsets.symmetric(
-            horizontal: AppLayout.scaledValue(14),
-            vertical: AppLayout.scaledValue(12)),
+          horizontal: AppLayout.scaledValue(14),
+          vertical: AppLayout.scaledValue(12),
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _infoTile(
-                icon: Icons.account_balance_outlined,
-                label: '全称',
-                value: inst.cidFullName),
+              icon: Icons.account_balance_outlined,
+              label: '全称',
+              value: inst.cidFullName,
+            ),
             Divider(height: AppLayout.scaledValue(18)),
             _infoTile(
-                icon: Icons.badge_outlined,
-                label: '身份CID号',
-                value: inst.cidNumber),
+              icon: Icons.badge_outlined,
+              label: '身份CID号',
+              value: inst.cidNumber,
+            ),
             Divider(height: AppLayout.scaledValue(18)),
             _infoTile(
-                icon: Icons.account_balance_wallet_outlined,
-                label: '主账户',
-                value: mainSs58),
+              icon: Icons.account_balance_wallet_outlined,
+              label: '主账户',
+              value: mainSs58,
+            ),
             Divider(height: AppLayout.scaledValue(18)),
             _infoTile(
-                icon: Icons.payments_outlined,
-                label: '主账户余额',
-                value: _mainBalanceLabel()),
+              icon: Icons.payments_outlined,
+              label: '主账户余额',
+              value: _mainBalanceLabel(),
+            ),
             Divider(height: AppLayout.scaledValue(18)),
             _infoTile(
-                icon: Icons.person_outline,
-                label: '法定代表人',
-                value: '${inst.familyName ?? ''}${inst.givenName ?? ''}'),
+              icon: Icons.person_outline,
+              label: '法定代表人',
+              value: '${inst.familyName ?? ''}${inst.givenName ?? ''}',
+            ),
             Divider(height: AppLayout.scaledValue(18)),
             _infoTile(
-                icon: Icons.place_outlined, label: '所属地', value: _areaPath),
+              icon: Icons.place_outlined,
+              label: '所属地',
+              value: _areaPath,
+            ),
             // 非法人加显「所属上级法人全称」(ADR-028 决策 6)。
             if (inst.isUnincorporated) ...[
               Divider(height: AppLayout.scaledValue(18)),
@@ -494,8 +556,9 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
     return _entryCard(
       icon: Icons.how_to_vote_outlined,
       title: '发起提案',
-      subtitle:
-          _isCurrentUserAdmin ? '转账 / 管理员更换 / …（链上按岗位授权）' : '激活机构签名钱包后按岗位授权发起',
+      subtitle: _isCurrentUserAdmin
+          ? '转账 / 管理员更换 / …（链上按岗位授权）'
+          : '激活机构签名钱包后按岗位授权发起',
       onTap: _openProposalTypes,
     );
   }
@@ -514,7 +577,7 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
     if (provincial.contains(code)) {
       return (
         tier: LawTier.provincial,
-        scope: int.tryParse(inst.provinceCode) ?? 0
+        scope: int.tryParse(inst.provinceCode) ?? 0,
       );
     }
     if (municipal.contains(code)) {
@@ -586,8 +649,8 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
           activatedAccountIds: _activatedAccountIds,
           badgeColor: AppTheme.primary,
           onActivated: () {
-            _adminService.clearCache(identity);
-            _contextResolver.clearWalletCache();
+            _adminService?.clearCache(identity);
+            _contextResolver?.clearWalletCache();
             unawaited(_loadGovernanceAdminsAndRole());
           },
         ),
@@ -616,11 +679,14 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
             left: AppLayout.scaledValue(2),
             bottom: AppLayout.scaledValue(12),
           ),
-          child: Text('提案列表',
-              style: TextStyle(
-                  fontSize: AppLayout.scaledValue(16),
-                  fontWeight: FontWeight.w700,
-                  color: AppTheme.primaryDark)),
+          child: Text(
+            '提案列表',
+            style: TextStyle(
+              fontSize: AppLayout.scaledValue(16),
+              fontWeight: FontWeight.w700,
+              color: AppTheme.primaryDark,
+            ),
+          ),
         ),
         if (!hasGov && !hasPublic)
           _emptyProposalState()
@@ -662,13 +728,19 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
       ),
       child: Column(
         children: [
-          Icon(Icons.ballot_outlined,
-              size: AppLayout.scaledValue(40), color: AppTheme.textTertiary),
+          Icon(
+            Icons.ballot_outlined,
+            size: AppLayout.scaledValue(40),
+            color: AppTheme.textTertiary,
+          ),
           SizedBox(height: AppLayout.scaledValue(8)),
-          Text('暂无提案',
-              style: TextStyle(
-                  fontSize: AppLayout.scaledValue(14),
-                  color: AppTheme.textSecondary)),
+          Text(
+            '暂无提案',
+            style: TextStyle(
+              fontSize: AppLayout.scaledValue(14),
+              color: AppTheme.textSecondary,
+            ),
+          ),
         ],
       ),
     );
@@ -711,8 +783,9 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
   }) {
     return Container(
       padding: EdgeInsets.symmetric(
-          horizontal: AppLayout.scaledValue(14),
-          vertical: AppLayout.scaledValue(12)),
+        horizontal: AppLayout.scaledValue(14),
+        vertical: AppLayout.scaledValue(12),
+      ),
       decoration: BoxDecoration(
         color: AppTheme.surfaceCard,
         borderRadius: BorderRadius.circular(AppLayout.scaledValue(12)),
@@ -727,47 +800,63 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
               color: statusColor.withValues(alpha: 0.10),
               borderRadius: BorderRadius.circular(AppLayout.scaledValue(10)),
             ),
-            child: Icon(Icons.how_to_vote_outlined,
-                size: AppLayout.scaledValue(18), color: statusColor),
+            child: Icon(
+              Icons.how_to_vote_outlined,
+              size: AppLayout.scaledValue(18),
+              color: statusColor,
+            ),
           ),
           SizedBox(width: AppLayout.scaledValue(12)),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title,
-                    style: TextStyle(
-                        fontSize: AppLayout.scaledValue(15),
-                        fontWeight: FontWeight.w600,
-                        color: AppTheme.primaryDark)),
+                Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: AppLayout.scaledValue(15),
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.primaryDark,
+                  ),
+                ),
                 if (subtitle != null && subtitle.isNotEmpty) ...[
                   SizedBox(height: AppLayout.scaledValue(2)),
-                  Text(subtitle,
-                      style: TextStyle(
-                          fontSize: AppLayout.scaledValue(12),
-                          color: AppTheme.textTertiary)),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      fontSize: AppLayout.scaledValue(12),
+                      color: AppTheme.textTertiary,
+                    ),
+                  ),
                 ],
               ],
             ),
           ),
           Container(
             padding: EdgeInsets.symmetric(
-                horizontal: AppLayout.scaledValue(8),
-                vertical: AppLayout.scaledValue(2)),
+              horizontal: AppLayout.scaledValue(8),
+              vertical: AppLayout.scaledValue(2),
+            ),
             decoration: BoxDecoration(
               color: statusColor.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(AppLayout.scaledValue(10)),
             ),
-            child: Text(statusLabel,
-                style: TextStyle(
-                    fontSize: AppLayout.scaledValue(11),
-                    fontWeight: FontWeight.w600,
-                    color: statusColor)),
+            child: Text(
+              statusLabel,
+              style: TextStyle(
+                fontSize: AppLayout.scaledValue(11),
+                fontWeight: FontWeight.w600,
+                color: statusColor,
+              ),
+            ),
           ),
           if (trailingChevron) ...[
             SizedBox(width: AppLayout.scaledValue(4)),
-            Icon(Icons.chevron_right,
-                size: AppLayout.scaledValue(20), color: AppTheme.textTertiary),
+            Icon(
+              Icons.chevron_right,
+              size: AppLayout.scaledValue(20),
+              color: AppTheme.textTertiary,
+            ),
           ],
         ],
       ),
@@ -775,12 +864,12 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
   }
 
   String _statusLabel(int status) => switch (status) {
-        1 => '已通过',
-        2 => '已拒绝',
-        3 => '已执行',
-        4 => '执行失败',
-        _ => '投票中',
-      };
+    1 => '已通过',
+    2 => '已拒绝',
+    3 => '已执行',
+    4 => '执行失败',
+    _ => '投票中',
+  };
 
   // ──── 治理提案详情路由(port 自治理详情页)────
 
@@ -790,9 +879,9 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
     final proposal = await _resolveProposalDetail(summary);
     if (!mounted) return;
     if (proposal == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('提案详情读取失败，请稍后重试')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('提案详情读取失败，请稍后重试')));
       return;
     }
     final proposalId = proposal.meta.proposalId;
@@ -829,9 +918,9 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
         ),
       );
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('该联合提案详情页正在开发中')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('该联合提案详情页正在开发中')));
       return;
     }
     if (mounted) unawaited(_loadDynamics(force: true));
@@ -842,9 +931,10 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
   ) async {
     final cached = _govProposalDetailsById[summary.proposalId];
     if (cached != null) return cached;
+    final feed = _multisigTransferFeed;
+    if (feed == null) return null;
     try {
-      final fresh =
-          await _multisigTransferFeed.fetchProposalsByIds([summary.proposalId]);
+      final fresh = await feed.fetchProposalsByIds([summary.proposalId]);
       if (fresh.isEmpty) return null;
       final proposal = fresh.first;
       if (mounted) {
@@ -877,25 +967,34 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
             color: AppTheme.surfaceMuted,
             borderRadius: BorderRadius.circular(AppLayout.scaledValue(9)),
           ),
-          child: Icon(icon,
-              size: AppLayout.scaledValue(16), color: AppTheme.primary),
+          child: Icon(
+            icon,
+            size: AppLayout.scaledValue(16),
+            color: AppTheme.primary,
+          ),
         ),
         SizedBox(width: AppLayout.scaledValue(10)),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(label,
-                  style: TextStyle(
-                      fontSize: AppLayout.scaledValue(11),
-                      color: AppTheme.textTertiary,
-                      fontWeight: FontWeight.w500)),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: AppLayout.scaledValue(11),
+                  color: AppTheme.textTertiary,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
               SizedBox(height: AppLayout.scaledValue(2)),
-              Text(value,
-                  style: TextStyle(
-                      fontSize: AppLayout.scaledValue(13),
-                      color: AppTheme.textPrimary,
-                      fontWeight: FontWeight.w600)),
+              Text(
+                value,
+                style: TextStyle(
+                  fontSize: AppLayout.scaledValue(13),
+                  color: AppTheme.textPrimary,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ],
           ),
         ),
@@ -920,8 +1019,9 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
         borderRadius: BorderRadius.circular(AppLayout.scaledValue(12)),
         child: Padding(
           padding: EdgeInsets.symmetric(
-              horizontal: AppLayout.scaledValue(14),
-              vertical: AppLayout.scaledValue(12)),
+            horizontal: AppLayout.scaledValue(14),
+            vertical: AppLayout.scaledValue(12),
+          ),
           child: Row(
             children: [
               Container(
@@ -929,34 +1029,45 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
                 height: AppLayout.scaledValue(36),
                 decoration: BoxDecoration(
                   color: AppTheme.primaryDark.withValues(alpha: 0.08),
-                  borderRadius:
-                      BorderRadius.circular(AppLayout.scaledValue(10)),
+                  borderRadius: BorderRadius.circular(
+                    AppLayout.scaledValue(10),
+                  ),
                 ),
-                child: Icon(icon,
-                    size: AppLayout.scaledValue(18),
-                    color: AppTheme.primaryDark),
+                child: Icon(
+                  icon,
+                  size: AppLayout.scaledValue(18),
+                  color: AppTheme.primaryDark,
+                ),
               ),
               SizedBox(width: AppLayout.scaledValue(12)),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(title,
-                        style: TextStyle(
-                            fontSize: AppLayout.scaledValue(15),
-                            fontWeight: FontWeight.w600,
-                            color: AppTheme.primaryDark)),
+                    Text(
+                      title,
+                      style: TextStyle(
+                        fontSize: AppLayout.scaledValue(15),
+                        fontWeight: FontWeight.w600,
+                        color: AppTheme.primaryDark,
+                      ),
+                    ),
                     SizedBox(height: AppLayout.scaledValue(2)),
-                    Text(subtitle,
-                        style: TextStyle(
-                            fontSize: AppLayout.scaledValue(12),
-                            color: AppTheme.textTertiary)),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        fontSize: AppLayout.scaledValue(12),
+                        color: AppTheme.textTertiary,
+                      ),
+                    ),
                   ],
                 ),
               ),
-              Icon(Icons.chevron_right,
-                  size: AppLayout.scaledValue(20),
-                  color: AppTheme.textTertiary),
+              Icon(
+                Icons.chevron_right,
+                size: AppLayout.scaledValue(20),
+                color: AppTheme.textTertiary,
+              ),
             ],
           ),
         ),

@@ -18,13 +18,25 @@ SquareSession fakeSession() => SquareSession(
       signRequest: (_) async => 'test-device-signature',
     );
 
-class FakeSessionProvider extends SquareSessionProvider {
-  FakeSessionProvider(this.session) : super();
+class FakeSessionProvider implements SquareSessionProvider {
+  FakeSessionProvider(this.session);
 
   final SquareSession? session;
 
   @override
   Future<SquareSession?> ensureSession() async => session;
+
+  @override
+  Future<SquareSession?> refreshSession() async => session;
+
+  @override
+  Future<SquareSessionResolution> resolveSession({bool refresh = false}) async =>
+      session == null
+          ? const SquareSessionResolution(SquareSessionStatus.noWallet)
+          : SquareSessionResolution(SquareSessionStatus.ready, session: session);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 SquarePost samplePost({

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizenapp/my/creator/creator_service.dart';
 import 'package:citizenapp/my/creator/models/creator_overview.dart';
 import 'package:citizenapp/my/creator/models/creator_plan.dart';
@@ -18,9 +19,6 @@ import 'package:citizenapp/security/local_data_key.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/identity_badge.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
-import 'package:citizenapp/wallet/core/sign_mode.dart';
-import 'package:citizenapp/wallet/core/default_account_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -28,38 +26,63 @@ import '../8964/profile/fake_profile.dart';
 
 const _cidNumber = 'CN220-CTZN2-198805200-2026';
 
+final _testWallet = CitizenWalletStateAccount(
+  signMode: CitizenWalletSignMode.hot,
+  walletIndex: 1,
+  accountIndex: 0,
+  ss58Address: 'wallet_profile_test',
+  accountId:
+      '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  name: '测试钱包',
+  createdAtMillis: BigInt.one,
+  isDefault: true,
+);
+
 /// 身份账户缓存 fake：直接返回已缓存 CID 快照，验证离线读取不会启动轻节点。
-class _CachedIdentityCache extends CurrentUserContext {
+class _CachedIdentityCache implements CurrentUserContext {
   @override
   Future<CurrentUser?> resolve() async => CurrentUser(
-        account: const DefaultAccount(
-          accountId:
-              '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          ss58Address: 'wallet_profile_test',
-          accountName: '默认账户',
-          signMode: SignMode.hot,
-          walletIndex: 1,
-        ),
-        binding: AccountDataBinding(
-          genesisHash: '0x${'11' * 32}',
-          cidNumber: _cidNumber,
-          accountId:
-              '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          bindingRevision: 1,
-        ),
-      );
+    account: CitizenWalletStateAccount(
+      signMode: CitizenWalletSignMode.hot,
+      walletIndex: 1,
+      accountIndex: 0,
+      accountId:
+          '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      ss58Address: 'wallet_profile_test',
+      name: '默认账户',
+      createdAtMillis: BigInt.one,
+      isDefault: true,
+    ),
+    binding: AccountDataBinding(
+      genesisHash: '0x${'11' * 32}',
+      cidNumber: _cidNumber,
+      accountId:
+          '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      bindingRevision: 1,
+    ),
+  );
   @override
   Future<String?> accountId() async =>
       '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-}
-
-class _FakeWalletManager extends WalletManager {
-  _FakeWalletManager(this.wallet);
-
-  final WalletProfile wallet;
 
   @override
-  Future<WalletProfile?> getDefaultWallet() async => wallet;
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _FakeWallet implements CitizenSdkWallet {
+  _FakeWallet(this.wallet);
+
+  final CitizenWalletStateAccount wallet;
+
+  @override
+  Future<CitizenWalletState> getState() async => CitizenWalletState(
+    revision: BigInt.one,
+    hotProfile: null,
+    accounts: [wallet],
+  );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _FakeIdentityBadgeSnapshotStore extends IdentityBadgeSnapshotStore {
@@ -128,21 +151,23 @@ class _StaticProfileMediaCache extends CitizenProfileMediaCache {
     required String? avatarUrl,
     required String? bannerUrl,
     required Map<String, String>? headers,
-  }) =>
-      read(profile);
+  }) => read(profile);
 }
 
-class _ConfirmedMembershipSnapshotService extends SubscriptionService {
+class _ConfirmedMembershipSnapshotService implements SubscriptionService {
+  static const _state = SquareMembershipState(
+    active: true,
+    paidUntil: 9999999999999,
+    membershipLevel: 'democracy',
+  );
+  int authorizeCalls = 0;
+
   @override
   Future<MembershipDisplaySnapshot?> readDisplaySnapshot(
     String cidNumber,
   ) async {
     return const MembershipDisplaySnapshot(
-      state: SquareMembershipState(
-        active: true,
-        paidUntil: 9999999999999,
-        membershipLevel: 'democracy',
-      ),
+      state: _state,
       prices: <String, int>{},
       subscriptionFetchedAtMs: 1,
       pricesFetchedAtMs: 0,
@@ -154,9 +179,21 @@ class _ConfirmedMembershipSnapshotService extends SubscriptionService {
     String cidNumber,
     MembershipDisplaySnapshot snapshot,
   ) async {}
+
+  @override
+  Future<SquareMembershipState> authorizeMembership(
+    SquareSession session, {
+    bool forceRefresh = false,
+  }) async {
+    authorizeCalls += 1;
+    return _state;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _DelayedMembershipSnapshotService extends SubscriptionService {
+class _DelayedMembershipSnapshotService implements SubscriptionService {
   final Completer<MembershipDisplaySnapshot?> snapshot =
       Completer<MembershipDisplaySnapshot?>();
 
@@ -169,9 +206,20 @@ class _DelayedMembershipSnapshotService extends SubscriptionService {
     String cidNumber,
     MembershipDisplaySnapshot snapshot,
   ) async {}
+
+  @override
+  Future<SquareMembershipState> authorizeMembership(
+    SquareSession session, {
+    bool forceRefresh = false,
+  }) async =>
+      (await snapshot.future)?.state ??
+      const SquareMembershipState(active: false, paidUntil: 0);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _PendingCreatorService extends CreatorService {
+class _PendingCreatorService implements CreatorService {
   final Completer<CreatorPageData> refresh = Completer<CreatorPageData>();
 
   @override
@@ -180,41 +228,28 @@ class _PendingCreatorService extends CreatorService {
 
   @override
   Future<CreatorPageData> load({String? expectedCidNumber}) => refresh.future;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 void main() {
-  setUp(() {
-    CurrentUserContext.debugInstance = _CachedIdentityCache();
-  });
-
-  tearDown(CurrentUserContext.resetDebugInstance);
-
   testWidgets('我的页面只读徽章快照且不启动轻节点', (tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(411, 914);
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     final snapshotStore = _FakeIdentityBadgeSnapshotStore();
-    const wallet = WalletProfile(
-      walletIndex: 1,
-      walletName: '测试钱包',
-      walletIcon: '',
-      balance: 0,
-      ss58Address: 'wallet_profile_test',
-      accountId:
-          '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-      alg: 'sr25519',
-      ss58: 2027,
-      createdAtMillis: 1,
-      source: 'test',
-      signMode: SignMode.hot,
-    );
+    final wallet = _testWallet;
     await tester.pumpWidget(
       MaterialApp(
         theme: AppTheme.lightTheme,
         home: MyTab(
-          walletManager: _FakeWalletManager(wallet),
+          wallet: _FakeWallet(wallet),
+          currentUserContext: _CachedIdentityCache(),
           badgeSnapshotStore: snapshotStore,
+          sessionProvider: FakeSessionProvider(fakeSession()),
+          subscriptionService: _ConfirmedMembershipSnapshotService(),
         ),
       ),
     );
@@ -285,33 +320,23 @@ void main() {
   });
 
   testWidgets('我的页面展示公开昵称且钱包改名广播不重复刷新资料', (tester) async {
-    const wallet = WalletProfile(
-      walletIndex: 1,
-      walletName: '不得公开的钱包名',
-      walletIcon: '',
-      balance: 0,
-      ss58Address: 'wallet_profile_test',
-      accountId:
-          '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-      alg: 'sr25519',
-      ss58: 2027,
-      createdAtMillis: 1,
-      source: 'test',
-      signMode: SignMode.hot,
-    );
+    final wallet = _testWallet;
     final profileApi = FakeProfileApi(sampleProfile(displayName: '公开昵称'));
     final profileCache = FakeProfileCache(sampleProfile(displayName: '缓存昵称'));
     final squareApi = _FakeSquareApi();
+    final membershipService = _ConfirmedMembershipSnapshotService();
     final snapshotStore = _FakeIdentityBadgeSnapshotStore();
     await tester.pumpWidget(
       MaterialApp(
         home: MyTab(
-          walletManager: _FakeWalletManager(wallet),
+          wallet: _FakeWallet(wallet),
+          currentUserContext: _CachedIdentityCache(),
           badgeSnapshotStore: snapshotStore,
           profileApi: profileApi,
           profileCache: profileCache,
           sessionProvider: FakeSessionProvider(fakeSession()),
           squareApi: squareApi,
+          subscriptionService: membershipService,
         ),
       ),
     );
@@ -321,18 +346,13 @@ void main() {
     expect(find.text('公开昵称'), findsOneWidget);
     expect(find.text('不得公开的钱包名'), findsNothing);
     expect(profileApi.calls, 1);
-    expect(squareApi.membershipCalls, 1);
-
-    // 钱包名变更也会产生 revision 广播，但身份账户不变时不得重拉公开资料。
-    WalletManager.walletsRevision.value += 1;
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    expect(profileApi.calls, 1);
+    expect(membershipService.authorizeCalls, 1);
+    expect(squareApi.membershipCalls, 0);
 
     MembershipRevision.instance.notifyChanged(_cidNumber);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
-    expect(squareApi.membershipCalls, 1);
+    expect(membershipService.authorizeCalls, 1);
 
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -350,20 +370,7 @@ void main() {
     addTearDown(() async {
       if (await root.exists()) await root.delete(recursive: true);
     });
-    const wallet = WalletProfile(
-      walletIndex: 1,
-      walletName: '测试钱包',
-      walletIcon: '',
-      balance: 0,
-      ss58Address: 'wallet_profile_test',
-      accountId:
-          '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-      alg: 'sr25519',
-      ss58: 2027,
-      createdAtMillis: 1,
-      source: 'test',
-      signMode: SignMode.hot,
-    );
+    final wallet = _testWallet;
     final profile = sampleProfile(
       displayName: '统一公开资料',
       avatarKey: 'profile/avatar',
@@ -373,7 +380,8 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: MyTab(
-          walletManager: _FakeWalletManager(wallet),
+          wallet: _FakeWallet(wallet),
+          currentUserContext: _CachedIdentityCache(),
           badgeSnapshotStore: _FakeIdentityBadgeSnapshotStore(),
           profileApi: FakeProfileApi(profile),
           profileCache: FakeProfileCache(profile),
@@ -416,27 +424,15 @@ void main() {
   });
 
   testWidgets('MyTab 已确认有效快照在普通D1读取等待时保持会员徽章和创作者首帧', (tester) async {
-    const wallet = WalletProfile(
-      walletIndex: 1,
-      walletName: '测试钱包',
-      walletIcon: '',
-      balance: 0,
-      ss58Address: 'wallet_profile_test',
-      accountId:
-          '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-      alg: 'sr25519',
-      ss58: 2027,
-      createdAtMillis: 1,
-      source: 'test',
-      signMode: SignMode.hot,
-    );
+    final wallet = _testWallet;
     final membershipSnapshots = _DelayedMembershipSnapshotService();
     final squareApi = _PendingMembershipSquareApi();
     final creatorService = _PendingCreatorService();
     await tester.pumpWidget(
       MaterialApp(
         home: MyTab(
-          walletManager: _FakeWalletManager(wallet),
+          wallet: _FakeWallet(wallet),
+          currentUserContext: _CachedIdentityCache(),
           badgeSnapshotStore: _FakeIdentityBadgeSnapshotStore(),
           profileApi: FakeProfileApi(sampleProfile(displayName: '公开昵称')),
           profileCache: FakeProfileCache(sampleProfile(displayName: '缓存昵称')),

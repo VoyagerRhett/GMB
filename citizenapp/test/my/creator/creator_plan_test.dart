@@ -7,7 +7,7 @@ import 'package:citizenapp/my/membership/subscription_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-class _PendingCreatorService extends CreatorService {
+class _PendingCreatorService implements CreatorService {
   final Completer<CreatorPageData> completer = Completer<CreatorPageData>();
 
   @override
@@ -16,10 +16,13 @@ class _PendingCreatorService extends CreatorService {
   @override
   Future<CreatorDisplaySnapshot?> readDisplaySnapshot(String cidNumber) async =>
       null;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// 后台刷新失败不能清掉已经提交的首帧展示态。
-class _FailingCreatorService extends CreatorService {
+class _FailingCreatorService implements CreatorService {
   int loadCalls = 0;
 
   @override
@@ -31,6 +34,9 @@ class _FailingCreatorService extends CreatorService {
     loadCalls++;
     throw Exception('设备子钥签名校验失败');
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _SnapshotCreatorService extends _PendingCreatorService {

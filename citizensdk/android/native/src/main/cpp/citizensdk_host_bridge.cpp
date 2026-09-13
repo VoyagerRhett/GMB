@@ -954,6 +954,26 @@ void CitizenSdkHostBridge::dispatch_event(const citizensdk_event_t &event) {
              event.capability_revision == 0 && event.reserved == 0) {
     jmethodID method = env->GetMethodID(type, "onNativeHistoryChanged", "(J)V");
     if (method != nullptr) env->CallVoidMethod(native_owner_, method, static_cast<jlong>(event.sequence));
+  } else if (event.event_type == CITIZENSDK_EVENT_FINALIZED_BLOCK_CHANGED) {
+    if (event.request_id == 0 && event.result != 0 &&
+        event.capability_revision == 0 && event.reserved == 0) {
+      WireWriter writer;
+      citizensdk_prepared_wallet_handle_t prepared = 0;
+      bool qr_review = false;
+      const bool encoded = encode_result(event.result, 0, &writer, &prepared, &qr_review);
+      citizensdk_result_release(event.result);
+      if (encoded && prepared == 0 && !qr_review) {
+        jmethodID method = env->GetMethodID(type, "onNativeFinalizedBlockChanged", "(J[B)V");
+        jbyteArray bytes = to_byte_array(env, writer.data());
+        if (method != nullptr && bytes != nullptr) {
+          env->CallVoidMethod(native_owner_, method,
+                              static_cast<jlong>(event.sequence), bytes);
+        }
+        if (bytes != nullptr) env->DeleteLocalRef(bytes);
+      }
+    } else if (event.result != 0) {
+      citizensdk_result_release(event.result);
+    }
   } else if (event.event_type == CITIZENSDK_EVENT_LIFECYCLE_CHANGED) {
     citizensdk_lifecycle_t lifecycle = 0;
     if (citizensdk_get_lifecycle(handle_, &lifecycle) == kOk) {

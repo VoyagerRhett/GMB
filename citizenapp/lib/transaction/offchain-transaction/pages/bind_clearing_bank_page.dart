@@ -1,12 +1,13 @@
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/transaction/offchain-transaction/services/clearing_bank_directory.dart';
-import 'package:citizenapp/transaction/offchain-transaction/rpc/onchain_clearing_bank_rpc.dart';
+import 'package:citizenapp/transaction/offchain-transaction/services/onchain_clearing_bank_chain.dart';
 import 'package:citizenapp/transaction/offchain-transaction/services/clearing_bank_prefs.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 绑定**清算行**(L2)确认页。
@@ -111,40 +112,29 @@ class _BindClearingBankPageState extends State<BindClearingBankPage> {
         throw Exception('账户公钥必须是 32 字节');
       }
 
-      final walletManager = WalletManager();
-      final signMode =
-          await walletManager.signModeForAccountId(widget.accountId);
-      final walletSigner = WalletAccountSigner(walletManager: walletManager);
-      final action = widget.switchMode
-          ? QrActions.switchClearingBank
-          : QrActions.bindClearingBank;
-
-      final rpc = OnchainClearingBankRpc();
+      final sdk = context.read<CitizenSdk>();
+      final chain = OnchainClearingBankChain(transactions: sdk.transactions);
       final result = widget.switchMode
-          ? await rpc.switchBank(
-              fromSs58Address: widget.ss58Address,
+          ? await chain.switchBank(
               signerPublicKey: Uint8List.fromList(publicKeyBytes),
               newBankMainAccountId: Uint8List.fromList(mainAccountIdBytes),
-              sign: (payload) => walletSigner.sign(
-                context: context,
-                accountId: widget.accountId,
-                signMode: signMode,
-                payload: payload,
-                action: action,
-                requestPrefix: 'bank_',
+              externalSigning: (pending) => showCitizenSdkQrResponse(
+                context,
+                request: pending.qrRequest,
+                expiresAt: BigInt.from(
+                  pending.expiresAt.millisecondsSinceEpoch ~/ 1000,
+                ),
               ),
             )
-          : await rpc.bindClearingBank(
-              fromSs58Address: widget.ss58Address,
+          : await chain.bindClearingBank(
               signerPublicKey: Uint8List.fromList(publicKeyBytes),
               bankMainAccountId: Uint8List.fromList(mainAccountIdBytes),
-              sign: (payload) => walletSigner.sign(
-                context: context,
-                accountId: widget.accountId,
-                signMode: signMode,
-                payload: payload,
-                action: action,
-                requestPrefix: 'bank_',
+              externalSigning: (pending) => showCitizenSdkQrResponse(
+                context,
+                request: pending.qrRequest,
+                expiresAt: BigInt.from(
+                  pending.expiresAt.millisecondsSinceEpoch ~/ 1000,
+                ),
               ),
             );
 
@@ -177,7 +167,7 @@ class _BindClearingBankPageState extends State<BindClearingBankPage> {
         ),
       );
       Navigator.pop(context, true);
-    } on WalletAuthException catch (e) {
+    } on AccountSecurityException catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(e.message)));

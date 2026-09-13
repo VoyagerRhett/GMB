@@ -2,10 +2,14 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
+import 'package:provider/provider.dart';
 
 import '../ui/app_theme.dart';
 import 'app_lock_service.dart';
+import 'account_security_service.dart';
 import 'emergency_wipe_platform.dart';
+
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 在设置页内输入并确认独立的防共匪密码。
@@ -316,7 +320,11 @@ class _PinInputPageState extends State<PinInputPage> {
   }
 
   Future<void> _handleVerify() async {
-    final result = await AppLockService.verifyPin(_pin);
+    final result = await AppLockService.verifyPin(
+      _pin,
+      wallet: context.read<CitizenSdk?>()?.wallet,
+      accountSecurity: context.read<AccountSecurityService?>(),
+    );
     if (!mounted) return;
 
     switch (result) {
@@ -336,7 +344,11 @@ class _PinInputPageState extends State<PinInputPage> {
   }
 
   Future<void> _handleRemove() async {
-    final result = await AppLockService.verifyNormalPin(_pin);
+    final result = await AppLockService.verifyNormalPin(
+      _pin,
+      wallet: context.read<CitizenSdk?>()?.wallet,
+      accountSecurity: context.read<AccountSecurityService?>(),
+    );
     if (!mounted) return;
 
     switch (result) {
@@ -357,6 +369,8 @@ class _PinInputPageState extends State<PinInputPage> {
   }
 
   Future<void> _triggerDuressModeWipe() async {
+    final wallet = context.read<CitizenSdk?>()?.wallet;
+    final accountSecurity = context.read<AccountSecurityService?>();
     // 必须先持久化擦除意图；只有门闩落盘成功才允许隐藏真实界面。
     await AppLockService.latchPersistentWipe();
     if (!mounted) return;
@@ -375,7 +389,10 @@ class _PinInputPageState extends State<PinInputPage> {
     await EmergencyWipePlatform.beginProtectedExecution();
     while (mounted) {
       try {
-        await AppLockService.wipeAllData();
+        await AppLockService.wipeAllData(
+          wallet: wallet,
+          accountSecurity: accountSecurity,
+        );
         await EmergencyWipePlatform.finishProtectedExecution();
         await SystemNavigator.pop();
         return;
@@ -389,8 +406,10 @@ class _PinInputPageState extends State<PinInputPage> {
   Future<void> _showRejectedPin() async {
     final failCount = await AppLockService.getFailCount();
     if (!mounted) return;
-    final remaining =
-        (AppLockService.maxFailAttempts - failCount).clamp(0, 999);
+    final remaining = (AppLockService.maxFailAttempts - failCount).clamp(
+      0,
+      999,
+    );
     setState(() {
       _pin = '';
       _error = '密码错误，还可尝试 $remaining 次';
@@ -475,7 +494,10 @@ class _PinInputPageState extends State<PinInputPage> {
       }
       setState(() => _submitting = true);
       try {
-        await AppLockService.wipeAllData();
+        await AppLockService.wipeAllData(
+          wallet: context.read<CitizenSdk?>()?.wallet,
+          accountSecurity: context.read<AccountSecurityService?>(),
+        );
         if (!mounted) return;
         await _showDataWipedTerminal();
         return;
@@ -510,14 +532,9 @@ class _PinInputPageState extends State<PinInputPage> {
     }
     return Scaffold(
       appBar: widget.mode != PinInputMode.verify
-          ? AppBar(
-              title: Text(_title),
-              centerTitle: true,
-            )
+          ? AppBar(title: Text(_title), centerTitle: true)
           : null,
-      body: SafeArea(
-        child: _locked ? _buildLockedView() : _buildPinView(),
-      ),
+      body: SafeArea(child: _locked ? _buildLockedView() : _buildPinView()),
     );
   }
 
@@ -535,8 +552,11 @@ class _PinInputPageState extends State<PinInputPage> {
                 shape: BoxShape.circle,
                 color: AppTheme.danger.withAlpha(20),
               ),
-              child: Icon(Icons.lock_clock,
-                  size: AppLayout.scaledValue(44), color: AppTheme.danger),
+              child: Icon(
+                Icons.lock_clock,
+                size: AppLayout.scaledValue(44),
+                color: AppTheme.danger,
+              ),
             ),
             SizedBox(height: AppLayout.scaledValue(24)),
             Text(
@@ -552,8 +572,9 @@ class _PinInputPageState extends State<PinInputPage> {
               '连续验证错误次数过多\n请在 ${_formatDuration(_remainingSeconds)} 后重试',
               textAlign: TextAlign.center,
               style: TextStyle(
-                  fontSize: AppLayout.scaledValue(14),
-                  color: AppTheme.textSecondary),
+                fontSize: AppLayout.scaledValue(14),
+                color: AppTheme.textSecondary,
+              ),
             ),
           ],
         ),
@@ -573,24 +594,29 @@ class _PinInputPageState extends State<PinInputPage> {
               shape: BoxShape.circle,
               gradient: AppTheme.primaryGradient,
             ),
-            child: Icon(Icons.lock_outline,
-                size: AppLayout.scaledValue(36), color: AppTheme.textOnPrimary),
+            child: Icon(
+              Icons.lock_outline,
+              size: AppLayout.scaledValue(36),
+              color: AppTheme.textOnPrimary,
+            ),
           ),
           SizedBox(height: AppLayout.scaledValue(16)),
         ],
         Text(
           widget.mode == PinInputMode.verify ? _title : _subtitle,
           style: TextStyle(
-              fontSize: AppLayout.scaledValue(16),
-              color: AppTheme.textSecondary),
+            fontSize: AppLayout.scaledValue(16),
+            color: AppTheme.textSecondary,
+          ),
         ),
         if (widget.mode == PinInputMode.setup && _firstPin == null) ...[
           SizedBox(height: AppLayout.scaledValue(8)),
           Container(
             margin: EdgeInsets.symmetric(horizontal: AppLayout.scaledValue(48)),
             padding: EdgeInsets.symmetric(
-                horizontal: AppLayout.scaledValue(12),
-                vertical: AppLayout.scaledValue(8)),
+              horizontal: AppLayout.scaledValue(12),
+              vertical: AppLayout.scaledValue(8),
+            ),
             decoration: AppTheme.bannerDecoration(AppTheme.warning),
             child: Text(
               '请牢记密码。忘记密码将清空所有数据。',
@@ -611,8 +637,9 @@ class _PinInputPageState extends State<PinInputPage> {
             final filled = i < _pin.length;
             return AnimatedContainer(
               duration: const Duration(milliseconds: 150),
-              margin:
-                  EdgeInsets.symmetric(horizontal: AppLayout.scaledValue(8)),
+              margin: EdgeInsets.symmetric(
+                horizontal: AppLayout.scaledValue(8),
+              ),
               width: AppLayout.scaledValue(filled ? 18 : 16),
               height: AppLayout.scaledValue(filled ? 18 : 16),
               decoration: BoxDecoration(
@@ -625,8 +652,9 @@ class _PinInputPageState extends State<PinInputPage> {
                 boxShadow: filled
                     ? [
                         BoxShadow(
-                            color: AppTheme.primary.withAlpha(40),
-                            blurRadius: AppLayout.scaledValue(8))
+                          color: AppTheme.primary.withAlpha(40),
+                          blurRadius: AppLayout.scaledValue(8),
+                        ),
                       ]
                     : null,
               ),
@@ -638,7 +666,9 @@ class _PinInputPageState extends State<PinInputPage> {
           Text(
             _error!,
             style: TextStyle(
-                color: AppTheme.danger, fontSize: AppLayout.scaledValue(13)),
+              color: AppTheme.danger,
+              fontSize: AppLayout.scaledValue(13),
+            ),
           ),
         ],
         if (_submitting && !_wipeTerminal) ...[
@@ -678,8 +708,9 @@ class _PinInputPageState extends State<PinInputPage> {
             children: [
               // 空白占位
               SizedBox(
-                  width: AppLayout.scaledValue(72),
-                  height: AppLayout.scaledValue(72)),
+                width: AppLayout.scaledValue(72),
+                height: AppLayout.scaledValue(72),
+              ),
               _key(0),
               // 删除键
               SizedBox(
@@ -687,8 +718,10 @@ class _PinInputPageState extends State<PinInputPage> {
                 height: AppLayout.scaledValue(72),
                 child: IconButton(
                   onPressed: _submitting || _wipeTerminal ? null : _onDelete,
-                  icon: Icon(Icons.backspace_outlined,
-                      size: AppLayout.scaledValue(24)),
+                  icon: Icon(
+                    Icons.backspace_outlined,
+                    size: AppLayout.scaledValue(24),
+                  ),
                 ),
               ),
             ],
@@ -712,7 +745,8 @@ class _PinInputPageState extends State<PinInputPage> {
         child: Material(
           color: Colors.transparent,
           shape: const CircleBorder(
-              side: BorderSide(color: AppTheme.borderLight, width: 1)),
+            side: BorderSide(color: AppTheme.borderLight, width: 1),
+          ),
           clipBehavior: Clip.hardEdge,
           child: InkWell(
             // 固定键盘在按下时立即登记；读屏点击由外层 Semantics 单独处理。

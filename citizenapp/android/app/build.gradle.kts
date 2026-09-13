@@ -54,10 +54,8 @@ android {
             // 所有环境只生成无私钥 Release 候选。正式 JKS 只存在 TataConsole 的
             // Data Protection Keychain，并由原生安全进程在 Touch ID 后通过匿名 stdin 使用。
             signingConfig = null
-            // release 不加 keepDebugSymbols:APK 保持精简,且不把 2.4 万个内部函数名
-            // (含密码学/密钥存储符号)随包发出。线上崩溃的反解依赖构建时留档的未剥离
-            // 产物 android/app/src/main/jniLibs/arm64-v8a/libsmoldot.so(Cargo 侧
-            // strip=false 保证它始终带符号),剥离只发生在打包阶段。
+            // Release 包不保留本地调试符号；CitizenSDK 原生库的构建与
+            // 符号归档由 CitizenSDK 自己的产品流程负责。
         }
     }
 

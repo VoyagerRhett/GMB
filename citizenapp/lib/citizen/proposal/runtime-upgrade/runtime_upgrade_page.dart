@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:citizenapp/ui/app_theme.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 协议升级介绍页。
@@ -11,7 +11,7 @@ import 'package:citizenapp/ui/app_layout.dart';
 class RuntimeUpgradePage extends StatelessWidget {
   const RuntimeUpgradePage({super.key, required this.adminWallets});
 
-  final List<WalletProfile> adminWallets;
+  final List<CitizenWalletStateAccount> adminWallets;
 
   @override
   Widget build(BuildContext context) {
@@ -21,8 +21,9 @@ class RuntimeUpgradePage extends StatelessWidget {
         title: Text(
           '协议升级',
           style: TextStyle(
-              fontSize: AppLayout.scaled(context, 17),
-              fontWeight: FontWeight.w700),
+            fontSize: AppLayout.scaled(context, 17),
+            fontWeight: FontWeight.w700,
+          ),
         ),
         centerTitle: true,
         backgroundColor: Colors.white,
@@ -135,8 +136,11 @@ class RuntimeUpgradePage extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon,
-              size: AppLayout.scaledValue(20), color: AppTheme.primaryDark),
+          Icon(
+            icon,
+            size: AppLayout.scaledValue(20),
+            color: AppTheme.primaryDark,
+          ),
           SizedBox(width: AppLayout.scaledValue(12)),
           Expanded(
             child: Column(

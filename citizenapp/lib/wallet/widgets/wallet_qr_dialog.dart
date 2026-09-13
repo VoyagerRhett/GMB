@@ -1,11 +1,10 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
-import 'package:citizenapp/qr/bodies/account_id_code_body.dart';
-import 'package:citizenapp/qr/envelope.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
@@ -14,15 +13,8 @@ import 'package:citizenapp/ui/app_layout.dart';
 /// 本机账户名称和 SS58 地址只用于弹窗展示，绝不进入二维码载荷；账户授权与关系主键
 /// 始终是规范 `account_id`。
 @visibleForTesting
-String buildWalletAccountQrData(String accountId) {
-  return QrEnvelope<AccountIdCodeBody>(
-    kind: QrKind.accountIdCode,
-    id: null,
-    issuedAt: null,
-    expiresAt: null,
-    body: AccountIdCodeBody(accountId: accountId),
-  ).toRawJson();
-}
+Future<String> buildWalletAccountQrData(CitizenQr qr, String accountId) =>
+    qr.encodeAccountId(accountId);
 
 /// 打开冷热钱包共用的账户二维码弹窗。
 ///
@@ -42,7 +34,11 @@ Future<void> showWalletQrDialog(
   }
 
   final ss58Address = ss58FromAccountIdText(normalizedAccountId);
-  final qrData = buildWalletAccountQrData(normalizedAccountId);
+  final qrData = await buildWalletAccountQrData(
+    context.read<CitizenSdk>().qr,
+    normalizedAccountId,
+  );
+  if (!context.mounted) return;
   await showDialog<void>(
     context: context,
     barrierDismissible: true,

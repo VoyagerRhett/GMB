@@ -9,7 +9,7 @@ import 'package:citizenapp/8964/models/square_models.dart';
 import 'package:citizenapp/8964/profile/models/citizen_profile.dart';
 import 'package:citizenapp/8964/services/square_post_store.dart';
 import 'package:citizenapp/signer/signing.dart';
-import 'package:citizenapp/wallet/core/device_subkey.dart' show hexToBytes;
+import 'package:citizenapp/security/device_subkey.dart' show hexToBytes;
 import 'package:citizenapp/8964/services/square_request_signer.dart';
 
 class SquareApiException implements Exception {

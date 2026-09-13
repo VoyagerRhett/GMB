@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -14,49 +15,56 @@ import 'package:citizenapp/chat/chat_product_policy.dart';
 import 'package:citizenapp/my/membership/membership_page.dart';
 import 'package:citizenapp/my/membership/membership_revision.dart';
 import 'package:citizenapp/my/membership/subscription_service.dart';
-import 'package:citizenapp/my/myid/current_user_context.dart';
 import 'package:citizenapp/my/myid/citizen_identity_chain_reader.dart';
 import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart' show TxPoolWatchCallback;
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/identity_badge.dart';
-import 'package:citizenapp/security/local_data_key.dart';
-import 'package:citizenapp/wallet/core/default_account_service.dart';
-import 'package:citizenapp/wallet/core/sign_mode.dart';
+
 import '../../support/isar_test_env.dart';
+import '../../support/fake_citizen_sdk.dart';
 
 const String _owner = '5GrwvaEF5zXb26Fz9rcQpDWS7u4m6DXb6T6TQvF9j5uQ8g6U';
 const _identityAccountId =
     '0x1111111111111111111111111111111111111111111111111111111111111111';
-const _identityAccount = DefaultAccount(
+final _identityAccount = CitizenWalletStateAccount(
+  signMode: CitizenWalletSignMode.hot,
+  walletIndex: 1,
+  accountIndex: 0,
   accountId: _identityAccountId,
   ss58Address: 'ss58-demo',
-  accountName: '默认账户',
-  signMode: SignMode.hot,
-  walletIndex: 1,
+  name: '默认账户',
+  createdAtMillis: BigInt.one,
+  isDefault: true,
 );
 
-class _FakeSessionProvider extends SquareSessionProvider {
-  _FakeSessionProvider() : super();
+class _FakeSessionProvider implements SquareSessionProvider {
+  SquareSession _session() => SquareSession(
+    sessionToken: 'tok',
+    cidNumber: "CN220-CTZN2-198805200-2026",
+    bindingRevision: 1,
+    accountId: _owner,
+    expiresAt: DateTime.now().millisecondsSinceEpoch + 600000,
+  );
 
   @override
-  Future<SquareSession?> ensureSession() async => SquareSession(
-        sessionToken: 'tok',
-        cidNumber: "CN220-CTZN2-198805200-2026",
-        bindingRevision: 1,
-        accountId: _owner,
-        expiresAt: DateTime.now().millisecondsSinceEpoch + 600000,
-      );
-}
+  Future<SquareSession?> ensureSession() async => _session();
 
-/// 未注册:身份缓存命中但快照为空(链读结论=全账户未占号,回退账户0)。
-class _UnregisteredIdentityCache extends CurrentUserContext {
   @override
-  Future<CurrentUser?> resolve() async =>
-      const CurrentUser(account: _identityAccount, binding: null);
+  Future<SquareSessionResolution> resolveSession({
+    bool refresh = false,
+  }) async =>
+      SquareSessionResolution(SquareSessionStatus.ready, session: _session());
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _CidNotBoundSessionProvider extends SquareSessionProvider {
+class _CidNotBoundSessionProvider implements SquareSessionProvider {
+  _CidNotBoundSessionProvider({
+    this.status = SquareSessionStatus.identityUnbound,
+  });
+
+  final SquareSessionStatus status;
   int calls = 0;
 
   @override
@@ -68,12 +76,19 @@ class _CidNotBoundSessionProvider extends SquareSessionProvider {
       errorCode: 'cid_not_bound',
     );
   }
+
+  @override
+  Future<SquareSessionResolution> resolveSession({bool refresh = false}) async {
+    calls++;
+    return SquareSessionResolution(status);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// 会话建立即失败(如设备子钥校验失败/网络故障):页面须给可见解释,不得留残缺骨架。
-class _ThrowingSessionProvider extends SquareSessionProvider {
-  _ThrowingSessionProvider() : super();
-
+class _ThrowingSessionProvider implements SquareSessionProvider {
   @override
   Future<SquareSession?> ensureSession() async {
     throw const SquareApiException(
@@ -82,20 +97,41 @@ class _ThrowingSessionProvider extends SquareSessionProvider {
       errorCode: 'invalid_signature',
     );
   }
+
+  @override
+  Future<SquareSessionResolution> resolveSession({
+    bool refresh = false,
+  }) async =>
+      const SquareSessionResolution(SquareSessionStatus.deviceUnavailable);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _PendingSessionProvider extends SquareSessionProvider {
-  _PendingSessionProvider(this.pending) : super();
+class _PendingSessionProvider implements SquareSessionProvider {
+  _PendingSessionProvider(this.pending);
 
   final Future<SquareSession?> pending;
 
   @override
   Future<SquareSession?> ensureSession() => pending;
+
+  @override
+  Future<SquareSessionResolution> resolveSession({bool refresh = false}) async {
+    final session = await pending;
+    return session == null
+        ? const SquareSessionResolution(SquareSessionStatus.noWallet)
+        : SquareSessionResolution(SquareSessionStatus.ready, session: session);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// 平台档价格链上单源（`PlatformPrice[level]`，分）；测试直接注入 mock 价表。
 class _FakeChainService extends SquareChainService {
-  _FakeChainService(this._prices);
+  _FakeChainService(this._prices)
+    : super(chain: TestCitizenChain(), transactions: TestCitizenTransactions());
 
   final Map<String, int> _prices;
   int fetchCount = 0;
@@ -112,6 +148,9 @@ class _FakeChainService extends SquareChainService {
 }
 
 class _FailingChainService extends SquareChainService {
+  _FailingChainService()
+    : super(chain: TestCitizenChain(), transactions: TestCitizenTransactions());
+
   int fetchCount = 0;
 
   @override
@@ -124,7 +163,7 @@ class _FailingChainService extends SquareChainService {
 }
 
 /// 记录订阅 / 取消动作的假编排：不触发真钱包与真上链。
-class _RecordingSubscriptionService extends SubscriptionService {
+class _RecordingSubscriptionService implements SubscriptionService {
   final List<String> subscribed = [];
   final List<String> changed = [];
   int cancelCount = 0;
@@ -135,6 +174,9 @@ class _RecordingSubscriptionService extends SubscriptionService {
   SquareMembershipState? mirror;
   MembershipDisplaySnapshot? cachedSnapshot;
   bool mirrorPending = false;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 
   @override
   bool get mirrorSyncPending => mirrorPending;
@@ -179,16 +221,12 @@ class _RecordingSubscriptionService extends SubscriptionService {
     String level,
     int expectedPriceFen, {
     BuildContext? context,
-    TxPoolWatchCallback? onWatchEvent,
   }) async {
     subscribed.add('$level:$expectedPriceFen');
   }
 
   @override
-  Future<void> cancel({
-    BuildContext? context,
-    TxPoolWatchCallback? onWatchEvent,
-  }) async {
+  Future<void> cancel({BuildContext? context}) async {
     cancelCount++;
   }
 
@@ -197,7 +235,6 @@ class _RecordingSubscriptionService extends SubscriptionService {
     String level,
     int expectedPriceFen, {
     BuildContext? context,
-    TxPoolWatchCallback? onWatchEvent,
   }) async {
     changed.add('$level:$expectedPriceFen');
   }
@@ -242,6 +279,7 @@ Future<void> _pump(
         chainService: chainService ?? _FakeChainService(prices),
         sessionProvider: sessionProvider ?? _FakeSessionProvider(),
         subscriptionService: effectiveService,
+        identityResolver: _RegisteredFinalizedIdentity(),
       ),
     ),
   );
@@ -249,55 +287,56 @@ Future<void> _pump(
 }
 
 Finder _frontCard(String text) => find.descendant(
-      of: find.byKey(const ValueKey('membership-front-card')),
-      matching: find.text(text),
-    );
+  of: find.byKey(const ValueKey('membership-front-card')),
+  matching: find.text(text),
+);
 
 Finder _frontButton(String label) => find.descendant(
-      of: find.byKey(const ValueKey('membership-front-card')),
-      matching: find.widgetWithText(FilledButton, label),
-    );
+  of: find.byKey(const ValueKey('membership-front-card')),
+  matching: find.widgetWithText(FilledButton, label),
+);
 
-/// 已注册身份 fake:订阅动作先过统一注册门([ensureCidRegisteredOrPrompt]),
-/// 不注 fake 会打到真单例(真链读/真 Isar,hermetic 违规)。
-class _RegisteredIdentityCache extends CurrentUserContext {
-  @override
-  Future<CurrentUser?> resolve() async => CurrentUser(
-        account: _identityAccount,
-        binding: AccountDataBinding(
-          genesisHash: '0x${'11' * 32}',
-          cidNumber: 'CN220-CTZN2-100000001-2026',
-          accountId: _identityAccountId,
-          bindingRevision: 1,
-        ),
-      );
-}
-
-class _RegisteredFinalizedIdentity extends FinalizedIdentityResolver {
+class _RegisteredFinalizedIdentity implements FinalizedIdentityResolver {
   @override
   Future<FinalizedIdentity?> resolve() async => FinalizedIdentity(
-        accountId: _identityAccountId,
-        ss58Address: 'ss58-demo',
-        snapshot: CitizenIdentityChainSnapshot(
-          cidNumber: 'CN220-CTZN2-100000001-2026',
-          accountId: Uint8List(32),
-          bindingRevision: 1,
-          votingIdentity: null,
-        ),
-      );
+    accountId: _identityAccountId,
+    ss58Address: 'ss58-demo',
+    snapshot: CitizenIdentityChainSnapshot(
+      cidNumber: 'CN220-CTZN2-100000001-2026',
+      accountId: Uint8List(32),
+      bindingRevision: 1,
+      votingIdentity: null,
+    ),
+  );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
+
+class _FakeWallet implements CitizenSdkWallet {
+  @override
+  Future<CitizenWalletState> getState() async => CitizenWalletState(
+    revision: BigInt.one,
+    hotProfile: null,
+    accounts: [_identityAccount],
+  );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+SubscriptionService _subscriptionService({SquareApiClient? api}) =>
+    SubscriptionService(
+      wallet: _FakeWallet(),
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
+      identityResolver: _RegisteredFinalizedIdentity(),
+      sessionProvider: _FakeSessionProvider(),
+      api: api,
+    );
 
 void main() {
   useIsolatedIsar();
-  setUp(() {
-    CurrentUserContext.debugInstance = _RegisteredIdentityCache();
-    FinalizedIdentityResolver.debugInstance = _RegisteredFinalizedIdentity();
-  });
-
-  tearDown(() {
-    CurrentUserContext.resetDebugInstance();
-    FinalizedIdentityResolver.resetDebugInstance();
-  });
 
   test('平台 finalized 镜像回执不再产生设备签名', () async {
     var deviceSignCount = 0;
@@ -363,8 +402,8 @@ void main() {
       expiresAt: 9999999999999,
       signRequest: (_) async => 'test-device-signature',
     );
-    final first = SubscriptionService(api: api);
-    final second = SubscriptionService(api: api);
+    final first = _subscriptionService(api: api);
+    final second = _subscriptionService(api: api);
 
     final states = await Future.wait([
       first.authorizeMembership(session),
@@ -478,6 +517,7 @@ void main() {
           chainService: _FakeChainService(const {}),
           sessionProvider: _PendingSessionProvider(pendingSession.future),
           subscriptionService: _RecordingSubscriptionService(),
+          identityResolver: _RegisteredFinalizedIdentity(),
         ),
       ),
     );
@@ -902,7 +942,7 @@ void main() {
   });
 
   test('会员动态展示快照按 CID 持久化且不包含静态套餐', () async {
-    final service = SubscriptionService();
+    final service = _subscriptionService();
     const cidNumber = 'CN220-CTZN2-100000001-2026';
     const snapshot = MembershipDisplaySnapshot(
       state: SquareMembershipState(
@@ -932,7 +972,9 @@ void main() {
 
   // 中文注释：同一状态在会员卡和详情页都必须保真，且按钮不得再与价格拼接。
   testWidgets('本机已有绑定但 Worker 未投影 → 显示身份同步故障而不是无钱包', (tester) async {
-    final sessionProvider = _CidNotBoundSessionProvider();
+    final sessionProvider = _CidNotBoundSessionProvider(
+      status: SquareSessionStatus.identityUnavailable,
+    );
     await _pump(
       tester,
       _state(active: false),
@@ -963,7 +1005,6 @@ void main() {
   });
 
   testWidgets('本机无绑定 → Worker 判未注册后显示注册引导', (tester) async {
-    CurrentUserContext.debugInstance = _UnregisteredIdentityCache();
     final sessionProvider = _CidNotBoundSessionProvider();
     await _pump(
       tester,
@@ -987,7 +1028,6 @@ void main() {
   });
 
   testWidgets('未注册 → 价格仍显示(价格是链上公开读,不依赖会话)', (tester) async {
-    CurrentUserContext.debugInstance = _UnregisteredIdentityCache();
     await _pump(
       tester,
       _state(active: false),

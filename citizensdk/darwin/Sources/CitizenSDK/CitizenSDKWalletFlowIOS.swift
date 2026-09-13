@@ -4,6 +4,29 @@ import Foundation
 import UIKit
 import CoreText
 
+private enum CitizenSDKWalletThemeIOS {
+    static let scaffold = UIColor(red: CGFloat(0xF7) / 255, green: CGFloat(0xF9) / 255,
+                                  blue: CGFloat(0xFC) / 255, alpha: 1)
+    static let surface = UIColor.white
+    static let primary = UIColor(red: 0, green: CGFloat(0x7A) / 255, blue: CGFloat(0x74) / 255, alpha: 1)
+    static let textPrimary = UIColor(red: CGFloat(0x1A) / 255, green: CGFloat(0x2B) / 255,
+                                     blue: CGFloat(0x3C) / 255, alpha: 1)
+    static let textSecondary = UIColor(red: CGFloat(0x5A) / 255, green: CGFloat(0x6B) / 255,
+                                       blue: CGFloat(0x7C) / 255, alpha: 1)
+    static let border = UIColor(red: CGFloat(0xE2) / 255, green: CGFloat(0xE8) / 255,
+                                blue: CGFloat(0xF0) / 255, alpha: 1)
+    static let danger = UIColor(red: CGFloat(0xEF) / 255, green: CGFloat(0x44) / 255,
+                                blue: CGFloat(0x44) / 255, alpha: 1)
+}
+
+private func citizenSDKHostAppNameIOS() -> String {
+    let label = (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+        ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
+        ?? ""
+    if label.isEmpty { return "当前应用" }
+    return label.hasSuffix("App") ? label : label + "App"
+}
+
 public extension CitizenSdk {
     /// 仅在 SDK 自有安全界面查看账户私钥；公开操作不返回秘密、内部句柄或显示回调。
     @MainActor
@@ -54,7 +77,11 @@ private final class CitizenSDKPrivateKeyContentIOS: UIView {
     init(buffer: CitizenSDKPrivateKeyDisplayBuffer) {
         self.buffer = buffer
         super.init(frame: .zero)
-        isOpaque = true; backgroundColor = .systemBackground
+        isOpaque = true
+        backgroundColor = CitizenSDKWalletThemeIOS.danger.withAlphaComponent(0.06)
+        layer.cornerRadius = 8
+        layer.borderWidth = 1
+        layer.borderColor = CitizenSDKWalletThemeIOS.danger.withAlphaComponent(0.16).cgColor
         isAccessibilityElement = false; accessibilityElementsHidden = true
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
@@ -65,8 +92,8 @@ private final class CitizenSDKPrivateKeyContentIOS: UIView {
     }
     override func draw(_ rect: CGRect) {
         guard !isHidden, let context = UIGraphicsGetCurrentContext() else { return }
-        let font = CTFontCreateWithName("Menlo" as CFString, 18, nil)
-        context.setFillColor(UIColor.label.cgColor)
+        let font = CTFontCreateWithName("Menlo" as CFString, 13, nil)
+        context.setFillColor(CitizenSDKWalletThemeIOS.textPrimary.cgColor)
         context.textMatrix = .identity
         context.translateBy(x: 0, y: bounds.height); context.scaleBy(x: 1, y: -1)
         buffer.withCharacters { characters in
@@ -74,7 +101,7 @@ private final class CitizenSDKPrivateKeyContentIOS: UIView {
             defer { for index in glyphs.indices { glyphs[index] = 0 } }
             guard CTFontGetGlyphsForCharacters(font, characters.baseAddress!, &glyphs, characters.count) else { return }
             var positions = (0..<characters.count).map {
-                CGPoint(x: 8 + ($0 % 22) * 11, y: Int(self.bounds.height) - 28 - ($0 / 22) * 28)
+                CGPoint(x: 14 + ($0 % 22) * 9, y: Int(self.bounds.height) - 28 - ($0 / 22) * 24)
             }
             CTFontDrawGlyphs(font, &glyphs, &positions, characters.count, context)
         }
@@ -86,6 +113,7 @@ private final class CitizenSDKPrivateKeyViewController: UIViewController {
     private let flow: CitizenSDKPrivateKeyView
     private let content: CitizenSDKPrivateKeyContentIOS
     private let status = UILabel()
+    private let dangerNote = UILabel()
     private let reveal = UIButton(type: .system)
     private let done = UIButton(type: .system)
     private var tokens: [NSObjectProtocol] = []
@@ -115,18 +143,24 @@ private final class CitizenSDKPrivateKeyViewController: UIViewController {
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
     override func viewDidLoad() {
-        super.viewDidLoad(); title = "查看账户私钥"; view.backgroundColor = .systemBackground
-        status.text = "私钥可控制本账户。请确认周围无人、未共享屏幕；不能复制或分享。"
+        super.viewDidLoad(); title = "查看私钥"; view.backgroundColor = CitizenSDKWalletThemeIOS.scaffold
+        status.text = "私钥泄露将导致该账户资产被盗（仅该账户，不影响本钱包其他账户）。\n\n确认要查看吗？"
         status.numberOfLines = 0
+        status.textColor = CitizenSDKWalletThemeIOS.textPrimary
+        dangerNote.text = "请手抄备份，不支持复制；导出即等于该账户控制权"
+        dangerNote.textColor = CitizenSDKWalletThemeIOS.danger
+        dangerNote.font = .systemFont(ofSize: 12, weight: .medium)
+        dangerNote.numberOfLines = 0
         content.isHidden = true
         content.heightAnchor.constraint(equalToConstant: 120).isActive = true
-        reveal.setTitle("已理解风险，验证身份并查看", for: .normal)
+        reveal.setTitle("查看", for: .normal)
+        reveal.tintColor = CitizenSDKWalletThemeIOS.danger
         reveal.addTarget(self, action: #selector(revealPressed), for: .touchUpInside)
-        done.setTitle("关闭并清除", for: .normal)
+        done.setTitle("关闭", for: .normal)
         done.addTarget(self, action: #selector(donePressed), for: .touchUpInside)
         navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel, target: self, action: #selector(cancelPressed))
-        let stack = UIStackView(arrangedSubviews: [status, content, reveal, done])
-        stack.axis = .vertical; stack.spacing = 20
+        let stack = UIStackView(arrangedSubviews: [status, content, dangerNote, reveal, done])
+        stack.axis = .vertical; stack.spacing = 12
         view.addSubview(stack); stack.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 24),
@@ -179,7 +213,7 @@ private final class CitizenSDKWalletViewController: UIViewController, UITextView
     private let completion: (CitizenSDKWalletFlowResult) -> Void
     private let mnemonic = UITextView()
     private let password = UITextField()
-    private let wordCount = UISegmentedControl(items: ["12 词", "18 词", "24 词"])
+    private let wordCount = UISegmentedControl(items: ["12 个助记词 · 推荐", "24 个助记词"])
     private let accountMode = UISegmentedControl(items: ["下一个账户", "指定编号"])
     private let accountIndices = UITextField()
     private let wordStatus = UILabel()
@@ -208,8 +242,7 @@ private final class CitizenSDKWalletViewController: UIViewController, UITextView
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "钱包操作"
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = CitizenSDKWalletThemeIOS.scaffold
         navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel,
                                                             target: self, action: #selector(cancelPressed))
         configureControls()
@@ -219,8 +252,10 @@ private final class CitizenSDKWalletViewController: UIViewController, UITextView
     private func configureControls() {
         mnemonic.font = .monospacedSystemFont(ofSize: 15, weight: .regular)
         mnemonic.layer.borderWidth = 1
-        mnemonic.layer.borderColor = UIColor.separator.cgColor
-        mnemonic.layer.cornerRadius = 8
+        mnemonic.layer.borderColor = CitizenSDKWalletThemeIOS.border.cgColor
+        mnemonic.layer.cornerRadius = 12
+        mnemonic.backgroundColor = CitizenSDKWalletThemeIOS.surface
+        mnemonic.textColor = CitizenSDKWalletThemeIOS.textPrimary
         mnemonic.autocorrectionType = .no
         mnemonic.autocapitalizationType = .none
         mnemonic.spellCheckingType = .no
@@ -239,6 +274,8 @@ private final class CitizenSDKWalletViewController: UIViewController, UITextView
         password.smartQuotesType = .no
         password.smartDashesType = .no
         password.smartInsertDeleteType = .no
+        password.borderStyle = .roundedRect
+        password.backgroundColor = CitizenSDKWalletThemeIOS.surface
         wordCount.selectedSegmentIndex = 0
         wordCount.addTarget(self, action: #selector(wordCountChanged), for: .valueChanged)
         accountMode.selectedSegmentIndex = 1
@@ -251,12 +288,13 @@ private final class CitizenSDKWalletViewController: UIViewController, UITextView
         wordStatus.numberOfLines = 0
 
         status.numberOfLines = 0
-        status.textColor = .secondaryLabel
-        backupLabel.text = "我已在离线安全位置备份助记词"
+        status.textColor = CitizenSDKWalletThemeIOS.textSecondary
+        backupLabel.text = "我已备份"
         backupLabel.numberOfLines = 0
 
         action.addTarget(self, action: #selector(actionPressed), for: .touchUpInside)
         action.configuration = .filled()
+        action.tintColor = CitizenSDKWalletThemeIOS.primary
         let backupRow = UIStackView(arrangedSubviews: [backup, backupLabel])
         backupRow.axis = .horizontal
         backupRow.spacing = 12
@@ -279,22 +317,34 @@ private final class CitizenSDKWalletViewController: UIViewController, UITextView
         status.text = CitizenSDKWalletInput.explanation
         switch request {
         case let .create(words):
-            wordCount.selectedSegmentIndex = CitizenSDKWalletInput.wordCounts.firstIndex(of: words) ?? 0
+            title = "创建钱包"
+            wordCount.selectedSegmentIndex = words == 24 ? 1 : 0
             mnemonic.isHidden = true
             wordStatus.isHidden = true
-            action.setTitle("生成钱包", for: .normal)
+            status.text = "钱包账户是 \(citizenSDKHostAppNameIOS()) 唯一的账户，请务必妥善保存助记词和钱包密码（如设置），若丢失或遗忘将永久无法找回。"
+            action.setTitle("创建钱包", for: .normal)
         case .importWallet:
-            action.setTitle("导入钱包", for: .normal)
+            title = "输入助记词"
+            wordCount.isHidden = true
+            status.isHidden = true
+            action.setTitle("确认导入", for: .normal)
         case let .addAccounts(indices):
+            title = "添加账户"
+            wordCount.isHidden = true
+            status.text = "无根设备不保存助记词或密码，追加账户需重新录入两者校验归属。"
             accountMode.isHidden = false
             accountIndices.isHidden = false
             accountIndices.text = indices.map(String.init).joined(separator: ",")
-            action.setTitle("添加账户", for: .normal)
+            action.setTitle("确认添加", for: .normal)
         }
         refreshWords()
     }
 
-    private var selectedWords: UInt32 { CitizenSDKWalletInput.wordCounts[wordCount.selectedSegmentIndex] }
+    private var selectedWords: UInt32 {
+        if case .create = request { return wordCount.selectedSegmentIndex == 1 ? 24 : 12 }
+        let count = mnemonic.text.split(whereSeparator: { $0.isWhitespace }).count
+        return count == 18 || count == 24 ? UInt32(count) : 12
+    }
     @objc private func wordCountChanged() { refreshWords() }
     @objc private func accountModeChanged() { accountIndices.isHidden = accountMode.selectedSegmentIndex == 0 }
     func textViewDidChange(_ textView: UITextView) { refreshWords() }
@@ -303,7 +353,7 @@ private final class CitizenSDKWalletViewController: UIViewController, UITextView
     private func refreshWords() {
         guard prepared == nil else { return }
         let words = mnemonic.text.split(whereSeparator: { $0.isWhitespace })
-        wordStatus.text = "\(words.count) / \(selectedWords) 词"
+        wordStatus.text = "\(words.count) 个助记词"
         if words.count == Int(selectedWords) {
             do { try CitizenSDKWalletInput.validateMnemonic(mnemonic.text, wordCount: selectedWords); wordStatus.text! += " · 校验通过" }
             catch { wordStatus.text = citizenSDKFlowError(error).message }
@@ -387,9 +437,10 @@ private final class CitizenSDKWalletViewController: UIViewController, UITextView
                         self.wordCount.isHidden = true
                         self.wordStatus.isHidden = true
                         self.suggestions.isHidden = true
-                        self.status.text = CitizenSDKWalletInput.explanation
-                        self.backup.superview?.isHidden = false
-                        self.action.setTitle("确认备份并创建", for: .normal)
+                        self.status.isHidden = false
+                        self.status.text = "公民不保存助记词，关闭本弹窗后将无法再次显示。\n请立即手抄备份，或在「公民钱包」中妥善保管——这是恢复钱包与追加其他账户的唯一凭证。设置过钱包密码时，还必须单独备份密码。\n不支持复制，不支持截屏。"
+                        self.backup.superview?.isHidden = true
+                        self.action.setTitle("我已备份", for: .normal)
                         self.action.isEnabled = true
                     } catch {
                         passwordBuffer.clear(); self.fail(error)
@@ -444,11 +495,7 @@ private final class CitizenSDKWalletViewController: UIViewController, UITextView
     }
 
     private func commitCreatedWallet() {
-        guard backup.isOn, let prepared else {
-            status.text = "请先确认已安全备份助记词。"
-            action.isEnabled = true
-            return
-        }
+        guard let prepared else { return }
         mnemonic.text = nil
         phrase?.clear(); phrase = nil
         task = Task { [weak self] in
@@ -486,6 +533,8 @@ private final class CitizenSDKWalletViewController: UIViewController, UITextView
                                                      irreversible: irreversible, error: error) {
             finish(result); return
         }
+        status.isHidden = false
+        status.textColor = CitizenSDKWalletThemeIOS.danger
         status.text = citizenSDKFlowError(error).message
         // 提交或助记词展示失败后不能复用已消费的准备句柄。
         if let prepared {

@@ -167,10 +167,68 @@ class CitizenSdk private constructor(
         }
     }
 
+    fun getStorageKeysPaged(
+        finalizedBlock: CitizenBlockRef,
+        prefix: ByteArray,
+        startKey: ByteArray? = null,
+        limit: Int = 1000,
+    ): CompletableFuture<List<ByteArray>> {
+        require(finalizedBlock.finality == CitizenFinality.FINALIZED) {
+            "storage keys page requires finalized block"
+        }
+        require(prefix.size in 1..4096 && (startKey == null || startKey.size in 1..4096)) {
+            "storage keys page prefix/start key is invalid"
+        }
+        require(limit in 1..1000) { "storage keys page limit must be 1..1000" }
+        val prefixCopy = prefix.clone()
+        val startCopy = startKey?.clone()
+        return request({ native.getStorageKeysPaged(finalizedBlock, prefixCopy, startCopy, limit) }) {
+            (it as CitizenSdkNativeResult.StorageBatch).value.map { value ->
+                requireNotNull(value).clone()
+            }
+        }
+    }
+
+    fun callRuntimeApi(
+        block: CitizenBlockRef,
+        method: String,
+        arguments: ByteArray,
+    ): CompletableFuture<ByteArray> {
+        require(method.toByteArray(Charsets.UTF_8).size in 1..128 &&
+            Regex("^[A-Za-z][A-Za-z0-9_]*_[A-Za-z0-9_]+$").matches(method)) {
+            "runtime API method is invalid"
+        }
+        require(arguments.size <= 1024 * 1024) { "runtime API arguments exceed 1 MiB" }
+        val copy = arguments.clone()
+        return request({ native.callRuntimeApi(block, method, copy) }) {
+            requireNotNull((it as CitizenSdkNativeResult.Storage).value).clone()
+        }
+    }
+
     fun getSystemEvents(finalizedBlock: CitizenBlockRef): CompletableFuture<ByteArray?> {
         require(finalizedBlock.finality == CitizenFinality.FINALIZED) { "System.Events requires finalized block" }
         return request({ native.getSystemEvents(finalizedBlock) }) {
             (it as CitizenSdkNativeResult.Storage).value?.clone()
+        }
+    }
+
+    fun deriveApplicationKey(
+        accountId: ByteArray,
+        salt: ByteArray,
+        info: ByteArray,
+    ): CompletableFuture<ByteArray> {
+        val checkedAccount = accountId.requireSize(32, "account id")
+        require(salt.size == 32 && info.size in 1..256) {
+            "application key requires 32-byte salt and 1..256-byte info"
+        }
+        val saltCopy = salt.clone()
+        val infoCopy = info.clone()
+        return request({ native.deriveApplicationKey(checkedAccount, saltCopy, infoCopy) }) {
+            val source = (it as CitizenSdkNativeResult.ApplicationKey).value
+            source.clone().also { source.fill(0) }
+        }.whenComplete { _, _ ->
+            saltCopy.fill(0)
+            infoCopy.fill(0)
         }
     }
 

@@ -1,12 +1,11 @@
 import 'dart:convert';
 
-import 'package:citizenapp/rpc/pallet_registry.dart';
+import 'package:citizenapp/citizen/shared/pallet_registry.dart';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:polkadart/scale_codec.dart' show ByteOutput;
 
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/rpc/signed_extrinsic_builder.dart';
 import 'package:citizenapp/votingengine/internal-vote/internal_vote_query_service.dart';
 
 /// 投票引擎统一投票入口服务。
@@ -23,9 +22,14 @@ import 'package:citizenapp/votingengine/internal-vote/internal_vote_query_servic
 /// Runtime 位置: `pallet_index=20, call_index=0`(InternalVote sub-pallet)。
 /// Call 编码: `[0x14][0x00][proposal_id:u64_le][ticket_claim][approve:bool]`。
 class InternalVoteService {
-  InternalVoteService({ChainRpc? chainRpc}) : _rpc = chainRpc ?? ChainRpc();
+  const InternalVoteService({
+    required CitizenChain chain,
+    required CitizenTransactions transactions,
+  })  : _chain = chain,
+        _transactions = transactions;
 
-  final ChainRpc _rpc;
+  final CitizenChain _chain;
+  final CitizenTransactions _transactions;
 
   // ──── 常量 ────
 
@@ -50,22 +54,20 @@ class InternalVoteService {
     required bool approve,
     String? actorCidNumber,
     String? voterRoleCode,
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
-    required Future<Uint8List> Function(Uint8List payload) sign,
-    TxPoolWatchCallback? onWatchEvent,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    ) externalSigning,
   }) async {
     final callData = buildCallData(
       proposalId: proposalId,
       voterRoleCode: voterRoleCode,
       approve: approve,
     );
-    final result = await _signAndSubmit(
+    final result = await _executeFinalized(
       callData: callData,
-      fromSs58Address: fromSs58Address,
       signerPublicKey: signerPublicKey,
-      sign: sign,
-      onWatchEvent: onWatchEvent,
+      externalSigning: externalSigning,
     );
     await _confirmRuntimeVote(
       proposalId: proposalId,
@@ -73,7 +75,6 @@ class InternalVoteService {
       voterRoleCode: voterRoleCode,
       approve: approve,
       signerPublicKey: signerPublicKey,
-      blockHashHex: result.blockHashHex,
     );
     return result;
   }
@@ -108,26 +109,50 @@ class InternalVoteService {
 
   // ──── 内部：签名提交 ────
 
-  Future<({String txHash, int usedNonce, String blockHashHex})> _signAndSubmit({
+  Future<({String txHash, int usedNonce, String blockHashHex})> _executeFinalized({
     required Uint8List callData,
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
-    required Future<Uint8List> Function(Uint8List payload) sign,
-    TxPoolWatchCallback? onWatchEvent,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    ) externalSigning,
   }) async {
-    return SignedExtrinsicBuilder(
-      chainRpc: _rpc,
-      logLabel: 'InternalVote',
-    ).signAndSubmitInBlock(
-      callData: callData,
-      fromSs58Address: fromSs58Address,
-      signerPublicKey: signerPublicKey,
-      sign: sign,
-      onWatchEvent: onWatchEvent,
+    final prepared = await _transactions.prepareTransaction(
+      signerPublicKey,
+      callData,
+    );
+    final started = await _transactions.executePreparedTransaction(
+      prepared.preparationId,
+    );
+    CitizenTransactionExecutionCompleted completed;
+    if (started is CitizenTransactionExternalSigningPending) {
+      final response = await externalSigning(started);
+      if (response == null) {
+        await _transactions.cancelPreparedTransactionExecution(
+          started.executionId,
+        );
+        throw StateError('投票签名已取消');
+      }
+      completed = await _transactions.consumePreparedTransactionQrResponse(
+        started.executionId,
+        response,
+      );
+    } else {
+      completed = started as CitizenTransactionExecutionCompleted;
+    }
+    if (completed.resolution !=
+            CitizenTransactionResolution.finalizedSuccess ||
+        completed.execution == null) {
+      throw StateError(completed.poolRejectionReason ?? '投票交易执行失败');
+    }
+    return (
+      txHash: '0x${_hexEncode(completed.transactionHash)}',
+      usedNonce: prepared.nonce.toInt(),
+      blockHashHex: completed.execution!.block.hash,
     );
   }
 
-  /// 入块后回读 runtime 投票引擎 storage，确认管理员投票已经真正写入。
+  /// SDK finalized execution 成功后回读 runtime 投票引擎 storage，
+  /// 确认管理员投票已经真正写入。
   ///
   /// 这里是 citizenapp 的投票确认边界。txHash、交易池状态和
   /// 客户端 pending 记录都不能替代 runtime `InternalVotesByTicket`。
@@ -137,10 +162,9 @@ class InternalVoteService {
     required String? voterRoleCode,
     required bool approve,
     required Uint8List signerPublicKey,
-    required String blockHashHex,
   }) async {
     final publicKey = _hexEncode(signerPublicKey);
-    final query = InternalVoteQueryService(chainRpc: _rpc);
+    final query = InternalVoteQueryService(chain: _chain);
     for (var attempt = 0; attempt < 6; attempt++) {
       final chainVote = actorCidNumber == null
           ? await query.fetchAdminVote(proposalId, publicKey)
@@ -159,13 +183,7 @@ class InternalVoteService {
       }
     }
 
-    final events = await _rpc.fetchSystemEventsAtBlock(blockHashHex);
-    final failure =
-        events == null ? null : _rpc.findExtrinsicFailureInEvents(events);
-    if (failure != null) {
-      throw StateError('runtime 拒绝投票：${failure.description}');
-    }
-    throw StateError('交易已入块，但 runtime 投票引擎未记录该管理员投票');
+    throw StateError('交易已成功执行，但 runtime 投票记录未收敛');
   }
 
   static Uint8List _encodeCompact(int value) {

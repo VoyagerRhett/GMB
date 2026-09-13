@@ -30,10 +30,6 @@ target 'Runner' do
   # Swift 插件统一以 framework 集成，避免静态模块映射与 Objective-C 桥接头冲突。
   use_frameworks!
 
-  # Smoldot 原生静态库由
-  # scripts/build-smoldot-native.sh ios 生成,符号清单从产物实抽,详见 podspec。
-  pod 'smoldot_ffi', :path => 'smoldot'
-
   # TataChatSDK 通过自身 Flutter FFI plugin 和 tatachat_sdk.podspec 自动安装；宿主
   # Podfile 不直接登记其 Rust 库，避免恢复跨产品链接所有权。
 

@@ -1,21 +1,19 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:polkadart_keyring/polkadart_keyring.dart' show Keyring;
-import 'package:smoldot/smoldot.dart' show LightClientStatusSnapshot;
 import 'package:citizenapp/citizen/shared/institution_info.dart';
 import 'package:citizenapp/citizen/shared/multisig_create_amount_rules.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_query_service.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
 import 'package:citizenapp/qr/widgets/address_scan_button.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/signer/qr_signer.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/widgets/chain_progress_banner.dart';
 import 'package:citizenapp/my/util/amount_format.dart';
 import 'package:citizenapp/transaction/shared/account_balance_snapshot_store.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 
 import 'personal_manage_service.dart';
 import 'personal_proposal_history_service.dart';
@@ -33,7 +31,7 @@ class PersonalAccountClosePage extends StatefulWidget {
   });
 
   final InstitutionInfo institution;
-  final List<WalletProfile> adminWallets;
+  final List<CitizenWalletStateAccount> adminWallets;
 
   @override
   State<PersonalAccountClosePage> createState() =>
@@ -42,16 +40,18 @@ class PersonalAccountClosePage extends StatefulWidget {
 
 class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
   final _beneficiaryController = TextEditingController();
-  final _manageService = PersonalManageService();
+  late final PersonalManageService _manageService;
+  late final ProposalQueryService _proposalQuery;
+  bool _dependenciesReady = false;
 
   bool _submitting = false;
   bool _loadingBalance = true;
   double? _availableBalance;
   String? _addressError;
-  LightClientStatusSnapshot? _chainProgress;
+  CitizenChainSyncStatus? _chainProgress;
   String? _chainProgressError;
 
-  late WalletProfile _selectedWallet;
+  late CitizenWalletStateAccount _selectedWallet;
   late String _accountSs58;
 
   @override
@@ -59,6 +59,19 @@ class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
     super.initState();
     _selectedWallet = widget.adminWallets.first;
     _accountSs58 = _hexToSs58(widget.institution.personalAccountId);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    final sdk = context.read<CitizenSdk>();
+    _manageService = PersonalManageService(
+      chain: sdk.chain,
+      transactions: sdk.transactions,
+    );
+    _proposalQuery = ProposalQueryService(chain: sdk.chain);
+    _dependenciesReady = true;
     _fetchBalance();
   }
 
@@ -69,6 +82,7 @@ class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
   }
 
   Future<void> _fetchBalance() async {
+    final chain = context.read<CitizenSdk>().chain;
     final store = AccountBalanceSnapshotStore.instance;
     final local = await store.read(widget.institution.personalAccountId);
     if (local != null && mounted) {
@@ -79,8 +93,10 @@ class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
       if (local.isFresh(AccountBalanceSnapshotStore.displayTtl)) return;
     }
     try {
-      final balance = await ChainRpc()
-          .fetchFinalizedBalance(widget.institution.personalAccountId);
+      final snapshot = await chain.getAccountBalance(
+        widget.institution.personalAccountId,
+      );
+      final balance = snapshot.freeFen.toDouble() / 100;
       try {
         await store.put(
           accountId: widget.institution.personalAccountId,
@@ -127,11 +143,12 @@ class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
   // ──── 提交 ────
 
   Future<void> _submit() async {
+    final chain = context.read<CitizenSdk>().chain;
     final blockedReason = _submitBlockedReason;
     if (blockedReason != null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(blockedReason)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(blockedReason)));
       return;
     }
 
@@ -139,10 +156,12 @@ class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
     if (!_validateAddress(beneficiary)) return;
 
     if (_availableBalance != null) {
-      final balanceFen =
-          MultisigCreateAmountRules.yuanToFen(_availableBalance!);
-      final executionFeeFen =
-          MultisigCreateAmountRules.calculateOnchainFeeFen(balanceFen);
+      final balanceFen = MultisigCreateAmountRules.yuanToFen(
+        _availableBalance!,
+      );
+      final executionFeeFen = MultisigCreateAmountRules.calculateOnchainFeeFen(
+        balanceFen,
+      );
       final requiredFen =
           executionFeeFen + MultisigCreateAmountRules.existentialDepositFen;
       if (balanceFen < requiredFen) {
@@ -164,56 +183,24 @@ class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
       final wallet = _selectedWallet;
       final publicKeyBytes = _hexDecode(wallet.accountId);
 
-      // 热钱包:先认证(生物/密码),后续 signCallback 用本地 seed 签名;
-      // 冷钱包:走 QR 签名(扫码 → citizenwallet 设备签 → 扫回签名)。
-      // 对齐 [institution_manage_detail_page._submitVote] 同款分流。
-      WalletManager? hotWalletManager;
-      if (wallet.requiresHotSign) {
-        hotWalletManager = WalletManager();
-      }
-
-      Future<Uint8List> signCallback(Uint8List payload) async {
-        if (hotWalletManager != null) {
-          return await hotWalletManager.signWithWallet(
-              wallet.walletIndex, payload);
-        }
-        // 冷钱包路径
-        final qrSigner = QrSigner();
-        final request = qrSigner.buildRequest(
-          requestId: QrSigner.generateRequestId(prefix: 'close-dq-'),
-          signerPublicKey: wallet.accountId,
-          payloadHex: '0x${_toHex(payload)}',
-          action: QrActions.personalClose,
-        );
-        final requestJson = qrSigner.encodeRequest(request);
-        if (!mounted) throw Exception('页面已关闭');
-        final response = await Navigator.push<SignResponseEnvelope>(
-          context,
-          MaterialPageRoute(
-            builder: (_) => QrSignSessionPage(
-                request: request,
-                requestJson: requestJson,
-                expectedSignerPublicKey: wallet.accountId),
-          ),
-        );
-        if (response == null) throw Exception('签名已取消');
-        return Uint8List.fromList(_hexDecode(response.body.signatureHex));
-      }
-
       // 提前查链上 NextProposalId 作为本次关闭提案的预测 ID(req 5 历史保留)。
-      final predictedProposalId =
-          await ProposalQueryService().fetchNextProposalId();
+      final predictedProposalId = await _proposalQuery.fetchNextProposalId();
 
       final result = await _manageService.submitProposeClosePersonal(
         accountId: widget.institution.personalAccountId,
         beneficiaryAddress: beneficiary,
-        fromSs58Address: wallet.ss58Address,
         signerPublicKey: Uint8List.fromList(publicKeyBytes),
-        sign: signCallback,
+        externalSigning: (pending) => showCitizenSdkQrResponse(
+          context,
+          request: pending.qrRequest,
+          expiresAt: BigInt.from(
+            pending.expiresAt.millisecondsSinceEpoch ~/ 1000,
+          ),
+        ),
       );
 
       // 写入 Isar `PersonalAccountProposalEntity`,详情页提案列表才能显示。
-      await PersonalProposalHistoryService().recordOrUpdate(
+      await PersonalProposalHistoryService(chain: chain).recordOrUpdate(
         personalAccountId: widget.institution.personalAccountId,
         proposalId: predictedProposalId,
         action: PersonalProposalAction.close,
@@ -221,9 +208,7 @@ class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
         // 发起关闭提案签名成功后，投票引擎已自动记录发起人的赞成票。
         yesVotes: 1,
         noVotes: 0,
-        snapshot: {
-          'beneficiary': beneficiary,
-        },
+        snapshot: {'beneficiary': beneficiary},
       );
 
       if (!mounted) return;
@@ -244,7 +229,7 @@ class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
     }
   }
 
-  void _handleChainProgressChanged(LightClientStatusSnapshot? progress) {
+  void _handleChainProgressChanged(CitizenChainSyncStatus? progress) {
     if (!mounted) return;
     setState(() {
       _chainProgress = progress;
@@ -266,7 +251,7 @@ class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
     if (progress == null) {
       return _chainProgressError ?? '正在读取区块链状态，请稍后再试';
     }
-    if (!progress.hasPeers) {
+    if (progress.peerCount == BigInt.zero) {
       return '轻节点尚未连接到区块链网络，暂不能发起关闭个人多签提案';
     }
     if (progress.isSyncing) {
@@ -288,8 +273,9 @@ class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
         title: Text(
           '关闭个人多签',
           style: TextStyle(
-              fontSize: AppLayout.scaled(context, 17),
-              fontWeight: FontWeight.w700),
+            fontSize: AppLayout.scaled(context, 17),
+            fontWeight: FontWeight.w700,
+          ),
         ),
         centerTitle: true,
         backgroundColor: Colors.white,
@@ -309,8 +295,9 @@ class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
                 padding: EdgeInsets.all(AppLayout.scaled(context, 12)),
                 decoration: BoxDecoration(
                   color: AppTheme.surfaceMuted,
-                  borderRadius:
-                      BorderRadius.circular(AppLayout.scaledValue(10)),
+                  borderRadius: BorderRadius.circular(
+                    AppLayout.scaledValue(10),
+                  ),
                 ),
                 child: Text(
                   _accountSs58,
@@ -329,8 +316,9 @@ class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
                 padding: EdgeInsets.all(AppLayout.scaled(context, 12)),
                 decoration: BoxDecoration(
                   color: AppTheme.surfaceMuted,
-                  borderRadius:
-                      BorderRadius.circular(AppLayout.scaledValue(10)),
+                  borderRadius: BorderRadius.circular(
+                    AppLayout.scaledValue(10),
+                  ),
                 ),
                 child: _loadingBalance
                     ? SizedBox(
@@ -363,12 +351,14 @@ class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
                   hintText: '输入或扫码',
                   errorText: _addressError,
                   border: OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(10)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(10),
+                    ),
                   ),
                   contentPadding: EdgeInsets.symmetric(
-                      horizontal: AppLayout.scaled(context, 12),
-                      vertical: AppLayout.scaled(context, 10)),
+                    horizontal: AppLayout.scaled(context, 12),
+                    vertical: AppLayout.scaled(context, 10),
+                  ),
                   suffixIcon: AddressScanButton(
                     onAddressScanned: (ss58Address) => setState(
                       () => _beneficiaryController.text = ss58Address,
@@ -380,15 +370,16 @@ class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
                 SizedBox(height: AppLayout.scaled(context, 20)),
                 _buildSectionTitle('签名钱包'),
                 SizedBox(height: AppLayout.scaled(context, 8)),
-                DropdownButtonFormField<WalletProfile>(
+                DropdownButtonFormField<CitizenWalletStateAccount>(
                   initialValue: _selectedWallet,
                   items: widget.adminWallets.map((w) {
                     return DropdownMenuItem(
                       value: w,
                       child: Text(
-                        '${w.walletName} (${_truncateAddress(w.ss58Address)})',
-                        style:
-                            TextStyle(fontSize: AppLayout.scaled(context, 13)),
+                        '${w.name} (${_truncateAddress(w.ss58Address)})',
+                        style: TextStyle(
+                          fontSize: AppLayout.scaled(context, 13),
+                        ),
                       ),
                     );
                   }).toList(),
@@ -397,11 +388,14 @@ class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
                   },
                   decoration: InputDecoration(
                     border: OutlineInputBorder(
-                        borderRadius:
-                            BorderRadius.circular(AppLayout.scaledValue(10))),
+                      borderRadius: BorderRadius.circular(
+                        AppLayout.scaledValue(10),
+                      ),
+                    ),
                     contentPadding: EdgeInsets.symmetric(
-                        horizontal: AppLayout.scaled(context, 12),
-                        vertical: AppLayout.scaled(context, 10)),
+                      horizontal: AppLayout.scaled(context, 12),
+                      vertical: AppLayout.scaled(context, 10),
+                    ),
                   ),
                 ),
               ],
@@ -415,22 +409,30 @@ class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
                     backgroundColor: AppTheme.danger,
                     foregroundColor: Colors.white,
                     padding: EdgeInsets.symmetric(
-                        vertical: AppLayout.scaled(context, 14)),
+                      vertical: AppLayout.scaled(context, 14),
+                    ),
                     shape: RoundedRectangleBorder(
-                        borderRadius:
-                            BorderRadius.circular(AppLayout.scaledValue(12))),
+                      borderRadius: BorderRadius.circular(
+                        AppLayout.scaledValue(12),
+                      ),
+                    ),
                   ),
                   child: _submitting
                       ? SizedBox(
                           width: AppLayout.scaled(context, 18),
                           height: AppLayout.scaled(context, 18),
                           child: const CircularProgressIndicator(
-                              strokeWidth: 2, color: Colors.white),
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
                         )
-                      : Text('发起关闭个人多签提案',
+                      : Text(
+                          '发起关闭个人多签提案',
                           style: TextStyle(
-                              fontSize: AppLayout.scaled(context, 16),
-                              fontWeight: FontWeight.w600)),
+                            fontSize: AppLayout.scaled(context, 16),
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
                 ),
               ),
               if (_submitBlockedReason != null) ...[
@@ -491,17 +493,6 @@ class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
   String _hexToSs58(String hex) {
     final bytes = _hexDecode(hex);
     return Keyring().encodeAddress(Uint8List.fromList(bytes), kGmbSs58Prefix);
-  }
-
-  String _toHex(List<int> bytes) {
-    const chars = '0123456789abcdef';
-    final buf = StringBuffer();
-    for (final b in bytes) {
-      buf
-        ..write(chars[(b >> 4) & 0x0f])
-        ..write(chars[b & 0x0f]);
-    }
-    return buf.toString();
   }
 
   Uint8List _hexDecode(String hex) {

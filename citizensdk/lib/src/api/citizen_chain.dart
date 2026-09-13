@@ -35,6 +35,21 @@ abstract interface class CitizenChain {
     List<Uint8List> keys,
   );
 
+  /// 返回一个准确 finalized 块上的有界 opaque storage key 页面。
+  Future<List<Uint8List>> getStorageKeysPaged(
+    CitizenBlockRef finalizedBlock,
+    Uint8List prefix, {
+    Uint8List? startKey,
+    int limit = 1000,
+  });
+
+  /// 在一个准确 verified block 上执行 opaque Runtime API。
+  Future<Uint8List> callRuntimeApi(
+    CitizenBlockRef block,
+    String method,
+    Uint8List arguments,
+  );
+
   Future<Uint8List?> getSystemEvents(CitizenBlockRef finalizedBlock);
 
   Future<CitizenChainState> exportState();

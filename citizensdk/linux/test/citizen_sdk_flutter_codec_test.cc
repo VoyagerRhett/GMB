@@ -63,6 +63,7 @@ void test_method_closure_and_requests() {
       Method::get_best_head, Method::get_finalized_block_at,
       Method::resolve_finalized_block, Method::get_block_header, Method::get_block_body,
       Method::get_runtime_context, Method::get_storage, Method::get_storage_batch,
+      Method::get_storage_keys_paged, Method::call_runtime_api,
       Method::get_system_events, Method::export_state, Method::import_state,
       Method::get_genesis_hash,
       Method::get_account_balance, Method::get_account_balances, Method::get_account_nonce,
@@ -73,7 +74,8 @@ void test_method_closure_and_requests() {
       Method::create_wallet, Method::import_wallet, Method::add_wallet_accounts,
       Method::set_active_wallet_account, Method::rename_wallet_account,
       Method::delete_wallet_account, Method::delete_wallet,
-      Method::reconcile_wallet_cleanup, Method::sign_wallet_payload, Method::begin_signing,
+      Method::reconcile_wallet_cleanup, Method::sign_wallet_payload,
+      Method::derive_application_key, Method::begin_signing,
       Method::consume_external_signature, Method::cancel_signing,
       Method::begin_default_account_change, Method::consume_default_account_change,
       Method::verify_signature, Method::prepare_transaction,
@@ -88,7 +90,7 @@ void test_method_closure_and_requests() {
   };
   std::set<std::string> names;
   for (Method method : all) names.insert(citizen_sdk::flutter::method_name(method));
-  assert(names.size() == 62 && names.count("open") == 1 &&
+  assert(names.size() == 65 && names.count("open") == 1 &&
          names.count("getTransactionHistory") == 1);
 
   assert(decode("open", list({Value::integer(1), Value::integer(63)})).modules == 63);
@@ -121,6 +123,13 @@ void test_method_closure_and_requests() {
       finalized, Value::bytes({1})})).payload.size() == 1);
   assert(decode("getStorageBatch", list({Value::integer(1), Value::string("s"), Value::integer(1),
       finalized, list({Value::bytes({1}), Value::bytes({2})})})).storage_keys.size() == 2);
+  const auto keys_page = decode("getStorageKeysPaged", list({Value::integer(1),
+      Value::string("s"), Value::integer(1), finalized, Value::bytes({1}),
+      Value::null(), Value::integer(1000)}));
+  assert(keys_page.storage_keys_limit == 1000 && !keys_page.storage_start_key);
+  const auto runtime = decode("callRuntimeApi", list({Value::integer(1), Value::string("s"),
+      Value::integer(1), finalized, Value::string("CitizenApi_items"), Value::bytes({})}));
+  assert(runtime.runtime_api_method == "CitizenApi_items" && runtime.payload.empty());
   assert(decode("importState", list({Value::integer(1), Value::string("s"), Value::integer(1),
       Value::integer(1), finalized, Value::bytes({1})})).state_database.size() == 1);
   for (const char *method : {"getAccountBalance", "getAccountNonce",
@@ -157,6 +166,11 @@ void test_method_closure_and_requests() {
   assert(reordered.wallet_revision == 7 && reordered.account_ids.size() == 2);
   assert(decode("signWalletPayload", list({Value::integer(1), Value::string("s"),
       Value::integer(1), Value::string(account('2')), Value::bytes({1, 2})})).payload.size() == 2);
+  const auto application_key = decode("deriveApplicationKey", list({Value::integer(1),
+      Value::string("s"), Value::integer(1), Value::string(account('2')),
+      Value::bytes(Value::Bytes(32, 7)), Value::bytes({1})}));
+  assert(application_key.application_key_salt.size() == 32 &&
+         application_key.application_key_info.size() == 1);
   const auto signing = decode("beginSigning", list({Value::integer(1), Value::string("s"),
       Value::integer(1), Value::string(account('2')), Value::bytes({1, 2}), Value::string("raw"),
       Value::bytes({}), Value::string("none"), Value::integer(0), Value::integer(120)}));
@@ -455,6 +469,12 @@ void test_balance_nonce_fee_semantics() {
 
 int main() {
   (void)citizen_sdk::flutter::event("s", 1, "historyChanged", Value::list({}));
+  (void)citizen_sdk::flutter::event(
+      "s", 2, "finalizedBlockChanged", Value::list({block_fixture('3', "7", true)}));
+  expect_failure([] {
+    (void)citizen_sdk::flutter::event(
+        "s", 2, "finalizedBlockChanged", Value::list({block_fixture('3', "7", false)}));
+  }, CITIZENSDK_ERROR_INTEGRITY);
   expect_failure([] {
     (void)citizen_sdk::flutter::event("s", 1, "historyChanged", Value::list({Value::integer(1)}));
   }, CITIZENSDK_ERROR_INTEGRITY);

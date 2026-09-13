@@ -1,14 +1,18 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'package:flutter/material.dart';
 
 import 'package:citizenapp/citizen/cid/cid_generator.dart';
 import 'package:citizenapp/ui/app_theme.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart' show Account;
+import 'package:citizen_sdk/citizen_sdk.dart' show CitizenWalletStateAccount;
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 「注册身份」的选择结果:主体类型 + 绑定的钱包账户。
 class RegisterChoice {
-  const RegisterChoice(
-      {required this.institution, required this.bindAccountId});
+  const RegisterChoice({
+    required this.institution,
+    required this.bindAccountId,
+  });
 
   /// [kCidInstitutionCitizen](公民)/ [kCidInstitutionResident](居民)。
   final String institution;
@@ -24,7 +28,7 @@ class RegisterChoice {
 /// ([MyIdService.registerAnonymousCid])承接,本面板只负责选择与风险知情。
 Future<RegisterChoice?> showRegisterIdentitySheet(
   BuildContext context, {
-  required List<Account> accounts,
+  required List<CitizenWalletStateAccount> accounts,
 }) {
   return showModalBottomSheet<RegisterChoice>(
     context: context,
@@ -36,7 +40,7 @@ Future<RegisterChoice?> showRegisterIdentitySheet(
 class RegisterIdentitySheet extends StatefulWidget {
   const RegisterIdentitySheet({super.key, required this.accounts});
 
-  final List<Account> accounts;
+  final List<CitizenWalletStateAccount> accounts;
 
   @override
   State<RegisterIdentitySheet> createState() => _RegisterIdentitySheetState();
@@ -44,17 +48,22 @@ class RegisterIdentitySheet extends StatefulWidget {
 
 class _RegisterIdentitySheetState extends State<RegisterIdentitySheet> {
   String _institution = kCidInstitutionCitizen;
-  late final List<Account> _sortedAccounts;
+  late final List<CitizenWalletStateAccount> _sortedAccounts;
   late String _bindAccountId;
 
   @override
   void initState() {
     super.initState();
     _sortedAccounts = [...widget.accounts]
-      ..sort((a, b) => a.accountIndex.compareTo(b.accountIndex));
+      ..sort(
+        (a, b) => (a.accountIndex ?? 0x7fffffff).compareTo(
+          b.accountIndex ?? 0x7fffffff,
+        ),
+      );
     // 默认绑账户0(序号最小者);列表为空是异常兜底,留空由 service 拒。
-    _bindAccountId =
-        _sortedAccounts.isEmpty ? '' : _sortedAccounts.first.accountId;
+    _bindAccountId = _sortedAccounts.isEmpty
+        ? ''
+        : _sortedAccounts.first.accountId;
   }
 
   @override
@@ -72,12 +81,14 @@ class _RegisterIdentitySheetState extends State<RegisterIdentitySheet> {
                 child: Container(
                   width: AppLayout.scaled(context, 36),
                   height: AppLayout.scaled(context, 4),
-                  margin:
-                      EdgeInsets.only(bottom: AppLayout.scaled(context, 16)),
+                  margin: EdgeInsets.only(
+                    bottom: AppLayout.scaled(context, 16),
+                  ),
                   decoration: BoxDecoration(
                     color: AppTheme.textTertiary,
-                    borderRadius:
-                        BorderRadius.circular(AppLayout.scaledValue(2)),
+                    borderRadius: BorderRadius.circular(
+                      AppLayout.scaledValue(2),
+                    ),
                   ),
                 ),
               ),
@@ -94,9 +105,10 @@ class _RegisterIdentitySheetState extends State<RegisterIdentitySheet> {
                 '占用一个匿名身份 CID 号并绑定到你选的钱包账户,自付最低链上费。身份主键是'
                 'CID 号,绑定账户只是鉴权凭证——私钥泄漏可换绑到新账户,CID 不丢失。',
                 style: TextStyle(
-                    fontSize: AppLayout.scaled(context, 12),
-                    height: 1.5,
-                    color: AppTheme.textSecondary),
+                  fontSize: AppLayout.scaled(context, 12),
+                  height: 1.5,
+                  color: AppTheme.textSecondary,
+                ),
               ),
               SizedBox(height: AppLayout.scaled(context, 16)),
               const _SectionLabel('主体类型'),
@@ -124,8 +136,9 @@ class _RegisterIdentitySheetState extends State<RegisterIdentitySheet> {
                 SizedBox(height: AppLayout.scaled(context, 8)),
                 ..._sortedAccounts.map(
                   (account) => Padding(
-                    padding:
-                        EdgeInsets.only(bottom: AppLayout.scaled(context, 8)),
+                    padding: EdgeInsets.only(
+                      bottom: AppLayout.scaled(context, 8),
+                    ),
                     child: _AccountRadio(
                       account: account,
                       selected: _bindAccountId == account.accountId,
@@ -219,7 +232,9 @@ class _TypeOption extends StatelessWidget {
         decoration: BoxDecoration(
           color: selected
               ? Color.alphaBlend(
-                  AppTheme.primary.withAlpha(10), AppTheme.surfaceCard)
+                  AppTheme.primary.withAlpha(10),
+                  AppTheme.surfaceCard,
+                )
               : AppTheme.surfaceCard,
           borderRadius: BorderRadius.circular(AppTheme.radiusLg),
           border: Border.all(color: color, width: selected ? 2 : 1),
@@ -287,7 +302,7 @@ class _AccountRadio extends StatelessWidget {
     required this.onTap,
   });
 
-  final Account account;
+  final CitizenWalletStateAccount account;
   final bool selected;
   final VoidCallback onTap;
 
@@ -326,7 +341,7 @@ class _AccountRadio extends StatelessWidget {
                 children: [
                   Flexible(
                     child: Text(
-                      account.accountName,
+                      account.name,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(

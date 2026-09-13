@@ -5,12 +5,13 @@
 // - 管理员身份统一按机构 CID 路由，机构码只用于选择对应 admins pallet。
 // - 读取遵守 ADR-018:余额走精确整键批量,提案走当年共享缓存客户端过滤,不长前缀扫描。
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizenapp/citizen/institution/institution.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/models/admin_account.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/services/institution_admin_service.dart';
 import 'package:citizenapp/citizen/institution/institution_role_models.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
 import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_proposal_adapter.dart';
+import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_service.dart';
 
 /// 机构提案摘要(详情页提案列表用)。
 class InstitutionProposalSummary {
@@ -50,21 +51,32 @@ abstract interface class InstitutionChainState {
 /// 生产实现:复用既有链读基础设施。链读需联网,真机验证。
 class LiveInstitutionChainState implements InstitutionChainState {
   LiveInstitutionChainState({
-    ChainRpc? chainRpc,
+    required CitizenChain chain,
+    required CitizenTransactions transactions,
     InstitutionAdminService? adminService,
     MultisigTransferProposalFeed? feed,
-  })  : _chainRpc = chainRpc ?? ChainRpc(),
-        _adminService = adminService ?? InstitutionAdminService(),
-        _feed = feed ?? MultisigTransferProposalFeed();
+  })  : _chain = chain,
+        _adminService = adminService ?? InstitutionAdminService(chain: chain),
+        _feed = feed ??
+            MultisigTransferProposalFeed(
+              service: MultisigTransferService(
+                chain: chain,
+                transactions: transactions,
+              ),
+            );
 
-  final ChainRpc _chainRpc;
+  final CitizenChain _chain;
   final InstitutionAdminService _adminService;
   final MultisigTransferProposalFeed _feed;
 
   @override
-  Future<Map<String, double>> balances(List<String> accountIds) {
+  Future<Map<String, double>> balances(List<String> accountIds) async {
     if (accountIds.isEmpty) return Future.value(const {});
-    return _chainRpc.fetchFinalizedBalances(accountIds);
+    final snapshots = await _chain.getAccountBalances(accountIds);
+    return <String, double>{
+      for (final snapshot in snapshots)
+        snapshot.accountId: snapshot.freeFen.toDouble() / 100,
+    };
   }
 
   @override

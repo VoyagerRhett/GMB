@@ -1,4 +1,6 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
 import 'package:citizenapp/transaction/offchain-transaction/services/clearing_bank_directory.dart';
 import 'package:citizenapp/transaction/offchain-transaction/pages/bind_clearing_bank_page.dart';
@@ -35,8 +37,8 @@ class ClearingBankSettingsPage extends StatefulWidget {
 class _ClearingBankSettingsPageState extends State<ClearingBankSettingsPage> {
   final TextEditingController _searchCtrl = TextEditingController();
 
-  late final ClearingBankDirectory _directory =
-      widget.directory ?? ClearingBankDirectory();
+  late final ClearingBankDirectory _directory;
+  bool _dependenciesReady = false;
 
   ClearingBankBindingSnapshot? _current;
   List<ClearingBankCandidate> _items = const [];
@@ -47,6 +49,21 @@ class _ClearingBankSettingsPageState extends State<ClearingBankSettingsPage> {
   @override
   void initState() {
     super.initState();
+    if (widget.directory != null) {
+      _directory = widget.directory!;
+      _dependenciesReady = true;
+      _loadCurrent();
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    _directory = ClearingBankDirectory(
+      chain: context.read<CitizenSdk>().chain,
+    );
+    _dependenciesReady = true;
     _loadCurrent();
   }
 

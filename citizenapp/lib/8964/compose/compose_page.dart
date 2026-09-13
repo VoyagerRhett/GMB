@@ -1,7 +1,10 @@
 import 'dart:async';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
+import 'package:citizenapp/8964/chain/square_chain_service.dart';
 import 'package:citizenapp/8964/compose/article/article_compose_body.dart';
 import 'package:citizenapp/8964/compose/compose_payload.dart';
 import 'package:citizenapp/8964/compose/document/document_compose_body.dart';
@@ -13,10 +16,16 @@ import 'package:citizenapp/8964/compose/video/video_compose_body.dart';
 import 'package:citizenapp/8964/compose/widgets/compose_media_widgets.dart';
 import 'package:citizenapp/8964/models/square_models.dart';
 import 'package:citizenapp/8964/profile/services/citizen_profile_cache.dart';
+import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/8964/profile/widgets/profile_avatar.dart';
 import 'package:citizenapp/8964/services/square_compose_signers.dart';
 import 'package:citizenapp/8964/services/square_identity_state.dart';
 import 'package:citizenapp/8964/services/square_publish_service.dart';
+import 'package:citizenapp/8964/services/square_upload_service.dart';
+import 'package:citizenapp/my/membership/subscription_service.dart';
+import 'package:citizenapp/my/myid/current_user_context.dart';
+import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
+import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
@@ -25,7 +34,7 @@ class SquareComposePage extends StatefulWidget {
   const SquareComposePage({
     super.key,
     required this.postType,
-    this.identityService = const SquareIdentityService(),
+    this.identityService,
     this.publishService,
     this.draftStore,
     this.profileCache,
@@ -35,7 +44,7 @@ class SquareComposePage extends StatefulWidget {
     this.replacePostId,
   });
 
-  final SquareIdentityService identityService;
+  final SquareIdentityService? identityService;
   final SquarePublishService? publishService;
   final SquareComposeDraftRepository? draftStore;
   final CitizenProfileCache? profileCache;
@@ -57,7 +66,8 @@ class _SquareComposePageState extends State<SquareComposePage>
   final _articleKey = GlobalKey<SquareArticleComposeBodyState>();
   final _videoKey = GlobalKey<SquareVideoComposeBodyState>();
 
-  late final SquarePublishService _publishService;
+  SquarePublishService? _publishService;
+  late final SquareIdentityService _identityService;
   late final SquareComposeDraftRepository _draftStore;
   late final CitizenProfileCache _profileCache;
   late final CitizenProfileMediaCache _profileMediaCache;
@@ -79,18 +89,39 @@ class _SquareComposePageState extends State<SquareComposePage>
   SquarePublishStage _stage = SquarePublishStage.idle;
   bool _publishing = false;
   bool _contentValid = false;
+  bool _dependenciesReady = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _publishService = widget.publishService ?? SquarePublishService();
     _draftStore = widget.draftStore ?? SquareComposeDraftStore.instance;
     _profileCache = widget.profileCache ?? const CitizenProfileCache();
     _profileMediaCache = widget.profileMediaCache ?? CitizenProfileMediaCache();
     _draftId = 'd${DateTime.now().microsecondsSinceEpoch}';
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    final injectedIdentity = widget.identityService;
+    if (injectedIdentity != null) {
+      _identityService = injectedIdentity;
+    } else {
+      final sdk = context.read<CitizenSdk>();
+      _identityService = SquareIdentityService(
+        wallet: sdk.wallet,
+        currentUserContext: context.read<CurrentUserContext>(),
+        chainService: SquareChainService(
+          chain: sdk.chain,
+          transactions: sdk.transactions,
+        ),
+      );
+    }
+    _publishService = widget.publishService;
     // 编辑页只读取默认账户的本地用户上下文，禁止为了展示或保存草稿启动轻节点。
-    _identityFuture = widget.identityService.loadCurrent(readLiveChain: false)
+    _identityFuture = _identityService.loadCurrent(readLiveChain: false)
       ..then((identity) {
         _identity = identity;
         unawaited(_loadAvatar(identity));
@@ -99,6 +130,7 @@ class _SquareComposePageState extends State<SquareComposePage>
         if (_savePendingForIdentity) unawaited(_flushLatestSnapshot());
       });
     WidgetsBinding.instance.addPostFrameCallback((_) => _refreshEditorState());
+    _dependenciesReady = true;
   }
 
   /// 发布页只读当前 CID 的公开资料与已验证媒体缓存，不额外联网，也不建立本机头像
@@ -142,12 +174,11 @@ class _SquareComposePageState extends State<SquareComposePage>
   }
 
   ComposeBodyCollector? get _activeBody => switch (widget.postType) {
-        SquarePostType.document =>
-          _documentKey.currentState as ComposeBodyCollector?,
-        SquarePostType.article =>
-          _articleKey.currentState as ComposeBodyCollector?,
-        SquarePostType.video => _videoKey.currentState as ComposeBodyCollector?,
-      };
+    SquarePostType.document =>
+      _documentKey.currentState as ComposeBodyCollector?,
+    SquarePostType.article => _articleKey.currentState as ComposeBodyCollector?,
+    SquarePostType.video => _videoKey.currentState as ComposeBodyCollector?,
+  };
 
   Future<SquareLocalMediaDraft> _persistMedia(
     SquareLocalMediaDraft media,
@@ -206,9 +237,11 @@ class _SquareComposePageState extends State<SquareComposePage>
     if (snapshot == null) return;
     _savePendingForIdentity = false;
     final draftId = _draftId;
-    _saveChain = _saveChain.catchError((_) {
-      // 上一次失败不能阻断后续新快照；显式退出仍会等待当前这次写入。
-    }).then((_) => _writeSnapshot(cidNumber, draftId, snapshot));
+    _saveChain = _saveChain
+        .catchError((_) {
+          // 上一次失败不能阻断后续新快照；显式退出仍会等待当前这次写入。
+        })
+        .then((_) => _writeSnapshot(cidNumber, draftId, snapshot));
     await _saveChain;
   }
 
@@ -272,15 +305,18 @@ class _SquareComposePageState extends State<SquareComposePage>
                   _TopBar(
                     title: '发${widget.postType.label}',
                     publishing: _publishing,
-                    canCancel: !_publishing ||
+                    canCancel:
+                        !_publishing ||
                         _stage == SquarePublishStage.processingMedia,
                     stageLabel: _stage.label,
-                    onCancel: _publishing &&
+                    onCancel:
+                        _publishing &&
                             _stage == SquarePublishStage.processingMedia
                         ? _cancelMediaProcessing
                         : _flushAndPop,
                     onDrafts: _openDrafts,
-                    onPublish: identity.hasWallet &&
+                    onPublish:
+                        identity.hasWallet &&
                             identity.signMode != null &&
                             identity.cidNumber?.isNotEmpty == true &&
                             _contentValid &&
@@ -305,69 +341,70 @@ class _SquareComposePageState extends State<SquareComposePage>
   }
 
   Widget _buildBody() => switch (widget.postType) {
-        SquarePostType.document => SquareDocumentComposeBody(
-            key: _documentKey,
-            initialText: widget.initialText,
-            onChanged: _handleBodyChanged,
-            persistMedia: _persistMedia,
-            onMediaCountChanged: (count) {
-              if (mounted && count != _documentImageCount) {
-                setState(() => _documentImageCount = count);
-              }
-            },
-          ),
-        SquarePostType.article => SquareArticleComposeBody(
-            key: _articleKey,
-            initialTitle: widget.initialTitle,
-            initialText: widget.initialText,
-            onChanged: _handleBodyChanged,
-            persistMedia: _persistMedia,
-          ),
-        SquarePostType.video => SquareVideoComposeBody(
-            key: _videoKey,
-            initialText: widget.initialText,
-            onChanged: _handleBodyChanged,
-            persistMedia: _persistMedia,
-            onVideoChanged: (video) {
-              if (mounted && video != _selectedVideo) {
-                setState(() => _selectedVideo = video);
-              }
-            },
-          ),
-      };
+    SquarePostType.document => SquareDocumentComposeBody(
+      key: _documentKey,
+      initialText: widget.initialText,
+      onChanged: _handleBodyChanged,
+      persistMedia: _persistMedia,
+      onMediaCountChanged: (count) {
+        if (mounted && count != _documentImageCount) {
+          setState(() => _documentImageCount = count);
+        }
+      },
+    ),
+    SquarePostType.article => SquareArticleComposeBody(
+      key: _articleKey,
+      initialTitle: widget.initialTitle,
+      initialText: widget.initialText,
+      onChanged: _handleBodyChanged,
+      persistMedia: _persistMedia,
+    ),
+    SquarePostType.video => SquareVideoComposeBody(
+      key: _videoKey,
+      initialText: widget.initialText,
+      onChanged: _handleBodyChanged,
+      persistMedia: _persistMedia,
+      onVideoChanged: (video) {
+        if (mounted && video != _selectedVideo) {
+          setState(() => _selectedVideo = video);
+        }
+      },
+    ),
+  };
 
   /// 原类型胶囊位置只承载当前编辑器的媒体入口，不重复显示内容类型。
   Widget? _buildMediaAction() => switch (widget.postType) {
-        SquarePostType.document => ComposeMediaAddButton(
-            key: const ValueKey('document-add-images'),
-            icon: Icons.add_photo_alternate_outlined,
-            tooltip: _documentImageCount >= documentMaxImages
-                ? '最多选择 $documentMaxImages 张图片'
-                : '添加图片',
-            onPressed: _documentImageCount >= documentMaxImages
-                ? null
-                : () => _documentKey.currentState?.pickImages(),
-          ),
-        SquarePostType.video => _selectedVideo == null
-            ? ComposeMediaAddButton(
-                key: const ValueKey('video-picker'),
-                icon: Icons.video_library_outlined,
-                tooltip: '选择视频',
-                onPressed: () => _videoKey.currentState?.pickVideo(),
-              )
-            : ComposeVideoThumbnailButton(
-                key: const ValueKey('video-picker-thumbnail'),
-                path: _selectedVideo!.path,
-                onPressed: () => _videoKey.currentState?.pickVideo(),
-              ),
-        SquarePostType.article => ComposeMediaAddButton(
-            key: const ValueKey('article-add-section'),
-            icon: Icons.post_add_outlined,
-            iconSize: 25,
-            tooltip: '添加图文框',
-            onPressed: () => _articleKey.currentState?.addTextSection(),
-          ),
-      };
+    SquarePostType.document => ComposeMediaAddButton(
+      key: const ValueKey('document-add-images'),
+      icon: Icons.add_photo_alternate_outlined,
+      tooltip: _documentImageCount >= documentMaxImages
+          ? '最多选择 $documentMaxImages 张图片'
+          : '添加图片',
+      onPressed: _documentImageCount >= documentMaxImages
+          ? null
+          : () => _documentKey.currentState?.pickImages(),
+    ),
+    SquarePostType.video =>
+      _selectedVideo == null
+          ? ComposeMediaAddButton(
+              key: const ValueKey('video-picker'),
+              icon: Icons.video_library_outlined,
+              tooltip: '选择视频',
+              onPressed: () => _videoKey.currentState?.pickVideo(),
+            )
+          : ComposeVideoThumbnailButton(
+              key: const ValueKey('video-picker-thumbnail'),
+              path: _selectedVideo!.path,
+              onPressed: () => _videoKey.currentState?.pickVideo(),
+            ),
+    SquarePostType.article => ComposeMediaAddButton(
+      key: const ValueKey('article-add-section'),
+      icon: Icons.post_add_outlined,
+      iconSize: 25,
+      tooltip: '添加图文框',
+      onPressed: () => _articleKey.currentState?.addTextSection(),
+    ),
+  };
 
   Future<void> _openDrafts() async {
     final cidNumber = _identity?.cidNumber;
@@ -406,6 +443,27 @@ class _SquareComposePageState extends State<SquareComposePage>
     });
   }
 
+  SquarePublishService _requirePublishService() {
+    final existing = _publishService;
+    if (existing != null) return existing;
+    final sdk = context.read<CitizenSdk>();
+    final created = SquarePublishService(
+      chain: sdk.chain,
+      transactions: sdk.transactions,
+      uploadService: SquareUploadService(
+        subscriptionService: SubscriptionService(
+          wallet: sdk.wallet,
+          chain: sdk.chain,
+          transactions: sdk.transactions,
+          identityResolver: context.read<FinalizedIdentityResolver>(),
+          sessionProvider: context.read<SquareSessionProvider>(),
+        ),
+      ),
+    );
+    _publishService = created;
+    return created;
+  }
+
   Future<void> _publish(SquareIdentityState identity) async {
     if (_publishing) return;
     final collector = _activeBody;
@@ -421,7 +479,7 @@ class _SquareComposePageState extends State<SquareComposePage>
     });
     final signers = SquareComposeSigners(context: context, identity: identity);
     try {
-      final result = await _publishService.publish(
+      final result = await _requirePublishService().publish(
         identity: identity,
         postType: widget.postType,
         text: payload.text,
@@ -429,7 +487,13 @@ class _SquareComposePageState extends State<SquareComposePage>
         contentSections: payload.contentSections,
         mediaDrafts: payload.mediaDrafts,
         signLoginPayload: signers.signLogin,
-        signChainPayload: signers.signChain,
+        externalSigning: (pending) => showCitizenSdkQrResponse(
+          context,
+          request: pending.qrRequest,
+          expiresAt: BigInt.from(
+            pending.expiresAt.millisecondsSinceEpoch ~/ 1000,
+          ),
+        ),
         replacePostId: widget.replacePostId,
         onStage: (stage) {
           if (mounted) setState(() => _stage = stage);
@@ -460,7 +524,7 @@ class _SquareComposePageState extends State<SquareComposePage>
   }
 
   Future<void> _cancelMediaProcessing() async {
-    await _publishService.cancelMediaProcessing();
+    await _requirePublishService().cancelMediaProcessing();
   }
 
   void _showError(String message) {
@@ -542,10 +606,7 @@ class _TopBar extends StatelessWidget {
                         backgroundColor: AppTheme.primary,
                         disabledBackgroundColor: const Color(0xFFCBD5E1),
                         disabledForegroundColor: Colors.white,
-                        minimumSize: const Size(
-                          56,
-                          32,
-                        ),
+                        minimumSize: const Size(56, 32),
                         padding: const EdgeInsets.symmetric(
                           horizontal: 12,
                           vertical: 5,
@@ -601,10 +662,7 @@ class _IdentityBar extends StatelessWidget {
               borderRadius: 17,
               showBadge: false,
             ),
-            if (mediaAction != null) ...[
-              const Spacer(),
-              mediaAction!,
-            ],
+            if (mediaAction != null) ...[const Spacer(), mediaAction!],
           ],
         ),
       ),

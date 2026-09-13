@@ -89,7 +89,7 @@ Rust Core 没有公开私钥返回接口；内部原生显示只提供本次查�
 Rust 在平台资源创建前统一校验 modules；wallet/signing 各有独立门禁，不因共享 secure
 store/Vault 而开放钱包 UI。chain 未选择时不构造 provider、读取链资产或创建链数据库；
 history 未选择时不初始化历史服务。SDK 执行的 prepared transaction 保持先持久化 pending 再广播。
-既有 ABI 结构与数值保持；增加唯一只读失败阶段 getter 后，当前闭集为 117 个。
+既有 ABI 结构与数值保持；加入准确链读取与应用派生钥后，当前闭集为 121 个。
 
 公开错误只含稳定 code、八项通用 failure stage、固定公开 method、可选 session/request
 关联和经过控制的诊断文本。严禁写入助记词、password、payload、callData、签名、extrinsic、

@@ -1,7 +1,9 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/codec/account_id_codec.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/models/admin_account.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/pages/admin_set_change_confirm_page.dart';
@@ -14,10 +16,6 @@ import 'package:citizenapp/citizen/proposal/admins-change/widgets/admin_set_edit
 import 'package:citizenapp/citizen/proposal/admins-change/widgets/admin_account_card.dart';
 import 'package:citizenapp/citizen/shared/institution_info.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/signer/qr_signer.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
 class AdminsChangePage extends StatefulWidget {
@@ -30,20 +28,21 @@ class AdminsChangePage extends StatefulWidget {
 
   final InstitutionInfo institution;
   final AdminAccountIdentity accountIdentity;
-  final List<WalletProfile> adminWallets;
+  final List<CitizenWalletStateAccount> adminWallets;
 
   @override
   State<AdminsChangePage> createState() => _AdminsChangePageState();
 }
 
 class _AdminsChangePageState extends State<AdminsChangePage> {
-  final _accountService = AdminAccountService();
-  final _changeService = AdminsChangeService();
+  late final AdminAccountService _accountService;
+  late final AdminsChangeService _changeService;
+  bool _dependenciesReady = false;
   final _thresholdController = TextEditingController();
   AdminAccountState? _subject;
   List<AdminPerson> _admins = const [];
   Map<String, double> _balanceByAccountId = const {};
-  WalletProfile? _selectedWallet;
+  CitizenWalletStateAccount? _selectedWallet;
   bool _loading = true;
   bool _submitting = false;
   String? _error;
@@ -53,6 +52,16 @@ class _AdminsChangePageState extends State<AdminsChangePage> {
     super.initState();
     _selectedWallet =
         widget.adminWallets.isNotEmpty ? widget.adminWallets.first : null;
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    final sdk = context.read<CitizenSdk>();
+    _accountService = AdminAccountService(chain: sdk.chain);
+    _changeService = AdminsChangeService(transactions: sdk.transactions);
+    _dependenciesReady = true;
     _load();
   }
 
@@ -136,12 +145,12 @@ class _AdminsChangePageState extends State<AdminsChangePage> {
   }
 
   Widget _buildWalletSelector() {
-    return DropdownButtonFormField<WalletProfile>(
+    return DropdownButtonFormField<CitizenWalletStateAccount>(
       initialValue: _selectedWallet,
       decoration: const InputDecoration(labelText: '发起管理员钱包'),
       items: widget.adminWallets
           .map((wallet) =>
-              DropdownMenuItem(value: wallet, child: Text(wallet.walletName)))
+              DropdownMenuItem(value: wallet, child: Text(wallet.name)))
           .toList(),
       onChanged: _submitting
           ? null
@@ -174,7 +183,12 @@ class _AdminsChangePageState extends State<AdminsChangePage> {
       return;
     }
     try {
-      final balances = await ChainRpc().fetchFinalizedBalances(accountIds);
+      final snapshots =
+          await context.read<CitizenSdk>().chain.getAccountBalances(accountIds);
+      final balances = <String, double>{
+        for (final snapshot in snapshots)
+          snapshot.accountId: snapshot.freeFen.toDouble() / 100,
+      };
       if (mounted) setState(() => _balanceByAccountId = balances);
     } catch (_) {
       // 管理员更换编辑态余额读取失败不影响集合修改,余额值留空。
@@ -238,49 +252,19 @@ class _AdminsChangePageState extends State<AdminsChangePage> {
         admins: _admins,
         newThreshold: newThreshold,
       );
-      final callData = _changeService.buildCallData(
-        account: account,
-        proposerAccountId: wallet.accountId,
-        admins: validated.admins,
-        newThreshold: validated.threshold,
-      );
-      WalletManager? hotWalletManager;
-      if (wallet.requiresHotSign) {
-        hotWalletManager = WalletManager();
-      }
-      Future<Uint8List> signCallback(Uint8List payload) async {
-        if (hotWalletManager != null) {
-          return hotWalletManager.signWithWallet(wallet.walletIndex, payload);
-        }
-        final qrSigner = QrSigner();
-        final request = qrSigner.buildRequest(
-          requestId: QrSigner.generateRequestId(prefix: 'admin-change-'),
-          signerPublicKey: wallet.accountId,
-          payloadHex: '0x${AdminAccountIdCodec.hexEncode(payload)}',
-          action: QrActions.chain(callData[0], callData[1]),
-        );
-        final response = await Navigator.of(context).push(
-          MaterialPageRoute(
-            builder: (_) => QrSignSessionPage(
-              request: request,
-              requestJson: qrSigner.encodeRequest(request),
-              expectedSignerPublicKey: wallet.accountId,
-            ),
-          ),
-        );
-        if (response == null) throw Exception('签名已取消');
-        return AdminAccountIdCodec.fromAccountIdText(
-            response.body.signatureHex);
-      }
-
       final result = await _changeService.submit(
         account: account,
         admins: validated.admins,
         newThreshold: validated.threshold,
-        fromSs58Address: wallet.ss58Address,
         signerPublicKey:
             AdminAccountIdCodec.fromAccountIdText(wallet.accountId),
-        sign: signCallback,
+        externalSigning: (pending) => showCitizenSdkQrResponse(
+          context,
+          request: pending.qrRequest,
+          expiresAt: BigInt.from(
+            pending.expiresAt.millisecondsSinceEpoch ~/ 1000,
+          ),
+        ),
       );
       _accountService.clearPersonalAccountCache(account.personalAccountId!);
       _accountService.clearCache(widget.accountIdentity);

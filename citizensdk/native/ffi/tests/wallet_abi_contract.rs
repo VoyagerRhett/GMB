@@ -70,8 +70,10 @@ fn base_wallet_and_qr_exports_are_exact_and_disjoint() {
     let old = rust_exports(include_str!("../src/lib.rs"));
     let wallet = rust_exports(include_str!("../src/wallet_abi.rs"));
     let qr = rust_exports(include_str!("../src/qr_abi.rs"));
-    assert_eq!(old.len(), 50);
-    assert_eq!(wallet.len(), 48);
+    // Base 增加 finalized keys page/runtime API 两项；wallet 增加通用应用
+    // 派生钥及其一次性结果复制两项。总闭集与 symbol_contract/C 头一致。
+    assert_eq!(old.len(), 52);
+    assert_eq!(wallet.len(), 50);
     assert_eq!(qr.len(), 8);
     assert!(old.is_disjoint(&wallet));
     assert!(old.is_disjoint(&qr));
@@ -104,6 +106,7 @@ fn base_wallet_and_qr_exports_are_exact_and_disjoint() {
         "citizensdk_rename_wallet_account",
         "citizensdk_delete_wallet_account",
         "citizensdk_delete_wallet",
+        "citizensdk_derive_application_key",
         "citizensdk_reconcile_wallet_cleanup",
         "citizensdk_sign_wallet_payload",
         "citizensdk_begin_signing",
@@ -125,6 +128,7 @@ fn base_wallet_and_qr_exports_are_exact_and_disjoint() {
         "citizensdk_result_get_signature",
         "citizensdk_result_get_signing_outcome",
         "citizensdk_result_get_default_account_change",
+        "citizensdk_result_get_application_key",
         "citizensdk_result_get_prepared_wallet",
     ]
     .into_iter()
@@ -191,6 +195,7 @@ fn appended_result_values_and_portable_product_layouts_are_frozen() {
     assert_eq!(CitizenSdkResultKind::QrReview as u32, 19);
     assert_eq!(CitizenSdkResultKind::QrSigned as u32, 20);
     assert_eq!(CitizenSdkResultKind::WalletState as u32, 21);
+    assert_eq!(CitizenSdkResultKind::ApplicationKey as u32, 29);
     assert!(include_str!("../../../include/citizensdk_types.h")
         .contains("#define CITIZENSDK_RESULT_ACCOUNT_BALANCES 18U"));
 

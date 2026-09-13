@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/codec/account_id_codec.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/models/admin_account.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/services/admin_account_service.dart';
@@ -8,26 +9,38 @@ import 'package:citizenapp/citizen/proposal/admins-change/services/admin_activat
 import 'package:citizenapp/citizen/proposal/admins-change/services/institution_admin_service.dart';
 import 'package:citizenapp/citizen/shared/institution_info.dart';
 import 'package:citizenapp/citizen/institution/institution_role_models.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
 import 'package:citizenapp/isar/wallet_isar.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:polkadart/polkadart.dart' show Hasher;
 
 import '../../support/isar_test_env.dart';
+import '../../support/fake_citizen_sdk.dart';
 
-class FakeChainRpc extends ChainRpc {
+class FakeChain extends TestCitizenChain {
   final Map<String, Uint8List?> responses = {};
   final List<String> requestedKeys = [];
 
   @override
-  Future<Uint8List?> fetchStorage(String storageKeyHex) async {
+  Future<CitizenBlockRef> getFinalizedHead() async => CitizenBlockRef(
+        hash: '0x${'11' * 32}',
+        number: BigInt.one,
+        finality: CitizenBlockFinality.finalized,
+      );
+
+  @override
+  Future<Uint8List?> getStorage(
+    CitizenBlockRef block,
+    Uint8List key,
+  ) async {
+    final storageKeyHex = '0x${key.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join()}';
     requestedKeys.add(storageKeyHex);
     return responses[storageKeyHex];
   }
 }
 
 class FakeAdminService extends InstitutionAdminService {
-  FakeAdminService({required this.admins});
+  FakeAdminService({required this.admins})
+      : super(chain: TestCitizenChain());
 
   final List<AdminPerson> admins;
 
@@ -113,8 +126,8 @@ void main() {
 
   test('私权非法人机构按 CID 与显式 kind 路由', () async {
     const cidNumber = 'GD001-UNIN0-123456789-2026';
-    final rpc = FakeChainRpc();
-    final service = InstitutionAdminService(chainRpc: rpc);
+    final rpc = FakeChain();
+    final service = InstitutionAdminService(chain: rpc);
     final accountKey =
         '0x${hexOf(AdminAccountIdCodec.institutionAdminStorageKey(
       cidNumber,
@@ -147,8 +160,8 @@ void main() {
   });
 
   test('个人多签严格按 personal_account_id 路由', () async {
-    final rpc = FakeChainRpc();
-    final service = InstitutionAdminService(chainRpc: rpc);
+    final rpc = FakeChain();
+    final service = InstitutionAdminService(chain: rpc);
     final personalAccountId = '0x${'22' * 32}';
     final accountIdBytes =
         AdminAccountIdCodec.fromAccountIdText(personalAccountId);
@@ -179,8 +192,8 @@ void main() {
   test('公权机构从 PublicManage 读取机构阈值', () async {
     for (final entry in const {'FRG': 3, 'NJD': 8}.entries) {
       final cidNumber = 'ZS001-${entry.key}00-123456789-2026';
-      final rpc = FakeChainRpc();
-      final service = AdminAccountService(chainRpc: rpc);
+      final rpc = FakeChain();
+      final service = AdminAccountService(chain: rpc);
       final identity = AdminAccountIdentity.institution(
         cidNumber: cidNumber,
         institutionCode: entry.key,
@@ -216,8 +229,8 @@ void main() {
   });
 
   test('管理员缓存按明确 identity key 隔离并可清除', () async {
-    final rpc = FakeChainRpc();
-    final service = AdminAccountService(chainRpc: rpc);
+    final rpc = FakeChain();
+    final service = AdminAccountService(chain: rpc);
     final personalAccountId = '0x${'33' * 32}';
     final accountIdBytes =
         AdminAccountIdCodec.fromAccountIdText(personalAccountId);

@@ -1,15 +1,15 @@
 import 'dart:convert';
-import 'dart:typed_data';
-
+import 'package:citizen_sdk/citizen_sdk.dart';
+import 'package:crypto/crypto.dart' hide Hmac;
+import 'package:cryptography/cryptography.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:citizenapp/qr/bodies/account_data_key_response_body.dart';
 import 'package:citizenapp/security/account_data_key_provision.dart';
 import 'package:citizenapp/security/local_cipher.dart';
 import 'package:citizenapp/security/local_data_key.dart';
-import 'package:citizenapp/security/native_account_crypto.dart';
 import 'package:citizenapp/signer/signing.dart';
-import 'package:citizenapp/wallet/core/native_sr25519.dart';
 
 class _MemoryStore implements LocalKeyBlobStore {
   final Map<String, String> entries = <String, String>{};
@@ -39,7 +39,26 @@ class _MemoryStore implements LocalKeyBlobStore {
   }
 }
 
+final class _DerivingWallet implements CitizenSdkWallet {
+  _DerivingWallet(Uint8List secret) : _secret = Uint8List.fromList(secret);
+
+  final Uint8List _secret;
+
+  @override
+  Future<Uint8List> deriveApplicationKey({
+    required String accountId,
+    required Uint8List salt,
+    required Uint8List info,
+  }) async => Uint8List.fromList(
+    sha256.convert(<int>[..._secret, ...salt, ...info]).bytes,
+  );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   const genesisHash =
       '0x1111111111111111111111111111111111111111111111111111111111111111';
   const cidNumber = 'GD-CTZN1-8F3A2B';
@@ -48,8 +67,9 @@ void main() {
   const secondAccountId =
       '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
   final firstSecret = Uint8List.fromList(List<int>.generate(32, (i) => i));
-  final secondSecret =
-      Uint8List.fromList(List<int>.generate(32, (i) => 100 + i));
+  final secondSecret = Uint8List.fromList(
+    List<int>.generate(32, (i) => 100 + i),
+  );
   const firstBinding = AccountDataBinding(
     genesisHash: genesisHash,
     cidNumber: cidNumber,
@@ -93,12 +113,14 @@ void main() {
         throwsA(isA<AccountDataKeyException>()),
       );
       await expectLater(
-        bindingStore.activate(const AccountDataBinding(
-          genesisHash: genesisHash,
-          cidNumber: cidNumber,
-          bindingRevision: 2,
-          accountId: firstAccountId,
-        )),
+        bindingStore.activate(
+          const AccountDataBinding(
+            genesisHash: genesisHash,
+            cidNumber: cidNumber,
+            bindingRevision: 2,
+            accountId: firstAccountId,
+          ),
+        ),
         throwsA(isA<AccountDataKeyException>()),
       );
     });
@@ -115,8 +137,10 @@ void main() {
 
       await bindingStore.activate(firstBinding);
       await bindingStore.activate(secondCidBinding);
-      expect((await bindingStore.readForCid(cidNumber))?.accountId,
-          firstAccountId);
+      expect(
+        (await bindingStore.readForCid(cidNumber))?.accountId,
+        firstAccountId,
+      );
       expect(
         (await bindingStore.readForCid(secondCidBinding.cidNumber))?.accountId,
         secondCidBinding.accountId,
@@ -165,7 +189,7 @@ void main() {
         );
         await expectLater(
           AccountDataKeyDeriver.derive(
-            accountSecret: firstSecret,
+            wallet: _DerivingWallet(firstSecret),
             binding: binding,
             purpose: LocalKeyPurpose.chat,
           ),
@@ -189,9 +213,13 @@ void main() {
         AccountDataBindingStore.pendingHandoverKey,
       ]);
       expect(
-          store.entries.values.single, isNot(contains(firstSecret.join(','))));
+        store.entries.values.single,
+        isNot(contains(firstSecret.join(','))),
+      );
       expect(
-          store.entries.values.single, isNot(contains(secondSecret.join(','))));
+        store.entries.values.single,
+        isNot(contains(secondSecret.join(','))),
+      );
 
       await bindingStore.markPendingHandoverReady(
         source: firstBinding,
@@ -255,12 +283,13 @@ void main() {
         source: firstBinding,
         target: secondBinding,
       );
-      final decoded = jsonDecode(
-        store.entries[AccountDataBindingStore.pendingHandoverKey]!,
-      ) as Map<String, dynamic>;
+      final decoded =
+          jsonDecode(store.entries[AccountDataBindingStore.pendingHandoverKey]!)
+              as Map<String, dynamic>;
       (decoded['target'] as Map<String, dynamic>)['binding_revision'] = 3;
-      store.entries[AccountDataBindingStore.pendingHandoverKey] =
-          jsonEncode(decoded);
+      store.entries[AccountDataBindingStore.pendingHandoverKey] = jsonEncode(
+        decoded,
+      );
 
       await expectLater(
         bindingStore.readPendingHandover(),
@@ -272,12 +301,12 @@ void main() {
   group('当前钱包账户用途子钥', () {
     test('同一账户同一绑定跨设备派生结果一致', () async {
       final first = await AccountDataKeyDeriver.derive(
-        accountSecret: firstSecret,
+        wallet: _DerivingWallet(firstSecret),
         binding: firstBinding,
         purpose: LocalKeyPurpose.chat,
       );
       final anotherDevice = await AccountDataKeyDeriver.derive(
-        accountSecret: Uint8List.fromList(firstSecret),
+        wallet: _DerivingWallet(Uint8List.fromList(firstSecret)),
         binding: firstBinding,
         purpose: LocalKeyPurpose.chat,
       );
@@ -288,7 +317,7 @@ void main() {
       final values = <String>{};
       for (final purpose in LocalKeyPurpose.values) {
         final key = await AccountDataKeyDeriver.derive(
-          accountSecret: firstSecret,
+          wallet: _DerivingWallet(firstSecret),
           binding: firstBinding,
           purpose: purpose,
         );
@@ -300,13 +329,13 @@ void main() {
 
     test('同一用途的 encryption 与 index 上下文互相隔离', () async {
       final encryptionKey = await AccountDataKeyDeriver.derive(
-        accountSecret: firstSecret,
+        wallet: _DerivingWallet(firstSecret),
         binding: firstBinding,
         purpose: LocalKeyPurpose.contactsCloud,
         context: 'encryption',
       );
       final indexKey = await AccountDataKeyDeriver.derive(
-        accountSecret: firstSecret,
+        wallet: _DerivingWallet(firstSecret),
         binding: firstBinding,
         purpose: LocalKeyPurpose.contactsCloud,
         context: 'index',
@@ -316,7 +345,7 @@ void main() {
 
     test('没有当前账户签名交接时，新钱包不能直接解密此前钱包历史私有密文', () async {
       final currentKey = await AccountDataKeyDeriver.derive(
-        accountSecret: firstSecret,
+        wallet: _DerivingWallet(firstSecret),
         binding: firstBinding,
         purpose: LocalKeyPurpose.chat,
       );
@@ -326,7 +355,7 @@ void main() {
         aad: '${LocalKeyPurpose.chat.domain}|message-before-rebind',
       );
       final newKey = await AccountDataKeyDeriver.derive(
-        accountSecret: secondSecret,
+        wallet: _DerivingWallet(secondSecret),
         binding: secondBinding,
         purpose: LocalKeyPurpose.chat,
       );
@@ -347,8 +376,17 @@ void main() {
       final child = Uint8List.fromList(
         List<int>.generate(32, (index) => index + 1),
       );
-      final accountId = '0x${_hex(NativeSr25519.publicKeyOf(child))}';
-      final binding = AccountDataBinding(
+      const accountId =
+          '0x1111111111111111111111111111111111111111111111111111111111111111';
+      const channel = MethodChannel('citizen/sdk/core/v1');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        expect(call.method, 'verifySignature');
+        return <Object?>[1, true];
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      const binding = AccountDataBinding(
         genesisHash: genesisHash,
         cidNumber: cidNumber,
         bindingRevision: 1,
@@ -359,7 +397,7 @@ void main() {
         (purpose: LocalKeyPurpose.contactsCloud, context: 'encryption'),
       ];
       final recipientSecret = Uint8List.fromList(List<int>.filled(32, 0x31));
-      final session = AccountDataKeyProvisionSession.create(
+      final session = await AccountDataKeyProvisionSession.create(
         binding: binding,
         requests: requests,
         expiresAt: 1900000000,
@@ -371,7 +409,7 @@ void main() {
         for (final request in requests) {
           keys.add(
             await AccountDataKeyDeriver.derive(
-              accountSecret: child,
+              wallet: _DerivingWallet(child),
               binding: binding,
               purpose: request.purpose,
               context: request.context,
@@ -389,18 +427,15 @@ void main() {
         ]);
         final senderSecret = Uint8List.fromList(List<int>.filled(32, 0x51));
         final nonce = Uint8List.fromList(List<int>.filled(12, 0x61));
-        final senderPublicKey = NativeAccountCrypto.x25519PublicKey(
-          senderSecret,
-        );
-        final ciphertext = NativeAccountCrypto.seal(
-          recipientPublicKey: NativeAccountCrypto.x25519PublicKey(
-            recipientSecret,
-          ),
+        final sealed = await _sealAccountDataBundle(
+          recipientSecret: recipientSecret,
           senderSecret: senderSecret,
           nonce: nonce,
           plaintext: plaintext,
           aad: session.payload,
         );
+        final senderPublicKey = sealed.senderPublicKey;
+        final ciphertext = sealed.ciphertext;
         final authorization = accountDataKeyProvisionAuthorization(
           requestPayload: session.payload,
           senderPublicKey: senderPublicKey,
@@ -411,16 +446,16 @@ void main() {
           opTag: kOpSignAccountDataKeyProvision,
           scalePayload: authorization,
         );
-        final signature = NativeSr25519.sign(child, message);
+        final signature = Uint8List(64);
         final body = AccountDataKeyResponseBody.fromBytes(
-          signerPublicKey: NativeSr25519.publicKeyOf(child),
+          signerPublicKey: List<int>.filled(32, 0x11),
           signature: signature,
           keyExchangePublicKey: senderPublicKey,
           encryptionNonce: nonce,
           ciphertext: ciphertext,
         );
 
-        final opened = session.open(body);
+        final opened = await session.open(body);
         expect(opened, hasLength(2));
         expect(opened[0], keys[0]);
         expect(opened[1], keys[1]);
@@ -430,13 +465,15 @@ void main() {
 
         final tampered = Uint8List.fromList(ciphertext)..[0] ^= 1;
         expect(
-          () => session.open(AccountDataKeyResponseBody.fromBytes(
-            signerPublicKey: NativeSr25519.publicKeyOf(child),
-            signature: signature,
-            keyExchangePublicKey: senderPublicKey,
-            encryptionNonce: nonce,
-            ciphertext: tampered,
-          )),
+          session.open(
+            AccountDataKeyResponseBody.fromBytes(
+              signerPublicKey: List<int>.filled(32, 0x11),
+              signature: signature,
+              keyExchangePublicKey: senderPublicKey,
+              encryptionNonce: nonce,
+              ciphertext: tampered,
+            ),
+          ),
           throwsA(isA<AccountDataKeyException>()),
         );
         plaintext.fillRange(0, plaintext.length, 0);
@@ -486,5 +523,37 @@ void main() {
   });
 }
 
-String _hex(List<int> bytes) =>
-    bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
+Future<({Uint8List senderPublicKey, Uint8List ciphertext})>
+_sealAccountDataBundle({
+  required Uint8List recipientSecret,
+  required Uint8List senderSecret,
+  required Uint8List nonce,
+  required Uint8List plaintext,
+  required Uint8List aad,
+}) async {
+  final x25519 = X25519();
+  final sender = await x25519.newKeyPairFromSeed(senderSecret);
+  final recipient = await x25519.newKeyPairFromSeed(recipientSecret);
+  final senderPublicKey = await sender.extractPublicKey();
+  final recipientPublicKey = await recipient.extractPublicKey();
+  final shared = await x25519.sharedSecretKey(
+    keyPair: sender,
+    remotePublicKey: recipientPublicKey,
+  );
+  final salt = await Sha256().hash(aad);
+  final key = await Hkdf(hmac: Hmac.sha256(), outputLength: 32).deriveKey(
+    secretKey: shared,
+    nonce: salt.bytes,
+    info: utf8.encode('citizenapp.account-data/provision'),
+  );
+  final box = await AesGcm.with256bits().encrypt(
+    plaintext,
+    secretKey: key,
+    nonce: nonce,
+    aad: aad,
+  );
+  return (
+    senderPublicKey: Uint8List.fromList(senderPublicKey.bytes),
+    ciphertext: Uint8List.fromList(<int>[...box.cipherText, ...box.mac.bytes]),
+  );
+}

@@ -1,7 +1,7 @@
 # CitizenSDK 原生产物与候选打包
 
-当前闭集为 117 个 Core C 函数、Linux/Windows 各 17 个 Host C 函数、3 个
-ZXing-C++ 图像 C 函数和五端统一 62 个 Flutter 方法。新增符号不改变 ABI v1
+当前闭集为 121 个 Core C 函数、Linux/Windows 各 17 个 Host C 函数、3 个
+ZXing-C++ 图像 C 函数和五端统一 65 个 Flutter 方法。新增符号不改变 ABI v1
 既有结构和数值。模块选择只影响运行时服务与
 资源装配，不是发布包裁剪：现有正式包装仍编译 full，并完整携带链资产。未选 chain 的实例
 不加载这些资产、不创建链数据库或启动 smoldot。模块化、链查询与安全查看的完整五端硬件验收尚未完成；准确构建、测试与运行证据以当前任务卡为准，旧分步结果不替代本轮验收。
@@ -131,7 +131,7 @@ CITIZENSDK_NATIVE_OUTPUT_DIR=<原生产物目录>
 `darwin/Sources/CitizenSDK` Swift 源码、根产品头、Privacy Manifest 与完整 CitizenChain 资产组合为一个
 `CitizenSDK.xcframework`。其闭集只有 iOS 设备变体、iOS 模拟器变体与 macOS；三个
 Apple machine slice 的架构元数据均为 `arm64`；
-每个 slice 精确导出产品头声明的 117 个符号及 3 个 QR 图像符号，并拒绝 `smoldot_*`、`citizen_sr25519_*`、
+每个 slice 精确导出产品头声明的 121 个符号及 3 个 QR 图像符号，并拒绝 `smoldot_*`、`citizen_sr25519_*`、
 `account_crypto_*` 和其它架构。
 
 legacy `libsmoldot.dylib` 只允许作为源码树外的 macOS `arm64` 差分测试宿主库生成；它绝不进入
@@ -146,7 +146,7 @@ XCFramework、Hosted 或 GitHub 候选。其 `LC_ID_DYLIB` 是编译工作区的
 QR 统一为 9 个协议、审阅、签名和结果符号；统一钱包状态增加 8 个入口，通用冷热签名与默认
 账户授权再增加 7 个入口，第 1.4 步安全链读取增加 10 个入口，第 1.5 步交易准备增加 3 个入口，
 第 1.6 步冷热交易执行增加 4 个入口形成 121 个；第 1.7 步以 4 个通用历史入口替换 8 个业务
-转账/历史入口；第 1.8 步删除业务二维码编码入口、第 1.10.3 步增加只读失败阶段 getter 后总计 117 个；构建产物与头文件
+转账/历史入口；本次增加准确链读取与应用派生钥四项后总计 121 个；构建产物与头文件
 任一缺失、额外或重复都必须失败关闭。
 
 第 1.10.4 步没有增加产品函数：Host public-store 结构仍为 72 bytes，原偏移 56/64 的两个

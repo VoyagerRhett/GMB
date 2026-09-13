@@ -1,3 +1,4 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizenapp/qr/pages/qr_scan_page.dart';
 import 'package:citizenapp/transaction/personal-manage/personal_account_create_page.dart';
 import 'package:flutter/material.dart';
@@ -11,7 +12,15 @@ void main() {
 
   Future<void> pumpPage(WidgetTester tester) async {
     await tester.pumpWidget(
-      const MaterialApp(home: PersonalAccountCreatePage()),
+      MaterialApp(
+        home: PersonalAccountCreatePage(
+          walletStateLoader: () async => CitizenWalletState(
+            revision: BigInt.zero,
+            hotProfile: null,
+            accounts: const [],
+          ),
+        ),
+      ),
     );
     await tester.pumpAndSettle();
   }
@@ -20,9 +29,7 @@ void main() {
     await pumpPage(tester);
 
     final title = find.text('管理员列表（0/64）');
-    final scanButton = find.byKey(
-      const ValueKey('personal-admin-scan-button'),
-    );
+    final scanButton = find.byKey(const ValueKey('personal-admin-scan-button'));
     expect(title, findsOneWidget);
     expect(scanButton, findsOneWidget);
     expect(find.widgetWithText(OutlinedButton, '扫码添加管理员'), findsNothing);
@@ -36,16 +43,16 @@ void main() {
       find.descendant(of: scanButton, matching: find.byType(SvgPicture)),
     );
     expect(icon.bytesLoader, isA<SvgAssetLoader>());
-    expect((icon.bytesLoader as SvgAssetLoader).assetName,
-        'assets/icons/scan-line.svg');
+    expect(
+      (icon.bytesLoader as SvgAssetLoader).assetName,
+      'assets/icons/scan-line.svg',
+    );
   });
 
   testWidgets('点击标题行扫码图标仍进入用户码管理员扫码页', (tester) async {
     await pumpPage(tester);
 
-    await tester.tap(
-      find.byKey(const ValueKey('personal-admin-scan-button')),
-    );
+    await tester.tap(find.byKey(const ValueKey('personal-admin-scan-button')));
     await tester.pumpAndSettle();
 
     final page = tester.widget<QrScanPage>(find.byType(QrScanPage));

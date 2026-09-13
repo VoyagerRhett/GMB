@@ -14,7 +14,7 @@ import 'package:citizenapp/ui/app_layout.dart';
 ///
 /// [description] 由调用方传一句该页专属说明(如「注册后即可使用聊天与通讯录。」);
 /// [onRegistered] 在占号提交成功后回调,调用方借此就地回刷(占号不改钱包列表,
-/// 不会触发 walletsRevision,必须靠这个回调驱动刷新)。
+/// 不改变账户目录时仍需靠 finalized 身份 revision 或本回调驱动刷新。
 class IdentityRegisterGuide extends StatefulWidget {
   const IdentityRegisterGuide({
     super.key,

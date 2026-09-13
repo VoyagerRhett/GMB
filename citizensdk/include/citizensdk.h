@@ -202,6 +202,15 @@ CITIZENSDK_API citizensdk_error_code_t citizensdk_get_storage_batch_at(
     citizensdk_handle_t handle, const citizensdk_block_ref_t *block,
     const citizensdk_bytes_view_t *keys, uint32_t key_count,
     citizensdk_request_id_t *out_request_id);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_get_storage_keys_paged(
+    citizensdk_handle_t handle, const citizensdk_block_ref_t *finalized_block,
+    citizensdk_bytes_view_t prefix, uint8_t has_start_key,
+    citizensdk_bytes_view_t start_key, uint32_t limit,
+    citizensdk_request_id_t *out_request_id);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_call_runtime_api(
+    citizensdk_handle_t handle, const citizensdk_block_ref_t *block,
+    citizensdk_bytes_view_t method, citizensdk_bytes_view_t arguments,
+    citizensdk_request_id_t *out_request_id);
 CITIZENSDK_API citizensdk_error_code_t citizensdk_get_runtime_context_at(
     citizensdk_handle_t handle, const citizensdk_block_ref_t *block,
     citizensdk_request_id_t *out_request_id);
@@ -348,6 +357,10 @@ CITIZENSDK_API citizensdk_error_code_t citizensdk_reconcile_wallet_cleanup(
 CITIZENSDK_API citizensdk_error_code_t citizensdk_sign_wallet_payload(
     citizensdk_handle_t handle, const citizensdk_account_id_t *account_id,
     citizensdk_bytes_view_t message,
+    citizensdk_request_id_t *out_request_id);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_derive_application_key(
+    citizensdk_handle_t handle, const citizensdk_account_id_t *account_id,
+    citizensdk_bytes_view_t salt, citizensdk_bytes_view_t info,
     citizensdk_request_id_t *out_request_id);
 
 /* Product-independent transaction preparation. call_data is one complete canonical opaque SCALE
@@ -521,6 +534,8 @@ CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_wallet_account(
     uint64_t *out_name_required);
 CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_signature(
     citizensdk_result_handle_t result, uint8_t *out_signature_64);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_application_key(
+    citizensdk_result_handle_t result, uint8_t *out_key_32);
 CITIZENSDK_API citizensdk_error_code_t citizensdk_result_get_prepared_wallet(
     citizensdk_result_handle_t result,
     citizensdk_prepared_wallet_info_t *out_info);

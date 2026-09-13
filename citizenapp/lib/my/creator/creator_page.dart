@@ -1,3 +1,6 @@
+import 'package:provider/provider.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -13,9 +16,11 @@ import 'package:citizenapp/my/membership/membership_page.dart';
 import 'package:citizenapp/my/membership/membership_revision.dart';
 import 'package:citizenapp/my/membership/subscription_service.dart';
 import 'package:citizenapp/my/myid/current_user_context.dart';
+import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
+import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/widgets/identity_register_guide.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 「我的 → 创作者」：管理自己的创作者会员（档位 / 收入概览）。
@@ -46,7 +51,9 @@ class CreatorPage extends StatefulWidget {
 }
 
 class _CreatorPageState extends State<CreatorPage> {
-  late final CreatorService _service = widget._service ?? CreatorService();
+  late final CreatorService _service;
+  AccountSecurityService? _accountSecurity;
+  bool _dependenciesReady = false;
   CreatorPageData? _data;
   bool _unregistered = false;
   String? _error;
@@ -66,14 +73,38 @@ class _CreatorPageState extends State<CreatorPage> {
         overview: CreatorOverview.zero,
       ),
     };
-    WalletManager.walletsRevision.addListener(_onIdentityChanged);
     MembershipRevision.instance.listenable.addListener(_onMembershipChanged);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    final injected = widget._service;
+    if (injected != null) {
+      _service = injected;
+      _dependenciesReady = true;
+      unawaited(_bootstrap(useInitialCid: true));
+      return;
+    }
+    final sdk = context.read<CitizenSdk>();
+    final accountSecurity = context.read<AccountSecurityService>();
+    _service = CreatorService(
+      wallet: sdk.wallet,
+      chain: sdk.chain,
+      transactions: sdk.transactions,
+      identityResolver: context.read<FinalizedIdentityResolver>(),
+      sessionProvider: context.read<SquareSessionProvider>(),
+    );
+    _accountSecurity = accountSecurity;
+    accountSecurity.revision.addListener(_onIdentityChanged);
+    _dependenciesReady = true;
     unawaited(_bootstrap(useInitialCid: true));
   }
 
   @override
   void dispose() {
-    WalletManager.walletsRevision.removeListener(_onIdentityChanged);
+    _accountSecurity?.revision.removeListener(_onIdentityChanged);
     MembershipRevision.instance.listenable.removeListener(_onMembershipChanged);
     super.dispose();
   }
@@ -99,7 +130,7 @@ class _CreatorPageState extends State<CreatorPage> {
     try {
       var cidNumber = useInitialCid ? widget.initialCidNumber.trim() : '';
       if (cidNumber.isEmpty) {
-        final currentUser = await CurrentUserContext.instance.resolve();
+        final currentUser = await context.read<CurrentUserContext>().resolve();
         cidNumber = currentUser?.cidNumber.trim() ?? '';
       }
       if (!mounted || generation != _loadGeneration) return;

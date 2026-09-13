@@ -549,7 +549,7 @@ function windowsInstallFixture(root) {
         ? 'windows/include/citizen_sdk/citizensdk_host.h' : 'include/citizensdk.h');
       const names = [...new Set([...readFileSync(header, 'utf8')
         .matchAll(/\b(citizensdk_[a-z0-9_]+)\s*\(/gu)].map((m) => m[1]))].sort();
-      assert.equal(names.length, host ? 17 : 117);
+      assert.equal(names.length, host ? 17 : 121);
       if (host) names.push(...qrImageSymbols());
       if (!host) names.push(...CITIZENSDK_INTERNAL_SYMBOLS);
       names.sort();
@@ -1175,7 +1175,7 @@ function citizenSdkSymbols() {
   const symbols = [...new Set(
     [...header.matchAll(/\b(citizensdk_[a-z0-9_]+)\s*\(/g)].map((match) => match[1]),
   )].sort();
-  assert.equal(symbols.length, 117);
+  assert.equal(symbols.length, 121);
   return symbols;
 }
 
@@ -1208,7 +1208,7 @@ test('私钥查看私有ABI固定四符号和布局，公开头不声明内部�
     assert.ok(header.includes(`offsetof(citizensdk_internal_private_key_view_v1_t, ${field}) == ${offset}`));
   }
   assert.doesNotMatch(readFileSync(join(citizenSdkRoot, 'include/citizensdk.h'), 'utf8'), /citizensdk_internal_/u);
-  assert.equal(citizenSdkSymbols().length, 117);
+  assert.equal(citizenSdkSymbols().length, 121);
   assert.equal(citizenSdkLinkedSymbols().length, 121);
 });
 
@@ -2582,7 +2582,7 @@ test('Apple XCFramework 固定三个 arm64 技术变体、产品 ABI、版本与
     });
     assert.throws(
       () => assertAppleReleaseProjection(missingSymbol),
-      /精确导出 117 个 citizensdk_/,
+      /精确导出 121 个 citizensdk_/,
     );
 
     const legacySymbol = join(root, 'legacy-symbol');
@@ -3116,7 +3116,7 @@ test('Windows 薄 Host 与正式 Flutter 适配保持唯一 Core 和官方注册
   const functions = [...new Set([...header.matchAll(/\b(citizensdk_host_[a-z0-9_]+)\s*\(/gu)].map((m) => m[1]))].sort();
   assert.equal(exported.length, 20);
   assert.deepEqual(exported, [...functions, ...qrImageSymbols()].sort());
-  assert.equal(citizenSdkSymbols().length, 117);
+  assert.equal(citizenSdkSymbols().length, 121);
   assert.match(header, /void \*hwnd;/u);
   assert.doesNotMatch(header.replaceAll('citizensdk_host_view_account_private_key', ''), /gtk_parent|private_key|plaintext_dek|mnemonic_utf8/u);
   const cmake = readFileSync(join(citizenSdkRoot, 'windows/CMakeLists.txt'), 'utf8');
@@ -4293,7 +4293,7 @@ test('模块选择和独立签名历史门面只投影同一Core，不产生第�
   assert.match(codec, /return <Object\?>\[protocolVersion, \.\.\.fields\];/u);
   assert.match(codec, /_tuple\(raw, 2, '验签响应'\)/u);
   assert.match(api, /final CitizenHistory history;/u);
-  assert.doesNotMatch(source('lib/src/api/citizen_wallet.dart'), /Future<CitizenWalletSignature> sign/u);
+  assert.doesNotMatch(source('lib/src/api/citizen_sdk_wallet.dart'), /Future<CitizenWalletSignature> sign/u);
   const transactions = source('lib/src/api/citizen_transactions.dart');
   assert.doesNotMatch(transactions.split('abstract interface class CitizenHistory')[0], /initializeFinalizedHistory|syncFinalizedHistory/u);
   assert.match(source('lib/src/platform/citizen_sdk_flutter_codec.dart'), /return <Object\?>\[protocolVersion, modules\];/u);
@@ -4397,7 +4397,7 @@ test('三类消费者和独立签名器只依赖同一正式公开面', () => {
 
   const reference = readFileSync(join(consumerRoot, 'reference/reference_consumer.dart'), 'utf8');
   for (const capability of [
-    'CitizenChain', 'CitizenWallet', 'CitizenSigning', 'CitizenQr',
+    'CitizenChain', 'CitizenSdkWallet', 'CitizenSigning', 'CitizenQr',
     'CitizenTransactions', 'CitizenHistory',
   ]) assert.match(reference, new RegExp(`final ${capability} `, 'u'));
   assert.doesNotMatch(reference, /destination|amount|remark|booking|route|vote|proposal|governance/iu);
@@ -4434,11 +4434,11 @@ test('三类消费者和独立签名器只依赖同一正式公开面', () => {
   assert.match(matrix, /calls, hasLength\(3\)/u);
   assert.match(matrix, /CitizenQrKind\.values\.any\(\(value\) => value\.value == 4\)/u);
   assert.match(matrix, /CitizenWalletWordCount\.values/u);
-  assert.equal(citizenSdkSymbols().length, 117);
+  assert.equal(citizenSdkSymbols().length, 121);
   assert.equal(CITIZENSDK_INTERNAL_SYMBOLS.length, 4);
 });
 
-test('Dart、Android、Darwin、Linux、Windows 固定同一 Flutter 双通道和 62 方法合同', () => {
+test('Dart、Android、Darwin、Linux、Windows 固定同一 Flutter 双通道和 65 方法合同', () => {
   const root = mkdtempSync(join(workRoot, 'release-flutter-contract-test-'));
   const sources = [
     'lib/src/platform/citizen_sdk_flutter_codec.dart',
@@ -4466,7 +4466,7 @@ test('Dart、Android、Darwin、Linux、Windows 固定同一 Flutter 双通道�
     );
     assert.throws(
       () => assertFlutterBindingContract(root),
-      /Linux Flutter 方法合同漂移：必须精确为固定 62 项/,
+      /Linux Flutter 方法合同漂移：必须精确为固定 65 项/,
     );
 
     writeFileSync(
@@ -4476,7 +4476,7 @@ test('Dart、Android、Darwin、Linux、Windows 固定同一 Flutter 双通道�
     );
     assert.throws(
       () => assertFlutterBindingContract(root),
-      /Linux Flutter 方法合同漂移：必须精确为固定 62 项/,
+      /Linux Flutter 方法合同漂移：必须精确为固定 65 项/,
     );
     writeFileSync(linuxMethods, methodSource);
 
@@ -5181,7 +5181,7 @@ test('1.10.1基线报告固定实测边界、问题分级与只读上游约束',
     join(citizenSdkRoot, 'test/baselines/sdk_1_10_1_contract_test.dart'),
     'utf8',
   );
-  assert.match(dart, /CitizenSdkFlutterCodec\.methods, hasLength\(62\)/u);
+  assert.match(dart, /CitizenSdkFlutterCodec\.methods, hasLength\(65\)/u);
   assert.match(dart, /CitizenExternalSignerTransport\.qrV1/u);
   assert.match(dart, /isNot\(contains\('QR_V2'\)\)/u);
 });
@@ -6575,7 +6575,7 @@ test('Linux 安装验收执行真实文件闭集、字节、版本、平台和 E
     ]) {
       const names = [...new Set([...readFileSync(header, 'utf8')
         .matchAll(/\b(citizensdk_[a-z0-9_]+)\s*\(/g)].map((match) => match[1]))].sort();
-      assert.equal(names.length, kind === 'core' ? 117 : 17);
+      assert.equal(names.length, kind === 'core' ? 121 : 17);
       if (kind === 'host') names.push(...qrImageSymbols());
       if (kind === 'core') names.push(...CITIZENSDK_INTERNAL_SYMBOLS);
       names.sort();
@@ -6939,7 +6939,7 @@ test('产品 ABI 从完整 nm 导出集合与头文件精确对拍并拒绝任�
       [...header.matchAll(/\b(citizensdk_[a-z0-9_]+)\s*\(/g)]
         .map((match) => match[1]),
     )].sort();
-    assert.equal(expected.length, 117);
+    assert.equal(expected.length, 121);
     expected.push(...CITIZENSDK_INTERNAL_SYMBOLS);
     expected.sort();
 

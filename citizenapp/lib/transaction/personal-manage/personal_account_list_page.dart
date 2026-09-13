@@ -9,6 +9,8 @@ import 'dart:async' show unawaited;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
+import 'package:provider/provider.dart';
 import 'package:citizenapp/log/app_log.dart';
 import 'package:isar_community/isar.dart';
 import 'package:polkadart_keyring/polkadart_keyring.dart' show Keyring;
@@ -18,7 +20,6 @@ import 'package:citizenapp/citizen/shared/admin_accounts_scan_service.dart';
 import 'package:citizenapp/citizen/shared/institution_info.dart';
 import 'package:citizenapp/isar/wallet_isar.dart';
 import 'package:citizenapp/ui/app_theme.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
 
 import 'personal_account_create_page.dart';
 import 'personal_manage_account_info_page.dart';
@@ -37,12 +38,11 @@ class PersonalAccountListPage extends StatefulWidget {
 }
 
 class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
-  final PersonalManageService _personalManageService = PersonalManageService();
-  final PersonalProposalHistoryService _personalProposalHistoryService =
-      PersonalProposalHistoryService();
-  final AdminAccountsScanService _scanService = AdminAccountsScanService();
-  final PersonalManageDiscoveryService _discoveryService =
-      PersonalManageDiscoveryService();
+  late final PersonalManageService _personalManageService;
+  late final PersonalProposalHistoryService _personalProposalHistoryService;
+  late final AdminAccountsScanService _scanService;
+  late final PersonalManageDiscoveryService _discoveryService;
+  bool _dependenciesReady = false;
 
   List<PersonalAccountEntity> _items = [];
   Map<String, String?> _statuses = const {};
@@ -56,6 +56,25 @@ class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
   @override
   void initState() {
     super.initState();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    final sdk = context.read<CitizenSdk>();
+    _personalManageService = PersonalManageService(
+      chain: sdk.chain,
+      transactions: sdk.transactions,
+    );
+    _personalProposalHistoryService = PersonalProposalHistoryService(
+      chain: sdk.chain,
+    );
+    _scanService = AdminAccountsScanService(chain: sdk.chain);
+    _discoveryService = PersonalManageDiscoveryService(
+      personalManageService: _personalManageService,
+    );
+    _dependenciesReady = true;
     _load();
   }
 
@@ -596,7 +615,8 @@ class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
   }
 
   Future<Set<String>> _currentWalletAccountIds() async {
-    final wallets = await WalletManager().getWallets();
+    final wallets =
+        (await context.read<CitizenSdk>().wallet.getState()).accounts;
     return wallets.map((wallet) => wallet.accountId).toSet();
   }
 

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
@@ -9,16 +10,8 @@ import 'package:citizenapp/chat/chat_product_policy.dart';
 import 'package:citizenapp/my/membership/membership_revision.dart';
 import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart' show TxPoolWatchCallback;
-import 'package:citizenapp/rpc/pallet_registry.dart';
-import 'package:citizenapp/rpc/subscription_rpc.dart';
-import 'package:citizenapp/wallet/core/default_account_service.dart';
-import 'package:citizenapp/wallet/core/device_subkey.dart' show hexToBytes;
-import 'package:citizenapp/wallet/core/secure_seed_store.dart'
-    show SecureSeedException;
-import 'package:citizenapp/wallet/core/seed_sign_error.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/my/membership/subscription_chain.dart';
+import 'package:citizenapp/security/device_subkey.dart' show hexToBytes;
 import 'package:citizenapp/isar/wallet_isar.dart';
 
 class SubscriptionException implements Exception {
@@ -63,29 +56,41 @@ class MembershipDisplaySnapshot {
 /// 根据共识时间戳完成。CitizenApp 不提交续费或周期确认。
 class SubscriptionService {
   SubscriptionService({
-    SubscriptionRpc? rpc,
-    WalletManager? walletManager,
-    DefaultAccountReader? defaultAccountReader,
-    SquareSessionProvider? sessionProvider,
+    required CitizenSdkWallet wallet,
+    required CitizenChain chain,
+    required CitizenTransactions transactions,
+    required FinalizedIdentityResolver identityResolver,
+    required SquareSessionProvider sessionProvider,
+    SubscriptionChain? subscriptionChain,
     SquareApiClient? api,
-  })  : _rpc = rpc ?? SubscriptionRpc(),
-        _wallet = walletManager ?? WalletManager(),
-        _defaultAccountReader = defaultAccountReader ??
-            DefaultAccountService(walletManager: walletManager),
-        _session = sessionProvider ?? SquareSessionProvider.instance,
-        _api = api ?? SquareApiClient() {
-    _walletAccountSigner = WalletAccountSigner(walletManager: _wallet);
+  }) : _subscriptionChain =
+           subscriptionChain ??
+           SubscriptionChain(chain: chain, transactions: transactions),
+       _wallet = wallet,
+       _identityResolver = identityResolver,
+       _session = sessionProvider,
+       _api = api ?? SquareApiClient() {
     // App/会员服务重新建立时主动恢复 finalized 待同步交易；失败仍留在原 tx_hash 队列，
     // 后续状态刷新再次重试，不把恢复职责塞进广场发布流程。
-    unawaited(_retryPendingMirrorsForCurrentSession());
+    unawaited(
+      _retryPendingMirrorsForCurrentSession().catchError((
+        Object error,
+        StackTrace stackTrace,
+      ) {
+        // 构造期恢复是后台收敛，不得把暂时关闭的本地库等错误泄漏成未处理异常；
+        // 原 tx_hash 队列保持不变，下一次状态刷新仍会重试。
+        debugPrint(
+          '[Membership] pending mirror recovery deferred: $error\n$stackTrace',
+        );
+      }),
+    );
   }
 
-  final SubscriptionRpc _rpc;
-  final WalletManager _wallet;
-  final DefaultAccountReader _defaultAccountReader;
+  final SubscriptionChain _subscriptionChain;
+  final CitizenSdkWallet _wallet;
+  final FinalizedIdentityResolver _identityResolver;
   final SquareSessionProvider _session;
   final SquareApiClient _api;
-  late final WalletAccountSigner _walletAccountSigner;
 
   bool _mirrorSyncPending = false;
 
@@ -174,11 +179,13 @@ class SubscriptionService {
       final snapshot = MembershipDisplaySnapshot(
         state: SquareMembershipState(
           active: decoded['active'] == true,
-          paidUntil:
-              decoded['paid_until'] is int ? decoded['paid_until'] as int : 0,
+          paidUntil: decoded['paid_until'] is int
+              ? decoded['paid_until'] as int
+              : 0,
           membershipLevel: membershipLevel is String ? membershipLevel : null,
-          subscriptionStatus:
-              subscriptionStatus is String ? subscriptionStatus : null,
+          subscriptionStatus: subscriptionStatus is String
+              ? subscriptionStatus
+              : null,
           subscriptionActive: decoded['subscription_active'] == true,
           lastChargedAt: decoded['last_charged_at'] is int
               ? decoded['last_charged_at'] as int
@@ -232,17 +239,17 @@ class SubscriptionService {
     final state = snapshot.state;
     final effectiveState =
         state.active && (state.paidUntil <= 0 || now >= state.paidUntil)
-            ? SquareMembershipState(
-                active: false,
-                paidUntil: state.paidUntil,
-                membershipLevel: state.membershipLevel,
-                subscriptionStatus: state.subscriptionStatus,
-                subscriptionActive: false,
-                lastChargedAt: state.lastChargedAt,
-                plans: state.plans,
-                usageState: state.usageState,
-              )
-            : state;
+        ? SquareMembershipState(
+            active: false,
+            paidUntil: state.paidUntil,
+            membershipLevel: state.membershipLevel,
+            subscriptionStatus: state.subscriptionStatus,
+            subscriptionActive: false,
+            lastChargedAt: state.lastChargedAt,
+            plans: state.plans,
+            usageState: state.usageState,
+          )
+        : state;
     final effective = identical(effectiveState, state)
         ? snapshot
         : MembershipDisplaySnapshot(
@@ -297,78 +304,42 @@ class SubscriptionService {
     String level,
     int expectedPriceFen, {
     BuildContext? context,
-    TxPoolWatchCallback? onWatchEvent,
   }) async {
     final identity = await _requireIdentity();
-    final account = await _requireSigningAccount(identity.accountId);
+    await _requireSigningAccount(identity.accountId);
     final cidNumber = identity.snapshot!.cidNumber;
     try {
-      final result = await _rpc.subscribePlatform(
-        fromSs58Address: identity.ss58Address,
+      final result = await _subscriptionChain.subscribePlatform(
         signerPublicKey: Uint8List.fromList(hexToBytes(identity.accountId)),
         level: level,
         expectedPriceFen: BigInt.from(expectedPriceFen),
-        sign: (payload) => _walletAccountSigner.sign(
-          context: context,
-          accountId: identity.accountId,
-          signMode: account.signMode,
-          payload: payload,
-          action: QrActions.chain(
-            PalletRegistry.squarePostPallet,
-            PalletRegistry.subscribeCall,
-          ),
-          requestPrefix: 'subscribe-',
-        ),
-        onWatchEvent: onWatchEvent,
+        externalSigning: (pending) => _showExternalSigning(context, pending),
       );
       await _confirm(
         subscriberCidNumber: cidNumber,
         txHash: result.txHash,
         blockHashHex: result.blockHashHex,
       );
-    } on SecureSeedException catch (e) {
-      throw SubscriptionException(seedSignErrorMessage(e));
-    } on WalletAuthException catch (e) {
-      throw SubscriptionException(e.message);
     } on Exception catch (e) {
       throw SubscriptionException('订阅失败：$e');
     }
   }
 
   /// 取消平台会员（撤销按月扣款授权）。
-  Future<void> cancel({
-    BuildContext? context,
-    TxPoolWatchCallback? onWatchEvent,
-  }) async {
+  Future<void> cancel({BuildContext? context}) async {
     final identity = await _requireIdentity();
-    final account = await _requireSigningAccount(identity.accountId);
+    await _requireSigningAccount(identity.accountId);
     final cidNumber = identity.snapshot!.cidNumber;
     try {
-      final result = await _rpc.cancelPlatform(
-        fromSs58Address: identity.ss58Address,
+      final result = await _subscriptionChain.cancelPlatform(
         signerPublicKey: Uint8List.fromList(hexToBytes(identity.accountId)),
-        sign: (payload) => _walletAccountSigner.sign(
-          context: context,
-          accountId: identity.accountId,
-          signMode: account.signMode,
-          payload: payload,
-          action: QrActions.chain(
-            PalletRegistry.squarePostPallet,
-            PalletRegistry.cancelSubscriptionCall,
-          ),
-          requestPrefix: 'cancel-sub-',
-        ),
-        onWatchEvent: onWatchEvent,
+        externalSigning: (pending) => _showExternalSigning(context, pending),
       );
       await _confirm(
         subscriberCidNumber: cidNumber,
         txHash: result.txHash,
         blockHashHex: result.blockHashHex,
       );
-    } on SecureSeedException catch (e) {
-      throw SubscriptionException(seedSignErrorMessage(e));
-    } on WalletAuthException catch (e) {
-      throw SubscriptionException(e.message);
     } on Exception catch (e) {
       throw SubscriptionException('取消失败：$e');
     }
@@ -379,55 +350,52 @@ class SubscriptionService {
     String level,
     int expectedPriceFen, {
     BuildContext? context,
-    TxPoolWatchCallback? onWatchEvent,
   }) async {
     final identity = await _requireIdentity();
-    final account = await _requireSigningAccount(identity.accountId);
+    await _requireSigningAccount(identity.accountId);
     final cidNumber = identity.snapshot!.cidNumber;
     try {
-      final result = await _rpc.changePlatformPlan(
-        fromSs58Address: identity.ss58Address,
+      final result = await _subscriptionChain.changePlatformPlan(
         signerPublicKey: Uint8List.fromList(hexToBytes(identity.accountId)),
         level: level,
         expectedPriceFen: BigInt.from(expectedPriceFen),
-        sign: (payload) => _walletAccountSigner.sign(
-          context: context,
-          accountId: identity.accountId,
-          signMode: account.signMode,
-          payload: payload,
-          action: QrActions.chain(
-            PalletRegistry.squarePostPallet,
-            PalletRegistry.changeSubscriptionPlanCall,
-          ),
-          requestPrefix: 'change-sub-',
-        ),
-        onWatchEvent: onWatchEvent,
+        externalSigning: (pending) => _showExternalSigning(context, pending),
       );
       await _confirm(
         subscriberCidNumber: cidNumber,
         txHash: result.txHash,
         blockHashHex: result.blockHashHex,
       );
-    } on SecureSeedException catch (e) {
-      throw SubscriptionException(seedSignErrorMessage(e));
-    } on WalletAuthException catch (e) {
-      throw SubscriptionException(e.message);
     } on Exception catch (e) {
       throw SubscriptionException('更换订阅失败：$e');
     }
   }
 
-  Future<DefaultAccount> _requireSigningAccount(String accountId) async {
-    final account = await _defaultAccountReader.getDefaultAccount();
+  Future<CitizenWalletStateAccount> _requireSigningAccount(
+    String accountId,
+  ) async {
+    final account = (await _wallet.getState()).defaultAccount;
     if (account == null || account.accountId != accountId) {
       throw const SubscriptionException('当前身份与默认钱包账户不一致，已拒绝签名');
     }
     return account;
   }
 
+  Future<String?> _showExternalSigning(
+    BuildContext? context,
+    CitizenTransactionExternalSigningPending pending,
+  ) {
+    if (context == null || !context.mounted) return Future<String?>.value();
+    return showCitizenSdkQrResponse(
+      context,
+      request: pending.qrRequest,
+      expiresAt: BigInt.from(pending.expiresAt.millisecondsSinceEpoch ~/ 1000),
+    );
+  }
+
   /// 当前默认账户经 finalized 闭环验证后，才可成为链上订阅交易签名者。
   Future<FinalizedIdentity> _requireIdentity() async {
-    final identity = await FinalizedIdentityResolver.instance.resolve();
+    final identity = await _identityResolver.resolve();
     if (identity == null || !identity.isRegistered) {
       throw const SubscriptionException('请先注册并绑定公民 CID');
     }
@@ -473,8 +441,7 @@ class SubscriptionService {
       }
       _mirrorSyncPending = (await _readList(
         _pendingKey(subscriberCidNumber),
-      ))
-          .isNotEmpty;
+      )).isNotEmpty;
     } on Exception {
       // 保留未完成证明；链上订阅与自动续费不依赖 Cloudflare。
     }
@@ -570,17 +537,16 @@ class SubscriptionService {
   }
 
   Future<String?> _readState(String key) => WalletIsar.instance.read(
-        (isar) async => (await isar.walletMembershipStateEntitys.getByStateKey(
-          key,
-        ))
-            ?.payloadJson,
-      );
+    (isar) async => (await isar.walletMembershipStateEntitys.getByStateKey(
+      key,
+    ))?.payloadJson,
+  );
 
   Future<void> _writeState(String key, String payloadJson) =>
       WalletIsar.instance.writeTxn((isar) async {
         final row =
             await isar.walletMembershipStateEntitys.getByStateKey(key) ??
-                WalletMembershipStateEntity();
+            WalletMembershipStateEntity();
         row
           ..stateKey = key
           ..payloadJson = payloadJson;

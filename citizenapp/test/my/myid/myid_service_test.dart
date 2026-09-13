@@ -1,24 +1,23 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:tatachat_sdk/tatachat_sdk.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:polkadart_keyring/polkadart_keyring.dart' show Keyring;
 import 'package:citizenapp/citizen/cid/cid_generator.dart';
 import 'package:citizenapp/citizen/public/data/admin_division_store.dart';
-import 'package:citizenapp/chat/tatachat_sdk_adapter.dart';
 import 'package:citizenapp/my/myid/citizen_identity_chain_reader.dart';
 import 'package:citizenapp/my/myid/current_user_context.dart';
 import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
 import 'package:citizenapp/my/myid/identity_badge_snapshot_store.dart';
 import 'package:citizenapp/my/myid/myid_service.dart';
 import 'package:citizenapp/my/user/contact_service.dart';
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/rpc/citizen_identity_rpc.dart';
+import 'package:citizenapp/my/myid/citizen_identity_transaction.dart';
 import 'package:citizenapp/security/local_data_key.dart';
-import 'package:citizenapp/wallet/core/default_account_service.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
-import 'package:citizenapp/wallet/core/sign_mode.dart';
+import 'package:citizenapp/security/account_security_service.dart';
+import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
+import '../../support/fake_citizen_sdk.dart';
 
 /// Alice 通用 SS58(校验和有效),仅用于让 `decodeAddress` 解出 32 字节账户;
 /// 护照 App 真号是 prefix=2027,这里只需一个可解码地址驱动 storage key。
@@ -26,17 +25,35 @@ const _validAddress = '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY';
 const _validAccountId =
     '0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d';
 
+CitizenWalletStateAccount _testAccount({
+  required String accountId,
+  required String ss58Address,
+  required int accountIndex,
+  required String name,
+}) => CitizenWalletStateAccount(
+  signMode: CitizenWalletSignMode.hot,
+  walletIndex: 1,
+  accountIndex: accountIndex,
+  accountId: accountId,
+  ss58Address: ss58Address,
+  name: name,
+  createdAtMillis: BigInt.zero,
+  isDefault: accountIndex == 0,
+);
+
+final _aliceWallet = _testAccount(
+  accountId: _validAccountId,
+  ss58Address: _validAddress,
+  accountIndex: 0,
+  name: '账户0',
+);
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  setUp(() {
-    CurrentUserContext.resetDebugInstance();
-  });
-
-  tearDown(CurrentUserContext.resetDebugInstance);
-
   MyIdService buildService({
-    WalletProfile? wallet = const _AliceWallet(),
+    CitizenWalletStateAccount? wallet,
+    bool noWallet = false,
     Uint8List? voting,
     Uint8List? candidate,
     bool chainThrows = false,
@@ -45,8 +62,10 @@ void main() {
     bool hasCid = false,
     DateTime? now,
   }) {
-    final walletManager = _FakeWalletManager(wallet);
-    final chainRpc = _FakeChainRpc(
+    final walletManager = _FakeWalletManager(
+      noWallet ? null : wallet ?? _aliceWallet,
+    );
+    final chainRpc = _FakeChain(
       voting: voting,
       candidate: candidate,
       throws: chainThrows,
@@ -55,21 +74,17 @@ void main() {
       hasCid: hasCid,
     );
     return MyIdService(
-      walletManager: walletManager,
-      chainRpc: chainRpc,
+      wallet: walletManager,
+      signing: walletManager,
+      accountSecurity: walletManager,
+      currentUserContext: _InvalidationCountingIdentityCache(),
+      sessionProvider: _UnusedSessionProvider(),
+      chatRuntime: () => throw StateError('测试未请求 Chat runtime'),
+      chain: chainRpc,
+      transactions: TestCitizenTransactions(),
       identityResolver: FinalizedIdentityResolver(
-        defaultAccountReader: _FakeDefaultAccountReader(
-          wallet == null
-              ? null
-              : DefaultAccount(
-                  accountId: wallet.accountId,
-                  ss58Address: wallet.ss58Address,
-                  accountName: '测试默认账户',
-                  signMode: SignMode.hot,
-                  walletIndex: 1,
-                ),
-        ),
-        chainRpc: chainRpc,
+        wallet: walletManager,
+        chain: chainRpc,
       ),
       divisionStore: _FakeDivisionStore(),
       badgeSnapshotStore: _FakeBadgeStore(),
@@ -77,17 +92,42 @@ void main() {
     );
   }
 
+  MyIdService testService({
+    _FakeWalletManager? wallet,
+    CitizenChain? chain,
+    FinalizedIdentityResolver? identityResolver,
+    CitizenIdentityTransaction? identityTransaction,
+    CidAccountDataHandover? dataHandover,
+    CurrentUserContext? currentUserContext,
+    int Function()? cidYearProvider,
+  }) {
+    final actualWallet = wallet ?? _FakeWalletManager(_aliceWallet);
+    final actualChain = chain ?? _FakeChain();
+    return MyIdService(
+      wallet: actualWallet,
+      signing: actualWallet,
+      accountSecurity: actualWallet,
+      currentUserContext:
+          currentUserContext ?? _InvalidationCountingIdentityCache(),
+      identityResolver: identityResolver ?? _FakeIdentityResolver(null),
+      sessionProvider: _UnusedSessionProvider(),
+      chatRuntime: () => throw StateError('测试未请求 Chat runtime'),
+      chain: actualChain,
+      transactions: TestCitizenTransactions(),
+      divisionStore: _FakeDivisionStore(),
+      badgeSnapshotStore: _FakeBadgeStore(),
+      identityTransaction: identityTransaction,
+      dataHandover: dataHandover,
+      cidYearProvider: cidYearProvider,
+    );
+  }
+
   group('注册前余额闸 fetchRegistrationAffordability', () {
     test('门槛取自链上常量,余额旁路缓存读取', () async {
-      final rpc = _FakeChainRpc()
+      final rpc = _FakeChain()
         ..minSelfPayFen = BigInt.from(121)
         ..balanceYuan = 1.21;
-      final service = MyIdService(
-        walletManager: _FakeWalletManager(const _AliceWallet()),
-        chainRpc: rpc,
-        divisionStore: _FakeDivisionStore(),
-        badgeSnapshotStore: _FakeBadgeStore(),
-      );
+      final service = testService(chain: rpc);
       final result = await service.fetchRegistrationAffordability(
         _validAccountId,
       );
@@ -96,13 +136,8 @@ void main() {
     });
 
     test('链读失败必须上抛,绝不静默当成余额充足或不足', () async {
-      final rpc = _FakeChainRpc()..balanceThrows = true;
-      final service = MyIdService(
-        walletManager: _FakeWalletManager(const _AliceWallet()),
-        chainRpc: rpc,
-        divisionStore: _FakeDivisionStore(),
-        badgeSnapshotStore: _FakeBadgeStore(),
-      );
+      final rpc = _FakeChain()..balanceThrows = true;
+      final service = testService(chain: rpc);
       await expectLater(
         service.fetchRegistrationAffordability(_validAccountId),
         throwsA(isA<StateError>()),
@@ -111,7 +146,7 @@ void main() {
   });
 
   test('无默认账户时为访客并提示创建钱包', () async {
-    final state = await buildService(wallet: null).getState();
+    final state = await buildService(noWallet: true).getState();
     expect(state.tier, MyIdTier.visitor);
     expect(state.votingAccountId, isNull);
     expect(state.errorMessage, '请先创建钱包');
@@ -119,7 +154,7 @@ void main() {
 
   test('MyId 身份只读不构造 ChatSdk', () async {
     final liveChatRuntimeCount = ChatRuntimeCore.debugLiveInstanceCount;
-    final service = buildService(wallet: null);
+    final service = buildService(noWallet: true);
     await service.getState();
     expect(
       ChatRuntimeCore.debugLiveInstanceCount,
@@ -204,13 +239,13 @@ void main() {
 
   test('护照未生效/已过期/已吊销状态派生正确', () async {
     Uint8List voting({required int status}) => _encodeVoting(
-          from: 20260101,
-          until: 20310101,
-          status: status,
-          province: 'GD',
-          city: '0755',
-          town: '001',
-        );
+      from: 20260101,
+      until: 20310101,
+      status: status,
+      province: 'GD',
+      city: '0755',
+      town: '001',
+    );
 
     final notYet = await buildService(
       voting: voting(status: 0),
@@ -271,27 +306,26 @@ void main() {
 
   test('注册匿名 CID:用账户0 accountId + UTC 年生成金标 CID 并提交自签占号', () async {
     final identityCache = _InvalidationCountingIdentityCache();
-    CurrentUserContext.debugInstance = identityCache;
-    final revisionBefore = WalletManager.walletsRevision.value;
-    final fakeRpc = _FakeIdentityRpc();
+    final fakeWallet = _FakeWalletManager(_aliceWallet);
+    final fakeRpc = _FakeIdentityTransaction();
     final expected = generateCitizenCid(
       accountId: _validAccountId,
       institution: kCidInstitutionCitizen,
       year: 2026,
     );
-    final service = MyIdService(
-      walletManager: _FakeWalletManager(const _AliceWallet()),
-      chainRpc: _FakeChainRpc(),
-      divisionStore: _FakeDivisionStore(),
-      badgeSnapshotStore: _FakeBadgeStore(),
-      identityRpc: fakeRpc,
+    final service = testService(
+      wallet: fakeWallet,
+      chain: _FakeChain(),
+      identityTransaction: fakeRpc,
       identityResolver: _FakeIdentityResolver(
         _registeredIdentity(_validAccountId, cidNumber: expected),
       ),
+      currentUserContext: identityCache,
       cidYearProvider: () => 2026,
     );
 
     final cid = await service.registerAnonymousCid(
+      context: null,
       institution: kCidInstitutionCitizen,
     );
 
@@ -300,37 +334,32 @@ void main() {
     expect(fakeRpc.occupiedCid, expected);
     expect(fakeRpc.occupiedAccountId, _validAccountId);
     expect(identityCache.invalidateCalls, 1);
-    expect(WalletManager.walletsRevision.value, revisionBefore + 1);
+    expect(fakeWallet.identityNotifications, 1);
   });
 
   test('自主换绑保留当前账户授权；finalized 后仅由新账户接管', () async {
-    final newAccount = Account(
-      masterId: _validAccountId,
+    final newAccount = _testAccount(
       accountIndex: 5,
       accountId: '0x${'11' * 32}',
       ss58Address: 'new-ss58',
-      accountName: '账户5',
+      name: '账户5',
     );
-    final fakeRpc = _FakeIdentityRpc();
-    final fakeWallet = _FakeWalletManager(
-      const _AliceWallet(),
-      accounts: [newAccount],
-    );
+    final fakeRpc = _FakeIdentityTransaction();
+    final fakeWallet = _FakeWalletManager(_aliceWallet, accounts: [newAccount]);
     final resolver = _SequenceResolver(<FinalizedIdentity>[
       _registeredIdentity(_validAccountId),
       _registeredIdentity(newAccount.accountId, bindingRevision: 2),
     ]);
-    final service = MyIdService(
-      walletManager: fakeWallet,
-      chainRpc: _FakeChainRpc(),
-      divisionStore: _FakeDivisionStore(),
-      badgeSnapshotStore: _FakeBadgeStore(),
-      identityRpc: fakeRpc,
+    final service = testService(
+      wallet: fakeWallet,
+      chain: _FakeChain(),
+      identityTransaction: fakeRpc,
       identityResolver: resolver,
       dataHandover: _FakeDataHandover(),
     );
 
     await service.rebindCidTo(
+      buildContext: null,
       cidNumber: 'GD-CTZN1-8F3A2B',
       newAccountId: newAccount.accountId,
     );
@@ -348,24 +377,18 @@ void main() {
   });
 
   test('换绑 finalized 不登记 P-256 子钥，后续仅由 Worker 缺钥响应触发', () async {
-    final newAccount = Account(
-      masterId: _validAccountId,
+    final newAccount = _testAccount(
       accountIndex: 5,
       accountId: '0x${'11' * 32}',
       ss58Address: 'new-ss58',
-      accountName: '账户5',
+      name: '账户5',
     );
-    final fakeWallet = _FakeWalletManager(
-      const _AliceWallet(),
-      accounts: [newAccount],
-    );
+    final fakeWallet = _FakeWalletManager(_aliceWallet, accounts: [newAccount]);
     final resolver = _MutableResolver(_validAccountId);
-    final service = MyIdService(
-      walletManager: fakeWallet,
-      chainRpc: _FakeChainRpc(),
-      divisionStore: _FakeDivisionStore(),
-      badgeSnapshotStore: _FakeBadgeStore(),
-      identityRpc: _FakeIdentityRpc(
+    final service = testService(
+      wallet: fakeWallet,
+      chain: _FakeChain(),
+      identityTransaction: _FakeIdentityTransaction(
         onRebound: () =>
             resolver.setAccountId(newAccount.accountId, bindingRevision: 2),
       ),
@@ -374,6 +397,7 @@ void main() {
     );
 
     await service.rebindCidTo(
+      buildContext: null,
       cidNumber: 'GD-CTZN1-8F3A2B',
       newAccountId: newAccount.accountId,
     );
@@ -382,24 +406,18 @@ void main() {
   });
 
   test('换绑 extrinsic finalized 但目标状态未确认时绝不迁移本地数据', () async {
-    final newAccount = Account(
-      masterId: _validAccountId,
+    final newAccount = _testAccount(
       accountIndex: 5,
       accountId: '0x${'11' * 32}',
       ss58Address: 'new-ss58',
-      accountName: '账户5',
+      name: '账户5',
     );
-    final fakeWallet = _FakeWalletManager(
-      const _AliceWallet(),
-      accounts: [newAccount],
-    );
+    final fakeWallet = _FakeWalletManager(_aliceWallet, accounts: [newAccount]);
     final handover = _FakeDataHandover();
-    final service = MyIdService(
-      walletManager: fakeWallet,
-      chainRpc: _FakeChainRpc(),
-      divisionStore: _FakeDivisionStore(),
-      badgeSnapshotStore: _FakeBadgeStore(),
-      identityRpc: _FakeIdentityRpc(
+    final service = testService(
+      wallet: fakeWallet,
+      chain: _FakeChain(),
+      identityTransaction: _FakeIdentityTransaction(
         rebindError: StateError('finalized 目标绑定未生效'),
       ),
       identityResolver: _FakeIdentityResolver(
@@ -410,6 +428,7 @@ void main() {
 
     await expectLater(
       service.rebindCidTo(
+        buildContext: null,
         cidNumber: 'GD-CTZN1-8F3A2B',
         newAccountId: newAccount.accountId,
       ),
@@ -423,22 +442,19 @@ void main() {
   });
 
   test('换绑目标 == 当前身份账户时拒', () async {
-    const self = Account(
-      masterId: _validAccountId,
+    final self = _testAccount(
       accountIndex: 0,
       accountId: _validAccountId,
       ss58Address: _validAddress,
-      accountName: '账户0',
+      name: '账户0',
     );
-    final wallet = _FakeWalletManager(const _AliceWallet(), accounts: [self]);
-    final identityRpc = _FakeIdentityRpc();
+    final wallet = _FakeWalletManager(_aliceWallet, accounts: [self]);
+    final identityRpc = _FakeIdentityTransaction();
     final handover = _FakeDataHandover();
-    final service = MyIdService(
-      walletManager: wallet,
-      chainRpc: _FakeChainRpc(),
-      divisionStore: _FakeDivisionStore(),
-      badgeSnapshotStore: _FakeBadgeStore(),
-      identityRpc: identityRpc,
+    final service = testService(
+      wallet: wallet,
+      chain: _FakeChain(),
+      identityTransaction: identityRpc,
       identityResolver: _FakeIdentityResolver(
         _registeredIdentity(_validAccountId),
       ),
@@ -447,10 +463,11 @@ void main() {
 
     await expectLater(
       service.rebindCidTo(
+        buildContext: null,
         cidNumber: 'GD-CTZN1-8F3A2B',
         newAccountId: _validAccountId,
       ),
-      throwsA(isA<WalletAuthException>()),
+      throwsA(isA<AccountSecurityException>()),
     );
     expect(wallet.signCalls, 0, reason: '相同 account_id 必须在读取私钥前拒绝');
     expect(identityRpc.fetchRebindContextCalls, 0);
@@ -458,28 +475,21 @@ void main() {
   });
 
   test('listRebindTargets 排除当前身份账户', () async {
-    const self = Account(
-      masterId: _validAccountId,
+    final self = _testAccount(
       accountIndex: 0,
       accountId: _validAccountId,
       ss58Address: _validAddress,
-      accountName: '账户0',
+      name: '账户0',
     );
-    final other = Account(
-      masterId: _validAccountId,
+    final other = _testAccount(
       accountIndex: 1,
       accountId: '0x${'22' * 32}',
       ss58Address: 'other-ss58',
-      accountName: '账户1',
+      name: '账户1',
     );
-    final service = MyIdService(
-      walletManager: _FakeWalletManager(
-        const _AliceWallet(),
-        accounts: [self, other],
-      ),
-      chainRpc: _FakeChainRpc(),
-      divisionStore: _FakeDivisionStore(),
-      badgeSnapshotStore: _FakeBadgeStore(),
+    final service = testService(
+      wallet: _FakeWalletManager(_aliceWallet, accounts: [self, other]),
+      chain: _FakeChain(),
       identityResolver: _FakeIdentityResolver(
         _registeredIdentity(_validAccountId),
       ),
@@ -492,28 +502,21 @@ void main() {
   });
 
   test('listBindableAccounts 返回全部本地账户(含账户0)', () async {
-    const acc0 = Account(
-      masterId: _validAccountId,
+    final acc0 = _testAccount(
       accountIndex: 0,
       accountId: _validAccountId,
       ss58Address: _validAddress,
-      accountName: '账户0',
+      name: '账户0',
     );
-    final acc5 = Account(
-      masterId: _validAccountId,
+    final acc5 = _testAccount(
       accountIndex: 5,
       accountId: '0x${'55' * 32}',
       ss58Address: 'ss5-addr',
-      accountName: '账户5',
+      name: '账户5',
     );
-    final service = MyIdService(
-      walletManager: _FakeWalletManager(
-        const _AliceWallet(),
-        accounts: [acc0, acc5],
-      ),
-      chainRpc: _FakeChainRpc(),
-      divisionStore: _FakeDivisionStore(),
-      badgeSnapshotStore: _FakeBadgeStore(),
+    final service = testService(
+      wallet: _FakeWalletManager(_aliceWallet, accounts: [acc0, acc5]),
+      chain: _FakeChain(),
     );
 
     final accounts = await service.listBindableAccounts();
@@ -521,25 +524,22 @@ void main() {
   });
 
   test('注册匿名 CID 可绑到所选子账户 //5(非账户0)', () async {
-    final acc5 = Account(
-      masterId: _validAccountId,
+    final acc5 = _testAccount(
       accountIndex: 5,
       accountId: '0x${'55' * 32}',
       ss58Address: 'ss5-addr',
-      accountName: '账户5',
+      name: '账户5',
     );
-    final fakeRpc = _FakeIdentityRpc();
+    final fakeRpc = _FakeIdentityTransaction();
     final expected = generateCitizenCid(
       accountId: acc5.accountId,
       institution: kCidInstitutionCitizen,
       year: 2026,
     );
-    final service = MyIdService(
-      walletManager: _FakeWalletManager(const _AliceWallet(), accounts: [acc5]),
-      chainRpc: _FakeChainRpc(),
-      divisionStore: _FakeDivisionStore(),
-      badgeSnapshotStore: _FakeBadgeStore(),
-      identityRpc: fakeRpc,
+    final service = testService(
+      wallet: _FakeWalletManager(_aliceWallet, accounts: [acc5]),
+      chain: _FakeChain(),
+      identityTransaction: fakeRpc,
       identityResolver: _FakeIdentityResolver(
         _registeredIdentity(acc5.accountId, cidNumber: expected),
       ),
@@ -547,6 +547,7 @@ void main() {
     );
 
     final cid = await service.registerAnonymousCid(
+      context: null,
       institution: kCidInstitutionCitizen,
       bindAccountId: acc5.accountId,
     );
@@ -581,7 +582,7 @@ void main() {
       final contacts = _HandoverContactService()
         ..stageError = StateError('通讯录 stage 失败');
       final handover = CidAccountDataHandover(
-        walletManager: wallet,
+        accountSecurity: wallet,
         chatRuntime: chat,
         contactService: contacts,
       );
@@ -608,7 +609,7 @@ void main() {
         ..stageError = StateError('通讯录 stage 失败')
         ..discardError = StateError('通讯录 discard 失败');
       final handover = CidAccountDataHandover(
-        walletManager: wallet,
+        accountSecurity: wallet,
         chatRuntime: chat,
         contactService: contacts,
       );
@@ -653,11 +654,11 @@ List<int> _vec(String s) {
 }
 
 List<int> _u32(int v) => [
-      v & 0xff,
-      (v >> 8) & 0xff,
-      (v >> 16) & 0xff,
-      (v >> 24) & 0xff,
-    ];
+  v & 0xff,
+  (v >> 8) & 0xff,
+  (v >> 16) & 0xff,
+  (v >> 24) & 0xff,
+];
 
 Uint8List _encodeVoting({
   required int from,
@@ -703,58 +704,49 @@ Uint8List _encodeCandidate({
 
 // ── Fakes ──
 
-class _AliceWallet implements WalletProfile {
-  const _AliceWallet();
-  @override
-  String get accountId => _validAccountId;
-  @override
-  String get ss58Address => _validAddress;
-  @override
-  bool get isHotWallet => true;
-  @override
-  bool get isColdWallet => false;
-  @override
-  dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
-}
-
-class _FakeWalletManager extends WalletManager {
-  _FakeWalletManager(this._wallet, {this.accounts = const <Account>[]});
-  final WalletProfile? _wallet;
-  final List<Account> accounts;
+class _FakeWalletManager
+    implements CitizenSdkWallet, CitizenSigning, AccountSecurityService {
+  _FakeWalletManager(
+    this._wallet, {
+    this.accounts = const <CitizenWalletStateAccount>[],
+  });
+  final CitizenWalletStateAccount? _wallet;
+  final List<CitizenWalletStateAccount> accounts;
 
   int deviceSubkeyRegistrationCalls = 0;
 
   /// 当前钱包派生上下文激活记录。
   final List<({String cidNumber, int bindingRevision, String accountId})>
-      dataBindings = [];
+  dataBindings = [];
   final List<String> events = <String>[];
   int signCalls = 0;
+  int identityNotifications = 0;
   AccountDataBinding? activeDataBinding;
   ({
     AccountDataBinding source,
     AccountDataBinding target,
     AccountDataHandoverState state,
-  })? pendingHandover;
+  })?
+  pendingHandover;
 
   @override
-  Future<WalletProfile?> getDefaultWallet() async => _wallet;
-  @override
-  Future<List<Account>> getAccounts(String masterId) async => accounts;
-  @override
-  Future<Account?> getAccountByAccountId(String accountId) async {
-    for (final account in accounts) {
-      if (account.accountId == accountId) return account;
-    }
-    return null;
-  }
+  Future<CitizenWalletState> getState() async => CitizenWalletState(
+    revision: BigInt.one,
+    hotProfile: null,
+    accounts: <CitizenWalletStateAccount>[
+      if (_wallet != null) _wallet,
+      ...accounts.where((account) => account.accountId != _wallet?.accountId),
+    ],
+  );
 
   @override
-  Future<Uint8List> signForAccountId(
-    String accountId,
-    Uint8List payload,
-  ) async {
+  Future<CitizenSigningOutcome> begin(CitizenSigningIntent intent) async {
     signCalls++;
-    return Uint8List(64);
+    return CitizenSigningCompleted(
+      accountId: intent.accountId,
+      payloadHash: '0x${'00' * 32}',
+      signature: Uint8List(64),
+    );
   }
 
   @override
@@ -793,11 +785,13 @@ class _FakeWalletManager extends WalletManager {
 
   @override
   Future<
-      ({
-        AccountDataBinding source,
-        AccountDataBinding target,
-        AccountDataHandoverState state,
-      })?> readPendingAccountDataHandover() async => pendingHandover;
+    ({
+      AccountDataBinding source,
+      AccountDataBinding target,
+      AccountDataHandoverState state,
+    })?
+  >
+  readPendingAccountDataHandover() async => pendingHandover;
 
   @override
   Future<void> recordPendingAccountDataHandover({
@@ -837,10 +831,18 @@ class _FakeWalletManager extends WalletManager {
   ) async {
     deviceSubkeyRegistrationCalls++;
   }
+
+  @override
+  void notifyIdentityBindingChanged() {
+    identityNotifications++;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _HandoverChatRuntime extends ChatSdk {
-  _HandoverChatRuntime() : super(host: createCitizenChatRuntimeHost());
+  _HandoverChatRuntime() : super(host: _UnusedChatHost());
 
   int discardCalls = 0;
 
@@ -859,9 +861,25 @@ class _HandoverChatRuntime extends ChatSdk {
   }
 }
 
-class _HandoverContactService extends UserContactService {
-  _HandoverContactService() : super(autoSync: false);
+class _UnusedChatHost implements ChatRuntimeHost {
+  @override
+  final ChatStorageKeyProvider keyProvider = _UnusedChatStorageKeyProvider();
 
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _UnusedChatStorageKeyProvider implements ChatStorageKeyProvider {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _UnusedSessionProvider implements SquareSessionProvider {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _HandoverContactService implements UserContactService {
   Object? stageError;
   Object? discardError;
   int discardCalls = 0;
@@ -884,35 +902,35 @@ class _HandoverContactService extends UserContactService {
     final error = discardError;
     if (error != null) throw error;
   }
-}
-
-class _FakeDefaultAccountReader implements DefaultAccountReader {
-  _FakeDefaultAccountReader(this.account);
-  final DefaultAccount? account;
 
   @override
-  Future<DefaultAccount?> getDefaultAccount() async => account;
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// 预设身份账户解析结果的假 resolver(换绑/列举目标测试用,绕开真链读序列)。
-class _FakeIdentityResolver extends FinalizedIdentityResolver {
+class _FakeIdentityResolver implements FinalizedIdentityResolver {
   _FakeIdentityResolver(this._resolved);
   final FinalizedIdentity? _resolved;
   @override
   Future<FinalizedIdentity?> resolve() async => _resolved;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _InvalidationCountingIdentityCache extends CurrentUserContext {
+class _InvalidationCountingIdentityCache implements CurrentUserContext {
   int invalidateCalls = 0;
 
   @override
   void invalidate() {
     invalidateCalls++;
-    super.invalidate();
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _SequenceResolver extends FinalizedIdentityResolver {
+class _SequenceResolver implements FinalizedIdentityResolver {
   _SequenceResolver(this._values);
   final List<FinalizedIdentity> _values;
   int _index = 0;
@@ -922,12 +940,15 @@ class _SequenceResolver extends FinalizedIdentityResolver {
     final index = _index < _values.length ? _index++ : _values.length - 1;
     return _values[index];
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// 可变身份账户的假 resolver(对账测试:换绑前后链上身份账户切换)。
-class _MutableResolver extends FinalizedIdentityResolver {
+class _MutableResolver implements FinalizedIdentityResolver {
   _MutableResolver(this._accountId, {int bindingRevision = 1})
-      : _bindingRevision = bindingRevision;
+    : _bindingRevision = bindingRevision;
   String _accountId;
   int _bindingRevision;
   void setAccountId(String accountId, {required int bindingRevision}) {
@@ -938,6 +959,9 @@ class _MutableResolver extends FinalizedIdentityResolver {
   @override
   Future<FinalizedIdentity?> resolve() async =>
       _registeredIdentity(_accountId, bindingRevision: _bindingRevision);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// 造一个「已注册(匿名)身份账户」解析结果:accountId 绑了 CID(snapshot 非空)。
@@ -945,22 +969,22 @@ FinalizedIdentity _registeredIdentity(
   String accountId, {
   String cidNumber = 'GD-CTZN1-8F3A2B',
   int bindingRevision = 1,
-}) =>
-    FinalizedIdentity(
-      accountId: accountId,
-      ss58Address: _validAddress,
-      snapshot: CitizenIdentityChainSnapshot(
-        cidNumber: cidNumber,
-        accountId: Uint8List(32),
-        bindingRevision: bindingRevision,
-        votingIdentity: null,
-        candidateIdentity: null,
-      ),
-    );
+}) => FinalizedIdentity(
+  accountId: accountId,
+  ss58Address: _validAddress,
+  snapshot: CitizenIdentityChainSnapshot(
+    cidNumber: cidNumber,
+    accountId: Uint8List(32),
+    bindingRevision: bindingRevision,
+    votingIdentity: null,
+    candidateIdentity: null,
+  ),
+);
 
 /// 记录占号 / 换绑调用参数的假 RPC(不上链),验证 service 编排把账户与 CID 传对。
-class _FakeIdentityRpc extends CitizenIdentityRpc {
-  _FakeIdentityRpc({this.rebindError, this.onRebound});
+class _FakeIdentityTransaction extends CitizenIdentityTransaction {
+  _FakeIdentityTransaction({this.rebindError, this.onRebound})
+    : super(chain: TestCitizenChain(), transactions: TestCitizenTransactions());
 
   final Object? rebindError;
   final void Function()? onRebound;
@@ -975,7 +999,10 @@ class _FakeIdentityRpc extends CitizenIdentityRpc {
   Future<({String txHash, int usedNonce, String blockHashHex})> selfOccupyCid({
     required String cidNumber,
     required String accountId,
-    required String fromSs58Address,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    )
+    externalSigning,
   }) async {
     occupiedCid = cidNumber;
     occupiedAccountId = accountId;
@@ -984,13 +1011,16 @@ class _FakeIdentityRpc extends CitizenIdentityRpc {
 
   @override
   Future<({String txHash, int usedNonce, String blockHashHex})>
-      selfRebindCidAccount({
+  selfRebindCidAccount({
     required String cidNumber,
     required String newAccountId,
     required String currentAccountId,
-    required String newFromSs58Address,
     required SelfRebindAuthorizationContext context,
     required Uint8List currentAccountSignature,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    )
+    externalSigning,
   }) async {
     final error = rebindError;
     if (error != null) throw error;
@@ -1015,9 +1045,7 @@ class _FakeIdentityRpc extends CitizenIdentityRpc {
   }
 }
 
-class _FakeDataHandover extends CidAccountDataHandover {
-  _FakeDataHandover();
-
+class _FakeDataHandover implements CidAccountDataHandover {
   int stageCalls = 0;
   int discardCalls = 0;
 
@@ -1054,10 +1082,13 @@ class _FakeDataHandover extends CidAccountDataHandover {
 
   @override
   Future<void> completeFinalizedBinding(AccountDataBinding current) async {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _FakeChainRpc extends ChainRpc {
-  _FakeChainRpc({
+class _FakeChain extends TestCitizenChain {
+  _FakeChain({
     this.voting,
     this.candidate,
     this.throws = false,
@@ -1083,36 +1114,38 @@ class _FakeChainRpc extends ChainRpc {
   bool balanceThrows = false;
 
   @override
-  Future<Uint8List> fetchGenesisHash() async =>
-      Uint8List(32)..fillRange(0, 32, 0x42);
+  Future<String> getGenesisHash() async => '0x${'42' * 32}';
 
   @override
-  Future<BigInt> fetchMinSelfPayBalanceFen() async {
+  Future<CitizenFeeSnapshot> getFeeSnapshot() async {
     if (balanceThrows) throw StateError('metadata 未就绪');
-    return minSelfPayFen;
+    return CitizenFeeSnapshot(
+      bestBlock: _bestBlock,
+      feeRateParts: 1000000,
+      minimumFeeFen: BigInt.from(10),
+      existentialDepositFen: minSelfPayFen - BigInt.from(10),
+    );
   }
 
   @override
-  Future<double> fetchFinalizedBalance(
-    String publicKey, {
-    bool forceFresh = false,
-  }) async {
-    if (balanceThrows) throw StateError('smoldot 未就绪');
-    // 余额闸必须旁路块内缓存,否则刚充完钱的用户会被拿旧值再踢回充值页。
-    expect(forceFresh, isTrue);
-    return balanceYuan;
+  Future<CitizenAccountBalance> getAccountBalance(String accountId) async {
+    if (balanceThrows) throw StateError('CitizenSDK 链状态未就绪');
+    final fen = BigInt.from((balanceYuan * 100).round());
+    return CitizenAccountBalance(
+      accountId: accountId,
+      block: _finalizedBlock,
+      freeFen: fen,
+      reservedFen: BigInt.zero,
+      totalFen: fen,
+    );
   }
 
   @override
-  Future<({Uint8List blockHash, int blockNumber})>
-      fetchFinalizedBlock() async => (blockHash: Uint8List(32), blockNumber: 1);
+  Future<CitizenBlockRef> getFinalizedHead() async => _finalizedBlock;
 
   @override
-  Future<Uint8List?> fetchStorageAtBlock(
-    String storageKeyHex,
-    String blockHashHex,
-  ) async {
-    if (throws) throw StateError('smoldot 未就绪');
+  Future<Uint8List?> getStorage(CitizenBlockRef block, Uint8List key) async {
+    if (throws) throw StateError('CitizenSDK 链状态未就绪');
     final current = _readIndex++;
     if (current == 0) {
       // 有投票身份必有 CID;匿名态(hasCid=true)也有 CID 但后续 voting 读为 null。
@@ -1142,6 +1175,24 @@ class _FakeChainRpc extends ChainRpc {
     if (current == 5) return Uint8List.fromList(<int>[1, 0, 0, 0, 0, 0, 0, 0]);
     throw StateError('读取次数超出身份闭环');
   }
+
+  @override
+  Future<List<Uint8List?>> getStorageBatch(
+    CitizenBlockRef block,
+    List<Uint8List> keys,
+  ) async => Future.wait(keys.map((key) => getStorage(block, key)));
+
+  static final CitizenBlockRef _finalizedBlock = CitizenBlockRef(
+    hash: '0x${'00' * 32}',
+    number: BigInt.one,
+    finality: CitizenBlockFinality.finalized,
+  );
+
+  static final CitizenBlockRef _bestBlock = CitizenBlockRef(
+    hash: '0x${'11' * 32}',
+    number: BigInt.one,
+    finality: CitizenBlockFinality.best,
+  );
 }
 
 class _FakeDivisionStore implements AdminDivisionStore {
@@ -1150,8 +1201,7 @@ class _FakeDivisionStore implements AdminDivisionStore {
     String level,
     String scopeKey,
     String code,
-  ) async =>
-      'N($code)';
+  ) async => 'N($code)';
   @override
   dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
 }

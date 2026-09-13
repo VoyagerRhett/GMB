@@ -1,6 +1,7 @@
 package org.citizen.sdk.ui
 
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.app.AlertDialog
 import android.os.Bundle
 import android.text.Editable
@@ -40,6 +41,8 @@ internal class CitizenSdkWalletFlowActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        window.statusBarColor = SURFACE
+        window.navigationBarColor = SURFACE
         onBackPressedDispatcher.addCallback(
             this,
             object : OnBackPressedCallback(true) {
@@ -160,16 +163,24 @@ internal class CitizenSdkWalletFlowActivity : FragmentActivity() {
         val content = CitizenSdkRecoveryContent(this, owner.buffer)
         recoveryContent = content; content.visibility = android.view.View.INVISIBLE
         val warning = TextView(this).apply {
-            text = "私钥可控制本账户。请确认周围无人、未共享屏幕；不能复制或分享。"
+            text = "私钥泄露将导致该账户资产被盗（仅该账户，不影响本钱包其他账户）。\n\n确认要查看吗？"
+            setTextColor(TEXT_PRIMARY)
+            textSize = 14f
         }
         val reveal = Button(this).apply {
-            text = "已理解风险，验证身份并查看"
+            text = "查看"
+            setTextColor(DANGER)
             setOnClickListener { isEnabled = false; owner.reveal() }
         }
-        val done = Button(this).apply {
-            text = "关闭并清除"; setOnClickListener { owner.end(cancelled = !owner.isReady()) }
+        val note = TextView(this).apply {
+            text = "请手抄备份，不支持复制；导出即等于该账户控制权"
+            setTextColor(DANGER)
+            textSize = 12f
         }
-        setContentView(layout(title("查看账户私钥"), warning, content, reveal, done))
+        val done = Button(this).apply {
+            text = "关闭"; setOnClickListener { owner.end(cancelled = !owner.isReady()) }
+        }
+        setContentView(layout(title("查看私钥"), warning, content, note, reveal, done))
     }
 
     @JvmSynthetic
@@ -191,10 +202,18 @@ internal class CitizenSdkWalletFlowActivity : FragmentActivity() {
     private fun showCreate(wordCount: Int) {
         val password = secretInput("钱包密码（选填）")
         val words = wordSelector(wordCount)
-        val errorText = TextView(this)
-        val action = Button(this).apply { text = "生成助记词" }
+        val errorText = TextView(this).apply { setTextColor(DANGER); textSize = 12f }
+        val action = Button(this).apply { text = "创建钱包" }
         val cancel = Button(this).apply { text = "取消"; setOnClickListener { finishCancelled() } }
-        setContentView(layout(title("创建钱包"), description(), words, password, errorText, action, cancel))
+        val intro = TextView(this).apply {
+            text = "钱包账户是 ${hostAppName()} 唯一的账户，请务必妥善保存助记词和钱包密码（如设置），若丢失或遗忘将永久无法找回。"
+            textSize = 13f; setTextColor(TEXT_SECONDARY); gravity = Gravity.CENTER
+        }
+        val notes = TextView(this).apply {
+            text = "账户私钥经硬件加密储存在本机，本机不会保存助记词\n\n每次动钱动权需通过设备安全验证\n\n请手抄助记词；设置密码时还必须单独记住密码"
+            textSize = 12f; setTextColor(TEXT_SECONDARY)
+        }
+        setContentView(layout(title("创建钱包"), intro, words, password, notes, errorText, action, cancel))
         inputRetry = { failure ->
             errorText.text = walletInputError(failure)
             password.isEnabled = true
@@ -236,12 +255,14 @@ internal class CitizenSdkWalletFlowActivity : FragmentActivity() {
         recoveryContent = content
         phrase!!.useCharacters(content::replace)
         val warning = TextView(this).apply {
-            text = CitizenSdkWalletInputPolicy.EXPLANATION
-            setTextColor(Color.RED)
+            text = "公民不保存助记词，关闭本弹窗后将无法再次显示。\n" +
+                "请立即手抄备份，或在「公民钱包」中妥善保管——这是恢复钱包与追加其他账户的唯一凭证。" +
+                "设置过钱包密码时，还必须单独备份密码。\n不支持复制，不支持截屏。"
+            setTextColor(TEXT_PRIMARY)
+            textSize = 14f
         }
-        val confirm = Button(this).apply { text = "我已完成离线备份" }
-        val cancel = Button(this).apply { text = "取消并清除"; setOnClickListener { finishCancelled() } }
-        setContentView(layout(title("备份助记词"), warning, content, confirm, cancel))
+        val confirm = Button(this).apply { text = "我已备份" }
+        setContentView(layout(title("请备份助记词"), warning, content, confirm))
         confirm.setOnClickListener {
             confirm.isEnabled = false
             content.close()
@@ -260,7 +281,9 @@ internal class CitizenSdkWalletFlowActivity : FragmentActivity() {
     private fun showRecoveryInput(indices: IntArray?) {
         val mnemonic = secretInput("助记词（仅本页内存）", multiline = true)
         val password = secretInput("钱包密码（选填）")
-        val words = wordSelector(12)
+        val words = wordSelector(12, includeEighteen = true).apply {
+            visibility = android.view.View.GONE
+        }
         val counter = TextView(this)
         val suggestions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val accountMode = RadioGroup(this).apply {
@@ -278,17 +301,25 @@ internal class CitizenSdkWalletFlowActivity : FragmentActivity() {
         accountMode.setOnCheckedChangeListener { _, checked ->
             accountIndices.visibility = if (checked == 2) android.view.View.VISIBLE else android.view.View.GONE
         }
-        val errorText = TextView(this)
-        val action = Button(this).apply { text = if (indices == null) "导入钱包" else "添加账户" }
+        val errorText = TextView(this).apply { setTextColor(DANGER); textSize = 13f }
+        val action = Button(this).apply { text = if (indices == null) "确认导入" else "确认添加" }
         val cancel = Button(this).apply { text = "取消"; setOnClickListener { finishCancelled() } }
-        setContentView(layout(title(action.text.toString()), description(), words, accountMode, accountIndices, mnemonic, counter, suggestions, password, errorText, action, cancel))
+        val heading = if (indices == null) "输入助记词" else "添加账户"
+        val explanation = TextView(this).apply {
+            text = if (indices == null) CitizenSdkWalletInputPolicy.EXPLANATION
+            else "无根设备不保存助记词或密码，追加账户需重新录入两者校验归属。"
+            textSize = 12f; setTextColor(TEXT_SECONDARY)
+        }
+        setContentView(layout(title(heading), explanation, words, accountMode, accountIndices, mnemonic, counter, suggestions, password, errorText, action, cancel))
         fun refreshWords() {
             val text = mnemonic.text
             val count = text.splitToSequence(Regex("\\s+")).count { it.isNotEmpty() }
-            counter.text = "$count / ${selectedWordCount(words)} 词"
-            if (count == selectedWordCount(words)) {
+            val expected = if (count == 12 || count == 18 || count == 24) count else 12
+            words.check(expected)
+            counter.text = "$count 个助记词"
+            if (count == expected) {
                 try {
-                    CitizenSdkSensitiveBytes.utf8(text).use { coordinator!!.sdk.validateWalletMnemonic(it, selectedWordCount(words)) }
+                    CitizenSdkSensitiveBytes.utf8(text).use { coordinator!!.sdk.validateWalletMnemonic(it, expected) }
                     counter.append(" · 校验通过")
                 } catch (failure: Throwable) { counter.text = walletInputError(failure) }
             }
@@ -384,10 +415,24 @@ internal class CitizenSdkWalletFlowActivity : FragmentActivity() {
             .setOnCancelListener { cancelled() }.show()
     }
 
-    private fun wordSelector(initial: Int) = RadioGroup(this).apply {
-        orientation = RadioGroup.HORIZONTAL
-        listOf(12, 18, 24).forEach { words -> addView(RadioButton(context).apply { id = words; text = "$words 词" }) }
-        check(initial)
+    private fun wordSelector(initial: Int, includeEighteen: Boolean = false) = RadioGroup(this).apply {
+        orientation = RadioGroup.VERTICAL
+        val values = if (includeEighteen) listOf(12, 18, 24) else listOf(12, 24)
+        values.forEach { words ->
+            addView(RadioButton(context).apply {
+                id = words
+                text = when (words) {
+                    12 -> "12 个助记词　推荐\n128 位熵 · 标准安全强度"
+                    24 -> "24 个助记词\n256 位熵 · 安全性更高"
+                    else -> "18 个助记词"
+                }
+                textSize = 15f
+                setTextColor(TEXT_PRIMARY)
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+                background = roundedCard()
+            })
+        }
+        check(if (values.contains(initial)) initial else values.first())
     }
 
     private fun selectedWordCount(selector: RadioGroup) = selector.checkedRadioButtonId
@@ -449,8 +494,10 @@ internal class CitizenSdkWalletFlowActivity : FragmentActivity() {
 
     private fun title(value: String) = TextView(this).apply {
         text = value
-        textSize = 24f
-        setTextColor(Color.BLACK)
+        textSize = 20f
+        setTypeface(typeface, android.graphics.Typeface.BOLD)
+        setTextColor(TEXT_PRIMARY)
+        gravity = Gravity.CENTER
     }
 
     private fun secretInput(hintValue: String, multiline: Boolean = false) =
@@ -477,24 +524,50 @@ internal class CitizenSdkWalletFlowActivity : FragmentActivity() {
         }.also { secretInputs.add(it) }
 
     private fun layout(vararg children: android.view.View) = ScrollView(this).apply {
+        setBackgroundColor(SCAFFOLD)
         addView(LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(48, 64, 48, 48)
+            setPadding(dp(24), dp(40), dp(24), dp(24))
             children.forEach { child ->
+                if (child is TextView && child !is Button && child.currentTextColor == Color.BLACK) {
+                    child.setTextColor(TEXT_PRIMARY)
+                }
+                if (child is Button) child.backgroundTintList = android.content.res.ColorStateList.valueOf(PRIMARY)
                 addView(
                     child,
                     LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.MATCH_PARENT,
                         LinearLayout.LayoutParams.WRAP_CONTENT,
-                    ).apply { bottomMargin = 24 },
+                    ).apply { bottomMargin = dp(12) },
                 )
             }
         })
     }
 
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    private fun hostAppName(): String {
+        val label = applicationInfo.loadLabel(packageManager).toString().trim()
+        if (label.isEmpty()) return "当前应用"
+        return if (label.endsWith("App")) label else "${label}App"
+    }
+
+    private fun roundedCard() = GradientDrawable().apply {
+        setColor(SURFACE)
+        setStroke(dp(1), BORDER)
+        cornerRadius = dp(12).toFloat()
+    }
+
     companion object {
         internal const val EXTRA_FLOW_ID = "org.citizen.sdk.wallet.FLOW_ID"
+        private const val SCAFFOLD = 0xfff7f9fc.toInt()
+        private const val SURFACE = 0xffffffff.toInt()
+        private const val PRIMARY = 0xff007a74.toInt()
+        private const val TEXT_PRIMARY = 0xff1a2b3c.toInt()
+        private const val TEXT_SECONDARY = 0xff5a6b7c.toInt()
+        private const val BORDER = 0xffe2e8f0.toInt()
+        private const val DANGER = 0xffef4444.toInt()
     }
 }
 

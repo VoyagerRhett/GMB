@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -10,10 +11,8 @@ import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/my/myid/current_user_context.dart';
 import 'package:citizenapp/security/local_data_key.dart';
-import 'package:citizenapp/wallet/core/default_account_service.dart';
-import 'package:citizenapp/wallet/core/device_subkey.dart';
-import 'package:citizenapp/wallet/core/sign_mode.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/security/device_subkey.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 
 /// 只覆写 publicKeyHex（返回**裸**公钥），其余走原生桥（本测试不触发）。
 class _FakeDeviceSubkey extends DeviceSubkey {
@@ -66,26 +65,8 @@ class _SessionApi extends SquareApiClient {
   }
 }
 
-class _SessionWalletManager extends WalletManager {
+class _SessionWalletManager implements AccountSecurityService {
   int registrationCalls = 0;
-
-  @override
-  Future<WalletProfile?> getDefaultWallet() async => const WalletProfile(
-        walletIndex: 7,
-        walletName: '测试钱包',
-        walletIcon: '',
-        balance: 0,
-        accountId: _accountId,
-        ss58Address: 'ss58',
-        alg: 'sr25519',
-        ss58: 2027,
-        createdAtMillis: 1,
-        source: 'test',
-        signMode: SignMode.hot,
-      );
-
-  @override
-  Future<int> walletIndexForAccountId(String accountId) async => 7;
 
   @override
   Future<AccountDataBinding> accountDataBindingForAccountId(
@@ -113,20 +94,32 @@ class _SessionWalletManager extends WalletManager {
   ) async {
     registrationCalls++;
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _SessionIdentityCache extends CurrentUserContext {
+class _SessionIdentityCache implements CurrentUserContext {
   @override
-  Future<CurrentUser?> resolve() async => const CurrentUser(
-        account: DefaultAccount(
+  Future<CurrentUser?> resolve() async => CurrentUser(
+        account: CitizenWalletStateAccount(
+          signMode: CitizenWalletSignMode.hot,
+          walletIndex: 7,
+          accountIndex: 0,
           accountId: _accountId,
           ss58Address: 'ss58',
-          accountName: '测试账户',
-          signMode: SignMode.hot,
-          walletIndex: 7,
+          name: '测试账户',
+          createdAtMillis: BigInt.one,
+          isDefault: true,
         ),
         binding: _binding,
       );
+
+  @override
+  void invalidate() {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 void main() {
@@ -233,7 +226,7 @@ void main() {
     final existingWallet = _SessionWalletManager();
     final existing = SquareSessionProvider(
       client: _SessionApi(deviceMissing: false),
-      walletManager: existingWallet,
+      accountSecurity: existingWallet,
       deviceSubkey: _FakeDeviceSubkey('04${'a' * 128}'),
       currentUserContext: _SessionIdentityCache(),
     );
@@ -243,7 +236,7 @@ void main() {
     final missingWallet = _SessionWalletManager();
     final missing = SquareSessionProvider(
       client: _SessionApi(deviceMissing: true),
-      walletManager: missingWallet,
+      accountSecurity: missingWallet,
       deviceSubkey: _FakeDeviceSubkey('04${'b' * 128}'),
       currentUserContext: _SessionIdentityCache(),
     );

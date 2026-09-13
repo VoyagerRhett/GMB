@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart'
@@ -12,15 +13,8 @@ import 'package:citizenapp/my/creator/models/creator_plan.dart';
 import 'package:citizenapp/my/membership/subscription_service.dart';
 import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
-import 'package:citizenapp/rpc/pallet_registry.dart';
-import 'package:citizenapp/rpc/subscription_rpc.dart';
-import 'package:citizenapp/wallet/core/default_account_service.dart';
-import 'package:citizenapp/wallet/core/device_subkey.dart' show hexToBytes;
-import 'package:citizenapp/wallet/core/secure_seed_store.dart'
-    show SecureSeedException;
-import 'package:citizenapp/wallet/core/seed_sign_error.dart';
-import 'package:citizenapp/wallet/core/wallet_manager.dart';
+import 'package:citizenapp/my/membership/subscription_chain.dart';
+import 'package:citizenapp/security/device_subkey.dart' show hexToBytes;
 import 'package:citizenapp/isar/wallet_isar.dart';
 
 /// 创作者页展示态：无可用钱包账户会话 / 已开通（含计划与概览）。
@@ -85,30 +79,35 @@ class CreatorException implements Exception {
 /// - 保存档位只签一次 `set_creator_plans` 链上交易；名称与价格均由 finalized 链状态确认。
 class CreatorService {
   CreatorService({
+    required CitizenSdkWallet wallet,
+    required CitizenChain chain,
+    required CitizenTransactions transactions,
+    required FinalizedIdentityResolver identityResolver,
+    required SquareSessionProvider sessionProvider,
     CreatorApi? api,
-    SubscriptionRpc? subscriptionRpc,
-    WalletManager? walletManager,
-    DefaultAccountReader? defaultAccountReader,
-    SquareSessionProvider? sessionProvider,
+    SubscriptionChain? subscriptionChain,
     SubscriptionService? subscriptionService,
   }) : _api = api ?? CreatorApiHttp(),
-       _subscriptionRpc = subscriptionRpc ?? SubscriptionRpc(),
-       _wallet = walletManager ?? WalletManager(),
-       _defaultAccountReader =
-           defaultAccountReader ??
-           DefaultAccountService(walletManager: walletManager),
-       _session = sessionProvider ?? SquareSessionProvider.instance,
-       _subscriptionService = subscriptionService ?? SubscriptionService() {
-    _walletAccountSigner = WalletAccountSigner(walletManager: _wallet);
-  }
+       _subscriptionChain = subscriptionChain ??
+           SubscriptionChain(chain: chain, transactions: transactions),
+       _wallet = wallet,
+       _identityResolver = identityResolver,
+       _session = sessionProvider,
+       _subscriptionService = subscriptionService ??
+           SubscriptionService(
+             wallet: wallet,
+             chain: chain,
+             transactions: transactions,
+             identityResolver: identityResolver,
+             sessionProvider: sessionProvider,
+           );
 
   final CreatorApi _api;
-  final SubscriptionRpc _subscriptionRpc;
-  final WalletManager _wallet;
-  final DefaultAccountReader _defaultAccountReader;
+  final SubscriptionChain _subscriptionChain;
+  final CitizenSdkWallet _wallet;
+  final FinalizedIdentityResolver _identityResolver;
   final SquareSessionProvider _session;
   final SubscriptionService _subscriptionService;
-  late final WalletAccountSigner _walletAccountSigner;
 
   String _displaySnapshotKey(String cidNumber) =>
       'creator_display_snapshot_by_cid:$cidNumber';
@@ -276,7 +275,7 @@ class CreatorService {
       throw const CreatorException('最多 ${CreatorPlan.maxTiers} 个会员档');
     }
     final identity = await _requireIdentity();
-    final account = await _requireSigningAccount(identity.accountId);
+    await _requireSigningAccount(identity.accountId);
     final session = await _session.ensureSession();
     if (session == null) {
       throw const CreatorException('会话不可用，请稍后重试');
@@ -292,8 +291,7 @@ class CreatorService {
       if (!membership.active) {
         throw const CreatorException('需要当前有效的平台会员才能设置创作者会员档');
       }
-      final result = await _subscriptionRpc.setCreatorPlans(
-        fromSs58Address: identity.ss58Address,
+      final result = await _subscriptionChain.setCreatorPlans(
         signerPublicKey: Uint8List.fromList(hexToBytes(identity.accountId)),
         tiers: tiers
             .map(
@@ -311,19 +309,9 @@ class CreatorService {
               ),
             )
             .toList(growable: false),
-        sign: (payload) => _walletAccountSigner.sign(
-          context: context,
-          accountId: identity.accountId,
-          signMode: account.signMode,
-          payload: payload,
-          action: QrActions.chain(
-            PalletRegistry.squarePostPallet,
-            PalletRegistry.setCreatorPlansCall,
-          ),
-          requestPrefix: 'creator-plans-',
-        ),
+        externalSigning: (pending) => _showExternalSigning(context, pending),
       );
-      return _completeFinalizedSave(
+      return await _completeFinalizedSave(
         session: session,
         accountId: identity.accountId,
         creatorCidNumber: session.cidNumber,
@@ -331,11 +319,6 @@ class CreatorService {
         blockHashHex: result.blockHashHex,
         tiers: tiers,
       );
-    } on SecureSeedException catch (e) {
-      // 生物识别取消 / 无锁屏等：单源文案，杜绝静默失败。
-      throw CreatorException(seedSignErrorMessage(e));
-    } on WalletAuthException catch (e) {
-      throw CreatorException(e.message);
     } on CreatorApiException catch (e) {
       throw CreatorException(e.message);
     } on Exception catch (e) {
@@ -351,7 +334,7 @@ class CreatorService {
     required String tierName,
   }) async {
     final identity = await _requireIdentity();
-    final account = await _requireSigningAccount(identity.accountId);
+    await _requireSigningAccount(identity.accountId);
     final session = await _session.ensureSession();
     if (session == null || session.accountId != identity.accountId) {
       throw const CreatorException('当前会话与默认钱包账户不一致，请重新登录');
@@ -359,22 +342,11 @@ class CreatorService {
     final index = currentTiers.indexWhere((tier) => tier.tierId == tierId);
     if (index < 0) throw const CreatorException('要改名的会员档不存在');
     try {
-      final result = await _subscriptionRpc.updateCreatorTierName(
-        fromSs58Address: identity.ss58Address,
+      final result = await _subscriptionChain.updateCreatorTierName(
         signerPublicKey: Uint8List.fromList(hexToBytes(identity.accountId)),
         tierId: tierId,
         tierName: tierName,
-        sign: (payload) => _walletAccountSigner.sign(
-          context: context,
-          accountId: identity.accountId,
-          signMode: account.signMode,
-          payload: payload,
-          action: QrActions.chain(
-            PalletRegistry.squarePostPallet,
-            PalletRegistry.updateCreatorTierNameCall,
-          ),
-          requestPrefix: 'creator-tier-name-',
-        ),
+        externalSigning: (pending) => _showExternalSigning(context, pending),
       );
       try {
         await _appendLocalTransaction(
@@ -415,10 +387,6 @@ class CreatorService {
         updatedAt: 0,
       );
       return projectedPlan ?? localPlan;
-    } on SecureSeedException catch (e) {
-      throw CreatorException(seedSignErrorMessage(e));
-    } on WalletAuthException catch (e) {
-      throw CreatorException(e.message);
     } on Exception catch (e) {
       throw CreatorException('改名失败：$e');
     }
@@ -427,15 +395,31 @@ class CreatorService {
   /// 当前默认账户经 finalized 闭环验证后，才可签名 `set_creator_plans` 链上
   /// 交易的唯一签名者。档位与待提交证明归属永久 CID，账户只记录签名事实。
   Future<FinalizedIdentity> _requireIdentity() async {
-    final identity = await FinalizedIdentityResolver.instance.resolve();
+    final identity = await _identityResolver.resolve();
     if (identity == null || !identity.isRegistered) {
       throw const CreatorException('请先注册并绑定公民 CID');
     }
     return identity;
   }
 
-  Future<DefaultAccount> _requireSigningAccount(String accountId) async {
-    final account = await _defaultAccountReader.getDefaultAccount();
+  Future<String?> _showExternalSigning(
+    BuildContext? context,
+    CitizenTransactionExternalSigningPending pending,
+  ) {
+    if (context == null || !context.mounted) return Future<String?>.value();
+    return showCitizenSdkQrResponse(
+      context,
+      request: pending.qrRequest,
+      expiresAt: BigInt.from(
+        pending.expiresAt.millisecondsSinceEpoch ~/ 1000,
+      ),
+    );
+  }
+
+  Future<CitizenWalletStateAccount> _requireSigningAccount(
+    String accountId,
+  ) async {
+    final account = (await _wallet.getState()).defaultAccount;
     if (account == null || account.accountId != accountId) {
       throw const CreatorException('当前身份与默认钱包账户不一致，已拒绝签名');
     }

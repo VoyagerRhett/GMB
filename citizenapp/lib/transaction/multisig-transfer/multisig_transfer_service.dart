@@ -1,7 +1,8 @@
 import 'dart:convert';
 
-import 'package:citizenapp/rpc/pallet_registry.dart';
+import 'package:citizenapp/citizen/shared/pallet_registry.dart';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/foundation.dart';
 import 'package:citizenapp/log/app_log.dart';
 import 'package:polkadart/polkadart.dart' show Hasher;
@@ -13,9 +14,6 @@ import 'package:citizenapp/citizen/institution/institution_chain_service.dart';
 import 'package:citizenapp/transaction/personal-manage/personal_manage_models.dart';
 import 'package:citizenapp/transaction/personal-manage/personal_manage_service.dart';
 
-import 'package:citizenapp/rpc/chain_rpc.dart';
-import 'package:citizenapp/rpc/signed_extrinsic_builder.dart';
-import 'package:citizenapp/rpc/smoldot_client.dart';
 import 'package:citizenapp/citizen/shared/institution_code_label.dart';
 import 'package:citizenapp/citizen/shared/institution_info.dart';
 import 'package:citizenapp/citizen/shared/proposal/proposal_cache.dart';
@@ -44,12 +42,16 @@ String defaultInstitutionProposerRoleCode(InstitutionInfo institution) {
 ///
 /// 负责 extrinsic 编码/提交 和 storage 查询。
 class MultisigTransferService {
-  MultisigTransferService({ChainRpc? chainRpc})
-      : _rpc = chainRpc ?? ChainRpc(),
-        _internalVoteQuery = InternalVoteQueryService(chainRpc: chainRpc),
-        _proposalQuery = ProposalQueryService(chainRpc: chainRpc);
+  MultisigTransferService({
+    required CitizenChain chain,
+    required CitizenTransactions transactions,
+  })  : _chain = chain,
+        _transactions = transactions,
+        _internalVoteQuery = InternalVoteQueryService(chain: chain),
+        _proposalQuery = ProposalQueryService(chain: chain);
 
-  final ChainRpc _rpc;
+  final CitizenChain _chain;
+  final CitizenTransactions _transactions;
   final InternalVoteQueryService _internalVoteQuery;
   final ProposalQueryService _proposalQuery;
 
@@ -102,9 +104,10 @@ class MultisigTransferService {
     required String beneficiaryAddress,
     required double amountYuan,
     required String remark,
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
-    required Future<Uint8List> Function(Uint8List payload) sign,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    ) externalSigning,
   }) async {
     final amountFen = BigInt.from((amountYuan * 100).round());
     final actorCidNumber = isPersonalAccountIdentity(institution.cidNumber)
@@ -127,14 +130,13 @@ class MultisigTransferService {
       amountFen: amountFen,
       remark: remark,
     );
-    final submitResult = await _signAndSubmitInBlock(
+    final submitResult = await _executeFinalized(
       callData: callData,
-      fromSs58Address: fromSs58Address,
       signerPublicKey: signerPublicKey,
-      sign: sign,
+      externalSigning: externalSigning,
     );
     final proposalId = await _confirmTransferProposedEvent(
-      blockHashHex: submitResult.blockHashHex,
+      finalizedBlock: submitResult.block,
       institutionCode: institution.adminAccountCode ?? 'PMUL',
       actorCidNumber: actorCidNumber,
       proposerPublicKey: signerPublicKey,
@@ -146,7 +148,7 @@ class MultisigTransferService {
       txHash: submitResult.txHash,
       usedNonce: submitResult.usedNonce,
       proposalId: proposalId,
-      blockHashHex: submitResult.blockHashHex,
+      blockHashHex: submitResult.block.hash,
     );
   }
 
@@ -163,9 +165,10 @@ class MultisigTransferService {
     required String beneficiaryAddress,
     required double amountYuan,
     required String remark,
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
-    required Future<Uint8List> Function(Uint8List payload) sign,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    ) externalSigning,
   }) async {
     final amountFen = BigInt.from((amountYuan * 100).round());
     final actorCidNumber = institution.cidNumber;
@@ -183,14 +186,13 @@ class MultisigTransferService {
       amountYuan: amountYuan,
       remark: remark,
     );
-    final submitResult = await _signAndSubmitInBlock(
+    final submitResult = await _executeFinalized(
       callData: callData,
-      fromSs58Address: fromSs58Address,
       signerPublicKey: signerPublicKey,
-      sign: sign,
+      externalSigning: externalSigning,
     );
     final proposalId = await _confirmProposalEvent(
-      blockHashHex: submitResult.blockHashHex,
+      finalizedBlock: submitResult.block,
       eventLabel: 'SafetyFundTransferProposed',
       eventIndex: _safetyFundProposedEventIndex,
       decode: (data, offset) => _decodeSafetyFundProposedEvent(
@@ -207,7 +209,7 @@ class MultisigTransferService {
       txHash: submitResult.txHash,
       usedNonce: submitResult.usedNonce,
       proposalId: proposalId,
-      blockHashHex: submitResult.blockHashHex,
+      blockHashHex: submitResult.block.hash,
     );
   }
 
@@ -219,9 +221,10 @@ class MultisigTransferService {
     required InstitutionInfo institution,
     required String proposerRoleCode,
     required double amountYuan,
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
-    required Future<Uint8List> Function(Uint8List payload) sign,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    ) externalSigning,
   }) async {
     final amountFen = BigInt.from((amountYuan * 100).round());
     final feeAccountId =
@@ -236,14 +239,13 @@ class MultisigTransferService {
       institutionAccountId: feeAccountId,
       amountYuan: amountYuan,
     );
-    final submitResult = await _signAndSubmitInBlock(
+    final submitResult = await _executeFinalized(
       callData: callData,
-      fromSs58Address: fromSs58Address,
       signerPublicKey: signerPublicKey,
-      sign: sign,
+      externalSigning: externalSigning,
     );
     final proposalId = await _confirmProposalEvent(
-      blockHashHex: submitResult.blockHashHex,
+      finalizedBlock: submitResult.block,
       eventLabel: 'SweepToMainProposed',
       eventIndex: _sweepProposedEventIndex,
       decode: (data, offset) => _decodeSweepProposedEvent(
@@ -260,7 +262,7 @@ class MultisigTransferService {
       txHash: submitResult.txHash,
       usedNonce: submitResult.usedNonce,
       proposalId: proposalId,
-      blockHashHex: submitResult.blockHashHex,
+      blockHashHex: submitResult.block.hash,
     );
   }
 
@@ -270,8 +272,9 @@ class MultisigTransferService {
   ///
   /// 治理机构按主账户、费用账户、安全基金、永久质押分别建模，转账提案固定从主账户支出；
   /// 个人/注册多签账户通过 InstitutionInfo.mainAccountId 继续映射到账户。
-  Future<double> fetchInstitutionBalance(InstitutionInfo institution) {
-    return _rpc.fetchFinalizedBalance(institution.mainAccountId);
+  Future<double> fetchInstitutionBalance(InstitutionInfo institution) async {
+    final balance = await _chain.getAccountBalance(institution.mainAccountId);
+    return balance.freeFen.toDouble() / 100;
   }
 
   // ──── 双层 ID 与反向索引 ────
@@ -286,7 +289,7 @@ class MultisigTransferService {
       'ProposalDisplayId',
       _u64ToLeBytes(proposalId),
     );
-    final data = await _rpc.fetchStorage('0x${_hexEncode(key)}');
+    final data = await _fetchStorage('0x${_hexEncode(key)}');
     if (data == null || data.length != 6) return null;
     // SCALE: u16 LE (year) + u32 LE (seq_in_year) = 6 bytes
     final bd = ByteData.sublistView(data);
@@ -307,7 +310,7 @@ class MultisigTransferService {
               _u64ToLeBytes(id),
             ))}')
         .toList();
-    final batchResult = await _rpc.fetchStorageBatch(keyHexList);
+    final batchResult = await _fetchStorageBatch(keyHexList);
     final result = <int, ProposalDisplayMeta>{};
     for (var i = 0; i < proposalIds.length; i++) {
       final data = batchResult[keyHexList[i]];
@@ -353,18 +356,13 @@ class MultisigTransferService {
     prefix.setAll(off, firstKeyHashed);
     off += firstKeyHashed.length;
     prefix.setAll(off, firstKeyRaw);
-    final prefixHex = '0x${_hexEncode(prefix)}';
-
-    // 一次拉到底(开发期数据量小);生产 1000 万级时再分页。
-    // 必须走 finalized 钉块入口,否则轻节点追块窗口内会拿到旧状态空列表。
-    final keysHex =
-        await SmoldotClientManager.instance.getKeysPagedFinalized(prefixHex);
-    if (keysHex.isEmpty) return const [];
+    final finalized = await _chain.getFinalizedHead();
+    final keys = await _chain.getStorageKeysPaged(finalized, prefix);
+    if (keys.isEmpty) return const [];
 
     // 每条 key 末 8 字节 = proposal_id u64 LE(twox64_concat 的 raw 部分)
     final ids = <int>[];
-    for (final keyHex in keysHex) {
-      final keyBytes = _hexDecode(keyHex);
+    for (final keyBytes in keys) {
       if (keyBytes.length < 8) continue;
       final tail = keyBytes.sublist(keyBytes.length - 8);
       ids.add(_decodeU64(tail));
@@ -470,7 +468,10 @@ class MultisigTransferService {
     final uncachedMetaKeys = <String>[];
     final uncachedMetaIds = <int>[];
     final cachedMetas = <int, ProposalMeta>{};
-    final runtimeUpgradeService = RuntimeUpgradeService(chainRpc: _rpc);
+    final runtimeUpgradeService = RuntimeUpgradeService(
+      chain: _chain,
+      transactions: _transactions,
+    );
 
     for (final id in ids) {
       final cached = ProposalCache.getMeta(id);
@@ -486,7 +487,7 @@ class MultisigTransferService {
 
     // 批量查询未命中的 meta
     if (uncachedMetaKeys.isNotEmpty) {
-      final batchResult = await _rpc.fetchStorageBatch(uncachedMetaKeys);
+      final batchResult = await _fetchStorageBatch(uncachedMetaKeys);
       for (var i = 0; i < uncachedMetaIds.length; i++) {
         final id = uncachedMetaIds[i];
         final data = batchResult[uncachedMetaKeys[i]];
@@ -567,8 +568,11 @@ class MultisigTransferService {
 
     if (uncachedDetailKeys.isNotEmpty) {
       final manageService = InstitutionChainService();
-      final personalManageService = PersonalManageService(chainRpc: _rpc);
-      final batchResult = await _rpc.fetchStorageBatch(uncachedDetailKeys);
+      final personalManageService = PersonalManageService(
+        chain: _chain,
+        transactions: _transactions,
+      );
+      final batchResult = await _fetchStorageBatch(uncachedDetailKeys);
       for (var i = 0; i < uncachedDetailIds.length; i++) {
         final id = uncachedDetailIds[i];
         final meta = cachedMetas[id];
@@ -779,7 +783,7 @@ class MultisigTransferService {
     final key = Uint8List(palletHash.length + storageHash.length);
     key.setAll(0, palletHash);
     key.setAll(palletHash.length, storageHash);
-    final data = await _rpc.fetchStorage('0x${_hexEncode(key)}');
+    final data = await _fetchStorage('0x${_hexEncode(key)}');
     if (data == null || data.length < 2) return null;
     return ByteData.sublistView(data).getUint16(0, Endian.little);
   }
@@ -825,7 +829,7 @@ class MultisigTransferService {
       'ProposalData',
       _u64ToLeBytes(proposalId),
     );
-    return _rpc.fetchStorage('0x${_hexEncode(key)}');
+    return _fetchStorage('0x${_hexEncode(key)}');
   }
 
   /// 检测联合提案 ProposalData 的 MODULE_TAG 前缀。
@@ -939,7 +943,7 @@ class MultisigTransferService {
       'ProposalData',
       _u64ToLeBytes(proposalId),
     );
-    final raw = await _rpc.fetchStorage('0x${_hexEncode(key)}');
+    final raw = await _fetchStorage('0x${_hexEncode(key)}');
     if (raw == null || raw.isEmpty) return null;
     // 单笔与批量读取统一消费同一严格解码入口，禁止标签或布局双轨漂移。
     return _decodeProposalData(proposalId, raw);
@@ -1196,7 +1200,7 @@ class MultisigTransferService {
       'SafetyFundProposalActions',
       _u64ToLeBytes(proposalId),
     );
-    final raw = await _rpc.fetchStorage('0x${_hexEncode(key)}');
+    final raw = await _fetchStorage('0x${_hexEncode(key)}');
     // SafetyFundAction: actor CID + institution_account_id + beneficiary + amount + remark + proposer。
     if (raw == null || raw.length < 1 + 32 + 32 + 16 + 1 + 32) {
       return null;
@@ -1250,7 +1254,7 @@ class MultisigTransferService {
       'SweepProposalActions',
       _u64ToLeBytes(proposalId),
     );
-    final raw = await _rpc.fetchStorage('0x${_hexEncode(key)}');
+    final raw = await _fetchStorage('0x${_hexEncode(key)}');
     // SweepAction: actor CID + institution_account_id + amount + proposer。
     if (raw == null || raw.length < 1 + 32 + 16 + 32) return null;
     try {
@@ -1283,27 +1287,71 @@ class MultisigTransferService {
     }
   }
 
-  Future<({String txHash, int usedNonce, String blockHashHex})>
-      _signAndSubmitInBlock({
+  Future<Uint8List?> _fetchStorage(String keyHex) async {
+    final finalized = await _chain.getFinalizedHead();
+    return _chain.getStorage(finalized, _hexDecode(keyHex));
+  }
+
+  Future<Map<String, Uint8List?>> _fetchStorageBatch(
+    List<String> keyHexes,
+  ) async {
+    if (keyHexes.isEmpty) return const <String, Uint8List?>{};
+    final finalized = await _chain.getFinalizedHead();
+    final values = await _chain.getStorageBatch(
+      finalized,
+      keyHexes.map(_hexDecode).toList(growable: false),
+    );
+    return <String, Uint8List?>{
+      for (var index = 0; index < keyHexes.length; index++)
+        keyHexes[index]: values[index],
+    };
+  }
+
+  Future<({String txHash, int usedNonce, CitizenBlockRef block})>
+      _executeFinalized({
     required Uint8List callData,
-    required String fromSs58Address,
     required Uint8List signerPublicKey,
-    required Future<Uint8List> Function(Uint8List payload) sign,
+    required Future<String?> Function(
+      CitizenTransactionExternalSigningPending pending,
+    ) externalSigning,
   }) async {
-    return SignedExtrinsicBuilder(
-      chainRpc: _rpc,
-      logLabel: 'TransferProposal',
-    ).signAndSubmitInBlock(
-      callData: callData,
-      fromSs58Address: fromSs58Address,
-      signerPublicKey: signerPublicKey,
-      sign: sign,
-      onTrace: _logSignedExtrinsicTrace,
+    final prepared = await _transactions.prepareTransaction(
+      signerPublicKey,
+      callData,
+    );
+    final started = await _transactions.executePreparedTransaction(
+      prepared.preparationId,
+    );
+    CitizenTransactionExecutionCompleted completed;
+    if (started is CitizenTransactionExternalSigningPending) {
+      final response = await externalSigning(started);
+      if (response == null) {
+        await _transactions.cancelPreparedTransactionExecution(
+          started.executionId,
+        );
+        throw StateError('多签提案交易签名已取消');
+      }
+      completed = await _transactions.consumePreparedTransactionQrResponse(
+        started.executionId,
+        response,
+      );
+    } else {
+      completed = started as CitizenTransactionExecutionCompleted;
+    }
+    if (completed.resolution !=
+            CitizenTransactionResolution.finalizedSuccess ||
+        completed.execution == null) {
+      throw StateError(completed.poolRejectionReason ?? '多签提案交易执行失败');
+    }
+    return (
+      txHash: '0x${_hexEncode(completed.transactionHash)}',
+      usedNonce: prepared.nonce.toInt(),
+      block: completed.execution!.block,
     );
   }
 
   Future<int> _confirmTransferProposedEvent({
-    required String blockHashHex,
+    required CitizenBlockRef finalizedBlock,
     required String institutionCode,
     required String? actorCidNumber,
     required Uint8List proposerPublicKey,
@@ -1312,7 +1360,7 @@ class MultisigTransferService {
     required BigInt amountFen,
   }) {
     return _confirmProposalEvent(
-      blockHashHex: blockHashHex,
+      finalizedBlock: finalizedBlock,
       eventLabel: 'TransferProposed',
       eventIndex: _transferProposedEventIndex,
       decode: (data, offset) => _decodeTransferProposedEvent(
@@ -1333,7 +1381,7 @@ class MultisigTransferService {
   /// 三类提案（转账/安全基金/手续费划转）共用本入口，
   /// 事件不存在=业务失败，必须抛错而不是静默放过。
   Future<int> _confirmProposalEvent({
-    required String blockHashHex,
+    required CitizenBlockRef finalizedBlock,
     required String eventLabel,
     required int eventIndex,
     required ({int proposalId, bool matches})? Function(
@@ -1341,7 +1389,7 @@ class MultisigTransferService {
       int offset,
     ) decode,
   }) async {
-    final events = await _rpc.fetchSystemEventsAtBlock(blockHashHex);
+    final events = await _chain.getSystemEvents(finalizedBlock);
     if (events == null || events.isEmpty) {
       throw StateError('交易已入块，但未读取到 System.Events，不能确认提案创建成功');
     }
@@ -1568,79 +1616,6 @@ class MultisigTransferService {
     );
   }
 
-  void _logSignedExtrinsicTrace(SignedExtrinsicTrace trace) {
-    AppLog.d('[TransferProposal] ════════ EXTRINSIC 诊断 ════════');
-    AppLog.d(
-        '[TransferProposal] signing payload hex (${trace.payloadBytes.length} bytes): ${_hexEncode(trace.payloadBytes)}');
-    AppLog.d(
-        '[TransferProposal] signature hex (${trace.signature.length} bytes): ${_hexEncode(trace.signature)}');
-    AppLog.d(
-        '[TransferProposal] signer publicKey hex: ${_hexEncode(trace.signerPublicKey)}');
-    AppLog.d(
-        '[TransferProposal] call data hex (${trace.callData.length} bytes): ${_hexEncode(trace.callData)}');
-    AppLog.d(
-        '[TransferProposal] nonce=${trace.nonce}, eraPeriod=${trace.eraPeriod}, blockNumber=${trace.blockNumber}');
-    AppLog.d(
-        '[TransferProposal] specVersion=${trace.runtimeVersion.specVersion}, txVersion=${trace.runtimeVersion.transactionVersion}');
-    AppLog.d(
-        '[TransferProposal] genesisHash=0x${_hexEncode(trace.genesisHash)}');
-    AppLog.d(
-        '[TransferProposal] CheckEra blockHash=0x${_hexEncode(trace.genesisHash)}');
-    AppLog.d(
-        '[TransferProposal] registry.extrinsicVersion=${trace.registry.extrinsicVersion}');
-    try {
-      final extKeys =
-          (trace.registry.getSignedExtensionTypes() as Map<String, dynamic>)
-              .keys
-              .toList();
-      AppLog.d(
-          '[TransferProposal] signedExtension keys (${extKeys.length}): $extKeys');
-      final addExtKeys = (trace.registry.getAdditionalSignedExtensionTypes()
-              as Map<String, dynamic>)
-          .keys
-          .toList();
-      AppLog.d(
-          '[TransferProposal] additionalSignedExtension keys (${addExtKeys.length}): $addExtKeys');
-    } catch (e) {
-      AppLog.d('[TransferProposal] 获取 extension keys 失败: $e');
-    }
-    AppLog.d(
-        '[TransferProposal] encoded extrinsic hex (${trace.encoded.length} bytes): ${_hexEncode(trace.encoded)}');
-    _logExtrinsicBody(trace.encoded);
-    AppLog.d('[TransferProposal] ════════ 诊断结束 ════════');
-  }
-
-  void _logExtrinsicBody(Uint8List encoded) {
-    var pos = 0;
-    final firstByte = encoded[0];
-    int compactLen;
-    if (firstByte & 0x03 == 0x00) {
-      compactLen = firstByte >> 2;
-      pos = 1;
-    } else if (firstByte & 0x03 == 0x01) {
-      compactLen = ((encoded[1] << 8 | firstByte) >> 2);
-      pos = 2;
-    } else if (firstByte & 0x03 == 0x02) {
-      compactLen = ((encoded[3] << 24 |
-              encoded[2] << 16 |
-              encoded[1] << 8 |
-              firstByte) >>
-          2);
-      pos = 4;
-    } else {
-      compactLen = -1;
-      pos = 0;
-    }
-    AppLog.d(
-        '[TransferProposal] compact length prefix: $compactLen, body starts at byte $pos');
-    if (pos < encoded.length) {
-      AppLog.d(
-          '[TransferProposal] version byte: 0x${encoded[pos].toRadixString(16).padLeft(2, '0')}');
-      final bodyHex = _hexEncode(encoded.sublist(pos));
-      AppLog.d(
-          '[TransferProposal] extrinsic body hex ($compactLen bytes): $bodyHex');
-    }
-  }
 
   // ──── 内部：storage key 构造 ────
 

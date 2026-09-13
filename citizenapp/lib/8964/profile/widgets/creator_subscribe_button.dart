@@ -1,4 +1,6 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/8964/subscribe/creator_subscribe_service.dart';
@@ -6,6 +8,7 @@ import 'package:citizenapp/my/creator/creator_api.dart';
 import 'package:citizenapp/my/creator/creator_money.dart';
 import 'package:citizenapp/my/creator/models/creator_plan.dart';
 import 'package:citizenapp/my/myid/register_identity_flow.dart';
+import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
@@ -35,10 +38,9 @@ class CreatorSubscribeButton extends StatefulWidget {
 }
 
 class _CreatorSubscribeButtonState extends State<CreatorSubscribeButton> {
-  late final CreatorSubscribeService _service =
-      widget._service ?? CreatorSubscribeService();
-  late final SquareSessionProvider _session =
-      widget._sessionProvider ?? SquareSessionProvider.instance;
+  CreatorSubscribeService? _service;
+  SquareSessionProvider? _session;
+  bool _dependenciesReady = false;
 
   bool _loading = true;
   bool _busy = false;
@@ -48,18 +50,65 @@ class _CreatorSubscribeButtonState extends State<CreatorSubscribeButton> {
   @override
   void initState() {
     super.initState();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_dependenciesReady) return;
+    final injectedService = widget._service;
+    final injectedSession = widget._sessionProvider;
+    if (injectedService != null && injectedSession != null) {
+      _service = injectedService;
+      _session = injectedSession;
+      _dependenciesReady = true;
+      _load();
+      return;
+    }
+    final session =
+        widget._sessionProvider ?? context.read<SquareSessionProvider?>();
+    final sdk = context.read<CitizenSdk?>();
+    final identityResolver = context.read<FinalizedIdentityResolver?>();
+    _session = session;
+    if (session == null ||
+        (injectedService == null &&
+            (sdk == null || identityResolver == null))) {
+      // 独立 Widget/预览没有完整产品依赖时只隐藏远端订阅入口；正式 App 根始终
+      // 提供三项依赖，钱包、链和交易仍只来自同一个 CitizenSDK 实例。
+      _loading = false;
+      _dependenciesReady = true;
+      return;
+    }
+    final resolvedSdk = sdk!;
+    final resolvedIdentity = identityResolver!;
+    _service =
+        injectedService ??
+        CreatorSubscribeService(
+          wallet: resolvedSdk.wallet,
+          chain: resolvedSdk.chain,
+          transactions: resolvedSdk.transactions,
+          identityResolver: resolvedIdentity,
+          sessionProvider: session,
+        );
+    _dependenciesReady = true;
     _load();
   }
 
   Future<void> _load() async {
     setState(() => _loading = true);
+    final sessionProvider = _session;
+    final service = _service;
+    if (sessionProvider == null || service == null) {
+      if (mounted) setState(() => _loading = false);
+      return;
+    }
     try {
-      final session = await _session.ensureSession();
+      final session = await sessionProvider.ensureSession();
       if (session == null) {
         if (mounted) setState(() => _loading = false);
         return;
       }
-      final view = await _service.fetchView(session, widget.creatorCidNumber);
+      final view = await service.fetchView(session, widget.creatorCidNumber);
       if (!mounted) return;
       setState(() {
         _plan = view.plan;
@@ -158,16 +207,18 @@ class _CreatorSubscribeButtonState extends State<CreatorSubscribeButton> {
         (current?.subscriptionStatus == 'active' ||
             current?.subscriptionStatus == 'cancelled') &&
         !samePlan;
+    final service = _service;
+    if (service == null) return;
     await _run(
       () => shouldChange
-          ? _service.changePlan(
+          ? service.changePlan(
               context: context,
               creatorCidNumber: widget.creatorCidNumber,
               tierId: selection.tierId,
               period: selection.period.key,
               priceFen: selection.priceFen,
             )
-          : _service.subscribe(
+          : service.subscribe(
               context: context,
               creatorCidNumber: widget.creatorCidNumber,
               tierId: selection.tierId,
@@ -197,8 +248,10 @@ class _CreatorSubscribeButtonState extends State<CreatorSubscribeButton> {
       ),
     );
     if (confirmed != true || !mounted) return;
+    final service = _service;
+    if (service == null) return;
     await _run(
-      () => _service.cancel(
+      () => service.cancel(
         context: context,
         creatorCidNumber: widget.creatorCidNumber,
       ),

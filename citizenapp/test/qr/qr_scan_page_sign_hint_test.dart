@@ -1,8 +1,9 @@
 import 'dart:convert';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:gmb_scanner_flutter/scanner_flutter.dart';
+import 'package:citizenapp/qr/scanner/scanner.dart';
 
 import 'package:citizenapp/qr/bodies/sign_request_body.dart';
 import 'package:citizenapp/qr/pages/qr_scan_page.dart';
@@ -18,7 +19,7 @@ void main() {
     'p': QrProtocol.qrV1,
     'k': QrKind.signRequest.code,
     'i': 'ch-0123456789abcdef',
-    'e': 1090,
+    'e': DateTime.now().millisecondsSinceEpoch ~/ 1000 + 90,
     'b': SignRequestBody.fromHex(
       action: QrActions.squareAccountAction,
       signerPublicKeyHex:
@@ -35,10 +36,9 @@ void main() {
   testWidgets('transfer 模式扫到签名请求:指路聊天扫一扫,不回传结果', (tester) async {
     QrScanTransferResult? popped;
     final navigatorKey = GlobalKey<NavigatorState>();
-    await tester.pumpWidget(MaterialApp(
-      navigatorKey: navigatorKey,
-      home: const SizedBox.shrink(),
-    ));
+    await tester.pumpWidget(
+      MaterialApp(navigatorKey: navigatorKey, home: const SizedBox.shrink()),
+    );
 
     unawaitedPush(navigatorKey, signRequestCode).then((value) {
       popped = value;
@@ -60,11 +60,7 @@ void main() {
 
   testWidgets('账户目标入口拒绝签名请求码', (tester) async {
     final navigatorKey = await pumpScannerHost(tester);
-    unawaitedPushMode(
-      navigatorKey,
-      signRequestCode,
-      QrScanMode.accountTarget,
-    );
+    unawaitedPushMode(navigatorKey, signRequestCode, QrScanMode.accountTarget);
     await tester.pumpAndSettle();
     expect(find.text('二维码类型不符'), findsOneWidget);
     expect(find.text('请扫描用户码或账户码'), findsOneWidget);
@@ -89,10 +85,9 @@ void main() {
 
 Future<GlobalKey<NavigatorState>> pumpScannerHost(WidgetTester tester) async {
   final navigatorKey = GlobalKey<NavigatorState>();
-  await tester.pumpWidget(MaterialApp(
-    navigatorKey: navigatorKey,
-    home: const SizedBox.shrink(),
-  ));
+  await tester.pumpWidget(
+    MaterialApp(navigatorKey: navigatorKey, home: const SizedBox.shrink()),
+  );
   return navigatorKey;
 }
 
@@ -107,6 +102,7 @@ Future<Object?> unawaitedPushMode(
         mode: mode,
         initialCode: initialCode,
         scannerController: ScannerController(backend: _FakeScannerBackend()),
+        qr: const _TestQr(),
       ),
     ),
   );
@@ -122,6 +118,7 @@ Future<QrScanTransferResult?> unawaitedPush(
         mode: QrScanMode.transfer,
         initialCode: initialCode,
         scannerController: ScannerController(backend: _FakeScannerBackend()),
+        qr: const _TestQr(),
       ),
     ),
   );
@@ -147,4 +144,24 @@ final class _FakeScannerBackend implements ScannerDeviceBackend {
 
   @override
   Future<void> toggleTorch() async {}
+}
+
+final class _TestQr implements CitizenQr {
+  const _TestQr();
+
+  @override
+  Future<CitizenQrDocument> parse(String text) async {
+    if (text.contains('"k":5')) {
+      return CitizenQrDocument(
+        kind: CitizenQrKind.accountId,
+        canonicalText: text,
+        accountId:
+            '0x1111111111111111111111111111111111111111111111111111111111111111',
+      );
+    }
+    throw const FormatException('CitizenApp business QR');
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
