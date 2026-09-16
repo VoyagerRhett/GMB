@@ -83,7 +83,7 @@ dev dependencies，且相应源码由 `.pubignore` 排除，不会成为宿主�
 
 此前第 6 步本机对当时的 17 文件 Hosted 闭包执行分析为 0 问题；完整 Dart 套件使用
 `scripts/test.sh flutter --timeout=2m` 执行 316/316。这是历史本地闭集验证，不代表第 7.1 步公开门面
-命名统一后重新运行过 Dart 测试，也不代表 Hosted 已上传或 TataConsole 远程 CI 已运行。
+命名统一后重新运行过 Dart 测试，也不代表 Hosted 已上传或 调用方 远程 CI 已运行。
 
 真实 Flutter consumer 已从本公开入口完成 Android release APK（ABI `arm64-v8a`）、iOS device Release
 no-codesign、iOS 模拟器变体（Rust target `aarch64-apple-ios-sim`）编译和 macOS Release 构建。该结果只证明公开

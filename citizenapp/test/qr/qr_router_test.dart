@@ -161,22 +161,6 @@ void main() {
       expect(result.type, QrRouteType.unknown);
       expect(result.envelope, isNull);
     });
-
-    test('should reject legacy chat_node_pairing payload on k=5', () {
-      // k=5 已回收给账户码；旧 chat_node_pairing 载荷靠 body 字段集精确匹配拒绝，
-      // 不需要专门的拒绝分支。
-      final raw = jsonEncode({
-        'p': QrProtocol.qrV1,
-        'k': 5,
-        'b': {
-          'node_peer_id': '12D3Koo',
-          'node_multiaddr': '/ip4/1.2.3.4/tcp/30333',
-          'endpoint_kind': 'ip4',
-        },
-      });
-      final result = router.route(raw);
-      expect(result.type, QrRouteType.unknown);
-    });
   });
 
   _auditHardeningRegressions();

@@ -292,7 +292,7 @@ internal class CitizenSdkNative private constructor(
     @Suppress("unused") // Called only by citizensdk_jni.
     private fun onNativeFinalizedBlockChanged(sequence: Long, encoded: ByteArray) {
         val decoded = CitizenSdkNativeCodec.decode(encoded)
-        val block = (decoded.value as? CitizenSdkNativeResult.Block)?.value ?: return
+        val block = (decoded.result as? CitizenSdkNativeResult.Block)?.value ?: return
         if (block.finality != CitizenFinality.FINALIZED) return
         if (!calls.isClosed()) eventSink?.invoke(
             CitizenSdkEvents.Event.FinalizedBlockChanged(
@@ -463,14 +463,16 @@ internal class CitizenSdkNative private constructor(
             modules: Int = CitizenSdkModules.FULL,
         ): CitizenSdkNative = CitizenSdkNative(assets, hostServices, modules)
 
+        // 中文注释：类本身仍是SDK内部实现；这三个@JvmStatic JNI成员必须使用JVM public名称，
+        // 否则Kotlin会给internal成员追加模块后缀，破坏C++ RegisterNatives唯一准确表。
         @JvmStatic
-        internal external fun validateModules(modules: Int)
+        external fun validateModules(modules: Int)
 
         @JvmStatic
-        internal external fun verifySignature(accountId: ByteArray, signature: ByteArray, message: ByteArray): Boolean
+        external fun verifySignature(accountId: ByteArray, signature: ByteArray, message: ByteArray): Boolean
 
         @JvmStatic
-        internal external fun completeVaultUnwrap(nativeBridge: Long, hostOperationId: Long, errorCode: Int)
+        external fun completeVaultUnwrap(nativeBridge: Long, hostOperationId: Long, errorCode: Int)
     }
 }
 

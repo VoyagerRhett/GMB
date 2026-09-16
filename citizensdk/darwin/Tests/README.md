@@ -12,7 +12,7 @@ SDK 消费者。归档、构建与最终运行分别隔离，失败日志保留�
 第 10 步 GitHub 统一 CI，仍是必须通过的独立验收，不得用本机开发完成替代运行结果。
 
 The canonical central Apple candidate harness runs these tests in two modes without
-writing build state into this source tree. TataConsole workflow integration is
+writing build state into this source tree. Product workflow integration is
 a later step and must not be claimed until that workflow actually invokes the
 harness:
 
@@ -48,7 +48,7 @@ macOS native host may invoke the same idempotent entry point explicitly and
 
 Both modes use the same C header, Rust Core archive, Swift sources and assets as
 the release candidate. The temporary Xcode project, test databases, DerivedData
-and result bundles belong only under TataConsole's central CitizenSDK work
+and result bundles belong only under 调用方's central CitizenSDK work
 directory. Secure Enclave creation, biometric prompts and Keychain device-only
 semantics additionally require real supported Apple hardware and are never
 declared proven by simulator-only execution.
@@ -62,5 +62,5 @@ real-hardware-only case was skipped. The final normal
 and supervisor consumer smoke processes both passed. No physical Apple mobile
 device was available, so Secure Enclave, biometric and device-only Keychain
 behavior remains a separate device-validation requirement. No remote CI,
-formal Release, Hosted upload or Git operation was run, and TataConsole Flow has
+formal Release, Hosted upload or Git operation was run, and the product flow has
 not yet integrated this harness.

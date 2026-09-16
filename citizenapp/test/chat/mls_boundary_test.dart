@@ -1,8 +1,13 @@
 import 'package:citizenapp/chat/tatachat_sdk_adapter.dart';
+
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:tatachat_sdk/tatachat_sdk.dart';
 import 'package:citizenapp/security/local_data_key.dart';
@@ -29,8 +34,7 @@ class _TestBinding extends AccountDataBinding implements ChatDataBinding {
   String get id => '$keyDomain|$userId|$bindingRevision|$accountId';
 }
 
-class _TargetHandoverKeyFailureWalletManager
-    implements AccountSecurityService {
+class _TargetHandoverKeyFailureWalletManager implements AccountSecurityService {
   final List<Uint8List> sourceKeys = <Uint8List>[
     Uint8List.fromList(List<int>.filled(32, 17)),
     Uint8List.fromList(List<int>.filled(32, 29)),
@@ -65,7 +69,7 @@ void main() {
       );
 
       expect(identity.validate(), isNull);
-      expect(identity.cidNumber, 'CN220-CTZN2-100000001-2026');
+      expect(identity.userId, 'CN220-CTZN2-100000001-2026');
       expect(identity.deviceId, 'alice-phone');
     });
 
@@ -201,30 +205,31 @@ void main() {
 
     test('目标用途钥取得失败时立即清零已经取得的来源用途钥', () async {
       const source = _TestBinding(
-        genesisHash:
-            '0x1111111111111111111111111111111111111111111111111111111111111111',
+        genesisHash: '0x1111111111111111111111111111111111111111111111111111111111111111',
         cidNumber: 'CN220-CTZN2-100000001-2026',
         bindingRevision: 1,
-        accountId:
-            '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        accountId: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       );
       const target = _TestBinding(
-        genesisHash:
-            '0x1111111111111111111111111111111111111111111111111111111111111111',
+        genesisHash: '0x1111111111111111111111111111111111111111111111111111111111111111',
         cidNumber: 'CN220-CTZN2-100000001-2026',
         bindingRevision: 2,
-        accountId:
-            '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        accountId: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
       );
       final walletManager = _TargetHandoverKeyFailureWalletManager();
       final store = ChatStore(
         crypto: ChatCrypto(CitizenChatStorageKeyProvider(walletManager)),
       );
       await store.activateBindingFence(source);
+      final currentUserContext = _UnusedCurrentUserContext();
       final runtime = createCitizenChatRuntime(
         store: store,
         accountSecurity: walletManager,
-        currentUserContext: _UnusedCurrentUserContext(),
+        currentUserContext: currentUserContext,
+        squareSessionProvider: SquareSessionProvider(
+          accountSecurity: walletManager,
+          currentUserContext: currentUserContext,
+        ),
         documentsDirectoryProvider: () async => deviceDirectory,
       );
 
@@ -304,5 +309,108 @@ void main() {
 
       expect(chatUserErrorMessage(error), '当前账户尚未开通聊天会员权益');
     });
+  });
+
+  test('CitizenServe 聊天授权 HTTP 与响应解析只属于 SquareApiClient', () async {
+    final client = SquareApiClient(
+      baseUrl: 'https://www.example.test/api',
+      httpClient: MockClient((request) async {
+        expect(request.method, 'POST');
+        expect(request.url.path, '/api/auth/chatserver/access');
+        expect(jsonDecode(request.body), <String, Object?>{
+          'device_id': 'device-a',
+        });
+        expect(request.headers['authorization'], 'Bearer session-a');
+        return http.Response(
+          jsonEncode(<String, Object?>{
+            'ok': true,
+            'chat_server_url': 'https://chat.example.test',
+            'chat_server_token': 'header.payload.signature',
+            'expires_at_millis': 4102444800000,
+          }),
+          200,
+        );
+      }),
+    );
+    final access = await client.fetchChatServerAccess(
+      session: SquareSession(
+        sessionToken: 'session-a',
+        cidNumber: 'CN220-CTZN2-100000001-2026',
+        bindingRevision: 1,
+        accountId: '0x1111111111111111111111111111111111111111111111111111111111111111',
+        expiresAt: 4102444800000,
+        signRequest: (_) async => 'request-signature',
+      ),
+      deviceId: 'device-a',
+    );
+
+    expect(access.chatServerUrl, Uri.parse('https://chat.example.test'));
+    expect(access.chatServerToken, 'header.payload.signature');
+    expect(access.expiresAtMillis, 4102444800000);
+  });
+
+  test('SquareApiClient 拒绝非 HTTPS 聊天服务地址', () async {
+    final client = SquareApiClient(
+      baseUrl: 'https://www.example.test/api',
+      httpClient: MockClient(
+        (_) async => http.Response(
+          jsonEncode(<String, Object?>{
+            'ok': true,
+            'chat_server_url': 'http://chat.example.test',
+            'chat_server_token': 'header.payload.signature',
+            'expires_at_millis': 4102444800000,
+          }),
+          200,
+        ),
+      ),
+    );
+
+    await expectLater(
+      client.fetchChatServerAccess(
+        session: SquareSession(
+          sessionToken: 'session-a',
+          cidNumber: 'CN220-CTZN2-100000001-2026',
+          bindingRevision: 1,
+          accountId: '0x1111111111111111111111111111111111111111111111111111111111111111',
+          expiresAt: 4102444800000,
+          signRequest: (_) async => 'request-signature',
+        ),
+        deviceId: 'device-a',
+      ),
+      throwsA(
+        isA<SquareApiException>().having(
+          (error) => error.message,
+          'message',
+          '聊天服务访问授权响应不合法',
+        ),
+      ),
+    );
+  });
+
+  test('SquareApiClient 在发网前拒绝空聊天设备标识', () async {
+    var requestCount = 0;
+    final client = SquareApiClient(
+      baseUrl: 'https://www.example.test/api',
+      httpClient: MockClient((_) async {
+        requestCount += 1;
+        return http.Response('{}', 200);
+      }),
+    );
+
+    await expectLater(
+      client.fetchChatServerAccess(
+        session: SquareSession(
+          sessionToken: 'session-a',
+          cidNumber: 'CN220-CTZN2-100000001-2026',
+          bindingRevision: 1,
+          accountId: '0x1111111111111111111111111111111111111111111111111111111111111111',
+          expiresAt: 4102444800000,
+          signRequest: (_) async => 'request-signature',
+        ),
+        deviceId: '   ',
+      ),
+      throwsA(isA<SquareApiException>()),
+    );
+    expect(requestCount, 0);
   });
 }

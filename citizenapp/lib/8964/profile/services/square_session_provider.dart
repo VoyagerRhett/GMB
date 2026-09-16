@@ -24,14 +24,14 @@ enum SquareSessionStatus {
 
 extension SquareSessionStatusText on SquareSessionStatus {
   String get message => switch (this) {
-        SquareSessionStatus.ready => '',
-        SquareSessionStatus.noWallet => '请先添加钱包账户',
-        SquareSessionStatus.identityUnavailable => '当前钱包身份尚未同步或绑定，请稍后重试',
-        SquareSessionStatus.identityUnbound => '当前默认钱包账户尚未绑定 CID',
-        SquareSessionStatus.serviceUnavailable => '公民服务暂时不可用，请稍后重试',
-        SquareSessionStatus.networkUnavailable => '网络连接失败，请检查网络后重试',
-        SquareSessionStatus.deviceUnavailable => '钱包设备认证暂时不可用，请稍后重试',
-      };
+    SquareSessionStatus.ready => '',
+    SquareSessionStatus.noWallet => '请先添加钱包账户',
+    SquareSessionStatus.identityUnavailable => '当前钱包身份尚未同步或绑定，请稍后重试',
+    SquareSessionStatus.identityUnbound => '当前默认钱包账户尚未绑定 CID',
+    SquareSessionStatus.serviceUnavailable => '公民服务暂时不可用，请稍后重试',
+    SquareSessionStatus.networkUnavailable => '网络连接失败，请检查网络后重试',
+    SquareSessionStatus.deviceUnavailable => '钱包设备认证暂时不可用，请稍后重试',
+  };
 }
 
 class SquareSessionResolution {
@@ -58,11 +58,11 @@ class SquareSessionProvider {
     SquareApiClient? client,
     DeviceSubkey? deviceSubkey,
     ChainBootstrapApi? bootstrapApi,
-  })  : _client = client ?? SquareApiClient(),
-        _accountSecurity = accountSecurity,
-        _deviceSubkey = deviceSubkey ?? DeviceSubkey(),
-        _currentUserContext = currentUserContext,
-        _bootstrapApi = bootstrapApi ?? ChainBootstrapApi();
+  }) : _client = client ?? SquareApiClient(),
+       _accountSecurity = accountSecurity,
+       _deviceSubkey = deviceSubkey ?? DeviceSubkey(),
+       _currentUserContext = currentUserContext,
+       _bootstrapApi = bootstrapApi ?? ChainBootstrapApi();
 
   final SquareApiClient _client;
   final AccountSecurityService _accountSecurity;
@@ -93,13 +93,28 @@ class SquareSessionProvider {
       },
       onDeviceNotRegistered: (context) async {
         _requireCurrentAccount(current.accountId, context);
-        await _registerMissingDeviceSubkey(
-          await _bindingForContext(context),
-        );
+        await _registerMissingDeviceSubkey(await _bindingForContext(context));
       },
     );
     await _activateSessionBinding(session);
     return session;
+  }
+
+  /// 聊天模块只提交设备标识和预期身份；会话建立、请求签名与 HTTP 均留在服务模块。
+  Future<CitizenServeChatAccess> requestChatServerAccess({
+    required String deviceId,
+    required String expectedCidNumber,
+    required int expectedBindingRevision,
+    required String expectedAccountId,
+  }) async {
+    final session = await ensureSession();
+    if (session == null ||
+        session.cidNumber != expectedCidNumber ||
+        session.bindingRevision != expectedBindingRevision ||
+        session.accountId != expectedAccountId) {
+      throw const SquareApiException('聊天会话与当前用户绑定不一致');
+    }
+    return _client.fetchChatServerAccess(session: session, deviceId: deviceId);
   }
 
   /// 为页面保留失败原因；动作服务仍可使用 [ensureSession] 让异常失败关闭。
@@ -167,6 +182,9 @@ class SquareSessionProvider {
     _client.clearSession(current.accountId);
     return ensureSession();
   }
+
+  /// 账户换绑时只由会话所有者清理准确账户的 CitizenServe 登录态。
+  void invalidateAccount(String accountId) => _client.clearSession(accountId);
 
   /// 已由精确 finalized 交易结果确认换绑后，为目标账户建立新会话。
   ///

@@ -70,7 +70,7 @@ https://github.com/VoyagerRhett/GMB。包清单、主页、自有版权署名与
 ## 固定原生静态依赖来源（第 10.5 步）
 
 下列官方归档已核验实际下载字节；它们不是 CitizenApp 的逐字节收编源码，也不是本机
-已编译验证的依赖。完整官方源码只在中央准备工作区解包，SDK 源树没有新增源码副本或产物。
+已编译验证的依赖。完整官方源码只在调用方指定的源码外工作区解包，SDK源树没有新增源码副本或产物。
 
 | 组件 | 官方准确归档 | SHA256 |
 | --- | --- | --- |
@@ -82,7 +82,7 @@ https://github.com/VoyagerRhett/GMB。包清单、主页、自有版权署名与
 SQLite 官方发布页提供的 SHA3-256 为
 628a44cfe82c66aed1ccbbe85a562d2e33ebe64b3288981ed76285612227934e；
 上表 SQLite SHA256 是对同一通过官方 SHA3 校验的归档另行计算，不冒称官方公布。
-OpenSSL/TPM2-TSS SHA256 与官方 GitHub Release asset digest 一致。ZXing-C++ 归档只在 TATA 任务工作区解包，
+OpenSSL/TPM2-TSS SHA256与官方GitHub Release asset digest一致。ZXing-C++归档只在产品工作区解包，
 SDK 源树不复制或修改上游源码；CMake 在执行上游前验证准确构建输入树，不只检查版本字符串。
 完整归档的 `core/`、`docs/`、根 `CMakeLists.txt` 和 `zxing.cmake` 共 342 文件，按相对路径排序，
 将每项 `路径:SHA256\n` 串接后的 SHA256 为 `47e4950494ae7fef55307846ad47f2586b83a1d4cde381ec3c2ca0215015db3e`。
@@ -103,7 +103,8 @@ OpenSSL Perl 构建工具不冒充本次运行库闭集。
 当前两端使用的 24 个 SQLite 函数均在固定官方 sqlite3.h 中存在；
 TPM2-TSS 的 esys_crypto_ossl.c 包含 OpenSSL 3 的正式分支。以上仅证明接口声明和来源，
 不代表实际链接或运行通过。准备参数、八个 TSS2 头、142 个 OpenSSL 头、静态对象门禁及
-生成证据职责见 NATIVE_PACKAGING.md；中央合同是版本/来源准备唯一入口，SDK 只固定其摘要。
+生成证据职责见NATIVE_PACKAGING.md；`scripts/dependencies.lock.json`是版本、来源、摘要与构建选项唯一合同，
+`scripts/dependencies.mjs`负责普通开发者和CI的准备，SDK构建器只消费验真的源码或静态前缀。
 
 
 ## 权威来源
@@ -307,7 +308,7 @@ formatter 归一外不改行为；发布器继续对迁移闭集逐文件固定�
 `target` 命令不代表 CitizenSDK 当前交付合同，也不得作为 SDK 构建指引。CitizenSDK 当前产品
 ABI 投影覆盖 Android、iOS 与 macOS。当前 Android ABI 为 `arm64-v8a`；iOS 设备与模拟器变体
 及 macOS 的 Apple machine slice 架构值为 `arm64`。本机宿主测试库与全部生成记录只能写入
-`/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk` 下的任务独占目录；Linux 合同测试由
+`CITIZENSDK_WORK_DIR` 下的任务独占目录；Linux 合同测试由
 `CITIZENSDK_TEST_WORK_DIR` 显式接收现有 `0700` 目录且没有 `/tmp` fallback。远程 Runner 也
 必须由统一流程显式注入其 checkout 外的任务独占构建根，不能让测试自行选择临时目录。
 legacy `libsmoldot.dylib` 仅允许 macOS `arm64` 差分测试；
@@ -615,8 +616,8 @@ iOS 设备与模拟器变体使用浅层 framework，install ID 均为
 为 `@rpath/CitizenSDK.framework/Versions/A/CitizenSDK`。Release 归档只允许并保留 macOS
 framework 的精确五个标准内部相对符号链接：`Versions/Current -> A`，以及根
 `CitizenSDK`、`Headers`、`Modules`、`Resources` 指向 `Versions/Current/...`；其他任何
-符号链接均拒绝。Android Gradle/Kotlin persistent project state 只属于 TataConsole 中央
-work directory，源码与候选禁止 `android/.kotlin`。
+符号链接均拒绝。Android Gradle/Kotlin persistent project state只属于调用方指定的
+源码外工作目录，源码与候选禁止`android/.kotlin`。
 
 Apple 生产绑定的关闭语义也属于 CitizenSDK 自有源码：显式 ABI +1 retain lease 保护
 Core 借用的 HostBridge/callback/store/vault context；关闭从 monitor stop、callback clear 到
@@ -757,7 +758,7 @@ Android `:citizen_sdk:testDebugUnitTest` JUnit 与 iOS 模拟器 XCTest；只编
 的某次最终验收结果。本轮 Apple 执行记录是：iOS 设备与模拟器变体两组测试 bundle
 编译通过；本机无 Simulator runtime，因此未执行 iOS XCTest；macOS Core 50 项与 Flutter
 adapter 22 项 XCTest 0 失败，1 项真机硬件用例跳过；normal/supervisor smoke 通过。
-TataConsole Flow 已集成 Apple/Hosted 与五平台 Release 闭集；本轮仅执行本机闭集，
+产品Flow已集成Apple/Hosted与五平台Release闭集；本轮仅执行本机闭集，
 没有运行远程 CI、正式 Release、Hosted 上传或 Git。
 
 本轮完整本机闭集还包括：Android AAR 构建通过；Apple 单一 XCFramework 的 iOS 设备与
@@ -765,10 +766,10 @@ TataConsole Flow 已集成 Apple/Hosted 与五平台 Release 闭集；本轮仅�
 Dart 316/316（`--timeout=2m`）；根 Rust 285/285、compile-fail 文档测试 1/1、Clippy 与
 格式检查；Android 原生 Kotlin/Java 单元测试 Gradle 17 个 task 成功。
 
-2026-08-29 包边界重构前的 TataConsole `.work` 隔离快照已实际通过根 Flutter
+2026-08-29 包边界重构前的 调用方 `.work` 隔离快照已实际通过根 Flutter
 230/230、独立 smoldot Dart 51/51、钱包定向 88/88、交易定向 85/85、signer Rust 6/6、
 FFI Rust 5/5、PoW Rust 290/290（另有 3 项上游 ignored、14 个 benchmark 目标成功）、
-Android JUnit 3/3、Release 合同 18/18、TataConsole 99/99 与统一数据字典定向合同 2/2；
+Android JUnit 3/3、Release 合同 18/18、调用方 99/99 与统一数据字典定向合同 2/2；
 这些历史结果不冒充本次目录重构后的验证结论。
 当时 Android 最终冻结副本与产品真源逐字节目录比较无差异，生成的历史 CitizenSDK AAR 只包含
 `arm64-v8a/libsmoldot.so`。iOS 设备 Release App 与 iOS 模拟器测试包（Apple machine value

@@ -1,8 +1,10 @@
 import 'package:citizenapp/chat/tatachat_sdk_adapter.dart';
+
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/isar/social_isar.dart';
 import 'package:tatachat_sdk/tatachat_sdk.dart';
 import 'package:citizenapp/isar/app_isar.dart';
@@ -131,12 +133,31 @@ class _UnusedCurrentUserContext implements CurrentUserContext {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
+/// 测试显式从服务模块提供 CitizenServe 会话所有者，聊天工厂不得自行创建第二份。
+ChatSdk _createTestChatRuntime(
+  Future<Directory> Function() documentsDirectoryProvider,
+) {
+  final accountSecurity = _UnusedAccountSecurity();
+  final currentUserContext = _UnusedCurrentUserContext();
+  return createCitizenChatRuntime(
+    accountSecurity: accountSecurity,
+    currentUserContext: currentUserContext,
+    squareSessionProvider: SquareSessionProvider(
+      accountSecurity: accountSecurity,
+      currentUserContext: currentUserContext,
+    ),
+    documentsDirectoryProvider: documentsDirectoryProvider,
+  );
+}
+
 EncryptedMessage _incomingMessage() {
   return EncryptedMessage()
     ..messageId = 'env-storage-isolation'
     ..conversationId = 'conv-storage-isolation'
     ..senderUserId = _peerUserId
-    ..recipientCidNumber = _ownerUserId
+    ..deliveries.add(
+      EncryptedDelivery(recipient: Recipient(userId: _ownerUserId)),
+    )
     ..senderDeviceId = 'device-storage-isolation'
     ..createdAtMillis = Int64(1700000000000);
 }
@@ -626,11 +647,7 @@ void main() {
     await mlsFile.writeAsBytes(const <int>[1, 2, 3]);
     await sibling.writeAsString('outside-chat-root');
 
-    final runtime = createCitizenChatRuntime(
-      accountSecurity: _UnusedAccountSecurity(),
-      currentUserContext: _UnusedCurrentUserContext(),
-      documentsDirectoryProvider: () async => chatDocumentsRoot,
-    );
+    final runtime = _createTestChatRuntime(() async => chatDocumentsRoot);
     await expectLater(
       ChatRuntimeCore.closeAndDeleteLocalFiles(
         documentsDirectoryProvider: () async {
@@ -658,11 +675,7 @@ void main() {
       throwsA(isA<StateError>()),
     );
     expect(
-      () => createCitizenChatRuntime(
-        accountSecurity: _UnusedAccountSecurity(),
-        currentUserContext: _UnusedCurrentUserContext(),
-        documentsDirectoryProvider: () async => chatDocumentsRoot,
-      ),
+      () => _createTestChatRuntime(() async => chatDocumentsRoot),
       throwsA(isA<StateError>()),
     );
     expect(await chatRoot.exists(), isFalse, reason: '终态检查不得重新创建 Chat 根目录');
@@ -675,11 +688,7 @@ void main() {
     await marker.writeAsBytes(const <int>[1]);
 
     var disposeCalls = 0;
-    ChatSdk? runtime = createCitizenChatRuntime(
-      accountSecurity: _UnusedAccountSecurity(),
-      currentUserContext: _UnusedCurrentUserContext(),
-      documentsDirectoryProvider: () async => chatDocumentsRoot,
-    );
+    ChatSdk? runtime = _createTestChatRuntime(() async => chatDocumentsRoot);
     runtime.debugRegisterContextDisposerForTest(() async {
       disposeCalls += 1;
       if (disposeCalls == 1) {
@@ -719,11 +728,7 @@ void main() {
     await initialFile.parent.create(recursive: true);
     await initialFile.writeAsBytes(const <int>[1]);
 
-    final runtime = createCitizenChatRuntime(
-      accountSecurity: _UnusedAccountSecurity(),
-      currentUserContext: _UnusedCurrentUserContext(),
-      documentsDirectoryProvider: () async => chatDocumentsRoot,
-    );
+    final runtime = _createTestChatRuntime(() async => chatDocumentsRoot);
     final mutationEntered = Completer<void>();
     final releaseMutation = Completer<void>();
     final mutation = runtime.debugRunFileMutationForTest<void>(() async {
@@ -767,11 +772,7 @@ void main() {
     await initial.parent.create(recursive: true);
     await initial.writeAsBytes(const <int>[1]);
 
-    final runtime = createCitizenChatRuntime(
-      accountSecurity: _UnusedAccountSecurity(),
-      currentUserContext: _UnusedCurrentUserContext(),
-      documentsDirectoryProvider: () async => chatDocumentsRoot,
-    );
+    final runtime = _createTestChatRuntime(() async => chatDocumentsRoot);
     final flightEntered = Completer<void>();
     final releaseFlight = Completer<void>();
     final flightOperation = () async {
@@ -812,11 +813,7 @@ void main() {
     await marker.parent.create(recursive: true);
     await marker.writeAsBytes(const <int>[1]);
 
-    final runtime = createCitizenChatRuntime(
-      accountSecurity: _UnusedAccountSecurity(),
-      currentUserContext: _UnusedCurrentUserContext(),
-      documentsDirectoryProvider: () async => chatDocumentsRoot,
-    );
+    final runtime = _createTestChatRuntime(() async => chatDocumentsRoot);
     var socketStops = 0;
     var wakeCancels = 0;
     var tokenCancels = 0;
@@ -859,11 +856,7 @@ void main() {
   });
 
   test('后台 handler 在 stop 后仍等待已触发 callback，完成前不得释放运行态', () async {
-    final runtime = createCitizenChatRuntime(
-      accountSecurity: _UnusedAccountSecurity(),
-      currentUserContext: _UnusedCurrentUserContext(),
-      documentsDirectoryProvider: () async => chatDocumentsRoot,
-    );
+    final runtime = _createTestChatRuntime(() async => chatDocumentsRoot);
     final callbackEntered = Completer<void>();
     final releaseCallback = Completer<void>();
     final callback = runtime.debugRunRuntimeOperationForTest<void>(() async {

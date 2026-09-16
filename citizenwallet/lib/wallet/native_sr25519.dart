@@ -43,7 +43,7 @@ class NativeSr25519 {
   static String _hostTargetDirectory() {
     final target = Platform.environment['CARGO_TARGET_DIR'];
     if (target == null || target.isEmpty || !p.isAbsolute(target)) {
-      throw StateError('宿主测试必须由塔塔控制台提供 CARGO_TARGET_DIR');
+      throw StateError('宿主测试必须提供源码外 CARGO_TARGET_DIR');
     }
     return target;
   }

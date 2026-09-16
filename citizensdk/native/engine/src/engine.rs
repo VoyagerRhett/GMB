@@ -2502,7 +2502,7 @@ fn next_transaction_execution_id(
     let executions = registry.lock().map_err(|_| EngineError::StatePoisoned)?;
     for _ in 0..32 {
         let mut bytes = [0_u8; 16];
-        getrandom::getrandom(&mut bytes).map_err(|_| {
+        getrandom::fill(&mut bytes).map_err(|_| {
             EngineError::contract(
                 ContractErrorCode::Unavailable,
                 "操作系统随机源无法生成 transaction execution id",

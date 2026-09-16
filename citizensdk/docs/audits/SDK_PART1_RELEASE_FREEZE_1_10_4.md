@@ -81,4 +81,4 @@ TPM/Secure Enclave/PCP、真实 CitizenChain 网络 reconnect/submit/watch 均�
 - 唯一二维码协议仍为 `QR_V1`，没有 V2、legacy、fallback、alias 或 wrapper。
 - 没有迁移/兼容旧钱包或旧 whole-history SQLite；旧开发库由调用方明确清除后新建。
 - 源码树不得包含数据库、`build/`、`target/`、`.build/` 或候选临时产物；Cargo 与基准输出位于
-  仓库外 TataConsole cache 或 `/tmp`，完成后只清理本步骤创建的准确临时目录。
+  仓库外 调用方 cache 或 `/tmp`，完成后只清理本步骤创建的准确临时目录。

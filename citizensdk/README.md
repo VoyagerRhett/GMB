@@ -108,7 +108,7 @@ await sdk.close();
 CI 使用各平台增量构建，再把同一源码、版本和运行的原生件汇总为一份完整 SDK，最后由
 各平台消费同一份 Hosted 包。Release 全量重建同样的闭包，全部验收通过后才形成一次
 GitHub Release；正式资产仍为 `citizensdk.tgz`、`citizensdk-release.json`、`SHA256SUMS`。
-pub.dev 上传继续通过塔塔控制台的 SDK 发布按钮，不在 GitHub 工作流中保存上传凭据。
+pub.dev 上传继续通过产品构建调用方的 SDK 发布按钮，不在 GitHub 工作流中保存上传凭据。
 
 最终包检查包括桌面公开消费者运行、Android ARM64 Release APK 的双库字节核对，以及
 iOS device Release 宿主和 Simulator ARM64 Swift 链接。移动端构建通过不等于真机验证；
@@ -335,8 +335,19 @@ SDK 在密码学上限制了宿主的所有签名用途。
 
 本地测试统一通过 `scripts/test.sh` 执行。`scripts/test.sh cargo ...` 和
 `scripts/test.sh flutter ...` 分别传递 Cargo 与 Flutter 测试参数，所有测试生成物固定写入
-`/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk/test`；禁止在产品源码根直接运行裸
+`CITIZENSDK_TEST_WORK_DIR`指定的源码外测试目录；禁止在产品源码根直接运行裸
 `cargo test` 或 `flutter test`。`.dart_tool` 不在此目录规则范围内。
+
+原生依赖由`scripts/dependencies.lock.json`唯一固定版本、官方URL、摘要、构建选项和
+平台闭集。`scripts/dependencies.mjs prepare-environment --platform <平台> --work <目录>`
+在开发者缓存或调用方工作目录中查找原件，缺失时最多取得三次并校验；
+`prepare-native`为LinuxARM、LinuxAMD和Windows生成同一前缀与可复核收据。两个入口均可
+脱离任何外部控制程序直接运行，不向CitizenSDK源码树写入依赖或产物。
+
+消费CitizenSDK只有三种构建场景：本机开发使用当前本机SDK源码的直接`path`依赖；正式
+产品Release使用官方CitizenSDK Git仓库的准确Tag或commit并锁定包内路径；公开第三方使用
+软件包注册中心中的正式版本。三种场景由消费产品在构建时唯一选择，不是运行时回退、迁移
+或兼容路径，CitizenSDK不包含任何消费App的业务实现。
 
 根 Rust workspace 现在统一包含 `native/contracts`、`native/engine`、`native/ffi`、
 `native/signer` 与 `native/smoldot/provider`；收编的 PoW/light-base 继续使用已验证的嵌套
@@ -348,7 +359,8 @@ SDK-only Provider，canonical Release 对 Core、Provider、产品 ABI、根公�
 双投影字节一致、AAR 不含 Flutter class/reference、无嵌套 AAR、无 `libsmoldot` 验收。
 Core 与 JNI 的 ELF SONAME 分别固定为 `libcitizensdk.so` 和 `libcitizensdk_jni.so`；JNI 只能按
 Core SONAME 依赖一次，任何包含 `/` 的 `DT_NEEDED` 都会失败关闭，禁止构建机路径进入设备。
-Android Gradle/Kotlin 的 persistent project state 只能位于 TataConsole 中央 work directory；
+Android Gradle/Kotlin的persistent project state只能位于`CITIZENSDK_ANDROID_BUILD_DIR`
+指定的源码外工作目录；
 源码 `android/.kotlin` 明确禁止，候选与反向验证也必须拒绝它。
 Apple 候选使用一个 `CitizenSDK.xcframework` 封装同一产品 Core 与 Swift API，Flutter adapter
 只消费该框架而不重建 Core；
@@ -391,7 +403,7 @@ CitizenSDK 最终统一流程合同使用 `公民SDK · CI · SDK` 与
 成功状态和准确 `source_sha`，不读取、下载或比较 CI 资产；随后从同一源码提交重新执行依赖
 检查、测试、原生构建和候选生成。这是独立重建与重新验证，不把不同 Runner 的归档字节
 天然相同作为前提。
-TataConsole 现已接通五宿主原生阶段、同源汇总、五宿主同包消费和 Release 发布阶段；
+产品流程现已接通五宿主原生阶段、同源汇总、五宿主同包消费和Release发布阶段；
 尚未运行的远程 CI 或正式 Release 仍不能写成通过，单个阶段成功也不能冒充完整 SDK 验收。
 
 根包已消除本地 `path`/`git` 依赖，目标 Hosted 依赖形式固定为
@@ -457,14 +469,12 @@ Android 原生 AAR 只存在于 GitHub 审计候选；Hosted 包明确排除该 
 输入，但保留根 Flutter 插件直接编译的同一 Kotlin 生产 facade 和两份 `arm64-v8a` SO。两种分发读取
 同一源码提交和同一注入后候选。Linux Hosted 精确保留 39 项：27 项安装件及 12 项插件输入，
 排除 Host 私有源码、测试及构建模板，不在应用中重编 Host/Core。Windows Hosted 同样精确保留
-34 项：22 项安装件及 12 项插件输入。CitizenSDK 使用 TataConsole 的 SDK 发布按钮执行
-正式发布流程；不接入公民网下载。
+34项：22项安装件及12项插件输入。正式发布由CitizenSDK产品发布入口执行；不接入公民网下载。
 
-本机 CitizenSDK 最终产物容器固定为
-`/Users/rhett/TATA/tataconsole/target/gmb/citizensdk`，工作状态容器固定为
-`/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk`。唯一发布器只接受两者的严格
-子路径，不允许把永久容器本身作为写入目标；拒绝旧路径、越界、穿越和链接。
-第 9.1 步只补发布器的 Hosted 归档验真，不修改原生构建器、控制台事务或 GitHub 流程。
+本机CitizenSDK最终产物由`CITIZENSDK_NATIVE_OUTPUT_DIR`指定，工作状态由
+`CITIZENSDK_WORK_DIR`指定；两者必须是互不嵌套的源码外规范绝对路径。发布器接受调用方
+选择的安全源码外路径，拒绝源码内写入、越界、穿越和既存链接。
+第9.1步只补发布器的Hosted归档验真，不修改原生构建器、产品事务或GitHub流程。
 本地打包快照由准确的已提交 Git `HEAD` 导出；
 工作区中的未提交修改不会被冒充成该提交。中央目录现有三件套属于其生成时的历史提交，
 除非重新完成当前提交的统一构建与核验，否则不得称为当前源码候选。
@@ -475,7 +485,7 @@ Android 原生 AAR 只存在于 GitHub 审计候选；Hosted 包明确排除该 
 第 7.1 步没有运行 Linux 编译与 CTest、Dart/Flutter/Cargo 测试、Git、远程 CI、Release 或
 Hosted 上传，也没有生成任何 Linux 原生产物；只运行获准的 Node Release 来源合同测试与
 脚本语法检查，不能据此声称 Linux 运行验证通过。后续本机 Linux 验证状态只能写入
-`/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk` 下的任务独占目录；GitHub runner 使用统一工作流
+`CITIZENSDK_WORK_DIR` 下的任务独占目录；GitHub runner 使用统一工作流
 的 checkout 外独占目录，不照搬本机绝对路径。Linux CTest 配置必须用 `CITIZENSDK_TEST_WORK_DIR`
 显式注入对应工作区中已存在、有效 UID 所有且权限
 为 `0700` 的绝对工作根；测试不回退到 `/tmp`、当前目录或用户目录。

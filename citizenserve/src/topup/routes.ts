@@ -12,7 +12,7 @@ import {
 /// 稳定币充值(topup)子路由分派。挂在 `/square/topup/` 前缀下。
 /// App 端:config(公开只读) / intent(公开,充值目标由请求指定) / confirm / status
 /// (后两者凭 Worker 签发的 HMAC 付款意图自证,不需要账户会话)。
-/// 塔塔控制台端:settlement/*(SETTLE_TOKEN 鉴权)。
+/// 授权结算客户端：settlement/*（SETTLE_TOKEN鉴权）。
 const SETTLEMENT_PREFIX = '/square/topup/settlement/';
 
 export function isTopupPath(path: string): boolean {

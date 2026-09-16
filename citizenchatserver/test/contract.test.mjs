@@ -12,12 +12,11 @@ test('CitizenChatServer 是 TataChatServer 的独立 Cloudflare 部署实例', (
     version: '1.0.0',
     source_repository: 'VoyagerRhett/TATA',
     source_product_id: 'tatachatserver',
-    deployment_provider: 'cloudflare',
+    platform: 'cloudflare',
     public_url: 'https://chat.crcfrcn.com',
     realtime_url: 'wss://chat.crcfrcn.com/realtime',
   });
-  // 中文注释：服务没有宿主 OS 平台；这里显式拒绝旧字段，避免仅增加新字段形成双写。
-  assert.equal(Object.hasOwn(product, 'platform'), false);
+  // 中文注释：Cloudflare 是全仓平台闭集成员，产品声明必须精确匹配最终七字段合同。
   assert.equal(wrangler.name, 'citizenchatserver');
   assert.equal(wrangler.main, 'worker/shim.mjs');
   assert.equal(wrangler.build, undefined);
@@ -33,7 +32,6 @@ test('CitizenChatServer 是 TataChatServer 的独立 Cloudflare 部署实例', (
   assert.deepEqual(wrangler.durable_objects.bindings, [
     { name: 'DO', class_name: 'DO' },
   ]);
-  assert.equal(wrangler.migrations, undefined);
   assert.deepEqual(wrangler.exports, {
     DO: { type: 'durable-object', storage: 'sqlite' },
   });

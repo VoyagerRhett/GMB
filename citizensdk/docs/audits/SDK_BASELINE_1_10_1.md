@@ -29,7 +29,7 @@
 | Flutter / Dart | 未读取版本、未运行、未启动或停止任何进程 | 遵循用户明确边界 |
 | Linux / Windows / Android 真机 / Apple Flutter adapter | 未运行 | 待 runner/真机验证 |
 
-测试生成物全部定向到 `/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk/test`；本轮临时证据在报告完成后清理，
+测试生成物全部定向到 `CITIZENSDK_TEST_WORK_DIR指定的源码外测试目录`；本轮临时证据在报告完成后清理，
 不进入源码树或发布包。性能数字用于本机相对基线，不是跨机器 SLA。
 
 ## 3. 公共合同基线

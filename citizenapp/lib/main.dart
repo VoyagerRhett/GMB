@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import 'package:citizenapp/log/app_log.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:provider/provider.dart';
 import 'package:tatachat_sdk/tatachat_sdk.dart' as sdk;
@@ -29,7 +28,10 @@ import 'package:citizenapp/security/app_permission_gate.dart';
 import 'package:citizenapp/update/app_update.dart';
 import 'package:citizenapp/update/update_badge.dart';
 import 'package:citizenapp/8964/services/device_subkey_registrar.dart';
+import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
+import 'package:citizenapp/notifications/app_push_service.dart';
+import 'package:citizenapp/notifications/app_push_token.dart';
 import 'package:citizenapp/8964/pages/square_turnstile_page.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
 import 'package:citizenapp/qr/qr_protocols.dart';
@@ -102,9 +104,12 @@ Future<void> main() async {
     wallet: citizenSdk.wallet,
     chain: citizenSdk.chain,
   );
+  final squareApiClient = SquareApiClient();
+  final appPushService = AppPushService();
   final squareSessionProvider = SquareSessionProvider(
     accountSecurity: accountSecurity,
     currentUserContext: currentUserContext,
+    client: squareApiClient,
   );
 
   // 任何 ChatSdk、钱包页或 PIN 门禁构造前先处理跨重启擦除门闩。
@@ -165,7 +170,7 @@ Future<void> main() async {
 
   // 只有持久擦除门闩、上一进程 CID lease 和 SDK 启动尝试完成后，
   // 才允许注册会构造 ChatSdk 的后台入口。
-  FirebaseMessaging.onBackgroundMessage(chatRuntimeBackgroundHandler);
+  registerAppPushBackgroundHandler(chatRuntimeBackgroundHandler);
 
   // 诊断 — 把所有 framework / widget 静默吞掉的异常都打到 logcat。
   // 默认 ErrorWidget 在某些场景下表现为空白方块（白屏），这里换成显眼的红框 + 文字。
@@ -214,6 +219,8 @@ Future<void> main() async {
       currentUserContext: currentUserContext,
       finalizedIdentityResolver: finalizedIdentityResolver,
       squareSessionProvider: squareSessionProvider,
+      squareApiClient: squareApiClient,
+      appPushService: appPushService,
       transactionHistory: transactionHistory,
     ),
   );
@@ -469,6 +476,8 @@ class CitizenApp extends StatefulWidget {
     required this.currentUserContext,
     required this.finalizedIdentityResolver,
     required this.squareSessionProvider,
+    required this.squareApiClient,
+    required this.appPushService,
     required this.transactionHistory,
   });
 
@@ -477,6 +486,8 @@ class CitizenApp extends StatefulWidget {
   final CurrentUserContext currentUserContext;
   final FinalizedIdentityResolver finalizedIdentityResolver;
   final SquareSessionProvider squareSessionProvider;
+  final SquareApiClient squareApiClient;
+  final AppPushService appPushService;
   final WalletTransactionHistoryService transactionHistory;
 
   @override
@@ -504,6 +515,8 @@ class _CitizenAppState extends State<CitizenApp> {
         Provider<SquareSessionProvider>.value(
           value: widget.squareSessionProvider,
         ),
+        Provider<SquareApiClient>.value(value: widget.squareApiClient),
+        Provider<AppPushService>.value(value: widget.appPushService),
         Provider<WalletTransactionHistoryService>.value(
           value: widget.transactionHistory,
         ),
@@ -511,6 +524,8 @@ class _CitizenAppState extends State<CitizenApp> {
           create: (_) => createCitizenChatRuntime(
             accountSecurity: widget.accountSecurity,
             currentUserContext: widget.currentUserContext,
+            squareSessionProvider: widget.squareSessionProvider,
+            appPushService: widget.appPushService,
           ),
           dispose: (_, runtime) => unawaited(runtime.close()),
         ),
@@ -950,6 +965,7 @@ class _AppShellState extends State<AppShell> {
   int _squareNotifyCount = 0;
   bool _isRooted = false;
   StreamSubscription<Map<String, dynamic>>? _pushOpenSub;
+  StreamSubscription<AppPushToken>? _pushTokenSub;
 
   /// Chat 运行态只在用户首次打开聊天 Tab 时创建。广场、用户、钱包或公民页启动
   /// 不得因为构造 ChatSdk 而进入 Chat 的文件、密钥或网络生命周期。
@@ -982,13 +998,18 @@ class _AppShellState extends State<AppShell> {
         return;
       }
 
-      await ensureChatFirebaseReady();
+      final appPush = context.read<AppPushService>();
+      final endpoint = await appPush.initialize();
+      await _registerCitizenServePush(endpoint);
       if (!mounted) return;
-      _pushOpenSub = FirebaseMessaging.onMessageOpenedApp
-          .map((message) => message.data)
-          .listen((data) => unawaited(_handleOpenedPushData(data)));
-      final initial = await FirebaseMessaging.instance.getInitialMessage();
-      if (initial != null) await _handleOpenedPushData(initial.data);
+      _pushOpenSub = appPush.openedMessages.listen(
+        (data) => unawaited(_handleOpenedPushData(data)),
+      );
+      _pushTokenSub = appPush.tokenChanges.listen(
+        (token) => unawaited(_registerCitizenServePush(token)),
+      );
+      final initial = await appPush.initialMessage();
+      if (initial != null) await _handleOpenedPushData(initial);
     } catch (error, stackTrace) {
       AppLog.d('[AppPush] 打开路由初始化失败: $error\n$stackTrace');
     }
@@ -996,7 +1017,7 @@ class _AppShellState extends State<AppShell> {
 
   Future<void> _handleOpenedPushData(Map<String, dynamic> data) async {
     if (!mounted) return;
-    if (data['kind'] == 'square_post') {
+    if (data['kind'] == 'square_post' || data['kind'] == 'storage_cleanup') {
       _openSquareTab();
       return;
     }
@@ -1010,6 +1031,19 @@ class _AppShellState extends State<AppShell> {
     }
   }
 
+  Future<void> _registerCitizenServePush(AppPushToken endpoint) async {
+    try {
+      final sessionProvider = context.read<SquareSessionProvider>();
+      final client = context.read<SquareApiClient>();
+      final session = await sessionProvider.ensureSession();
+      if (session == null) return;
+      await client.registerPushEndpoint(session: session, endpoint: endpoint);
+    } catch (error, stackTrace) {
+      // 普通通知是软功能；登记失败不得阻断主界面、聊天或广场读取，Token刷新会再次尝试。
+      AppLog.d('[AppPush] CitizenServe端点登记失败: $error\n$stackTrace');
+    }
+  }
+
   void _openSquareTab() {
     if (!mounted || _currentIndex == 0) return;
     _selectedTab.value = 0;
@@ -1020,6 +1054,7 @@ class _AppShellState extends State<AppShell> {
   void dispose() {
     _updateController.removeListener(_handleUpdateStateChanged);
     unawaited(_pushOpenSub?.cancel());
+    unawaited(_pushTokenSub?.cancel());
     _selectedTab.dispose();
     super.dispose();
   }

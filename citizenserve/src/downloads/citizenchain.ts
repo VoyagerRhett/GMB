@@ -27,7 +27,7 @@ interface UpdateInput {
 }
 
 const publicationPrefix = '/operations/citizenchain/download-publications/';
-// 正式下载仓库必须与 GMB origin 和 TataConsole 冻结流程身份完全一致。
+// 正式下载仓库必须与GMB产品发布身份完全一致。
 const githubDownloadPrefix = 'https://github.com/VoyagerRhett/GMB/releases/download/';
 const maxClockSkewMs = 5 * 60 * 1000;
 
@@ -96,7 +96,7 @@ export async function citizenchainPublicationRoute(
 ): Promise<Response> {
   const platform = parsePlatform(path);
   if (!platform) throw new HttpError(404, 'publication_target_not_found', '发布目标不存在');
-  await requireTataConsoleSignature(request, env, path);
+  await requireCitizenServeRequestSignature(request, env, path);
   if (request.method === 'GET') {
     return jsonResponse({ ok: true, publication: await readPublication(env, platform) });
   }
@@ -218,11 +218,11 @@ function parsePlatform(path: string): CitizenchainDownloadPlatform | null {
   return Object.hasOwn(platformContracts, value) ? value as CitizenchainDownloadPlatform : null;
 }
 
-async function requireTataConsoleSignature(request: Request, env: Env, path: string): Promise<void> {
+async function requireCitizenServeRequestSignature(request: Request, env: Env, path: string): Promise<void> {
   const secret = env.CITIZENCHAIN_DOWNLOAD_PUBLISH_SECRET;
-  const timestamp = request.headers.get('x-tataconsole-time') ?? '';
-  const nonce = request.headers.get('x-tataconsole-nonce') ?? '';
-  const signature = request.headers.get('x-tataconsole-signature') ?? '';
+  const timestamp = request.headers.get('x-citizenserve-request-time') ?? '';
+  const nonce = request.headers.get('x-citizenserve-request-nonce') ?? '';
+  const signature = request.headers.get('x-citizenserve-request-signature') ?? '';
   const timestampValue = Number(timestamp);
   if (!secret || new TextEncoder().encode(secret).byteLength < 32) {
     throw new HttpError(503, 'publication_auth_unavailable', '发布指针认证尚未配置');

@@ -6,7 +6,7 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
-val flutterProductRoot = System.getenv("TATA_CONSOLE_FLUTTER_ROOT")
+val flutterProductRoot = System.getenv("CITIZENWALLET_PROJECT_ROOT")
     ?.let { file(it) }
     ?: rootProject.projectDir.parentFile
 val flutterBuildProperties = Properties().apply {
@@ -26,8 +26,8 @@ android {
     compileSdk = 36
     ndkVersion = "28.2.13676358"
 
-    // TataConsole本机编译只从中央工作目录打包Rust库，产品仓库不得保留生成的jniLibs。
-    System.getenv("TATA_CONSOLE_NATIVE_ANDROID_DIR")?.takeIf { it.isNotBlank() }?.let { nativeDir ->
+    // 只从CitizenWallet原生输出目录打包Rust库，产品仓库不保留生成的jniLibs。
+    System.getenv("CITIZENWALLET_NATIVE_ANDROID_DIR")?.takeIf { it.isNotBlank() }?.let { nativeDir ->
         sourceSets.getByName("main").jniLibs.directories.apply {
             clear()
             add(nativeDir)
@@ -55,8 +55,8 @@ android {
 
     buildTypes {
         release {
-            // 所有环境只生成无私钥 Release 候选。正式 JKS 只存在 TataConsole 的
-            // Data Protection Keychain，并由原生安全进程在 Touch ID 后通过匿名 stdin 使用。
+            // 所有环境只生成无私钥 Release 候选。正式JKS由产品发布环境的安全
+            // 凭据存储保管，并由发布签名进程通过匿名stdin使用。
             signingConfig = null
             // release 不加 keepDebugSymbols：APK 保持精简，也不把内部符号随包发出。
             // 线上崩溃的反解依赖构建时留档的未剥离产物
@@ -83,7 +83,7 @@ kotlin {
 
 flutter {
     // Gradle根保持在产品源码，Flutter输入根按当前产品执行环境选择。
-    source = System.getenv("TATA_CONSOLE_FLUTTER_ROOT") ?: "../.."
+    source = System.getenv("CITIZENWALLET_PROJECT_ROOT") ?: "../.."
 }
 
 // 钱包内置硬件金库直接使用宿主依赖。

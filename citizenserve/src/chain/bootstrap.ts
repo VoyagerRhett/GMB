@@ -34,7 +34,6 @@ export interface ChainBootstrapResponse {
   };
   services: {
     square_base_url: string;
-    chat_base_url: string;
     media_base_url: string;
     signed_extrinsic_relay: {
       enabled: boolean;
@@ -48,7 +47,7 @@ export interface ChainBootstrapResponse {
     validator_rpc_public: false;
   };
   degradation: {
-    p2p_unavailable: 'chat_square_continue_chain_state_degraded';
+    p2p_unavailable: 'services_continue_chain_state_degraded';
     chain_success_source: 'finalized_runtime_storage_or_events';
   };
 }
@@ -191,7 +190,6 @@ export function buildChainBootstrapResponse(
       // 生产 Worker 挂载在同域 `/api/*`，返回给 App 的服务根必须保留该部署前缀；
       // 本地直接挂载业务路由时则保持无前缀，不能在 manifest 中凭空丢失或增加入口层。
       square_base_url: apiRouteUrl(request, '/square', {}),
-      chat_base_url: apiRouteUrl(request, '/chat', {}),
       media_base_url: apiRouteUrl(request, '/square/media', {}),
       signed_extrinsic_relay: {
         enabled: relayEnabled,
@@ -205,7 +203,7 @@ export function buildChainBootstrapResponse(
       validator_rpc_public: false
     },
     degradation: {
-      p2p_unavailable: 'chat_square_continue_chain_state_degraded',
+      p2p_unavailable: 'services_continue_chain_state_degraded',
       chain_success_source: 'finalized_runtime_storage_or_events'
     }
   };

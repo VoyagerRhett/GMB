@@ -1,0 +1,12 @@
+{
+  "contract_version": 1,
+  "github_repository": "VoyagerRhett/GMB",
+  "action_tag_field": "release_tag",
+  "publication_tag_field": "version_tag",
+  "platform": "macos",
+  "download_path": "/download/citizenchain/macOS",
+  "put_body_json": "{\"expected_revision\":0,\"publication\":{\"asset_name\":\"citizenchain-node-macOS-v1.2.3.dmg\",\"asset_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"source_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version_tag\":\"citizenchain-node-macos-v1.2.3\"}}",
+  "snapshot_json": "{\"asset_name\":\"citizenchain-node-macOS-v1.2.3.dmg\",\"asset_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"platform\":\"macos\",\"published_at\":1787702400123,\"revision\":1,\"source_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version_tag\":\"citizenchain-node-macos-v1.2.3\"}",
+  "snapshot_anchor": "ccdp:macos:1:03939a59159d803ddc044c13c3aa0368006a7f0d69e3265c51b4d33ff6c9f9fc",
+  "location": "https://github.com/VoyagerRhett/GMB/releases/download/citizenchain-node-macos-v1.2.3/citizenchain-node-macOS-v1.2.3.dmg"
+}

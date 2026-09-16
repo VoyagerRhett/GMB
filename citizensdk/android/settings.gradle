@@ -13,35 +13,9 @@ if (settingsDir.canonicalFile != taskProject || taskProject.toPath().startsWith(
 }
 def sourceProperties = new Properties()
 new File(sdkSource, 'android/gradle.properties').withInputStream { sourceProperties.load(it) }
-def plugins = new groovy.json.JsonSlurper().parseText(providers.exec {
-    commandLine 'node', '--input-type=module', '-e', '''
-import { readFile } from 'node:fs/promises';
-import { join, isAbsolute } from 'node:path';
-import { pathToFileURL } from 'node:url';
-const root = process.env.TATA_WORKSPACE_ROOT || process.env.TATA_ROOT;
-const flows = process.env.TATA_CONSOLE_FLOW_ROOT || (root && join(root, 'tataconsole', 'flows'));
-if (!flows || !isAbsolute(flows)) throw Error('CitizenSDK独立Android缺少中央流程绝对路径');
-const tools = join(flows, '..', 'tools');
-const { readFlutter, readPatch } = await import(pathToFileURL(join(tools, 'flutter.mjs')));
-const flutter = await readFlutter(tools);
-const patch = await readPatch(tools, flutter.patch);
-const source = patch.find(file => file.path === 'packages/flutter_tools/gradle/build.gradle.kts')
-  ?.hunks.flatMap(hunk => hunk.next).join('\\n');
-const one = pattern => {
-  const matches = [...(source || '').matchAll(pattern)];
-  if (matches.length !== 1) throw Error('CitizenSDK中央Android插件版本必须唯一');
-  return matches[0][1];
-};
-const agp = one(/compileOnly\\("com\\.android\\.tools\\.build:gradle:([\\d.]+)"\\)/g);
-const kotlin = one(/implementation\\("org\\.jetbrains\\.kotlin:kotlin-gradle-plugin:([\\d.]+)"\\)/g);
-const library = JSON.parse(await readFile(join(tools, 'shared.json'), 'utf8'));
-const gradle = library.tools.filter(tool => tool.id === 'gradle');
-if (gradle.length !== 1) throw Error('CitizenSDK中央Gradle必须唯一');
-console.log(JSON.stringify({ agp, kotlin, gradle: gradle[0].version }));
-'''
-}.standardOutput.asText.get())
+def plugins = [agp: '9.0.1', kotlin: '2.2.20', gradle: '9.1.0']
 if (gradle.gradleVersion != plugins.gradle) {
-    throw new GradleException('CitizenSDK独立Android必须使用中央Gradle版本')
+    throw new GradleException("CitizenSDK独立Android要求Gradle ${plugins.gradle}")
 }
 // 在根脚本解析前选择同一组classpath；子模块不重复申请插件版本。
 gradle.beforeProject { project ->

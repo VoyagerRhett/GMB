@@ -41,12 +41,12 @@ citizen-sdk-smoldot-provider = { path = "../smoldot/provider", optional = true }
 # audited sr25519 implementation. The public C ABI exposes account-scoped
 # signing but never exports secret material or lets a host inject a signer.
 citizen-signer = { path = "../signer", optional = true }
-futures-channel = "=0.3.33"
-futures-executor = "=0.3.33"
-futures-util = "=0.3.33"
-getrandom = "=0.2.17"
+futures-channel = "=0.3.34"
+futures-executor = "=0.3.34"
+futures-util = "=0.3.34"
+getrandom = "=0.3.4"
 ghash = { version = "=0.5.1", features = ["zeroize"] }
-serde = { version = "=1.0.228", features = ["derive"] }
+serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 sha2 = "=0.10.9"
 tokio = { version = "=1.53.1", features = ["time"], optional = true }

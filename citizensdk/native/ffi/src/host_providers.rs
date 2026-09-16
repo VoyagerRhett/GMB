@@ -3098,14 +3098,14 @@ impl SecretVault for HostSecretVault {
             let aad = secret_aad(secret_ref);
             let aad_digest: [u8; 32] = Sha256::digest(&aad).into();
             let mut dek = Zeroizing::new(vec![0_u8; CITIZENSDK_HOST_DEK_BYTES as usize]);
-            getrandom::getrandom(dek.as_mut_slice()).map_err(|_| {
+            getrandom::fill(dek.as_mut_slice()).map_err(|_| {
                 ContractError::new(
                     ContractErrorCode::Unavailable,
                     "operating system randomness is unavailable for vault DEK",
                 )
             })?;
             let mut nonce = [0_u8; VAULT_NONCE_BYTES];
-            getrandom::getrandom(&mut nonce).map_err(|_| {
+            getrandom::fill(&mut nonce).map_err(|_| {
                 ContractError::new(
                     ContractErrorCode::Unavailable,
                     "operating system randomness is unavailable for vault nonce",

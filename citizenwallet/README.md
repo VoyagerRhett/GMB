@@ -25,7 +25,7 @@ citizenwallet/
 │   └── src/account_crypto.rs  用途钥派生与加密交付
 ├── test/                Dart 测试和本地固定向量
 ├── resources/           唯一资源根：icons、android、ios
-└── scripts/             控制台构建入口及生成工具
+└── scripts/             产品构建、测试及生成工具
 ```
 
 根目录只保留 README、Flutter/Cargo 所需配置及上述源码目录；不设本地 `packages/`、多 crate 层或第二份分析配置。包依赖统一由根 `pubspec.yaml` 和锁文件管理。
@@ -73,12 +73,13 @@ citizenwallet/
 
 ## 构建与验证
 
-本机构建通过 TataConsole 钱包 Android/iOS 入口执行。控制台生成当前平台的 Flutter、Gradle 和 Pods 配置，业务源码按文件只读引用。
+本机构建直接执行 `scripts/citizenwallet-run.sh <ios|android>`。产品入口生成当前平台的 Flutter、Gradle 和 Pods 配置，业务源码按文件只读引用。
 
-- 正式本机工作目录：TataConsole `work/gmb/citizenwallet/<platform>/`。
-- Flutter 状态和产物、Cargo target、平台缓存均写入当前中央任务目录；成功包由控制台归档。
-- 宿主 FFI 从控制台注入的 `CARGO_TARGET_DIR/release` 加载，不查找源码下的 `rust/target`。
-- 源码目录不运行裸 `flutter test`、`dart pub get` 或无目标目录的 `cargo build`；校验使用同一中央配置生成、源码写保护及任务回收机制。
+- `CITIZENWALLET_WORK_DIR` 可为并行任务指定独立工作目录；未提供时使用系统临时目录。
+- Flutter 状态和产物、Cargo target、平台缓存均写入源码外工作目录；`CITIZENWALLET_ARTIFACT_DIR` 可单独指定成功包目录。
+- 宿主 FFI 从调用方注入或产品默认的 `CARGO_TARGET_DIR/release` 加载，不查找源码下的 `rust/target`。
+- 默认允许标准工具按锁文件取得依赖；显式设置 `CITIZENWALLET_OFFLINE=true` 时只使用已有开发者缓存。
+- 源码目录不运行无目标目录的 `cargo build`；产品脚本负责源码外构建状态和任务级清理。
 - Android 金库测试位于 `android/app/src/test/`，随宿主 Release 单元测试执行；Flutter 测试位于 `test/`。
 
 `.dart_tool`、`build`、`target`、IDE 状态和自动注册文件属于生成状态，不是业务源码。不得把清理源码缓存作为正常构建步骤。

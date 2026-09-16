@@ -11,50 +11,17 @@ if (!sdkSourceValue || !new File(sdkSourceValue).isAbsolute()) {
 def sdkProductRoot = new File(sdkSourceValue).canonicalFile
 def nativeSourceRoot = new File(sdkProductRoot, 'android/native')
 
-// 只供独立AAR工程读取中央选版；正式Flutter插件不依赖此模块或控制台目录。
-def cmakeVersion = providers.exec {
-    commandLine 'node', '--input-type=module', '-e', '''
-import { join, isAbsolute } from 'node:path';
-import { pathToFileURL } from 'node:url';
-const root = process.env.TATA_WORKSPACE_ROOT || process.env.TATA_ROOT;
-const flows = process.env.TATA_CONSOLE_FLOW_ROOT || (root && join(root, 'tataconsole', 'flows'));
-if (!flows || !isAbsolute(flows)) throw Error('CitizenSDK独立Android缺少中央流程绝对路径');
-const { readCmake } = await import(pathToFileURL(join(flows, '..', 'tools', 'android.mjs')));
-const platform = process.platform === 'darwin' ? 'macos'
-  : process.platform === 'win32' ? 'windows'
-  : process.platform === 'linux' && process.arch === 'arm64' ? 'linux-arm'
-  : process.platform === 'linux' && process.arch === 'x64' ? 'linux-amd' : null;
-console.log(readCmake(platform).version);
-'''
-}.standardOutput.asText.get().trim()
-
-def tataConsoleTargetRoot = file('/Users/rhett/TATA/tataconsole/target').canonicalFile
-def localCitizenSdkRoots = { boolean buildOnly = false ->
-    def roots = [new File(tataConsoleTargetRoot.parentFile, 'cache/gmb/citizensdk').canonicalFile]
-    // 编译只能写测试库；验真原件输入仍可消费产物库的正式成功文件。
-    if (!buildOnly) roots.add(new File(tataConsoleTargetRoot, 'gmb/citizensdk').canonicalFile)
-    def taskWorkValue = System.getenv('TATA_CONSOLE_CACHE_DIR')
-    if (taskWorkValue != null && !taskWorkValue.trim().isEmpty()) {
-        def taskWork = file(taskWorkValue).canonicalFile
-        def sharedWorkRoot = new File(tataConsoleTargetRoot.parentFile, 'cache').canonicalFile
-        if (taskWork.path.startsWith(sharedWorkRoot.path + File.separator)) {
-            // 与 Flutter 插件工程使用同一中央目录边界，避免两个 Gradle 工程判断不一致。
-            roots.add(new File(taskWork, 'citizensdk').canonicalFile)
-        }
-    }
-    roots
-}
-def staysInLocalCitizenSdkRoot = { File candidate, boolean buildOnly = false ->
-    localCitizenSdkRoots(buildOnly).any { File root ->
-        candidate.path == root.path || candidate.path.startsWith(root.path + File.separator)
-    }
-}
+// SDK产品合同固定独立AAR使用的CMake版本；工具由开发环境或CI提供。
+def cmakeVersion = '3.31.6'
 def configuredBuildDir = System.getenv('CITIZENSDK_ANDROID_BUILD_DIR')
 def fallbackRoot = new File(System.getProperty('java.io.tmpdir'), 'citizensdk-unconfigured')
 def normalizedTarget = configuredBuildDir == null || configuredBuildDir.trim().isEmpty()
     ? new File(fallbackRoot, 'android-native').canonicalFile
     : file(configuredBuildDir).canonicalFile
 if (configuredBuildDir != null && !configuredBuildDir.trim().isEmpty()) {
+    if (!file(configuredBuildDir).isAbsolute()) {
+        throw new GradleException('CITIZENSDK_ANDROID_BUILD_DIR must be absolute')
+    }
     def githubActions = System.getenv('GITHUB_ACTIONS') == 'true'
     if (githubActions) {
         def workspace = System.getenv('GITHUB_WORKSPACE')
@@ -65,10 +32,9 @@ if (configuredBuildDir != null && !configuredBuildDir.trim().isEmpty()) {
                 throw new GradleException('CitizenSDK Android output must be outside the GitHub source checkout')
             }
         }
-    } else {
-        if (!staysInLocalCitizenSdkRoot(normalizedTarget, true)) {
-            throw new GradleException('CitizenSDK Android build output must stay in its central work directory or current host task')
-        }
+    }
+    if (normalizedTarget.toPath().startsWith(sdkProductRoot.toPath())) {
+        throw new GradleException('CitizenSDK Android build output must remain outside the source tree')
     }
 }
 def nativeTarget = new File(normalizedTarget, 'native')

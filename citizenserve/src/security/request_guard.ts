@@ -121,10 +121,10 @@ export async function guardRequest(request: Request, env: Env, path: string): Pr
     await enforceEdgeRate(env, 'RATE_WRITE', `user_projection:${ipKey}`);
     return;
   }
-  // 结算子接口只给本地部署塔塔控制台调用，handler 内用 SETTLE_TOKEN 鉴权，
-  // 不套 IP 限流（避免塔塔控制台批量补发被节流）。
+  // 结算子接口只给授权结算客户端调用，handler内用SETTLE_TOKEN鉴权，
+  // 不套IP限流（避免批量补发被节流）。
   if (path.startsWith('/square/topup/settlement/')) return;
-  // 公民链官网下载指针只接受 handler 内的塔塔控制台 HMAC，不得回落到普通用户 Session。
+  // 公民链官网下载指针只接受handler内的产品发布HMAC，不得回落到普通用户Session。
   if (path.startsWith('/operations/citizenchain/download-publications/')) return;
   // 充值整片免广场会话:充值是"付款人自掏稳定币给某个公民链账户打公民币",收款方无需
   // 证明账户所有权(同转账),冷钱包本机也没有私钥可签。绑定会话既挡不住抢单(见 orders.ts
@@ -191,7 +191,6 @@ function requiresDeviceProof(path: string, method: string): boolean {
   // Image.network 只能稳定携带 Bearer header；资料媒体仍由 handler 强制校验钱包
   // session，但不要求它动态生成 P-256 请求签名。
   if (path.startsWith('/square/media/')) return false;
-  if (path.startsWith('/chat/')) return true;
   if (path === '/chain/extrinsics/relay') return true;
   return path.startsWith('/square/') && method !== 'OPTIONS';
 }
@@ -208,10 +207,6 @@ function routeRate(path: string, method: string): { binding: RateBinding; key: s
   if (path.startsWith('/square/contacts/')) {
     return { binding: 'RATE_WRITE', key: 'contacts_write' };
   }
-  if (path === '/chat/signals' && method === 'GET') {
-    return { binding: 'RATE_AUTH', key: 'chat_signals' };
-  }
-  if (path.startsWith('/chat/')) return { binding: 'RATE_WRITE', key: 'chat' };
   if (method === 'GET') return { binding: 'RATE_READ', key: 'read' };
   return { binding: 'RATE_WRITE', key: 'write' };
 }

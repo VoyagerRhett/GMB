@@ -95,7 +95,7 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
-        <!-- file_picker 需要：允许查询文件管理器 / 文档提供程序 -->
+        <!-- TataChatSDK 自有附件选择只调用系统 OPEN_DOCUMENT。 -->
         <intent>
             <action android:name="android.intent.action.OPEN_DOCUMENT"/>
             <data android:mimeType="*/*"/>
@@ -104,10 +104,6 @@
         <intent>
             <action android:name="android.intent.action.VIEW"/>
             <data android:scheme="https"/>
-        </intent>
-        <intent>
-            <action android:name="android.intent.action.GET_CONTENT"/>
-            <data android:mimeType="*/*"/>
         </intent>
     </queries>
 </manifest>

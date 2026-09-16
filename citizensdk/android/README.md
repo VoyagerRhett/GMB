@@ -41,7 +41,7 @@ RuntimeCall、payload 或 extrinsic；同步 admission 失败会恢复唯一 pre
 `gradle.properties` enables AndroidX for both the standalone native AAR and the
 Flutter plugin projection. It is source configuration, not generated Gradle
 state; the Kotlin compiler runs in-process so all caches and outputs remain
-under TataConsole `target` rather than a user-level compiler-daemon directory.
+under 调用方 `target` rather than a user-level compiler-daemon directory.
 
 This directory is the Android side of the `citizen_sdk` Flutter package. The
 plugin does not contain a second wallet, vault, JNI adapter, or light client.
@@ -56,7 +56,7 @@ the native Android distribution; the Flutter plugin never embeds an AAR and
 never packages legacy `libsmoldot.so`.
 
 `CITIZENSDK_ANDROID_BUILD_DIR` selects the shared external build root. Local
-flows accept only descendants of `/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk`; GitHub
+flows accept only descendants of `CITIZENSDK_WORK_DIR`; GitHub
 Actions may use any absolute path outside the SDK source tree. The Flutter and
 native modules use separate children below that root.
 

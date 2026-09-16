@@ -15,7 +15,7 @@ interface FollowRow {
   notify_enabled: number;
   created_at: number;
 }
-/// 系统唤醒端点直接按 cid_number 归属，不参与聊天身份或消息存储。
+/// 普通应用通知端点直接按cid_number归属，不参与业务内容存储。
 interface DeviceRow {
   cid_number: string;
   push_provider: 'apns' | 'fcm';
@@ -166,8 +166,8 @@ class FakeStmt {
       return { results: rows as unknown as T[] };
     }
 
-    // 按粉丝 CID 读取未过期系统唤醒端点。
-    if (this.sql.includes('FROM chat_push_endpoints')) {
+    // 按粉丝 CID 读取未过期普通应用通知端点。
+    if (this.sql.includes('FROM push_endpoints')) {
       const cids = this.binds.slice(0, -1) as string[];
       const now = this.binds[this.binds.length - 1] as number;
       const matched = this.db.devices.filter(

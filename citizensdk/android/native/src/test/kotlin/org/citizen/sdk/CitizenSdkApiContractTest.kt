@@ -6,9 +6,32 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
 import java.nio.ByteBuffer
+import java.lang.reflect.Modifier
+import org.citizen.sdk.internal.CitizenSdkNative
 import org.citizen.sdk.ui.CitizenSdkPrivateKeyDisplayBuffer
 
 class CitizenSdkApiContractTest {
+    @Test
+    fun `static JNI entries keep the exact single registration names`() {
+        val type = CitizenSdkNative::class.java
+        val expected = listOf("validateModules", "verifySignature", "completeVaultUnwrap")
+        val names = type.declaredMethods.map { it.name }
+        for (name in expected) {
+            assertEquals(1, names.count { it == name })
+            assertTrue(names.none { it.startsWith("${name}\$") })
+        }
+        assertTrue(Modifier.isStatic(type.getDeclaredMethod(
+            "validateModules", Int::class.javaPrimitiveType,
+        ).modifiers))
+        assertTrue(Modifier.isStatic(type.getDeclaredMethod(
+            "verifySignature", ByteArray::class.java, ByteArray::class.java, ByteArray::class.java,
+        ).modifiers))
+        assertTrue(Modifier.isStatic(type.getDeclaredMethod(
+            "completeVaultUnwrap", Long::class.javaPrimitiveType, Long::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+        ).modifiers))
+    }
+
     @Test
     fun `QR native UI has one scan and safe signing entry without clocks or raw signatures`() {
         val activity = androidx.fragment.app.FragmentActivity::class.java

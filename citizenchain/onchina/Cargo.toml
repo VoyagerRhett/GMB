@@ -18,17 +18,17 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-# Web 服务使用 axum 0.7,保持 OnChina HTTPS 入口稳定。
-axum = { version = "0.7", features = ["multipart"] }
+# Web服务与三仓第一方服务统一使用axum 0.8。
+axum = { version = "=0.8.9", features = ["multipart"] }
 # 内网 API HTTPS(Card 05;机构私有 CA 签发 + rustls/ring)
-axum-server = { version = "0.7", features = ["tls-rustls"] }
+axum-server = { version = "=0.8.0", features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem", "x509-parser"] }
 x509-parser = { version = "0.16", default-features = false, features = ["verify"] }
 time = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "v5"] }
@@ -50,8 +50,7 @@ schnorrkel = "0.11"
 aes-gcm = "0.10"
 hkdf = "0.12"
 zeroize = "1"
-getrandom = "0.2"
-twox-hash = "1"
+twox-hash = "=2.1.4"
 
 # 链交互:subxt 经节点 RPC 读写链 + reqwest 直连 HTTP RPC
 subxt = { version = "0.43.1", default-features = false, features = ["jsonrpsee", "native"] }

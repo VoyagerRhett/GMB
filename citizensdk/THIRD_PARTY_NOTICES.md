@@ -15,7 +15,7 @@ GPL with Classpath Exception 原文，以及根许可证入口中完整重现的
 Copyright (C) 2008-2025 Robin Stuart <rstuart114@gmail.com>
 
 SDK 源树只包含自有窄包装，不复制上游源码；官方归档、准确版本和 SHA256
-由 TATA 依赖合同固定。发布候选必须保留本声明和许可证，不得将上游著作权写成 CitizenSDK 自有实现。
+由CitizenSDK依赖锁固定。发布候选必须保留本声明和许可证，不得将上游著作权写成CitizenSDK自有实现。
 
 第 7.1 步新增的 `linux/` Host 与合同测试是 CitizenSDK 自有实现，适用根 MIT 许可证。该步只
 提交源码，没有在仓库中携带 TPM2-TSS、SQLite、GTK 或 C++ runtime 的第三方源码/二进制副本，

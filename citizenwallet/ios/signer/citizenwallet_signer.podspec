@@ -16,7 +16,7 @@
 #   Release → Runner.app/Runner
 #   命令：llvm-nm -g <binary> | grep -c citizen_sr25519   应为 4
 #
-native_dir = ENV['TATA_CONSOLE_NATIVE_IOS_DIR'] || File.dirname(__FILE__)
+native_dir = ENV['CITIZENWALLET_NATIVE_IOS_DIR'] || File.dirname(__FILE__)
 library_path = File.expand_path('libcitizenwallet_signer.a', native_dir)
 
 Pod::Spec.new do |s|

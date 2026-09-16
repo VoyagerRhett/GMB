@@ -17,17 +17,17 @@ allprojects {
     }
 }
 
-// 本机编译必须由TataConsole把Gradle输出导向中央工作目录；GitHub临时Runner仍使用其短命工作区。
-val programTataConsoleBuildDir = System.getenv("TATA_CONSOLE_BUILD_DIR")
-val newBuildDir: Directory =
-    if (!programTataConsoleBuildDir.isNullOrBlank()) {
-        rootProject.layout.dir(rootProject.provider { rootProject.file(programTataConsoleBuildDir) }).get()
-    } else {
-        if (System.getenv("CI") != "true") {
-            throw GradleException("本机Android编译必须由TataConsole提供TATA_CONSOLE_BUILD_DIR")
-        }
-        rootProject.layout.buildDirectory.dir("../../build").get()
-    }
+// Gradle产物使用CitizenWallet命名的外部目录；普通开发与CI均可直接调用。
+val programBuildDir = System.getenv("CITIZENWALLET_BUILD_DIR")
+    ?: "${System.getProperty("java.io.tmpdir")}/citizenwallet/android"
+val programBuildFile = rootProject.file(programBuildDir).canonicalFile
+val citizenWalletSourcePath = rootDir.parentFile.canonicalFile.toPath()
+val newBuildDir: Directory = rootProject.layout.dir(
+    rootProject.provider { programBuildFile },
+).get()
+if (!programBuildFile.isAbsolute || programBuildFile.toPath().startsWith(citizenWalletSourcePath)) {
+    throw GradleException("CITIZENWALLET_BUILD_DIR必须是CitizenWallet源码外的绝对路径")
+}
 rootProject.layout.buildDirectory.value(newBuildDir)
 
 subprojects {

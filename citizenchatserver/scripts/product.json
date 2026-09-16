@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "source_repository": "VoyagerRhett/TATA",
   "source_product_id": "tatachatserver",
-  "deployment_provider": "cloudflare",
+  "platform": "cloudflare",
   "public_url": "https://chat.crcfrcn.com",
   "realtime_url": "wss://chat.crcfrcn.com/realtime"
 }

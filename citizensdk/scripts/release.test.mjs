@@ -78,77 +78,24 @@ import {
   verifyCitizenSdkRelease,
 } from './release.mjs';
 
-const workRoot = process.env.TATA_CONSOLE_CACHE_DIR;
+const workRoot = process.env.CITIZENSDK_RELEASE_TEST_WORK_DIR;
 if (!workRoot) {
-  throw new Error('CitizenSDK 发布测试缺少 TataConsole 中央缓存目录');
+  throw new Error('CitizenSDK发布测试缺少CITIZENSDK_RELEASE_TEST_WORK_DIR');
 }
 mkdirSync(workRoot, { recursive: true });
 
 const citizenSdkRoot = fileURLToPath(new URL('../', import.meta.url));
 
-test('Android独立CMake真实中央读取拒绝缺失与异版且不影响Flutter插件', async () => {
+test('Android独立工具版本由CitizenSDK产品合同固定且不依赖外部目录', () => {
   const gradle = readFileSync(join(citizenSdkRoot, 'android/native/build.gradle'), 'utf8');
-  const snippets = [...gradle.matchAll(/commandLine 'node', '--input-type=module', '-e', '''([\s\S]*?)'''/gu)];
-  assert.equal(snippets.length, 1);
-  const script = snippets[0][1];
+  const settings = readFileSync(join(citizenSdkRoot, 'android/settings.gradle'), 'utf8');
   assert.match(gradle, /version = cmakeVersion/u);
-  assert.doesNotMatch(gradle, /version = '\d+\.\d+\.\d+'/u);
+  assert.match(gradle, /def cmakeVersion = '3\.31\.6'/u);
   assert.doesNotMatch(readFileSync(join(citizenSdkRoot, 'android/build.gradle'), 'utf8'), /readCmake|cmakeVersion|tools.*android\.mjs/u);
-  const root = process.env.TATA_WORKSPACE_ROOT || process.env.TATA_ROOT;
-  const flows = process.env.TATA_CONSOLE_FLOW_ROOT || (root && join(root, 'tataconsole', 'flows'));
-  assert.ok(flows && isAbsolute(flows), 'CMake合同测试需要中央流程绝对路径');
-  const tools = resolve(flows, '..', 'tools');
-  const library = JSON.parse(readFileSync(join(tools, 'shared.json'), 'utf8'));
-  const expected = library.tools.find(tool => tool.id === 'cmake').version;
-  // 先执行Gradle将调用的原始Node脚本；它只读取中央合同，不编译或下载。
-  const actual = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
-    env: { ...process.env, TATA_CONSOLE_FLOW_ROOT: flows }, encoding: 'utf8', timeout: 10000,
-  });
-  assert.equal(actual.status, 0, actual.stderr);
-  assert.equal(actual.stdout.trim(), expected);
-  const source = readFileSync(join(tools, 'android.mjs'), 'utf8');
-  const reader = source.slice(source.indexOf('export function readCmake('), source.indexOf('\n// 版本真源'))
-    .replace('export function', 'function')
-    .replace("fileURLToPath(new URL('shared.json', import.meta.url))", "'central'");
-  // 错版和缺失场景只替换内存中的读取边界，实际生产版本校验函数保持原文。
-  const run = async (document, env = { TATA_CONSOLE_FLOW_ROOT: flows }, host = 'darwin', arch = 'arm64') => {
-    const output = [];
-    const readCmake = runInNewContext(`${reader}\nreadCmake`, {
-      lstatSync: () => { if (!document) throw Error('中央登记缺失'); return { isFile: () => true, size: 1000 }; },
-      realpathSync: resolve, resolve,
-      readFileSync: () => JSON.stringify(document),
-      repository: 'https://dl.google.com/android/repository/',
-      URL, fail: message => { throw Error(message); },
-    });
-    const executable = script.replace(/^import .*;\n/gm, '')
-      .replace('await import(', 'await loadCmake(');
-    await runInNewContext(`(async () => {${executable}})()`, {
-      join, isAbsolute, pathToFileURL, process: { env, platform: host, arch },
-      console: { log: value => output.push(value) },
-      loadCmake: async url => {
-        assert.equal(url.href, pathToFileURL(join(tools, 'android.mjs')).href);
-        return { readCmake };
-      },
-    });
-    return output;
-  };
-  for (const [host, arch] of [['darwin', 'arm64'], ['linux', 'x64'], ['linux', 'arm64'], ['win32', 'x64']]) {
-    assert.deepEqual(await run(library, undefined, host, arch), [expected]);
-  }
-  await assert.rejects(run(library, {}), /中央流程绝对路径/u);
-  await assert.rejects(run(library, { TATA_CONSOLE_FLOW_ROOT: 'relative' }), /中央流程绝对路径/u);
-  await assert.rejects(run(null), /中央登记缺失/u);
-  await assert.rejects(run(library, undefined, 'freebsd', 'x64'), /宿主未登记/u);
-  for (const change of [
-    value => { value.tools = value.tools.filter(tool => tool.id !== 'cmake'); },
-    value => { value.tools.push(structuredClone(value.tools.find(tool => tool.id === 'cmake'))); },
-    value => { value.tools.find(tool => tool.id === 'cmake').version = '0.0.0'; },
-    value => { value.tools.find(tool => tool.id === 'cmake').archives.macos.sha256 = 'invalid'; },
-  ]) {
-    const changed = structuredClone(library);
-    change(changed);
-    await assert.rejects(run(changed), /唯一版本|准确官方宿主/u);
-  }
+  assert.match(settings, /agp: '9\.0\.1'/u);
+  assert.match(settings, /kotlin: '2\.2\.20'/u);
+  assert.match(settings, /gradle: '9\.1\.0'/u);
+  assert.doesNotMatch(settings, /commandLine|\.\.\/tools|shared\.json/u);
 });
 
 test('Android工具三配置真实来源摘要与失败拒绝保持一致', () => {
@@ -1209,7 +1156,7 @@ test('私钥查看私有ABI固定四符号和布局，公开头不声明内部�
   }
   assert.doesNotMatch(readFileSync(join(citizenSdkRoot, 'include/citizensdk.h'), 'utf8'), /citizensdk_internal_/u);
   assert.equal(citizenSdkSymbols().length, 121);
-  assert.equal(citizenSdkLinkedSymbols().length, 121);
+  assert.equal(citizenSdkLinkedSymbols().length, 125);
 });
 
 function citizenSdkExportSymbols() {
@@ -1445,101 +1392,10 @@ function androidAarFixture(core, jni, {
 
 
 // 第10.5步：只用于格式/拒绝测试的固定合同金标，绝非另一套生产来源入口。
-const dependencyContractFixture = {
-  "schema": 1,
-  "sources": {
-    "sqlite": {
-      "version": "3.53.4",
-      "url": "https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip",
-      "size": 2946650,
-      "sha256": "1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d",
-      "sha3_256": "628a44cfe82c66aed1ccbbe85a562d2e33ebe64b3288981ed76285612227934e",
-      "archive_root": "sqlite-amalgamation-3530400"
-    },
-    "openssl": {
-      "version": "3.5.8",
-      "url": "https://github.com/openssl/openssl/releases/download/openssl-3.5.8/openssl-3.5.8.tar.gz",
-      "size": 53213818,
-      "sha256": "a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2",
-      "archive_root": "openssl-3.5.8",
-      "license": "LICENSE.txt",
-      "license_sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
-    },
-    "tpm2-tss": {
-      "version": "4.2.0",
-      "url": "https://github.com/tpm2-software/tpm2-tss/releases/download/4.2.0/tpm2-tss-4.2.0.tar.gz",
-      "size": 2023505,
-      "sha256": "b53f0c5c8c4ce17f05701a410ca9688f725ca380c9bc4640eacd0eadb1fea124",
-      "archive_root": "tpm2-tss-4.2.0",
-      "license": "LICENSE",
-      "license_sha256": "18c1bf4b1ba1fb2c4ffa7398c234d83c0d55475298e470ae1e5e3a8a8bd2e448"
-    }
-  },
-  "sqlite_defines": [
-    "SQLITE_THREADSAFE=1"
-  ],
-  "openssl_options": [
-    "no-shared",
-    "no-module",
-    "no-dso",
-    "no-tests",
-    "-fPIC"
-  ],
-  "tss2_options": [
-    "--enable-option-checking=fatal",
-    "--disable-shared",
-    "--enable-static",
-    "--with-pic",
-    "--with-crypto=ossl",
-    "--disable-fapi",
-    "--disable-policy",
-    "--enable-esys",
-    "--enable-util-io",
-    "--enable-tcti-device",
-    "--disable-tcti-mssim",
-    "--disable-tcti-swtpm",
-    "--disable-tcti-pcap",
-    "--disable-tcti-null",
-    "--disable-tcti-libtpms",
-    "--disable-tcti-cmd",
-    "--disable-tcti-spi-helper",
-    "--disable-tcti-spi-ltt2go",
-    "--disable-tcti-spidev",
-    "--disable-tcti-spi-ftdi",
-    "--disable-tcti-i2c-helper",
-    "--disable-tcti-i2c-ftdi",
-    "--disable-tcti-fuzzing",
-    "--enable-nodl",
-    "--disable-unit",
-    "--disable-integration",
-    "--disable-log-file",
-    "--with-maxloglevel=none",
-    "--with-sysusersdir=no",
-    "--with-tmpfilesdir=no",
-    "--disable-doxygen-doc",
-    "--disable-doxygen-man",
-    "--disable-doxygen-html"
-  ],
-  "platforms": {
-    "LinuxARM": {
-      "target": "aarch64-unknown-linux-gnu",
-      "machine": 183,
-      "openssl_target": "linux-aarch64",
-      "glibc": "2.31"
-    },
-    "LinuxAMD": {
-      "target": "x86_64-unknown-linux-gnu",
-      "machine": 62,
-      "openssl_target": "linux-x86_64",
-      "glibc": "2.31"
-    },
-    "Windows": {
-      "target": "x86_64-pc-windows-msvc",
-      "machine": 34404,
-      "msvc_runtime": "/MD"
-    }
-  }
-};
+const dependencyLockFixture = JSON.parse(
+  readFileSync(join(citizenSdkRoot, 'scripts/dependencies.lock.json'), 'utf8'),
+);
+const dependencyContractFixture = dependencyLockFixture.native;
 const opensslHeaderFixture = ["aes.h","asn1.h","asn1err.h","asn1t.h","async.h","asyncerr.h","bio.h","bioerr.h","blowfish.h","bn.h","bnerr.h","buffer.h","buffererr.h","byteorder.h","camellia.h","cast.h","cmac.h","cmp.h","cmp_util.h","cmperr.h","cms.h","cmserr.h","comp.h","comperr.h","conf.h","conf_api.h","conferr.h","configuration.h","conftypes.h","core.h","core_dispatch.h","core_names.h","core_object.h","crmf.h","crmferr.h","crypto.h","cryptoerr.h","cryptoerr_legacy.h","ct.h","cterr.h","decoder.h","decodererr.h","des.h","dh.h","dherr.h","dsa.h","dsaerr.h","dtls1.h","e_os2.h","e_ostime.h","ebcdic.h","ec.h","ecdh.h","ecdsa.h","ecerr.h","encoder.h","encodererr.h","engine.h","engineerr.h","err.h","ess.h","esserr.h","evp.h","evperr.h","fips_names.h","fipskey.h","hmac.h","hpke.h","http.h","httperr.h","idea.h","indicator.h","kdf.h","kdferr.h","lhash.h","macros.h","md2.h","md4.h","md5.h","mdc2.h","ml_kem.h","modes.h","obj_mac.h","objects.h","objectserr.h","ocsp.h","ocsperr.h","opensslconf.h","opensslv.h","ossl_typ.h","param_build.h","params.h","pem.h","pem2.h","pemerr.h","pkcs12.h","pkcs12err.h","pkcs7.h","pkcs7err.h","prov_ssl.h","proverr.h","provider.h","quic.h","rand.h","randerr.h","rc2.h","rc4.h","rc5.h","ripemd.h","rsa.h","rsaerr.h","safestack.h","seed.h","self_test.h","sha.h","srp.h","srtp.h","ssl.h","ssl2.h","ssl3.h","sslerr.h","sslerr_legacy.h","stack.h","store.h","storeerr.h","symhacks.h","thread.h","tls1.h","trace.h","ts.h","tserr.h","txt_db.h","types.h","ui.h","uierr.h","whrlpool.h","x509.h","x509_acert.h","x509_vfy.h","x509err.h","x509v3.h","x509v3err.h"];
 const dependencyFixtureHash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 function dependencyArchiveFixture(platform) {
@@ -1610,6 +1466,62 @@ test('第10.5步固定官方版本来源及摘要不能混用', () => {
     assert.throws(() => assertCitizenSdkNativeContract(changed), /固定来源/);
   }
 });
+
+test('CitizenSDK依赖锁与独立准备入口覆盖环境和三平台静态前缀', () => {
+  assert.deepEqual(Object.keys(dependencyLockFixture).sort(), [
+    'android_tools', 'environment', 'headers', 'native', 'schema',
+  ]);
+  assert.deepEqual(dependencyLockFixture.android_tools, {
+    agp: '9.0.1', cmake: '3.31.6', gradle: '9.1.0', kotlin: '2.2.20', ndk: '28.2.13676358',
+  });
+  const androidProperties = readFileSync(join(citizenSdkRoot, 'android/gradle.properties'), 'utf8');
+  assert.deepEqual(androidProperties.split('\n')
+    .filter((line) => /^android\.(?:builtInKotlin|newDsl)=/u.test(line)), [
+    'android.builtInKotlin=true', 'android.newDsl=true',
+  ]);
+  expectLockedSource(dependencyLockFixture.environment['zxing-cpp'], '3.1.1',
+    'c3c02c29c0b519de7bd4e25b376e606e87f0761befd1282815642a2246613d14');
+  const preparer = readFileSync(join(citizenSdkRoot, 'scripts/dependencies.mjs'), 'utf8');
+  assert.match(preparer, /command === 'plan'/u);
+  assert.match(preparer, /command === 'prepare-environment'/u);
+  assert.match(preparer, /command === 'prepare-native'/u);
+  assert.match(preparer, /attempt <= 3/u);
+  assert.match(preparer, /CITIZENSDK_DEPENDENCY_CACHE_DIR/u);
+  assert.doesNotMatch(preparer, /\.\.\/\.\.\/|\/Users\//u);
+});
+
+test('CitizenSDK依赖计划只投影自身锁定归档且拒绝错误平台', () => {
+  const entry = join(citizenSdkRoot, 'scripts/dependencies.mjs');
+  for (const platform of ['Android', 'macOS']) {
+    const result = spawnSync(process.execPath, [entry, 'plan', '--platform', platform], {
+      encoding: 'utf8', env: { PATH: process.env.PATH },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const value = JSON.parse(result.stdout);
+    assert.deepEqual(Object.keys(value).sort(), ['archives', 'platform', 'schema']);
+    assert.equal(value.schema, 1);
+    assert.equal(value.platform, platform);
+    assert.deepEqual(value.archives, [{
+      name: 'zxing-cpp', version: dependencyLockFixture.environment['zxing-cpp'].version,
+      url: dependencyLockFixture.environment['zxing-cpp'].url,
+      size: dependencyLockFixture.environment['zxing-cpp'].size,
+      sha256: dependencyLockFixture.environment['zxing-cpp'].sha256,
+      archive_root: dependencyLockFixture.environment['zxing-cpp'].archive_root,
+    }]);
+  }
+  const invalid = spawnSync(process.execPath, [entry, 'plan', '--platform', 'ios'], {
+    encoding: 'utf8', env: { PATH: process.env.PATH },
+  });
+  assert.notEqual(invalid.status, 0);
+  assert.match(invalid.stderr, /平台无效/u);
+});
+
+function expectLockedSource(source, version, digest) {
+  assert.equal(source.version, version);
+  assert.equal(source.sha256, digest);
+  assert.match(source.url, /^https:\/\//u);
+  assert.ok(Number.isSafeInteger(source.size) && source.size > 0);
+}
 
 test('第10.5步静态归档逐成员拒绝错误架构薄归档及动态输入', () => {
   for (const platform of ['LinuxARM', 'LinuxAMD', 'Windows']) {
@@ -2087,6 +1999,7 @@ gradle_project_cache="$FIXTURE_ROOT/project cache"
 kotlin_persistent_dir="$FIXTURE_ROOT/kotlin state"
 android_gradle_project="$FIXTURE_ROOT/project"
 sdk_dir="$FIXTURE_ROOT/sdk source"
+gradle_network_arg=''
 export CITIZENSDK_ZXING_SOURCE_DIR="$FIXTURE_ROOT/zxing source"
 gradle_bin="$FIXTURE_ROOT/gradle fixture"
 `;
@@ -2185,11 +2098,15 @@ test('Android任务工程仅生成入口配置且并发隔离并拒绝链接路�
       assert.deepEqual(readdirSync(untouched), ['sentinel']);
       assert.equal(readFileSync(join(untouched, 'sentinel'), 'utf8'), 'untouched');
     }
+    const flutter = readFileSync(join(citizenSdkRoot, 'android/build.gradle'), 'utf8');
     const native = readFileSync(join(citizenSdkRoot, 'android/native/build.gradle'), 'utf8');
     assert.match(native, /sourceSet\.setRoot\(sourceRoot\.path\)/u);
     assert.match(native, /sourceSet\.kotlin\.srcDirs/u);
     assert.match(native, /new File\(nativeSourceRoot, 'src\/main\/cpp\/CMakeLists\.txt'\)/u);
-    assert.match(native, /new File\(nativeSourceRoot, 'consumer-rules\.pro'\)/u);
+    assert.equal((flutter.match(/consumerProguardFiles new File\(androidSourceRoot, 'native\/consumer-rules\.pro'\)/gu) ?? []).length, 1);
+    assert.equal((native.match(/consumerProguardFiles new File\(nativeSourceRoot, 'consumer-rules\.pro'\)/gu) ?? []).length, 1);
+    const consumerRules = readFileSync(join(citizenSdkRoot, 'android/native/consumer-rules.pro'), 'utf8');
+    assert.equal((consumerRules.match(/^-keep class org[.]citizen[.]sdk[.]internal[.]CitizenSdkNative \{ \*; \}$/gmu) ?? []).length, 1);
     assert.match(native, /new File\(sdkProductRoot, 'assets'\)/u);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -3812,11 +3729,6 @@ test('Windows Hosted 19/34 闭集与全部复制预检保持七头原字节及�
     assert.throws(() => copyWindowsNativeArtifact(citizenSdkRoot, fixture.prefix, dirname(fixture.prefix)), /来源|目标/u);
     assert.throws(() => copyWindowsNativeArtifact(rejected, fixture.prefix, rejected), /来源|目标|源码/u);
     assert.throws(() => copyWindowsNativeArtifact(join(rejected, 'nested-source'), fixture.prefix, rejected), /来源|目标|源码/u);
-    // 不创建越界路径；调用必须在任何 mkdir/write 之前被本机双根门禁拒绝。
-    if (process.env.GITHUB_ACTIONS !== 'true') {
-      assert.throws(() => copyWindowsNativeArtifact(citizenSdkRoot, fixture.prefix,
-        '/Users/rhett/TATA/tataconsole/target/gmb/unregistered/sdk/candidate'), /目录|路径/u);
-    }
     copyWindowsNativeArtifact(citizenSdkRoot, fixture.prefix, rejected);
     assert.deepEqual(readFileSync(header), bytes);
     assert.throws(() => copyWindowsNativeArtifact(citizenSdkRoot, fixture.prefix, rejected), /目标已存在/u);
@@ -4706,6 +4618,9 @@ test('scripts 根固定正式闭集、原生构建器与统一测试入口', () 
   try {
     cpSync(join(citizenSdkRoot, 'scripts'), scripts, { recursive: true });
     assert.doesNotThrow(() => assertSdkScriptSource(root));
+    for (const name of ['ci', 'release']) {
+      assert.equal(lstatSync(join(scripts, name)).isDirectory(), true);
+    }
 
     const buildNative = join(scripts, 'build-native.sh');
     const buildNativeSource = readFileSync(buildNative, 'utf8');
@@ -4727,7 +4642,9 @@ test('scripts 根固定正式闭集、原生构建器与统一测试入口', () 
     assert.match(testEntrySource, /--build-dir=build/u);
     assert.match(testEntrySource, /--no-enable-native-assets/u);
     assert.match(testEntrySource, /--no-enable-dart-data-assets/u);
-    assert.match(testEntrySource, /pub get --offline --enforce-lockfile/u);
+    assert.match(testEntrySource, /pub_get_args=\(--enforce-lockfile\)/u);
+    assert.match(testEntrySource, /CITIZENSDK_OFFLINE:-false/u);
+    assert.match(testEntrySource, /true\) pub_get_args\+=\(--offline\)/u);
     assert.match(testEntrySource, /FLUTTER_ROOT="\$flutter_sdk_root"/u);
     assert.match(testEntrySource, /mktemp -d "\$test_root\/flutter-project\.XXXXXX"/u);
     assert.match(testEntrySource, /ln -s "\$source" "\$project_root\/\$name"/u);
@@ -5269,6 +5186,26 @@ test('1.10.4历史按execution索引、原子mutation和有界回收进入四端
   const monitor = readFileSync(join(citizenSdkRoot, 'native/ffi/src/chain_monitor.rs'), 'utf8');
   assert.match(monitor, /Duration::from_secs\(30\)/u);
   assert.match(monitor, /Some\(Some\(Err\(_\)\)\) \| Some\(None\)/u);
+
+  // Apple C ABI 边界必须先安全转换可空字节视图，再校验固定查询长度；
+  // citizenSDKData 是抛错边界，遗漏 try 会让正式 Apple 源码无法编译。
+  const appleHostBridge = readFileSync(
+    join(citizenSdkRoot, 'darwin/Sources/CitizenSDK/CitizenSDKHostBridge.swift'), 'utf8');
+  assert.match(appleHostBridge, /let bytes = try citizenSDKData\(query\)/u);
+  assert.match(appleHostBridge, /guard bytes\.count == 58/u);
+  const androidNative = readFileSync(join(citizenSdkRoot,
+    'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkNative.kt'), 'utf8');
+  assert.match(androidNative,
+    /\(decoded\.result as\? CitizenSdkNativeResult\.Block\)\?\.value \?: return/u);
+  assert.doesNotMatch(androidNative, /decoded\.value as\? CitizenSdkNativeResult\.Block/u);
+});
+
+test('Apple podspec只交付pod根内固定Framework相对名称', () => {
+  const podspec = readFileSync(join(citizenSdkRoot, 'darwin/citizen_sdk.podspec'), 'utf8');
+  assert.match(podspec, /framework_path = 'CitizenSDK\.xcframework'/u);
+  assert.match(podspec, /Dir\.exist\?\(File\.join\(__dir__, framework_path\)\)/u);
+  assert.match(podspec, /spec\.vendored_frameworks = framework_path/u);
+  assert.doesNotMatch(podspec, /CITIZENSDK_APPLE_FRAMEWORK_DIR|Pathname|relative_path_from/u);
 });
 
 test('Hosted Package 合同固定过滤规则、变更日志与可解析依赖边界', () => {
@@ -5811,200 +5748,19 @@ test('私钥扫描器不误报自身且仍拒绝真实 PEM 标记', () => {
   }
 });
 
-test('本机打包固定中央候选根，原生构建独立拒绝源码树输出', () => {
-  const source = readFileSync(new URL('./release.mjs', import.meta.url), 'utf8');
-  const constantNames = ['TATA_CONSOLE_TARGET_ROOT', 'TATA_CONSOLE_CACHE_ROOT'];
-  const constants = constantNames.map((name) => {
-    const matches = [...source.matchAll(new RegExp(`^const ${name} = '[^'\\r\\n]*';$`, 'gm'))];
-    assert.equal(matches.length, 1, `唯一生产常量：${name}`);
-    return matches[0][0];
-  });
-  const functionNames = ['fail', 'assertSafeTargetPath', 'assertLocalTarget'];
-  const functions = functionNames.map((name) => {
-    const matches = [...source.matchAll(new RegExp(
-      `^function ${name}\\([^\\n]*\\) \\{\\n[\\s\\S]*?^\\}\\n`, 'gm',
-    ))];
-    assert.equal(matches.length, 1, `唯一生产函数：${name}`);
-    return matches[0][0];
-  });
-  // GitHub 分支仍在通用路径检查之后；不把本机进程伪装成 GitHub 来绕过门禁。
-  assert.match(functions[2], /const target = assertSafeTargetPath\(path, label\);\n  if \(process\.env\.GITHUB_ACTIONS === 'true'\) return target;/u);
-  const expectedRoots = [
-    '/Users/rhett/TATA/tataconsole/target/gmb/citizensdk',
-    '/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk',
-  ];
-  // 候选打包只接受两个中央根；原生构建是可独立复用的产品入口，因此允许调用方
-  // 选择任意规范的源码树外目录，但仍必须保留同一零写源码门禁。
+test('本机打包与Android构建只要求安全的CitizenSDK源码外目录', () => {
+  const release = readFileSync(new URL('./release.mjs', import.meta.url), 'utf8');
   const native = readFileSync(new URL('./build-native.sh', import.meta.url), 'utf8');
-  assert.ok(native.includes('citizensdk_target_root="$tata_console_target_root/gmb/citizensdk"'));
-  assert.ok(native.includes('tata_console_cache_root="${tata_console_target_root%/target}/cache"'));
+  assert.match(release, /function assertLocalTarget\(path, label\)[\s\S]*?return target;/u);
+  assert.doesNotMatch(release, /固定本机目录|\/Users\/|外部控制程序/u);
   assert.match(native, /local_build_path_is_allowed\(\) \{[\s\S]*?"\$sdk_dir\/"\*\) return 1/u);
   assert.match(native, /工作目录或产物目录位于 CitizenSDK 源码树/u);
-  // 测试库与产物库必须平级，旧隐藏工作树不得继续成为可写根。
-  assert.equal(posix.dirname(expectedRoots[0].split('/gmb/')[0]), posix.dirname(expectedRoots[1].split('/gmb/')[0]));
   for (const relative of ['android/build.gradle', 'android/native/build.gradle']) {
     const gradle = readFileSync(new URL('../' + relative, import.meta.url), 'utf8');
-    assert.ok(gradle.includes("new File(tataConsoleTargetRoot.parentFile, 'cache/gmb/citizensdk')"));
-    assert.ok(gradle.includes("'gmb/citizensdk'"));
-  }
-
-  // 仅替换文件系统事实，不复制路径算法，也不在其它 OS 创建真实 /Users 目录。
-  // 两个根的金标独立于生产常量；VM 执行提取到的完整原文，不修改真实 process.env。
-  const entries = new Map();
-  for (const root of expectedRoots) {
-    let current = root;
-    for (;;) {
-      entries.set(current, 'directory');
-      if (current === '/') break;
-      current = posix.dirname(current);
-    }
-  }
-  const contract = runInNewContext([
-    ...constants,
-    ...functions,
-    '({ assertLocalTarget, roots: [TATA_CONSOLE_TARGET_ROOT, TATA_CONSOLE_CACHE_ROOT] })',
-  ].join('\n'), {
-    resolve: posix.resolve,
-    dirname: posix.dirname,
-    join: posix.join,
-    sep: posix.sep,
-    process: Object.freeze({ env: Object.freeze({}) }),
-    existsSync: (path) => entries.has(path) && entries.get(path) !== 'dangling',
-    readdirSync: (path) => [...entries.keys()]
-      .filter((entry) => entry !== path && posix.dirname(entry) === path)
-      .map((entry) => posix.basename(entry)),
-    lstatSync: (path) => {
-      const kind = entries.get(path);
-      if (kind === undefined) throw Object.assign(new Error('fixture path is absent'), { code: 'ENOENT' });
-      return {
-        isDirectory: () => kind === 'directory',
-        isSymbolicLink: () => kind === 'link' || kind === 'dangling',
-      };
-    },
-  }, { timeout: 1000 });
-  assert.deepEqual(Array.from(contract.roots), expectedRoots);
-  const check = (path) => contract.assertLocalTarget(path, '路径夹具');
-  const withEntry = (path, kind, action) => {
-    const previous = entries.get(path);
-    if (kind === undefined) entries.delete(path);
-    else entries.set(path, kind);
-    try { action(); }
-    finally {
-      if (previous === undefined) entries.delete(path);
-      else entries.set(path, previous);
-    }
-  };
-
-  for (const root of expectedRoots) {
-    for (const suffix of ['/candidate', '/nested/native-output', '/archive/citizensdk.tgz']) {
-      assert.equal(check(`${root}${suffix}`), `${root}${suffix}`);
-    }
-    for (const path of [root, `${root}-other/candidate`, `${root}x/candidate`,
-      `${root.replace(/citizensdk$/u, 'CitizenSDK')}/candidate`,
-      `${root.replace('/gmb/', '/GMB/')}/candidate`,
-      `${root.replace('/gmb/', '/Gmb/')}/candidate`]) {
-      assert.throws(() => check(path), /本地路径/u);
-    }
-    // 模拟文件系统以小写路径返回大写目录实体；文本根合法仍必须拒绝。
-    const repositoryDirectory = posix.dirname(root);
-    withEntry(repositoryDirectory, undefined, () => {
-      withEntry(repositoryDirectory.replace(/gmb$/u, 'GMB'), 'directory', () => {
-        assert.throws(() => check(`${root}/candidate`), /仓库目录必须准确小写/u);
-      });
-    });
-    for (const path of [
-      `${root}/../candidate`, `${root}/nested/../../candidate`, `${root}/./candidate`,
-      `${root}//candidate`, `${root}/candidate/`,
-    ]) {
-      assert.throws(() => check(path), /绝对规范路径/u);
-    }
-    withEntry(root, undefined, () => {
-      assert.throws(() => check(`${root}/candidate`), /中央目录不存在/u);
-    });
-    withEntry(root, 'file', () => {
-      assert.throws(() => check(`${root}/candidate`), /祖先不是目录/u);
-    });
-    const otherRoot = expectedRoots.find((value) => value !== root);
-    withEntry(otherRoot, undefined, () => {
-      assert.equal(check(`${root}/candidate`), `${root}/candidate`);
-    });
-    for (const path of [posix.dirname(root), root, `${root}/middle`]) {
-      const descendant = path === `${root}/middle` ? `${path}/missing/leaf` : `${root}/candidate`;
-      for (const kind of ['link', 'dangling']) {
-        withEntry(path, kind, () => {
-          assert.throws(() => check(descendant), /符号链接/u);
-        });
-      }
-      withEntry(path, 'file', () => {
-        assert.throws(() => check(descendant), /祖先不是目录/u);
-      });
-    }
-    const leaf = `${root}/candidate`;
-    for (const kind of ['link', 'dangling']) {
-      withEntry(leaf, kind, () => { assert.throws(() => check(leaf), /符号链接/u); });
-    }
-    // 路径级门禁允许最终普通文件；是否已存在/能否覆盖由原有打包入口单独拒绝。
-    withEntry(leaf, 'file', () => { assert.equal(check(leaf), leaf); });
-  }
-  for (const path of [
-    '/Users/rhett/TATA/tataconsole/target/.work/gmb/citizensdk/sdk/candidate',
-    '/Users/rhett/TATA/tataconsole/target/citizensdk/candidate',
-    '/Users/rhett/TATA/tataconsole/cache/citizensdk/candidate',
-    '/Users/rhett/TATA/tataconsole/target/gmb/citizenapp/sdk/candidate',
-    '/Users/rhett/TATA/tataconsole/cache/gmb/citizenapp/sdk/candidate',
-    '/Users/rhett/TATA/tataconsole/target/tuyu/citizensdk/sdk/candidate',
-    '/Users/rhett/TATA/tataconsole/cache/tata/citizensdk/sdk/candidate',
-    '/Users/rhett/TATA/tataconsole/target/gmb/citizensdk',
-    '/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk',
-  ]) {
-    assert.throws(() => check(path), /本地路径/u);
-  }
-  for (const path of ['', 'relative/candidate', '.', '..']) {
-    assert.throws(() => check(path), /绝对规范路径/u);
+    assert.doesNotMatch(gradle, /\/Users\/|共享工作根|中央工作目录/u);
+    assert.match(gradle, /outside the source tree/u);
   }
 });
-
-test('Android两工程实际Groovy守卫只允许测试库编译并保留正式产物输入（零写入）', async () => {
-  const repository = process.env.TATA_WORKSPACE_ROOT || process.env.TATA_ROOT;
-  assert.ok(repository && isAbsolute(repository), '路径合同需要准确中央仓库根');
-  const { loadTools, verifyTool } = await import(pathToFileURL(join(repository, 'tataconsole/worker/toolchain.mjs')));
-  const library = loadTools(join(repository, 'tataconsole/tools'));
-  const installed = {};
-  for (const id of ['java', 'gradle']) {
-    installed[id] = await verifyTool(library, library.tools.find(tool => tool.id === id));
-    assert.ok(installed[id], '只运行已安装并验真的中央工具：' + id);
-  }
-  const lib = join(dirname(dirname(installed.gradle.path)), 'lib');
-  const jars = readdirSync(lib).filter(name => /^groovy-\d[^/]*\.jar$/u.test(name));
-  assert.equal(jars.length, 1);
-  for (const relative of ['android/build.gradle', 'android/native/build.gradle']) {
-    const source = readFileSync(join(citizenSdkRoot, relative), 'utf8');
-    const start = source.indexOf('def tataConsoleTargetRoot =');
-    const end = source.indexOf(relative.includes('/native/') ? 'def configuredBuildDir =' : 'def androidBuildValue =', start);
-    assert.ok(start >= 0 && end > start);
-    assert.match(source, /staysInLocalCitizenSdkRoot\((?:androidBuildRoot|normalizedTarget), true\)/u);
-    // 只装入生产路径闭包并调用其真实 Groovy 语义；没有 Gradle 工程、文件生成或包解析。
-    const script = 'def file = { String value -> new File(value) };\n' + source.slice(start, end) + `
-def work = '/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk'
-def target = '/Users/rhett/TATA/tataconsole/target/gmb/citizensdk'
-assert staysInLocalCitizenSdkRoot(new File(work + '/android-build').canonicalFile, true)
-assert staysInLocalCitizenSdkRoot(new File(System.getenv('TATA_CONSOLE_CACHE_DIR') + '/citizensdk/android-build').canonicalFile, true)
-assert !staysInLocalCitizenSdkRoot(new File(target + '/android-build').canonicalFile, true)
-assert staysInLocalCitizenSdkRoot(new File(target + '/verified-input').canonicalFile)
-assert !staysInLocalCitizenSdkRoot(new File('/Users/rhett/TATA/tataconsole/target/.work/gmb/citizensdk/sdk/android-build').canonicalFile, true)
-assert !staysInLocalCitizenSdkRoot(new File(work + '-other/android-build').canonicalFile, true)
-println '中央测试库目录守卫通过'
-`;
-    const result = spawnSync(installed.java.path, ['-XX:-UsePerfData', '-Dgroovy.grape.enable=false',
-      '-cp', join(lib, jars[0]), 'groovy.ui.GroovyMain', '-e', script], {
-      env: { PATH: '/usr/bin:/bin', TATA_CONSOLE_CACHE_DIR: '/Users/rhett/TATA/tataconsole/cache/gmb/citizenapp/ios' },
-      encoding: 'utf8', timeout: 30_000,
-    });
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout.trim(), '中央测试库目录守卫通过');
-  }
-});
-
 test('Release 在创建目录前拒绝路径穿越与既存符号链接祖先', () => {
   const root = mkdtempSync(join(workRoot, 'release-path-guard-test-'));
   try {
@@ -6210,7 +5966,7 @@ test('原生构建入口固定 Apple arm64 技术合同/最低版本且在 mkdir
       GITHUB_ACTIONS: 'false',
     };
     // 产品原生构建入口可以被任意 App/第三方复用；它只要求规范绝对路径并拒绝
-    // CitizenSDK 源码树。候选打包器的两个中央根限制由前一个 VM 合同独立验证。
+    // CitizenSDK源码树。候选打包器同样只要求安全的源码外绝对路径。
     const acceptedHostResult = spawnSync(
       '/bin/bash', ['-c', hostPredicate, 'citizensdk-host-path-contract',
         externalOutput, citizenSdkRoot], {
@@ -6237,9 +5993,8 @@ test('原生构建入口固定 Apple arm64 技术合同/最低版本且在 mkdir
       'utf8',
     );
     for (const gradle of [androidPlugin, androidNative]) {
-      assert.match(gradle, /TATA_CONSOLE_CACHE_DIR/u);
-      assert.match(gradle, /new File\(taskWork, 'citizensdk'\)/u);
-      assert.match(gradle, /startsWith\(sharedWorkRoot\.path \+ File\.separator\)/u);
+      assert.doesNotMatch(gradle, /\/Users\/|共享工作根|中央工作目录/u);
+      assert.match(gradle, /outside the source tree/u);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -6983,6 +6738,22 @@ test('产品 ABI 从完整 nm 导出集合与头文件精确对拍并拒绝任�
   }
 });
 
+test('Apple导出闭集固定121 Core、4内部与3图像ABI', () => {
+  const build = readFileSync(join(citizenSdkRoot, 'scripts/build-native.sh'), 'utf8');
+  assert.match(build, /\[\[ "\$expected_count" == 124 \]\]/u);
+  assert.match(build, /grep -c '\^_citizensdk_' "\$destination" \|\| true\)" == 124/u);
+  assert.match(build, /121公开\+4内部\+3图像符号闭集（共128项）/u);
+  assert.doesNotMatch(build, /117公开|expected_count" == 120|destination" \|\| true\)" == 120/u);
+});
+
+test('Android原生构建只在调用方显式选择时使用Gradle离线模式', () => {
+  const build = readFileSync(join(citizenSdkRoot, 'scripts/build-native.sh'), 'utf8');
+  assert.match(build, /case "\$\{CITIZENSDK_OFFLINE:-false\}" in/u);
+  assert.match(build, /true\) gradle_network_arg='--offline'/u);
+  assert.match(build, /"\$gradle_bin" \$\{gradle_network_arg:\+"\$gradle_network_arg"\} --no-daemon/u);
+  assert.match(build, /CITIZENSDK_OFFLINE只接受true或false/u);
+});
+
 test('原生共用写路径拒绝移动端、产品 ABI、dangling 目标及 Cargo symlink', () => {
   const root = mkdtempSync(join(workRoot, 'native-descendant-path-guard-test-'));
   const outside = join(root, 'outside');
@@ -7559,7 +7330,7 @@ for (const github of process.platform === 'darwin' ? [false, true] : []) {
       const shell = [
         'set -euo pipefail',
         nativeShellFunctions(['fail', 'assert_safe_directory_path', 'assert_descendant_path', 'assert_readonly_dependency_directory', 'macos_hosted_root', 'macos_hosted_preflight']),
-        'tata_console_cache_root="$1"; work_dir="$2"; output_dir="$3"; sdk_dir="$4"; shift 4',
+        'export CITIZENSDK_HOSTED_ROOT="$1"; work_dir="$2"; output_dir="$3"; sdk_dir="$4"; shift 4',
         'uname() { if [[ "$1" == -s ]]; then printf "%s\\n" "${HOSTED_FIXTURE_OS:-Darwin}"; else printf "%s\\n" "${HOSTED_FIXTURE_ARCH:-arm64}"; fi; }',
         'macos_hosted_preflight "$@"',
       ].join('\n');
@@ -7580,7 +7351,7 @@ for (const github of process.platform === 'darwin' ? [false, true] : []) {
       const run = (values = argumentsList, options = {}) => {
         const before = snapshot();
         const result = spawnSync('/bin/bash', [
-          '-c', shell, 'macos-hosted-preflight', root, options.work ?? input.work,
+        '-c', shell, 'macos-hosted-preflight', central, options.work ?? input.work,
           options.output ?? input.output, options.sdk ?? sdk, ...values,
         ], { encoding: 'utf8', cwd: root, timeout: 10000,
           env: { ...process.env, GITHUB_ACTIONS: github ? 'true' : '',
@@ -8212,8 +7983,8 @@ if (process.env.CITIZENSDK_APPLE_NATIVE) {
       'set -euo pipefail',
       nativeShellFunctions(['fail', 'assert_safe_directory_path', 'assert_descendant_path',
         'assert_readonly_dependency_directory', 'macos_hosted_root']),
-      'tata_console_cache_root="$1"; sdk_dir="$2"; macos_hosted_root',
-    ].join('\n'), 'macos-hosted-root', '/Users/rhett/TATA/tataconsole/cache', resolve(citizenSdkRoot)], {
+      'work_dir="$1"; sdk_dir="$2"; export CITIZENSDK_HOSTED_ROOT="$1"; macos_hosted_root',
+    ].join('\n'), 'macos-hosted-root', workRoot, resolve(citizenSdkRoot)], {
       cwd: workRoot, encoding: 'utf8', timeout: 10000,
       env: { PATH: process.env.CITIZENSDK_TOOL_PATH,
         GITHUB_ACTIONS: process.env.GITHUB_ACTIONS, RUNNER_TEMP: process.env.RUNNER_TEMP,
@@ -8323,7 +8094,7 @@ try {
           cwd: root, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
           env: {
             PATH: process.env.CITIZENSDK_TOOL_PATH,
-            TATA_CONSOLE_CACHE_DIR: root,
+            CITIZENSDK_HOSTED_ROOT: root,
             CITIZENSDK_WORK_DIR: commandWork,
             CITIZENSDK_NATIVE_OUTPUT_DIR: commandOutput,
             GITHUB_ACTIONS: process.env.GITHUB_ACTIONS,

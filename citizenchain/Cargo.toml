@@ -72,10 +72,10 @@ citizenchain = { path = "runtime" }
 # 工具
 codec      = { package = "parity-scale-codec", version = "3.6.1", default-features = false, features = ["derive"] }
 scale-info = { version = "2.10.0", default-features = false, features = ["derive"] }
-serde      = { version = "1.0.197", default-features = false, features = ["derive", "alloc"] }
+serde      = { version = "=1.0.229", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1.0.114", default-features = false, features = ["alloc"] }
 clap       = { version = "4.5.3", features = ["derive"] }
-futures    = { version = "0.3.30", features = ["thread-pool"] }
+futures    = { version = "=0.3.34", features = ["thread-pool"] }
 futures-timer = { version = "3.0.2" }
 jsonrpsee  = { version = "0.24.2", features = ["server"] }
 array-bytes = { version = "6.2.2", default-features = false }
@@ -87,7 +87,7 @@ finality-grandpa = { version = "0.16.3", default-features = false }
 log = { version = "0.4.22", default-features = false }
 parking_lot = { version = "0.12.1", default-features = false }
 rand = { version = "0.8.5", default-features = false }
-thiserror = { version = "1.0.64" }
+thiserror = { version = "=2.0.20" }
 tokio = { version = "1.45.0", default-features = false }
 
 # SDK 核心零件（统一使用指定 Polkadot SDK 提交）

@@ -220,7 +220,7 @@ void verify_wal_processes(const std::filesystem::path &directory,
   assert((persisted.*load)().revision == 4);
 }
 
-// 调用方必须把 CITIZENSDK_TEST_WORK_DIR 指向 TataConsole 为本次任务
+// 调用方必须把 CITIZENSDK_TEST_WORK_DIR 指向 调用方 为本次任务
 // 独占创建的 0700 目录。本 helper 逐级 no-follow 打开该目录，随后只
 // 通过该目录 fd + CSPRNG 名称创建子目录；没有路径重解析或 fallback。
 class TempDirectory final {

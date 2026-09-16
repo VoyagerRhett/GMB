@@ -5,22 +5,22 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:citizenapp/8964/profile/models/citizen_profile.dart';
-import 'package:citizenapp/8964/profile/models/profile_presentation.dart';
 import 'package:citizenapp/8964/profile/services/citizen_profile_api.dart';
 import 'package:citizenapp/8964/profile/services/citizen_profile_cache.dart';
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
-import 'package:citizenapp/8964/profile/user_profile_page.dart';
 import 'package:citizenapp/8964/profile/widgets/profile_avatar.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/chat/chat_entry.dart';
-import 'package:citizenapp/chat/chat_product_policy.dart';
 import 'package:tatachat_sdk/tatachat_sdk.dart';
+import 'package:citizenapp/my/membership/subscription_service.dart';
 import 'package:citizenapp/my/user/contact_service.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 
 const _ownerUserId = 'CN220-CTZN2-100000001-2026';
 const _peerUserId = 'CN220-CTZN2-100000002-2026';
 const _carolCidNumber = 'CN220-CTZN2-100000003-2026';
+const _directConversationId =
+    'dm:CN220-CTZN2-100000001-2026:CN220-CTZN2-100000002-2026';
 const _peerAccountId =
     '0x2222222222222222222222222222222222222222222222222222222222222222';
 const _peerProfile = CitizenProfile(
@@ -48,8 +48,42 @@ const _peerProfile = CitizenProfile(
 );
 
 void main() {
-  setUp(() => ChatMediaLimits.applyMembershipLevel('freedom'));
-  tearDown(() => ChatMediaLimits.applyMembershipLevel(null));
+  setUp(
+    () => SubscriptionService.setChatAuthorizationForTesting(
+      _ownerUserId,
+      10 * 1024 * 1024,
+    ),
+  );
+  tearDown(
+    () =>
+        SubscriptionService.setChatAuthorizationForTesting(_ownerUserId, null),
+  );
+
+  Future<void> pumpTab(WidgetTester tester, {ChatEntryOpeners? openers}) async {
+    const accountId =
+        '0x1111111111111111111111111111111111111111111111111111111111111111';
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ChatTab(
+            store: _FakeChatStore(),
+            cidNumber: _ownerUserId,
+            accountId: accountId,
+            runtime: _FakeRuntime(address: accountId),
+            openers: openers,
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+
+  /// 菜单开合有动画，但聊天列表有轮询计时器，测试使用固定步长推进动画。
+  Future<void> openMenu(WidgetTester tester) async {
+    await tester.tap(find.byIcon(Icons.add_rounded));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+  }
 
   testWidgets('本地会话未返回时直接显示聊天页面且不使用整页转圈', (tester) async {
     final store = _PendingChatStore();
@@ -57,10 +91,10 @@ void main() {
       MaterialApp(
         home: Scaffold(
           body: ChatTab(
+            runtime: _FakeRuntime(address: _peerAccountId),
             store: store,
             cidNumber: _ownerUserId,
-            accountId:
-                '0x1111111111111111111111111111111111111111111111111111111111111111',
+            accountId: '0x1111111111111111111111111111111111111111111111111111111111111111',
           ),
         ),
       ),
@@ -95,10 +129,10 @@ void main() {
       MaterialApp(
         home: Scaffold(
           body: ChatTab(
+            runtime: _FakeRuntime(address: _peerAccountId),
             store: store,
             cidNumber: '',
-            accountId:
-                '0x1111111111111111111111111111111111111111111111111111111111111111',
+            accountId: '0x1111111111111111111111111111111111111111111111111111111111111111',
           ),
         ),
       ),
@@ -118,325 +152,6 @@ void main() {
     await tester.pump();
   });
 
-  testWidgets('聊天记录未返回时直接显示会话页和输入区域', (tester) async {
-    final store = _PendingMessagesStore();
-    await tester.pumpWidget(
-      MaterialApp(
-        home: CitizenChatPage(
-          conversationId: 'dm:me:peer',
-          ownerUserId: _ownerUserId,
-          accountId:
-              '0x1111111111111111111111111111111111111111111111111111111111111111',
-          peerUserId: _peerUserId,
-          title: '张三',
-          store: store,
-        ),
-      ),
-    );
-    await tester.pump();
-
-    expect(find.text('张三'), findsOneWidget);
-    expect(
-      find.byKey(const ValueKey('chat-peer-profile-entry')),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(const ValueKey('chat-expression-toggle')),
-      findsOneWidget,
-    );
-    expect(find.byKey(const ValueKey('chat-page-progress')), findsOneWidget);
-    expect(find.text('No messages yet'), findsNothing);
-    expect(find.text('暂无消息'), findsNothing);
-    expect(find.byType(CircularProgressIndicator), findsNothing);
-
-    store.completer.complete(const <ChatStoredMessage>[]);
-    await tester.pump(const Duration(milliseconds: 100));
-    expect(find.byKey(const ValueKey('chat-page-progress')), findsNothing);
-    expect(find.text('No messages yet'), findsNothing);
-    expect(find.text('暂无消息'), findsOneWidget);
-
-    await tester.pumpWidget(const SizedBox.shrink());
-    await tester.pump();
-  });
-
-  testWidgets('本地聊天记录未返回前不闪现空态，返回后直接显示历史消息', (tester) async {
-    final store = _PendingMessagesStore();
-    final readThrough = <int>[];
-    await tester.pumpWidget(
-      MaterialApp(
-        home: CitizenChatPage(
-          conversationId: 'dm:me:peer',
-          ownerUserId: _ownerUserId,
-          accountId:
-              '0x1111111111111111111111111111111111111111111111111111111111111111',
-          peerUserId: _peerUserId,
-          title: '张三',
-          store: store,
-          onMarkRead: (millis) async => readThrough.add(millis),
-        ),
-      ),
-    );
-    await tester.pump();
-    expect(find.text('No messages yet'), findsNothing);
-    expect(find.text('暂无消息'), findsNothing);
-
-    store.completer.complete(<ChatStoredMessage>[
-      ChatStoredMessage(
-        messageId: 'env-history',
-        conversationId: 'dm:me:peer',
-        direction: 'incoming',
-        senderUserId: _peerUserId,
-        recipientUserId: _ownerUserId,
-        messageKind: ChatMessageKind.text,
-        deliveryState: ChatMessageDeliveryState.receivedByDevice,
-        createdAtMillis: 1000,
-        plaintext: ChatPayloadCodec.encode(ChatContent.text('历史消息')),
-      ),
-    ]);
-    await tester.pump(const Duration(milliseconds: 100));
-    expect(find.text('No messages yet'), findsNothing);
-    expect(find.text('暂无消息'), findsNothing);
-    expect(find.text('历史消息'), findsOneWidget);
-    expect(readThrough, <int>[1000]);
-    await tester.pump(const Duration(milliseconds: 300));
-
-    await tester.pumpWidget(const SizedBox.shrink());
-    await tester.pump();
-  });
-
-  testWidgets('首次本地记录显示后静默重试不占用状态线且不二次读取', (tester) async {
-    final retry = Completer<int>();
-    final store = _FakeChatStore(
-      messages: [
-        ChatStoredMessage(
-          messageId: 'env-fast-first-frame',
-          conversationId: 'dm:me:peer',
-          direction: 'incoming',
-          senderUserId: _peerUserId,
-          recipientUserId: _ownerUserId,
-          messageKind: ChatMessageKind.text,
-          deliveryState: ChatMessageDeliveryState.receivedByDevice,
-          createdAtMillis: 1000,
-          plaintext: ChatPayloadCodec.encode(ChatContent.text('立即显示的记录')),
-        ),
-      ],
-    );
-    await tester.pumpWidget(
-      MaterialApp(
-        home: CitizenChatPage(
-          conversationId: 'dm:me:peer',
-          ownerUserId: _ownerUserId,
-          accountId:
-              '0x1111111111111111111111111111111111111111111111111111111111111111',
-          peerUserId: _peerUserId,
-          title: '张三',
-          store: store,
-          onSync: () => retry.future,
-        ),
-      ),
-    );
-    await tester.pump(const Duration(milliseconds: 100));
-
-    expect(find.text('立即显示的记录'), findsOneWidget);
-    expect(find.byKey(const ValueKey('chat-page-progress')), findsNothing);
-    expect(store.readMessagesCount, 1);
-
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(store.readMessagesCount, 1, reason: '待发送队列尚未完成也不得重复解密首屏');
-
-    retry.complete(0);
-    await tester.pump(const Duration(milliseconds: 100));
-    expect(store.readMessagesCount, 1, reason: '静默补发结束只更新内部投递事实');
-
-    await tester.pumpWidget(const SizedBox.shrink());
-    await tester.pump();
-  });
-
-  testWidgets('媒体路径解析未完成时文字记录和媒体占位先显示', (tester) async {
-    final paths = Completer<Map<String, String>>();
-    List<ChatContent>? requestedContents;
-    final store = _FakeChatStore(
-      messages: [
-        ChatStoredMessage(
-          messageId: 'env-text-before-media',
-          conversationId: 'dm:alice-wallet:bob-wallet',
-          direction: 'incoming',
-          senderUserId: _peerUserId,
-          recipientUserId: _ownerUserId,
-          messageKind: ChatMessageKind.text,
-          deliveryState: ChatMessageDeliveryState.receivedByDevice,
-          createdAtMillis: 1000,
-          plaintext: ChatPayloadCodec.encode(ChatContent.text('媒体前先显示文字')),
-        ),
-        _mediaStored(
-          id: 'delayed',
-          kind: ChatMessageKind.image,
-          mime: 'image/jpeg',
-        ),
-      ],
-    );
-    await tester.pumpWidget(
-      MaterialApp(
-        home: CitizenChatPage(
-          conversationId: 'dm:alice-wallet:bob-wallet',
-          ownerUserId: _ownerUserId,
-          accountId:
-              '0x1111111111111111111111111111111111111111111111111111111111111111',
-          peerUserId: _peerUserId,
-          title: 'Bob',
-          store: store,
-          onResolveMediaPaths: (conversationId, contents) {
-            requestedContents = contents;
-            return paths.future;
-          },
-        ),
-      ),
-    );
-    await tester.pump(const Duration(milliseconds: 100));
-
-    expect(find.text('媒体前先显示文字'), findsOneWidget);
-    expect(find.text('接收中…'), findsOneWidget);
-    expect(find.byKey(const ValueKey('chat-page-progress')), findsNothing);
-    expect(requestedContents?.single.attachmentId, 'att-delayed');
-    expect(store.readMessagesCount, 1);
-
-    paths.complete(const <String, String>{});
-    await tester.pump(const Duration(milliseconds: 100));
-    expect(store.readMessagesCount, 1);
-
-    await tester.pumpWidget(const SizedBox.shrink());
-    await tester.pump(const Duration(milliseconds: 300));
-  });
-
-  testWidgets('聊天窗口顶部直接使用传入的真实头像和会员徽章', (tester) async {
-    const avatarPath = '/cached/chat/avatar.webp';
-    await tester.pumpWidget(
-      MaterialApp(
-        home: CitizenChatPage(
-          conversationId: 'dm:me:peer',
-          ownerUserId: _ownerUserId,
-          accountId:
-              '0x1111111111111111111111111111111111111111111111111111111111111111',
-          peerUserId: _peerUserId,
-          title: '旧昵称',
-          store: _FakeChatStore(),
-          initialProfile: _peerProfile,
-          initialProfileMedia: const CitizenProfileMediaSnapshot(
-            avatarPath: avatarPath,
-          ),
-          profileApi: _FakeProfileApi(_peerProfile),
-          profileCache: const _MemoryProfileCache(_peerProfile),
-          profileMediaCache: _MemoryProfileMediaCache(
-            const CitizenProfileMediaSnapshot(avatarPath: avatarPath),
-          ),
-          sessionProvider: _FakeProfileSessionProvider(),
-        ),
-      ),
-    );
-    await tester.pump();
-
-    final avatar = tester.widget<ProfileAvatar>(find.byType(ProfileAvatar));
-    expect(find.text('会员用户'), findsOneWidget);
-    expect(find.text('旧昵称'), findsNothing);
-    expect(avatar.imagePath, avatarPath);
-    expect(avatar.membershipLevel, 'democracy');
-    expect(avatar.membershipActive, isTrue);
-    expect(avatar.showBadge, isTrue);
-
-    await tester.tap(find.byKey(const ValueKey('chat-peer-profile-entry')));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-    final profilePage = tester.widget<UserProfilePage>(
-      find.byType(UserProfilePage),
-    );
-    expect(profilePage.initialProfile?.membershipLevel, 'democracy');
-    expect(profilePage.initialProfile?.membershipActive, isTrue);
-    expect(profilePage.initialProfileMedia?.avatarPath, avatarPath);
-
-    await tester.pumpWidget(const SizedBox.shrink());
-    await tester.pump();
-  });
-
-  testWidgets('连续文字发送在网络 Future 完成前立即显示且键盘保持焦点', (tester) async {
-    final pendingSends = <Completer<void>>[];
-    final submitted = <String>[];
-    await tester.pumpWidget(
-      MaterialApp(
-        home: CitizenChatPage(
-          conversationId: 'dm:me:peer',
-          ownerUserId: _ownerUserId,
-          accountId:
-              '0x1111111111111111111111111111111111111111111111111111111111111111',
-          peerUserId: _peerUserId,
-          title: '张三',
-          store: _FakeChatStore(),
-          onSendText: (text) {
-            submitted.add(text);
-            final pending = Completer<void>();
-            pendingSends.add(pending);
-            return pending.future;
-          },
-        ),
-      ),
-    );
-    await tester.pump(const Duration(milliseconds: 400));
-
-    final input = find.byKey(const ValueKey('chat-text-input'));
-    await tester.tap(input);
-    await tester.enterText(input, '第一条');
-    await tester.testTextInput.receiveAction(TextInputAction.send);
-    await tester.pump();
-    await tester.enterText(input, '第二条');
-    await tester.testTextInput.receiveAction(TextInputAction.send);
-    await tester.pump();
-
-    expect(submitted, <String>['第一条', '第二条']);
-    expect(find.text('第一条'), findsOneWidget);
-    expect(find.text('第二条'), findsOneWidget);
-    final textField = tester.widget<TextField>(input);
-    expect(textField.controller?.text, isEmpty);
-    expect(textField.focusNode?.hasFocus, isTrue, reason: '键盘发送后必须继续输入');
-
-    for (final pending in pendingSends) {
-      pending.complete();
-    }
-    await tester.pump(const Duration(milliseconds: 400));
-    await tester.pumpWidget(const SizedBox.shrink());
-    await tester.pump(const Duration(milliseconds: 300));
-  });
-
-  testWidgets('聊天标题误传账户时仍按对方 CID 生成稳定默认昵称', (tester) async {
-    const peerUserId = 'CN220-CTZN2-100000002-2026';
-    const peerAccount = 'w5Bc7ma8qUcECfQDJmRyQM2wGmga5XSYtz7DvEengQ86xBWrT';
-    final store = _FakeChatStore();
-    await tester.pumpWidget(
-      MaterialApp(
-        home: CitizenChatPage(
-          conversationId: 'dm:$_ownerUserId:$peerUserId',
-          ownerUserId: _ownerUserId,
-          accountId:
-              '0x1111111111111111111111111111111111111111111111111111111111111111',
-          peerUserId: peerUserId,
-          title: peerAccount,
-          store: store,
-          onSync: () async => 0,
-        ),
-      ),
-    );
-    await tester.pump(const Duration(milliseconds: 100));
-    // flutter_chat_ui 的空列表动画会在首次稳定布局后再排一个 50ms timer。
-    await tester.pump(const Duration(milliseconds: 100));
-
-    expect(
-      find.text(ProfilePresentation.forIdentityKey(peerUserId).fallbackName),
-      findsOneWidget,
-    );
-    expect(find.text(peerAccount), findsNothing);
-
-    await tester.pumpWidget(const SizedBox.shrink());
-    await tester.pump(const Duration(milliseconds: 300));
-  });
-
   testWidgets('隐藏 Chat Tab 不初始化，进入后 init/resume 只同步一次', (tester) async {
     final selectedTab = ValueNotifier<int>(0);
     final runtime = _FakeRuntime(
@@ -450,8 +165,7 @@ void main() {
           body: ChatTab(
             store: _FakeChatStore(),
             cidNumber: _ownerUserId,
-            accountId:
-                '0x1111111111111111111111111111111111111111111111111111111111111111',
+            accountId: '0x1111111111111111111111111111111111111111111111111111111111111111',
             runtime: runtime,
             selectedTab: selectedTab,
             tabIndex: 2,
@@ -480,7 +194,7 @@ void main() {
     final store = _FakeChatStore(
       conversations: [
         ChatConversationPreview(
-          conversationId: 'dm:alice-wallet:bob-wallet',
+          conversationId: _directConversationId,
           title: 'Bob',
           peerUserId: 'CN220-CTZN2-100000002-2026',
           lastMessage: 'hello',
@@ -494,10 +208,10 @@ void main() {
       MaterialApp(
         home: Scaffold(
           body: ChatTab(
+            runtime: _FakeRuntime(address: _peerAccountId),
             store: store,
             cidNumber: _ownerUserId,
-            accountId:
-                '0x1111111111111111111111111111111111111111111111111111111111111111',
+            accountId: '0x1111111111111111111111111111111111111111111111111111111111111111',
           ),
         ),
       ),
@@ -516,7 +230,7 @@ void main() {
     expect(find.byIcon(Icons.qr_code_scanner_rounded), findsNothing);
     expect(find.byIcon(Icons.qr_code_2_rounded), findsNothing);
     final tile = find.byKey(
-      const ValueKey('chat-conversation-dm:alice-wallet:bob-wallet'),
+      const ValueKey('chat-conversation-$_directConversationId'),
     );
     final cardDecoration = tester
         .widgetList<DecoratedBox>(
@@ -547,10 +261,10 @@ void main() {
       MaterialApp(
         home: Scaffold(
           body: ChatTab(
+            runtime: _FakeRuntime(address: _peerAccountId),
             store: store,
             cidNumber: _ownerUserId,
-            accountId:
-                '0x1111111111111111111111111111111111111111111111111111111111111111',
+            accountId: '0x1111111111111111111111111111111111111111111111111111111111111111',
             profileApi: _FakeProfileApi(_peerProfile),
             profileCache: const _MemoryProfileCache(_peerProfile),
             profileMediaCache: _MemoryProfileMediaCache(
@@ -591,14 +305,10 @@ void main() {
   testWidgets('进会话点贴纸 → 接线到 runtime.sendSticker(peer/conv/pack/sticker 正确)', (
     tester,
   ) async {
-    final runtime = _FakeRuntime(
-      address:
-          '0x1111111111111111111111111111111111111111111111111111111111111111',
-    );
     final store = _FakeChatStore(
       conversations: [
         ChatConversationPreview(
-          conversationId: 'dm:alice-wallet:bob-wallet',
+          conversationId: _directConversationId,
           title: 'Bob',
           peerUserId: _peerUserId,
           lastMessage: 'hi',
@@ -608,14 +318,18 @@ void main() {
         ),
       ],
     );
+    final runtime = _FakeRuntime(
+      address:
+          '0x1111111111111111111111111111111111111111111111111111111111111111',
+      store: store,
+    );
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
           body: ChatTab(
             store: store,
             cidNumber: _ownerUserId,
-            accountId:
-                '0x1111111111111111111111111111111111111111111111111111111111111111',
+            accountId: '0x1111111111111111111111111111111111111111111111111111111111111111',
             runtime: runtime,
           ),
         ),
@@ -639,7 +353,7 @@ void main() {
     // 委托四参逐字正确(named 参数不会换位,守的是漏接/错映射的回归)。
     expect(runtime.sentStickers.single, [
       _peerUserId,
-      'dm:alice-wallet:bob-wallet',
+      _directConversationId,
       'fluent3d',
       'grinning_face',
     ]);
@@ -647,7 +361,7 @@ void main() {
       runtime.retryScopes,
       contains((
         recipientUserId: _peerUserId,
-        conversationId: 'dm:alice-wallet:bob-wallet',
+        conversationId: _directConversationId,
       )),
       reason: '进入私聊只能重试当前对端的当前会话队列',
     );
@@ -664,7 +378,7 @@ void main() {
     final store = _FakeChatStore(
       conversations: [
         ChatConversationPreview(
-          conversationId: 'dm:alice-wallet:bob-wallet',
+          conversationId: _directConversationId,
           title: 'Bob',
           peerUserId: _peerUserId,
           lastMessage: 'hello',
@@ -686,6 +400,7 @@ void main() {
     final runtime = _FakeRuntime(
       address:
           '0x1111111111111111111111111111111111111111111111111111111111111111',
+      store: store,
       onDeleteConversation: (conversationId) async {
         await allowPhysicalDelete.future;
         await store.deleteConversation(
@@ -694,10 +409,8 @@ void main() {
           bindingToken: const ChatBindingFenceToken(
             ownerUserId: _ownerUserId,
             bindingRevision: 1,
-            accountId:
-                '0x1111111111111111111111111111111111111111111111111111111111111111',
-            keyDomain:
-                '0x4242424242424242424242424242424242424242424242424242424242424242',
+            accountId: '0x1111111111111111111111111111111111111111111111111111111111111111',
+            keyDomain: '0x4242424242424242424242424242424242424242424242424242424242424242',
             generation: 1,
           ),
         );
@@ -710,8 +423,7 @@ void main() {
           body: ChatTab(
             store: store,
             cidNumber: _ownerUserId,
-            accountId:
-                '0x1111111111111111111111111111111111111111111111111111111111111111',
+            accountId: '0x1111111111111111111111111111111111111111111111111111111111111111',
             runtime: runtime,
           ),
         ),
@@ -734,7 +446,7 @@ void main() {
 
     allowPhysicalDelete.complete();
     await tester.pumpAndSettle();
-    expect(store.deletedConversationIds, ['dm:alice-wallet:bob-wallet']);
+    expect(store.deletedConversationIds, [_directConversationId]);
   });
 
   testWidgets('聊天窗口确认删除后立即返回且路由重载不恢复待清理卡片', (tester) async {
@@ -743,7 +455,7 @@ void main() {
     final store = _FakeChatStore(
       conversations: [
         ChatConversationPreview(
-          conversationId: 'dm:alice-wallet:bob-wallet',
+          conversationId: _directConversationId,
           title: 'Bob',
           peerUserId: _peerUserId,
           lastMessage: 'hello',
@@ -755,7 +467,7 @@ void main() {
       messages: [
         ChatStoredMessage(
           messageId: 'env-window-delete',
-          conversationId: 'dm:alice-wallet:bob-wallet',
+          conversationId: _directConversationId,
           direction: 'incoming',
           senderUserId: _peerUserId,
           recipientUserId: _ownerUserId,
@@ -769,6 +481,7 @@ void main() {
     final runtime = _FakeRuntime(
       address:
           '0x1111111111111111111111111111111111111111111111111111111111111111',
+      store: store,
       onDeleteConversation: (conversationId) async {
         deleteCalls += 1;
         await allowPhysicalDelete.future;
@@ -778,10 +491,8 @@ void main() {
           bindingToken: const ChatBindingFenceToken(
             ownerUserId: _ownerUserId,
             bindingRevision: 1,
-            accountId:
-                '0x1111111111111111111111111111111111111111111111111111111111111111',
-            keyDomain:
-                '0x4242424242424242424242424242424242424242424242424242424242424242',
+            accountId: '0x1111111111111111111111111111111111111111111111111111111111111111',
+            keyDomain: '0x4242424242424242424242424242424242424242424242424242424242424242',
             generation: 1,
           ),
         );
@@ -794,8 +505,7 @@ void main() {
           body: ChatTab(
             store: store,
             cidNumber: _ownerUserId,
-            accountId:
-                '0x1111111111111111111111111111111111111111111111111111111111111111',
+            accountId: '0x1111111111111111111111111111111111111111111111111111111111111111',
             runtime: runtime,
           ),
         ),
@@ -803,12 +513,10 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 400));
     await tester.tap(
-      find.byKey(
-        const ValueKey('chat-conversation-dm:alice-wallet:bob-wallet'),
-      ),
+      find.byKey(const ValueKey('chat-conversation-$_directConversationId')),
     );
     await tester.pumpAndSettle();
-    expect(find.byType(CitizenChatPage), findsOneWidget);
+    expect(find.byType(ChatConversationPage), findsOneWidget);
     expect(find.text('hello'), findsOneWidget);
 
     await tester.tap(find.byIcon(Icons.more_vert_rounded));
@@ -820,13 +528,17 @@ void main() {
 
     expect(deleteCalls, 1);
     expect(find.text('聊天暂时无法使用，请稍后重试'), findsNothing);
-    expect(find.byType(CitizenChatPage), findsNothing, reason: '确认后聊天窗口必须立即关闭');
+    expect(
+      find.byType(ChatConversationPage),
+      findsNothing,
+      reason: '确认后 TataChatSDK 聊天窗口必须立即关闭',
+    );
     expect(find.text('Bob'), findsNothing, reason: '后台删除未完成时路由重载也不得恢复卡片');
     expect(store.deletedConversationIds, isEmpty);
 
     allowPhysicalDelete.complete();
     await tester.pumpAndSettle();
-    expect(store.deletedConversationIds, ['dm:alice-wallet:bob-wallet']);
+    expect(store.deletedConversationIds, [_directConversationId]);
     expect(find.text('Bob'), findsNothing);
   });
 
@@ -835,6 +547,7 @@ void main() {
       MaterialApp(
         home: Scaffold(
           body: ChatTab(
+            runtime: _FakeRuntime(address: _peerAccountId),
             store: _FakeChatStore(),
             cidNumber: _ownerUserId,
             accountId: '',
@@ -860,8 +573,7 @@ void main() {
           body: ChatTab(
             store: store,
             cidNumber: _ownerUserId,
-            accountId:
-                '0x1111111111111111111111111111111111111111111111111111111111111111',
+            accountId: '0x1111111111111111111111111111111111111111111111111111111111111111',
             runtime: runtime,
           ),
         ),
@@ -898,8 +610,7 @@ void main() {
           body: ChatTab(
             store: store,
             cidNumber: _ownerUserId,
-            accountId:
-                '0x1111111111111111111111111111111111111111111111111111111111111111',
+            accountId: '0x1111111111111111111111111111111111111111111111111111111111111111',
             runtime: runtime,
           ),
         ),
@@ -916,7 +627,7 @@ void main() {
 
     store.replaceConversations([
       ChatConversationPreview(
-        conversationId: 'dm:alice-wallet:bob-wallet',
+        conversationId: _directConversationId,
         title: 'Bob',
         peerUserId: _peerUserId,
         lastMessage: '后台补发完成后的本地结果',
@@ -945,7 +656,7 @@ void main() {
     final store = _FakeChatStore(
       conversations: [
         ChatConversationPreview(
-          conversationId: 'dm:alice-wallet:bob-wallet',
+          conversationId: _directConversationId,
           title: 'Bob',
           peerUserId: _peerUserId,
           lastMessage: '本地会话必须保留',
@@ -962,8 +673,7 @@ void main() {
           body: ChatTab(
             store: store,
             cidNumber: _ownerUserId,
-            accountId:
-                '0x1111111111111111111111111111111111111111111111111111111111111111',
+            accountId: '0x1111111111111111111111111111111111111111111111111111111111111111',
             runtime: runtime,
           ),
         ),
@@ -996,8 +706,7 @@ void main() {
           body: ChatTab(
             store: store,
             cidNumber: _ownerUserId,
-            accountId:
-                '0x1111111111111111111111111111111111111111111111111111111111111111',
+            accountId: '0x1111111111111111111111111111111111111111111111111111111111111111',
             runtime: runtime,
           ),
         ),
@@ -1024,447 +733,6 @@ void main() {
 
     expect(runtime.realtimeStopCount, 1);
   });
-
-  testWidgets('聊天页打开后自动重试本机发送队列', (tester) async {
-    var syncCount = 0;
-    final store = _FakeChatStore();
-
-    await tester.pumpWidget(
-      MaterialApp(
-        home: CitizenChatPage(
-          conversationId: 'dm:alice-wallet:bob-wallet',
-          ownerUserId: _ownerUserId,
-          accountId:
-              '0x1111111111111111111111111111111111111111111111111111111111111111',
-          peerUserId: _peerUserId,
-          title: 'Bob',
-          store: store,
-          onSync: () async {
-            syncCount += 1;
-            return 0;
-          },
-        ),
-      ),
-    );
-    await tester.pump(const Duration(milliseconds: 100));
-
-    expect(syncCount, 1);
-    expect(store.readMessagesCount, greaterThanOrEqualTo(1));
-
-    await tester.pump(const Duration(seconds: 8));
-    await tester.pump();
-
-    expect(syncCount, 2);
-
-    await tester.pumpWidget(const SizedBox.shrink());
-    await tester.pump();
-  });
-
-  testWidgets('聊天页 uses realtime notice before polling fallback', (
-    tester,
-  ) async {
-    var syncCount = 0;
-    var realtimeStopCount = 0;
-    Future<void> Function()? realtimeNotice;
-    final store = _FakeChatStore();
-
-    await tester.pumpWidget(
-      MaterialApp(
-        home: CitizenChatPage(
-          conversationId: 'dm:alice-wallet:bob-wallet',
-          ownerUserId: _ownerUserId,
-          accountId:
-              '0x1111111111111111111111111111111111111111111111111111111111111111',
-          peerUserId: _peerUserId,
-          title: 'Bob',
-          store: store,
-          onSync: () async {
-            syncCount += 1;
-            return 0;
-          },
-          onStartRealtime: ({required onNotice, onDisconnected}) async {
-            realtimeNotice = onNotice;
-            return () async {
-              realtimeStopCount += 1;
-            };
-          },
-        ),
-      ),
-    );
-    await tester.pump(const Duration(milliseconds: 100));
-
-    expect(syncCount, 1);
-
-    await tester.pump(const Duration(seconds: 8));
-    await tester.pump();
-
-    expect(syncCount, 1);
-
-    await realtimeNotice?.call();
-    await tester.pump();
-
-    expect(syncCount, 1, reason: 'Realtime 入站通知只重读本地当前会话，不重复发起网络补发');
-    expect(store.readMessagesCount, greaterThanOrEqualTo(2));
-
-    await tester.pumpWidget(const SizedBox.shrink());
-    await tester.pump();
-
-    expect(realtimeStopCount, 1);
-  });
-
-  testWidgets('历史坏密文隔离提示在心跳刷新期间保持稳定且有效消息不消失', (tester) async {
-    final message = ChatStoredMessage(
-      messageId: 'env-readable',
-      conversationId: 'dm:me:peer',
-      direction: 'incoming',
-      senderUserId: _peerUserId,
-      recipientUserId: _ownerUserId,
-      messageKind: ChatMessageKind.text,
-      deliveryState: ChatMessageDeliveryState.receivedByDevice,
-      createdAtMillis: 1000,
-      plaintext: ChatPayloadCodec.encode(ChatContent.text('仍然可见的消息')),
-    );
-    final store = _IntegrityRefreshStore(message);
-    await tester.pumpWidget(
-      MaterialApp(
-        home: CitizenChatPage(
-          conversationId: 'dm:me:peer',
-          ownerUserId: _ownerUserId,
-          accountId:
-              '0x1111111111111111111111111111111111111111111111111111111111111111',
-          peerUserId: _peerUserId,
-          title: '张三',
-          store: store,
-          onSync: () async => 0,
-          onStartRealtime: ({required onNotice, onDisconnected}) async =>
-              () async {},
-        ),
-      ),
-    );
-    await tester.pump(const Duration(milliseconds: 100));
-    final notice = find.text('部分本机历史消息无法验证，其他记录已正常显示');
-    final readable = find.text('仍然可见的消息');
-    expect(notice, findsOneWidget);
-    expect(readable, findsOneWidget);
-    final initialTop = tester.getTopLeft(readable).dy;
-
-    await tester.pump(const Duration(seconds: 20));
-    await tester.pump();
-    expect(notice, findsOneWidget, reason: '后台刷新开始时不得先移除提示造成页面上下抖动');
-    expect(tester.getTopLeft(readable).dy, initialTop);
-
-    store.completeHeartbeat();
-    await tester.pump();
-    expect(notice, findsOneWidget);
-    expect(readable, findsOneWidget);
-    expect(tester.getTopLeft(readable).dy, initialTop);
-    await tester.pumpWidget(const SizedBox.shrink());
-    await tester.pump();
-  });
-
-  testWidgets('聊天页相册动作发送选择的加密媒体', (tester) async {
-    ChatMediaDraft? sentMedia;
-    ChatMediaLocalCommitNotifier? localCommitted;
-    final network = Completer<void>();
-    final store = _FakeChatStore();
-
-    await tester.pumpWidget(
-      MaterialApp(
-        home: CitizenChatPage(
-          conversationId: 'dm:alice-wallet:bob-wallet',
-          ownerUserId: _ownerUserId,
-          accountId:
-              '0x1111111111111111111111111111111111111111111111111111111111111111',
-          peerUserId: _peerUserId,
-          title: 'Bob',
-          store: store,
-          pickMedia: () async => const ChatMediaDraft(
-            kind: ChatMessageKind.file,
-            fileName: 'note.txt',
-            contentType: 'text/plain',
-            sourcePath: '/tmp/note.txt',
-            byteSize: 3,
-          ),
-          onSendMedia: (media, {onLocalCommitted}) async {
-            sentMedia = media;
-            localCommitted = onLocalCommitted;
-            await network.future;
-          },
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byKey(const ValueKey('chat-actions-toggle')));
-    await tester.pump();
-    await tester.tap(find.byKey(const ValueKey('chat-action-gallery')));
-    await tester.pump();
-
-    expect(sentMedia?.kind, ChatMessageKind.file);
-    expect(sentMedia?.fileName, 'note.txt');
-    expect(sentMedia?.sourcePath, '/tmp/note.txt');
-    expect(sentMedia?.byteSize, 3);
-    expect(find.text('note.txt'), findsOneWidget, reason: '媒体网络未完成也必须先显示本地气泡');
-
-    await localCommitted?.call();
-    network.complete();
-    await tester.pump(const Duration(milliseconds: 400));
-  });
-
-  testWidgets('聊天页 taps a file message to save the received media', (
-    tester,
-  ) async {
-    final store = _FakeChatStore(
-      messages: [
-        ChatStoredMessage(
-          messageId: 'env-attachment',
-          conversationId: 'dm:alice-wallet:bob-wallet',
-          direction: 'incoming',
-          senderUserId: _peerUserId,
-          recipientUserId: _ownerUserId,
-          messageKind: ChatMessageKind.file,
-          deliveryState: ChatMessageDeliveryState.receivedByDevice,
-          createdAtMillis: 3000,
-          plaintext: ChatPayloadCodec.encode(
-            ChatContent.media(
-              kind: ChatMessageKind.file,
-              attachmentId: 'att-1',
-              fileName: 'photo.txt',
-              mime: 'text/plain',
-              byteSize: 3,
-              cipherKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-              cipherByteSize: 19,
-              cipherSha256:
-                  '0000000000000000000000000000000000000000000000000000000000000000',
-            ),
-          ),
-        ),
-      ],
-    );
-    String? downloadedPlaintext;
-
-    await tester.pumpWidget(
-      MaterialApp(
-        home: CitizenChatPage(
-          conversationId: 'dm:alice-wallet:bob-wallet',
-          ownerUserId: _ownerUserId,
-          accountId:
-              '0x1111111111111111111111111111111111111111111111111111111111111111',
-          peerUserId: _peerUserId,
-          title: 'Bob',
-          store: store,
-          onDownloadAttachment: (conversationId, controlPlaintext) async {
-            downloadedPlaintext = controlPlaintext;
-            return const ChatDownloadedAttachment(
-              attachmentId: 'att-1',
-              fileName: 'photo.txt',
-              contentType: 'text/plain',
-              clearByteSize: 3,
-              filePath: '/tmp/photo.txt',
-            );
-          },
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('photo.txt'));
-    await tester.pumpAndSettle();
-
-    expect(
-      ChatPayloadCodec.decode(downloadedPlaintext!).kind,
-      ChatMessageKind.file,
-    );
-    expect(find.text('已保存：photo.txt'), findsOneWidget);
-  });
-
-  testWidgets('聊天页 deletes local conversation from menu and returns', (
-    tester,
-  ) async {
-    final allowPhysicalDelete = Completer<void>();
-    var deleteCalls = 0;
-    final store = _FakeChatStore(
-      messages: [
-        ChatStoredMessage(
-          messageId: 'env-delete-ui',
-          conversationId: 'dm:alice-wallet:bob-wallet',
-          direction: 'incoming',
-          senderUserId: _peerUserId,
-          recipientUserId: _ownerUserId,
-          messageKind: ChatMessageKind.text,
-          deliveryState: ChatMessageDeliveryState.receivedByDevice,
-          createdAtMillis: 1000,
-          plaintext: ChatPayloadCodec.encode(ChatContent.text('hello')),
-        ),
-      ],
-    );
-
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Builder(
-          builder: (context) => Scaffold(
-            body: Center(
-              child: TextButton(
-                onPressed: () {
-                  Navigator.of(context).push<void>(
-                    MaterialPageRoute(
-                      builder: (_) => CitizenChatPage(
-                        conversationId: 'dm:alice-wallet:bob-wallet',
-                        ownerUserId: _ownerUserId,
-                        accountId:
-                            '0x1111111111111111111111111111111111111111111111111111111111111111',
-                        peerUserId: _peerUserId,
-                        title: 'Bob',
-                        store: store,
-                        onDeleteConversation: () async {
-                          deleteCalls += 1;
-                          await allowPhysicalDelete.future;
-                          await store.deleteConversation(
-                            _ownerUserId,
-                            'dm:alice-wallet:bob-wallet',
-                            bindingToken: const ChatBindingFenceToken(
-                              ownerUserId: _ownerUserId,
-                              bindingRevision: 1,
-                              accountId:
-                                  '0x1111111111111111111111111111111111111111111111111111111111111111',
-                              keyDomain:
-                                  '0x4242424242424242424242424242424242424242424242424242424242424242',
-                              generation: 1,
-                            ),
-                          );
-                        },
-                      ),
-                    ),
-                  );
-                },
-                child: const Text('打开聊天'),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-
-    await tester.tap(find.text('打开聊天'));
-    await tester.pumpAndSettle();
-    expect(find.text('hello'), findsOneWidget);
-
-    await tester.tap(find.byIcon(Icons.more_vert_rounded));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('删除聊天记录'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('确定删除这台设备上的聊天记录？'), findsOneWidget);
-
-    await tester.tap(find.widgetWithText(TextButton, '删除'));
-    await tester.pump();
-
-    expect(deleteCalls, 1);
-    expect(store.deletedConversationIds, isEmpty, reason: '窗口关闭不得等待后台清理');
-    expect(find.text('打开聊天'), findsOneWidget);
-
-    allowPhysicalDelete.complete();
-    await tester.pumpAndSettle();
-    expect(store.deletedConversationIds, ['dm:alice-wallet:bob-wallet']);
-  });
-
-  testWidgets('聊天页把未到达的图片/视频消息渲染为「接收中」占位', (tester) async {
-    // 无本机路径(未注入 onResolveMediaPaths)→ source 为空 → 走 hasFile==false 占位分支。
-    final store = _FakeChatStore(
-      messages: [
-        _mediaStored(
-          id: 'img',
-          kind: ChatMessageKind.image,
-          mime: 'image/jpeg',
-        ),
-        _mediaStored(id: 'vid', kind: ChatMessageKind.video, mime: 'video/mp4'),
-      ],
-    );
-    await tester.pumpWidget(
-      MaterialApp(
-        home: CitizenChatPage(
-          conversationId: 'dm:alice-wallet:bob-wallet',
-          ownerUserId: _ownerUserId,
-          accountId:
-              '0x1111111111111111111111111111111111111111111111111111111111111111',
-          peerUserId: _peerUserId,
-          title: 'Bob',
-          store: store,
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    // 图片、视频两条都在"接收中"占位;误反转 hasFile 会去解码空路径而非占位。
-    expect(find.text('接收中…'), findsNWidgets(2));
-    // 视频占位带播放图标,与图片占位区分。
-    expect(find.byIcon(Icons.play_circle_fill_rounded), findsOneWidget);
-  });
-
-  testWidgets('聊天页视频占位从 metadata 读取 blurhash 渲染封面', (tester) async {
-    const hash = 'LEHV6nWB2yk8pyo0adR*.7kCMdnj';
-    final store = _FakeChatStore(
-      messages: [
-        _mediaStored(
-          id: 'vid',
-          kind: ChatMessageKind.video,
-          mime: 'video/mp4',
-          blurhash: hash,
-        ),
-      ],
-    );
-    await tester.pumpWidget(
-      MaterialApp(
-        home: CitizenChatPage(
-          conversationId: 'dm:alice-wallet:bob-wallet',
-          ownerUserId: _ownerUserId,
-          accountId:
-              '0x1111111111111111111111111111111111111111111111111111111111111111',
-          peerUserId: _peerUserId,
-          title: 'Bob',
-          store: store,
-        ),
-      ),
-    );
-    // 不用 pumpAndSettle:BlurHash 内部异步解码;只需确认封面 widget 已入树。
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    // 视频封面用 metadata['blurhash'];若误读 message.blurhash(VideoMessage 无此字段)
-    // 则渲染空 Container,BlurHash 不出现。
-    expect(find.byKey(const ValueKey('chat-video-blurhash')), findsOneWidget);
-    // Chat 首帧已经入树时会安排 250ms 的初始滚动，推进到定时器结束，
-    // 避免把组件库的正常滚动任务泄漏到下一条测试。
-    await tester.pump(const Duration(milliseconds: 300));
-  });
-
-  // ---- 顶栏改造：搜索框 + 加号 5 入口 ----
-
-  const self =
-      '0x1111111111111111111111111111111111111111111111111111111111111111';
-
-  Future<void> pumpTab(WidgetTester tester, {ChatEntryOpeners? openers}) async {
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: ChatTab(
-            store: _FakeChatStore(),
-            cidNumber: _ownerUserId,
-            accountId: self,
-            runtime: _FakeRuntime(address: self),
-            openers: openers,
-          ),
-        ),
-      ),
-    );
-    await tester.pump(const Duration(milliseconds: 100));
-  }
-
-  /// 菜单开合有动画，但聊天页有 15s 轮询定时器，用 pumpAndSettle 会被推着走，
-  /// 因此一律用固定步长 pump。
-  Future<void> openMenu(WidgetTester tester) async {
-    await tester.tap(find.byIcon(Icons.add_rounded));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-  }
 
   testWidgets('顶部为搜索框、右上角为加号，旧「新建群聊」卡片已删', (tester) async {
     await pumpTab(tester);
@@ -1589,40 +857,6 @@ void main() {
   });
 }
 
-ChatStoredMessage _mediaStored({
-  required String id,
-  required ChatMessageKind kind,
-  required String mime,
-  String? blurhash,
-}) {
-  return ChatStoredMessage(
-    messageId: 'env-$id',
-    conversationId: 'dm:alice-wallet:bob-wallet',
-    direction: 'incoming',
-    senderUserId: _peerUserId,
-    recipientUserId: _ownerUserId,
-    messageKind: kind,
-    deliveryState: ChatMessageDeliveryState.receivedByDevice,
-    createdAtMillis: 3000,
-    plaintext: ChatPayloadCodec.encode(
-      ChatContent.media(
-        kind: kind,
-        attachmentId: 'att-$id',
-        fileName: kind == ChatMessageKind.video ? 'v.mp4' : 'p.jpg',
-        mime: mime,
-        byteSize: 100,
-        width: 800,
-        height: 600,
-        blurhash: blurhash,
-        cipherKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-        cipherByteSize: 116,
-        cipherSha256:
-            '1111111111111111111111111111111111111111111111111111111111111111',
-      ),
-    ),
-  );
-}
-
 class _FakeChatStore extends ChatStore {
   _FakeChatStore({
     List<ChatConversationPreview> conversations = const [],
@@ -1713,56 +947,6 @@ class _PendingChatStore extends _FakeChatStore {
     required String ownerUserId,
     required String currentAccountId,
   }) => completer.future;
-}
-
-class _PendingMessagesStore extends _FakeChatStore {
-  final Completer<List<ChatStoredMessage>> completer =
-      Completer<List<ChatStoredMessage>>();
-
-  @override
-  Future<List<ChatStoredMessage>> readMessages({
-    required String ownerUserId,
-    required String currentAccountId,
-    required String conversationId,
-  }) => completer.future;
-}
-
-class _IntegrityRefreshStore extends _FakeChatStore {
-  _IntegrityRefreshStore(this.message)
-    : super(messages: <ChatStoredMessage>[message]);
-
-  final ChatStoredMessage message;
-  final Completer<ChatMessageDisplayBatch> _heartbeat =
-      Completer<ChatMessageDisplayBatch>();
-  var _reads = 0;
-
-  @override
-  Future<ChatMessageDisplayBatch> readMessagesForDisplay({
-    required String ownerUserId,
-    required String currentAccountId,
-    required String conversationId,
-  }) {
-    _reads += 1;
-    if (_reads == 1) {
-      return Future<ChatMessageDisplayBatch>.value(
-        ChatMessageDisplayBatch(
-          messages: <ChatStoredMessage>[message],
-          integrityFailureCount: 1,
-        ),
-      );
-    }
-    return _heartbeat.future;
-  }
-
-  void completeHeartbeat() {
-    if (_heartbeat.isCompleted) return;
-    _heartbeat.complete(
-      ChatMessageDisplayBatch(
-        messages: <ChatStoredMessage>[message],
-        integrityFailureCount: 1,
-      ),
-    );
-  }
 }
 
 class _FakeProfileApi extends CitizenProfileApi {
@@ -1856,6 +1040,7 @@ class _UnusedChatStorageKeyProvider implements ChatStorageKeyProvider {
 class _FakeRuntime extends ChatSdk {
   _FakeRuntime({
     required this.address,
+    super.store,
     this.enableRealtime = false,
     this.onDeleteConversation,
     this.retryCompleter,

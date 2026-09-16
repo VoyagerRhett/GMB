@@ -15,7 +15,7 @@ set -euo pipefail
 # 仓库根(本脚本位于 <repo>/citizenchain/scripts/)。
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-SHARED_WORK_DIR="${TATA_CONSOLE_BUILD_CACHE_DIR:-${TMPDIR:-/tmp}/gmb-sync-derive-vectors}"
+SHARED_WORK_DIR="${CITIZENCHAIN_VECTOR_WORK_DIR:-${TMPDIR:-/tmp}/citizenchain/sync-derive-vectors}"
 mkdir -p "$SHARED_WORK_DIR"
 export CARGO_TARGET_DIR="$SHARED_WORK_DIR/cargo"
 export TMPDIR="$SHARED_WORK_DIR/"

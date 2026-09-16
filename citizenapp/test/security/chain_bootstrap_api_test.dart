@@ -99,10 +99,7 @@ void main() {
 
     final parsed = ChainBootstrapManifest.fromJson(enabled);
     expect(parsed.services.signedExtrinsicRelayEnabled, isTrue);
-    expect(
-      parsed.services.signedExtrinsicRelayPath,
-      '/chain/extrinsics/relay',
-    );
+    expect(parsed.services.signedExtrinsicRelayPath, '/chain/extrinsics/relay');
 
     final badPath = _manifest();
     (badPath['services'] as Map<String, dynamic>)['signed_extrinsic_relay'] = {
@@ -130,58 +127,53 @@ void main() {
       throwsUnsupportedError,
     );
   });
-
 }
 
 Map<String, dynamic> _manifest() => {
-      'ok': true,
-      'schema': 'citizenapp.chain.bootstrap',
-      'generated_at': 1800000000000,
-      'cache_ttl_seconds': 300,
-      'chain': {
-        'chain_id': 'citizenchain',
-        'chain_name': 'CitizenChain',
-        'chain_type': 'Live',
-        'protocol_id': 'citizenchain',
-        // 协议解析夹具使用合成哈希，不复制真实创世锚点。
-        'genesis_hash':
-            '0x2222222222222222222222222222222222222222222222222222222222222222',
-        'state_root': _stateRoot,
-        'ss58_format': 2027,
-        'token_symbol': 'GMB',
-        'token_decimals': 2,
-      },
-      'light_client': {
-        'mode': 'smoldot',
-        'truth_source': 'p2p_finalized_storage',
-        'api_is_truth': false,
-        'bundled_assets_required': [
-          'assets/chainspec.json',
-          'assets/light_sync_state.json',
-        ],
-      },
-      'p2p': {
-        'bootnodes': [_bootnodeA, _bootnodeB],
-        'bootnodes_source': 'worker_config',
-        'min_peer_count_hint': 1,
-      },
-      'services': {
-        'square_base_url': 'https://api.onchina.org/square',
-        'chat_base_url': 'https://api.onchina.org/chat',
-        'media_base_url': 'https://api.onchina.org/square/media',
-        'signed_extrinsic_relay': {
-          'enabled': false,
-          'path': null,
-        },
-      },
-      'security': {
-        'exposes_rpc_url': false,
-        'rpc_proxy': false,
-        'exposes_private_key_material': false,
-        'validator_rpc_public': false,
-      },
-      'degradation': {
-        'p2p_unavailable': 'chat_square_continue_chain_state_degraded',
-        'chain_success_source': 'finalized_runtime_storage_or_events',
-      },
-    };
+  'ok': true,
+  'schema': 'citizenapp.chain.bootstrap',
+  'generated_at': 1800000000000,
+  'cache_ttl_seconds': 300,
+  'chain': {
+    'chain_id': 'citizenchain',
+    'chain_name': 'CitizenChain',
+    'chain_type': 'Live',
+    'protocol_id': 'citizenchain',
+    // 协议解析夹具使用合成哈希，不复制真实创世锚点。
+    'genesis_hash':
+        '0x2222222222222222222222222222222222222222222222222222222222222222',
+    'state_root': _stateRoot,
+    'ss58_format': 2027,
+    'token_symbol': 'GMB',
+    'token_decimals': 2,
+  },
+  'light_client': {
+    'mode': 'smoldot',
+    'truth_source': 'p2p_finalized_storage',
+    'api_is_truth': false,
+    'bundled_assets_required': [
+      'assets/chainspec.json',
+      'assets/light_sync_state.json',
+    ],
+  },
+  'p2p': {
+    'bootnodes': [_bootnodeA, _bootnodeB],
+    'bootnodes_source': 'worker_config',
+    'min_peer_count_hint': 1,
+  },
+  'services': {
+    'square_base_url': 'https://api.onchina.org/square',
+    'media_base_url': 'https://api.onchina.org/square/media',
+    'signed_extrinsic_relay': {'enabled': false, 'path': null},
+  },
+  'security': {
+    'exposes_rpc_url': false,
+    'rpc_proxy': false,
+    'exposes_private_key_material': false,
+    'validator_rpc_public': false,
+  },
+  'degradation': {
+    'p2p_unavailable': 'services_continue_chain_state_degraded',
+    'chain_success_source': 'finalized_runtime_storage_or_events',
+  },
+};

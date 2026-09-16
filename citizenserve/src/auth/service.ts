@@ -12,7 +12,6 @@ import {
   rollbackIdentitySession,
   sessionCacheKey
 } from './session_index';
-import { closeStaleChatRealtime } from '../chat/realtime';
 import { readUserByAccountId, readUserByCidNumber } from '../account/user_repository';
 import { inspectUserProjectionHealth } from '../account/user_projection';
 import {
@@ -396,7 +395,7 @@ async function revokeStaleBindingCredentials(
         WHERE cid_number = ? AND (binding_revision <> ? OR account_id <> ?)`,
     ).bind(cidNumber, bindingRevision, accountId),
     env.DB.prepare(
-      `DELETE FROM chat_push_endpoints
+      `DELETE FROM push_endpoints
         WHERE cid_number = ? AND (binding_revision <> ? OR account_id <> ?)`,
     ).bind(cidNumber, bindingRevision, accountId),
     env.DB.prepare(
@@ -404,5 +403,4 @@ async function revokeStaleBindingCredentials(
         WHERE cid_number = ? AND (binding_revision <> ? OR account_id <> ?)`,
     ).bind(cidNumber, bindingRevision, accountId),
   ]);
-  await closeStaleChatRealtime(env, cidNumber, bindingRevision, accountId);
 }

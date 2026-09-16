@@ -17,7 +17,7 @@ Local callers must provide both `CITIZENSDK_WORK_DIR` and
 `CITIZENSDK_NATIVE_OUTPUT_DIR` as absolute descendants of:
 
 ```text
-/Users/rhett/TATA/tataconsole/target/GMB/citizensdk/SDK
+CITIZENSDK_NATIVE_OUTPUT_DIR
 ```
 
 The script also places `CARGO_TARGET_DIR`, module caches, Gradle state,
@@ -26,7 +26,7 @@ that controlled work root. Nothing generated may be written below
 `/Users/rhett/GMB/citizensdk`.
 
 Do not run ad-hoc `cargo build`, copy libraries into this documentation tree,
-or restore the retired `native/{platform}` output layout. TataConsole and the
+or restore the retired `native/{platform}` output layout. 调用方 and the
 repository workflows call the same product script; no smoldot-only build or
 release path exists.
 
@@ -77,6 +77,6 @@ The canonical script and release verifier must reject:
   runtime import path.
 
 Source format, unit, contract, differential and consumer tests use temporary
-copies and target directories below TataConsole's central CitizenSDK work
+copies and target directories below 调用方's central CitizenSDK work
 root. CI and Release execution remain separate task-card steps; this document
 does not authorize either operation.

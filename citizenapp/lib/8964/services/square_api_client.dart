@@ -11,6 +11,7 @@ import 'package:citizenapp/8964/services/square_post_store.dart';
 import 'package:citizenapp/signer/signing.dart';
 import 'package:citizenapp/security/device_subkey.dart' show hexToBytes;
 import 'package:citizenapp/8964/services/square_request_signer.dart';
+import 'package:citizenapp/notifications/app_push_token.dart';
 
 class SquareApiException implements Exception {
   const SquareApiException(this.message, {this.statusCode, this.errorCode});
@@ -47,6 +48,19 @@ class SquareSession {
   final SquareDeviceSigner? signRequest;
 
   bool get isUsable => expiresAt > DateTime.now().millisecondsSinceEpoch;
+}
+
+/// CitizenServe 签发的短期聊天服务访问结果；登录态和 HTTP 合同只属于服务客户端。
+class CitizenServeChatAccess {
+  const CitizenServeChatAccess({
+    required this.chatServerUrl,
+    required this.chatServerToken,
+    required this.expiresAtMillis,
+  });
+
+  final Uri chatServerUrl;
+  final String chatServerToken;
+  final int expiresAtMillis;
 }
 
 class _FinalizedSessionBinding {
@@ -629,7 +643,7 @@ class SquareApiClient
   // 进行中的握手：同账户并发调用共享同一 Future，杜绝冷启动握手风暴。
   final Map<String, Future<SquareSession>> _inflightSessions = {};
 
-  /// Worker API 根地址。Chat 无内容唤醒与建连信令复用同一个 Worker 登录态。
+  /// CitizenServe API 根地址；聊天模块只复用该会话请求短期服务授权。
   Uri get baseUri => Uri.parse(baseUrl);
 
   Future<SquareSession> ensureSession({
@@ -844,6 +858,76 @@ class SquareApiClient
     const membershipPath = '/square/membership';
     final data = await _getJson(membershipPath, session: session);
     return _parseMembershipState(data);
+  }
+
+  /// 使用现有 CitizenServe 登录会话签发 CitizenChatServer 短期授权。
+  Future<CitizenServeChatAccess> fetchChatServerAccess({
+    required SquareSession session,
+    required String deviceId,
+  }) async {
+    final normalizedDeviceId = deviceId.trim();
+    if (normalizedDeviceId.isEmpty ||
+        normalizedDeviceId.length > 256 ||
+        normalizedDeviceId.contains(':') ||
+        normalizedDeviceId.codeUnits.any((value) => value < 32)) {
+      throw const SquareApiException('聊天设备标识不合法');
+    }
+    final data = await _postJson('/auth/chatserver/access', <String, Object?>{
+      'device_id': normalizedDeviceId,
+    }, session: session);
+    final urlValue = data['chat_server_url'];
+    final tokenValue = data['chat_server_token'];
+    final expiresValue = data['expires_at_millis'];
+    final url = urlValue is String ? Uri.tryParse(urlValue) : null;
+    if (data['ok'] != true ||
+        url == null ||
+        url.scheme != 'https' ||
+        url.host.isEmpty ||
+        url.userInfo.isNotEmpty ||
+        (url.path.isNotEmpty && url.path != '/') ||
+        url.hasQuery ||
+        url.hasFragment ||
+        tokenValue is! String ||
+        tokenValue.isEmpty ||
+        expiresValue is! num) {
+      throw const SquareApiException('聊天服务访问授权响应不合法');
+    }
+    return CitizenServeChatAccess(
+      chatServerUrl: url,
+      chatServerToken: tokenValue,
+      expiresAtMillis: expiresValue.toInt(),
+    );
+  }
+
+  /// 幂等登记CitizenServe普通应用通知端点；设备身份只由已验签Session决定。
+  Future<void> registerPushEndpoint({
+    required SquareSession session,
+    required AppPushToken endpoint,
+  }) async {
+    final provider = endpoint.provider;
+    final token = endpoint.token.trim();
+    final environment = endpoint.apnsEnvironment;
+    if ((provider != 'apns' && provider != 'fcm') ||
+        token.length < 16 ||
+        token.length > 4096 ||
+        (provider == 'apns' &&
+            environment != 'sandbox' &&
+            environment != 'production') ||
+        (provider == 'fcm' && environment != null)) {
+      throw const SquareApiException('应用推送端点不合法');
+    }
+    final expiresAt = DateTime.now()
+        .add(const Duration(days: 90))
+        .millisecondsSinceEpoch;
+    final data = await _putJson('/square/push-endpoint', <String, Object?>{
+      'push_provider': provider,
+      'push_token': token,
+      'apns_environment': environment,
+      'expires_at': expiresAt,
+    }, session: session);
+    if (data['ok'] != true || data['expires_at'] is! num) {
+      throw const SquareApiException('应用推送端点响应不合法');
+    }
   }
 
   SquareMembershipState _parseMembershipState(Map<String, dynamic> data) {

@@ -1,7 +1,7 @@
 import type { Env } from '../types';
 import { deletePostCloudflareDataByCid } from '../posts/confirm';
 import { usageLimits } from '../limits/catalog';
-import { sendStorageCleanupAlert } from '../chat/push';
+import { sendStorageCleanupAlert } from '../shared/push';
 
 // 权益到期清理使用 Cloudflare 定时事件时间；会员状态只由手机 finalized 交易同步，
 // Worker 不再为清理任务扫描链状态，也不保留第二套会员时钟。

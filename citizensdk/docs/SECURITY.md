@@ -191,7 +191,7 @@ Flutter tuple 位置。旧 Dart 硬件秘密通道与装配已删除，归档差
 外部拍摄或所有截图机制的绝对隔离。
 
 助记词、母种子、child mini-secret 和私钥不得上传到 TuyuServe、TuyuBooking、Cloudflare、
-GitHub、TataConsole 或任何远端服务。标准移动装配只在用户设备硬件金库保存 child 密文，并在
+GitHub、调用方 或任何远端服务。标准移动装配只在用户设备硬件金库保存 child 密文，并在
 本地认证、解密和签名。
 
 CitizenSDK Core 使用 RustCrypto `aes-gcm` 在 Rust 受控缓冲区内以随机 256 位 DEK 和随机
@@ -439,14 +439,14 @@ plugin 固定 `$ORIGIN`，不借助测试 runner 修补路径。同版产物缺�
 
 - SDK 源码树不得接收构建缓存、原生库或 Release 产物。
 - 本机 Linux 合同测试必须由 CMake/CTest 以 `CITIZENSDK_TEST_WORK_DIR` 注入
-  `/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk` 下有效 UID 所有、`0700`、任务独占的现有
+  `CITIZENSDK_WORK_DIR` 下有效 UID 所有、`0700`、任务独占的现有
   绝对目录。测试 helper 逐级 no-follow 验证后，以 CSPRNG 随机名称和 `mkdirat` 只在已验证
   目录 fd 下创建子目录，不回退 `/tmp`、当前目录或用户目录，也不递归删除未经 fd 与 inode
   复核的路径。
 - 原生构建和 Release 在首次建目录前校验绝对规范路径及每一级既存祖先，拒绝路径穿越、
   符号链接祖先和非目录祖先；工作目录与产物目录必须成对通过预检，任一无效时保持零写入。
-- 本机发布器只接受 `/Users/rhett/TATA/tataconsole/target/gmb/citizensdk` 和
-  `/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk` 的严格后代；永久根本身、
+- 本机发布器只接受 `CITIZENSDK_NATIVE_OUTPUT_DIR` 和
+  `CITIZENSDK_WORK_DIR` 的严格后代；永久根本身、
   旧根、邻产品/仓库/平台、伪前缀和最终链接均拒绝。只核验匹配根存在且为普通目录，
   未使用根缺失不影响本次请求。GitHub 隔离分支不变。该门禁不替代执行方对 UID、权限、
   任务归属和清理范围的检查；永久容器不得删除，不能清理别的任务内容。
@@ -472,11 +472,11 @@ plugin 固定 `$ORIGIN`，不借助测试 runner 修补路径。同版产物缺�
 runtime 没有声称 iOS XCTest 已运行。macOS Core 58 项与 Flutter adapter 23 项 XCTest
 0 失败，1 项需要真机硬件的用例跳过；normal/supervisor smoke 通过。本机无真实
 Apple 移动设备，所以 Secure Enclave、生物认证和 device-only Keychain 仍需真机验收。
-TataConsole Flow 已接入 Apple/Hosted 与五平台 Release 闭集；本轮仅执行本机闭集，
+产品Flow已接入Apple/Hosted与五平台Release闭集；本轮仅执行本机闭集，
 没有运行远程 CI、正式 Release、Hosted 上传或 Git。
 
 同轮 Android ARM64 Core/JNI/AAR 构建、原生 Kotlin 单元测试及最新本机 Flutter/AGP
-宿主的插件单元测试通过；Rust 根 workspace 295 项和 TataConsole CitizenSDK 合同
+宿主的插件单元测试通过；Rust 根 workspace 295 项和 调用方 CitizenSDK 合同
 61 项通过。Android 硬件金库跨进程用例保留在 androidTest，仍须真机执行；这些本机
 结果不替代 GitHub 五宿主 Release 或实体硬件验收。
 

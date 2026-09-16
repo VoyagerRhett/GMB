@@ -19,10 +19,47 @@ final class RunnerUITests: XCTestCase {
     continueAfterFailure = false
   }
 
+  /// 空钱包正式App必须直接启动CitizenSDK的创建/导入安全窗口；测试只检查公开初始态并取消。
+  /// 已存在钱包时门禁本就不可达，只确认主导航存在，不清空真实钱包制造测试条件。
+  func testWalletGateLaunchesCitizenSdkCreateAndImportWithoutSecretInput() throws {
+    let app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
+    app.launch()
+    XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20))
+    dismissPermissionGuideIfNeeded(in: app)
+
+    let create = walletGateCreate(in: app)
+    guard create.waitForExistence(timeout: 10) else {
+      XCTAssertTrue(chatTab(in: app).waitForExistence(timeout: 20))
+      return
+    }
+    let importing = app.buttons["已有钱包？导入助记词"]
+    XCTAssertTrue(importing.exists, "空钱包门禁缺少助记词导入入口")
+
+    create.tap()
+    XCTAssertTrue(app.navigationBars["创建钱包"].waitForExistence(timeout: 10))
+    XCTAssertTrue(app.buttons["12 个助记词 · 推荐"].exists)
+    XCTAssertTrue(app.buttons["24 个助记词"].exists)
+    XCTAssertTrue(app.secureTextFields["钱包密码（选填）"].exists)
+    XCTAssertTrue(app.buttons["创建钱包"].exists)
+    XCTAssertTrue(app.buttons["取消"].firstMatch.exists)
+    app.buttons["取消"].firstMatch.tap()
+    XCTAssertTrue(create.waitForExistence(timeout: 10))
+
+    importing.tap()
+    XCTAssertTrue(app.navigationBars["输入助记词"].waitForExistence(timeout: 10))
+    XCTAssertTrue(app.textViews["助记词"].exists)
+    XCTAssertTrue(app.secureTextFields["钱包密码（选填）"].exists)
+    XCTAssertTrue(app.buttons["确认导入"].exists)
+    XCTAssertTrue(app.buttons["取消"].firstMatch.exists)
+    app.buttons["取消"].firstMatch.tap()
+    XCTAssertTrue(create.waitForExistence(timeout: 10))
+  }
+
   func testInstalledReleaseLaunchesAndExposesMainNavigation() throws {
     let app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
     app.launch()
     dismissPermissionGuideIfNeeded(in: app)
+    try requireMainNavigation(in: app)
 
     XCTAssertTrue(
       app.wait(for: .runningForeground, timeout: 20),
@@ -43,6 +80,7 @@ final class RunnerUITests: XCTestCase {
     app.launch()
     XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20))
     dismissPermissionGuideIfNeeded(in: app)
+    try requireMainNavigation(in: app)
 
     let chatTab = chatTab(in: app)
     XCTAssertTrue(chatTab.waitForExistence(timeout: 20), "找不到聊天主导航入口")
@@ -71,6 +109,7 @@ final class RunnerUITests: XCTestCase {
     app.launch()
     XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20))
     dismissPermissionGuideIfNeeded(in: app)
+    try requireMainNavigation(in: app)
 
     let publish = app.buttons.matching(
       NSPredicate(format: "label == %@", "发布")
@@ -113,6 +152,7 @@ final class RunnerUITests: XCTestCase {
     app.launch()
     XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20))
     dismissPermissionGuideIfNeeded(in: app)
+    try requireMainNavigation(in: app)
 
     let myTab = app.buttons.matching(
       NSPredicate(format: "label CONTAINS %@", "我的")
@@ -146,6 +186,7 @@ final class RunnerUITests: XCTestCase {
     app.launch()
     XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20))
     dismissPermissionGuideIfNeeded(in: app)
+    try requireMainNavigation(in: app)
 
     let citizenTab = app.buttons.matching(
       NSPredicate(format: "label CONTAINS %@", "公民")
@@ -168,6 +209,99 @@ final class RunnerUITests: XCTestCase {
     attachScreenshot(app, name: "CitizenApp-治理双列卡片")
   }
 
+  /// 交易Tab必须继续显示原有公民链顶栏，并从真实CitizenSDK链状态得到非递减finalized高度。
+  /// 本用例只截取不含输入值的空交易表单，绝不填写账户、金额、备注或签名内容。
+  func testTransactionTabPreservesLiveChainHeaderAndEmptyPaymentForm() throws {
+    let app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
+    app.launch()
+    XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20))
+    dismissPermissionGuideIfNeeded(in: app)
+    try requireMainNavigation(in: app)
+
+    let transactionTab = app.buttons.matching(
+      NSPredicate(format: "label CONTAINS %@", "交易")
+    ).firstMatch
+    XCTAssertTrue(transactionTab.waitForExistence(timeout: 20), "找不到交易主导航入口")
+    transactionTab.tap()
+
+    let chainStatus = app.descendants(matching: .any).matching(
+      NSPredicate(format: "label BEGINSWITH %@ AND label CONTAINS %@", "公民链", "最终区块")
+    ).firstMatch
+    XCTAssertTrue(chainStatus.waitForExistence(timeout: 20), "交易Tab缺少原有公民链状态顶栏")
+    let finalized = expectation(
+      for: NSPredicate(format: "label MATCHES %@", ".*最终区块 [0-9]+.*"),
+      evaluatedWith: chainStatus
+    )
+    XCTAssertEqual(
+      XCTWaiter.wait(for: [finalized], timeout: 120),
+      .completed,
+      "CitizenSDK轻节点在120秒内没有提供真实finalized高度"
+    )
+    let firstHeight = try XCTUnwrap(finalizedHeight(from: chainStatus.label))
+    Thread.sleep(forTimeInterval: 7)
+    let secondHeight = try XCTUnwrap(finalizedHeight(from: chainStatus.label))
+    XCTAssertGreaterThanOrEqual(secondHeight, firstHeight, "finalized高度发生回退")
+
+    for label in ["请输入账户", "请输入金额", "请输入转账备注（选填）"] {
+      XCTAssertTrue(
+        app.descendants(matching: .any).matching(
+          NSPredicate(format: "label == %@", label)
+        ).firstMatch.waitForExistence(timeout: 10),
+        "交易Tab缺少原有空表单字段：\(label)"
+      )
+    }
+    XCTAssertTrue(app.buttons["选择交易钱包"].exists, "交易Tab缺少原有钱包选择入口")
+    attachScreenshot(app, name: "CitizenApp-交易Tab公民链状态")
+  }
+
+  /// 正式App钱包页只验收公开结构和CitizenSDK追加账户窗口的初始遮挡态。
+  /// 不输入助记词/密码，不执行创建、导入、追加或私钥显示，也不截图SDK敏感窗口。
+  func testWalletPagePreservesPublicSurfaceAndAvailableSdkEntry() throws {
+    let app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
+    app.launch()
+    XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20))
+    dismissPermissionGuideIfNeeded(in: app)
+    try requireMainNavigation(in: app)
+
+    let myTab = app.buttons.matching(
+      NSPredicate(format: "label CONTAINS %@", "我的")
+    ).firstMatch
+    XCTAssertTrue(myTab.waitForExistence(timeout: 20), "找不到我的主导航入口")
+    myTab.tap()
+
+    let walletEntry = app.descendants(matching: .any).matching(
+      NSPredicate(format: "label == %@", "钱包")
+    ).firstMatch
+    XCTAssertTrue(walletEntry.waitForExistence(timeout: 10), "我的页缺少钱包入口")
+    walletEntry.tap()
+    XCTAssertTrue(app.staticTexts["我的钱包"].waitForExistence(timeout: 15))
+
+    let addEntry = app.buttons["添加账户 / 导入冷钱包"]
+    let emptyWallet = app.staticTexts["还没有可展示的钱包。热钱包在首启时创建，这里可导入只读的冷钱包。"]
+    XCTAssertTrue(
+      addEntry.waitForExistence(timeout: 10) || emptyWallet.waitForExistence(timeout: 1),
+      "钱包页既没有账户操作入口，也没有确定空态"
+    )
+    attachScreenshot(app, name: "CitizenApp-我的钱包公开页面")
+
+    guard addEntry.exists && addEntry.isEnabled else { return }
+    addEntry.tap()
+    XCTAssertTrue(app.staticTexts["导入冷钱包"].waitForExistence(timeout: 10))
+    let addNext = app.staticTexts["添加下一个账户"]
+    guard addNext.exists else { return }
+    addNext.tap()
+
+    XCTAssertTrue(app.navigationBars["添加账户"].waitForExistence(timeout: 10))
+    XCTAssertTrue(app.textViews["助记词"].exists)
+    XCTAssertTrue(app.secureTextFields["钱包密码（选填）"].exists)
+    XCTAssertTrue(app.textFields["账户编号 1—1989，逗号分隔"].exists)
+    XCTAssertTrue(app.buttons["确认添加"].exists)
+    let cancel = app.buttons["取消"].firstMatch
+    XCTAssertTrue(cancel.exists, "CitizenSDK追加账户窗口缺少安全取消入口")
+    cancel.tap()
+    XCTAssertTrue(app.staticTexts["我的钱包"].waitForExistence(timeout: 10))
+  }
+
   /// 创作者页必须使用「我的」已持有的本地身份/会员展示态立即出首帧，
   /// 不得把 Worker 或链上读取放在路由打开的关键路径。
   func testCreatorPageDisplaysImmediatelyFromMyTab() throws {
@@ -175,6 +309,7 @@ final class RunnerUITests: XCTestCase {
     app.launch()
     XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20))
     dismissPermissionGuideIfNeeded(in: app)
+    try requireMainNavigation(in: app)
 
     let myTab = app.buttons.matching(
       NSPredicate(format: "label CONTAINS %@", "我的")
@@ -212,6 +347,27 @@ final class RunnerUITests: XCTestCase {
     add(attachment)
   }
 
+  private func finalizedHeight(from label: String) -> UInt64? {
+    guard let range = label.range(of: #"最终区块 [0-9]+"#, options: .regularExpression) else {
+      return nil
+    }
+    return UInt64(label[range].split(separator: " ").last ?? "")
+  }
+
+  private func walletGateCreate(in app: XCUIApplication) -> XCUIElement {
+    app.buttons.matching(NSPredicate(format: "label == %@", "创建钱包")).firstMatch
+  }
+
+  private func requireMainNavigation(in app: XCUIApplication) throws {
+    if walletGateCreate(in: app).waitForExistence(timeout: 2) {
+      throw XCTSkip("正式App尚无钱包；需由用户在CitizenSDK安全窗口直接导入测试钱包后验收主导航")
+    }
+    XCTAssertTrue(
+      chatTab(in: app).waitForExistence(timeout: 20),
+      "CitizenApp既未显示钱包门禁，也未进入五主导航"
+    )
+  }
+
   /// 首次启动的权限说明不属于创作者流程；黑盒验收只选择稍后授权，
   /// 避免触发系统弹窗，也不更改正式 App 的会员、钱包或身份数据。
   private func dismissPermissionGuideIfNeeded(in app: XCUIApplication) {
@@ -222,6 +378,7 @@ final class RunnerUITests: XCTestCase {
       later.tap()
       return
     }
+    if walletGateCreate(in: app).exists { return }
     // Flutter 在部分 iOS 版本的首个 semantics frame 不会立即暴露按钮；
     // 只有主导航仍不存在时，才点击权限说明页固定的「稍后再说」位置。
     if !chatTab(in: app).exists {

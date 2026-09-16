@@ -10,38 +10,60 @@ CITIZENAPP_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_ROOT="$(dirname "$CITIZENAPP_DIR")"
 export GMB_ROOT="$REPO_ROOT"
 FLUTTER_BIN="${FLUTTER_BIN:-flutter}"
-FLUTTER_ROOT="$CITIZENAPP_DIR"
+VIEW_SCRIPT="$SCRIPT_DIR/citizenapp-view.mjs"
+FLUTTER_ROOT=''
 ANALYSIS_CONFIG=''
 TEST_CONFIG=''
 TEST_CONFIGS_STAGED=false
-
-if [[ -n "${TATA_CONSOLE_CACHE_DIR:-}" ]]; then
-  BUILD_CACHE="${TATA_CONSOLE_BUILD_CACHE_DIR:-$TATA_CONSOLE_CACHE_DIR/work}"
-  DEPENDENCY_CACHE="${TATA_CONSOLE_DEPENDENCY_CACHE_DIR:-$TATA_CONSOLE_CACHE_DIR/dependencies}"
-  export CARGO_TARGET_DIR="$BUILD_CACHE/cargo-tests"
-  export PUB_CACHE="$DEPENDENCY_CACHE/dart-pub"
-  export XDG_CONFIG_HOME="$DEPENDENCY_CACHE/flutter-config"
-  export TMPDIR="$BUILD_CACHE/tmp"
-  mkdir -p "$TMPDIR"
-  export DYLD_LIBRARY_PATH="$CARGO_TARGET_DIR/release:$CARGO_TARGET_DIR/debug"
-  export LD_LIBRARY_PATH="$CARGO_TARGET_DIR/release:$CARGO_TARGET_DIR/debug"
-fi
+CITIZENAPP_TEST_WORK_DIR="${CITIZENAPP_TEST_WORK_DIR:-${TMPDIR:-/tmp}/citizenapp/test}"
+BUILD_CACHE="${CITIZENAPP_TEST_BUILD_DIR:-$CITIZENAPP_TEST_WORK_DIR/work}"
+DEPENDENCY_CACHE="${CITIZENAPP_TEST_DEPENDENCY_DIR:-$CITIZENAPP_TEST_WORK_DIR/dependencies}"
+python3 - "$CITIZENAPP_DIR" "$CITIZENAPP_TEST_WORK_DIR" "$BUILD_CACHE" "$DEPENDENCY_CACHE" <<'CHECK_OUTPUTS'
+from pathlib import Path
+import sys
+source = Path(sys.argv[1]).resolve()
+for value in sys.argv[2:]:
+    raw = Path(value)
+    target = raw.resolve()
+    if not raw.is_absolute() or target == source or source in target.parents:
+        raise SystemExit(f'CitizenApp测试目录必须是源码外绝对路径：{value}')
+CHECK_OUTPUTS
+mkdir -p "$CITIZENAPP_TEST_WORK_DIR"
+# Flutter分析、测试、.dart_tool与build全部在源码外工程视图运行；源码文件保持
+# 唯一真源且只读投影，测试不得再向CitizenApp根生成build或临时配置。
+FLUTTER_ROOT="$(node "$VIEW_SCRIPT" create \
+  --source-root "$CITIZENAPP_DIR" --work-root "$CITIZENAPP_TEST_WORK_DIR")"
+[[ "$FLUTTER_ROOT" == "$CITIZENAPP_TEST_WORK_DIR/source-view/"* \
+  && -f "$FLUTTER_ROOT/pubspec.yaml" ]] \
+  || { echo '错误: CitizenApp测试工程视图无效' >&2; exit 1; }
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$BUILD_CACHE/cargo-tests}"
+export PUB_CACHE="${PUB_CACHE:-$DEPENDENCY_CACHE/dart-pub}"
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$DEPENDENCY_CACHE/flutter-config}"
+export TMPDIR="$BUILD_CACHE/tmp"
+mkdir -p "$TMPDIR"
+export DYLD_LIBRARY_PATH="$CARGO_TARGET_DIR/release:$CARGO_TARGET_DIR/debug"
+export LD_LIBRARY_PATH="$CARGO_TARGET_DIR/release:$CARGO_TARGET_DIR/debug"
 
 if ! command -v "$FLUTTER_BIN" >/dev/null 2>&1; then
   echo "错误: 找不到 Flutter: $FLUTTER_BIN" >&2
   exit 1
 fi
 
-# Flutter 版本由 TataConsole 工具登记或 GitHub Action 的同一流程输入唯一确定；
-# 产品测试脚本只消费调用方注入的可执行文件，不再读取仓库中不存在的第二份版本表。
+# Flutter 版本由产品开发环境或 CI 工作流唯一确定；测试脚本只消费调用方
+# 注入的可执行文件，不维护第二份工具版本表。
 
 if [ ! -f "$FLUTTER_ROOT/.dart_tool/package_config.json" ]; then
   if [[ "${CI:-}" == true ]]; then
     echo "错误: 缺少 .dart_tool/package_config.json；CI必须先执行锁定依赖解析" >&2
     exit 1
   fi
-  # 本机测试不得把缺少的依赖交给 Flutter 下载；调用方必须先从塔塔依赖库物化准确锁定原件。
-  (cd "$FLUTTER_ROOT" && "$FLUTTER_BIN" pub get --offline --enforce-lockfile)
+  PUB_GET_ARGS=(--enforce-lockfile)
+  case "${CITIZENAPP_OFFLINE:-false}" in
+    true) PUB_GET_ARGS+=(--offline) ;;
+    false) ;;
+    *) echo '错误: CITIZENAPP_OFFLINE只接受true或false' >&2; exit 1 ;;
+  esac
+  (cd "$FLUTTER_ROOT" && "$FLUTTER_BIN" pub get "${PUB_GET_ARGS[@]}")
 fi
 
 # 设备 Release 构建会先 cargo clean；测试必须从宿主库构建开始一直持锁到最后一个
@@ -92,8 +114,8 @@ cleanup_test_configs() {
 }
 
 cd "$FLUTTER_ROOT"
-# Flutter 只从工程根发现这两类配置；源码真源统一放在 scripts，执行期间只在本次
-# CI 检出或塔塔工作目录短暂落盘，退出时必定清理。
+# Flutter只从工程根发现这两类配置；源码真源统一放在scripts，执行期间只在本次
+# 源码外工程视图短暂落盘，退出时必定清理。
 ANALYSIS_CONFIG="$FLUTTER_ROOT/analysis_options.yaml"
 TEST_CONFIG="$FLUTTER_ROOT/dart_test.yaml"
 trap cleanup_test_configs EXIT
@@ -104,10 +126,10 @@ if [[ ! -e "$ANALYSIS_CONFIG" && ! -L "$ANALYSIS_CONFIG"
   cp "$SCRIPT_DIR/dart_test.yaml" "$TEST_CONFIG"
 elif [[ "$FLUTTER_ROOT" == "$CITIZENAPP_DIR" || ! -f "$ANALYSIS_CONFIG" || -L "$ANALYSIS_CONFIG"
   || ! -f "$TEST_CONFIG" || -L "$TEST_CONFIG" ]]; then
-  echo '错误: Flutter 工程根存在不受塔塔任务管理的分析或测试配置' >&2
+  echo '错误: Flutter 工程根存在不受CitizenApp测试入口管理的分析或测试配置' >&2
   exit 1
 fi
-# GitHub Runner 保持既有原生锁；本机由控制台的准确任务所有权隔离，不使用跨端共享锁。
+# CI Runner 保持原生构建锁；本机测试使用独立工作目录，不使用跨端共享锁。
 if [[ "${CI:-}" == true ]]; then
   acquire_native_build_lock
 fi

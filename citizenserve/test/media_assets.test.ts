@@ -182,7 +182,7 @@ function signingEnv(): Env {
     CF_ACCOUNT_ID: '0123456789abcdef0123456789abcdef',
     R2_KEY: 'access-key',
     R2_SECRET: 'secret-key',
-    SQUARE_PUBLIC_MEDIA_BUCKET_NAME: 'citizenapp-media',
+    SQUARE_PUBLIC_MEDIA_BUCKET_NAME: 'citizenserve-media',
     SQUARE_PUBLIC_MEDIA_BASE_URL: 'https://media.crcfrcn.com',
     ZONE_ID: '0123456789abcdef0123456789abcdef',
     PURGE: 'cache-purge-token',

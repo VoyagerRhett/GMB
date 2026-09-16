@@ -85,7 +85,6 @@ describe('chain bootstrap manifest', () => {
     });
     expect(response.p2p.bootnodes).toEqual([bootnodeA, bootnodeB]);
     expect(response.services.square_base_url).toBe('https://api.onchina.org/api/square');
-    expect(response.services.chat_base_url).toBe('https://api.onchina.org/api/chat');
     expect(response.services.media_base_url).toBe('https://api.onchina.org/api/square/media');
     expect(response.services.signed_extrinsic_relay.enabled).toBe(false);
     expect(response.services.signed_extrinsic_relay.path).toBeNull();

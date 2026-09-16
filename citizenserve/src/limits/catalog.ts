@@ -12,14 +12,9 @@ export type ResourceKey =
   | 'square_video_freedom'
   | 'square_video_democracy'
   | 'square_video_spark'
-  | 'chat_push_endpoint'
   | 'chat_server_access'
-  | 'chat_ice'
-  | 'chat_signal'
-  | 'chat_envelope'
-  | 'chat_ack'
-  | 'chat_attachment'
-  | 'push_wake'
+  | 'push_endpoint'
+  | 'push_notification'
   | 'chain_extrinsic'
   | 'chain_extrinsic_json'
   | 'chain_rpc_response'
@@ -126,22 +121,9 @@ export const resourceLimits: Readonly<Record<ResourceKey, ResourceLimit>> = {
     max_height: 1920,
     max_count: 1,
   },
-  chat_push_endpoint: { max_bytes: 16 * kib, max_count: 8, ttl_seconds: 90 * 24 * 60 * 60 },
   chat_server_access: { max_bytes: 4 * kib },
-  chat_ice: { max_bytes: 1 * kib },
-  chat_signal: { max_bytes: 64 * kib },
-  // 文本、表情、贴纸和 MLS 控制信封只进单 CID 临时密文邮箱；媒体字节不得进入此入口。
-  chat_envelope: {
-    max_bytes: 128 * kib,
-    max_count: 1000,
-    max_items: 100,
-    ttl_seconds: 7 * 24 * 60 * 60,
-    max_total_bytes: 8 * mib,
-  },
-  chat_ack: { max_bytes: 16 * kib, max_items: 100 },
-  // Worker 只接收 multipart 签名和密文索引 JSON，附件字节直接进入私有 R2。
-  chat_attachment: { max_bytes: 128 * kib, max_items: 100, ttl_seconds: 7 * 24 * 60 * 60 },
-  push_wake: { max_bytes: 1 * kib },
+  push_endpoint: { max_bytes: 16 * kib, max_count: 8, ttl_seconds: 90 * 24 * 60 * 60 },
+  push_notification: { max_bytes: 4 * kib },
   chain_extrinsic: { max_bytes: 64 * kib },
   chain_extrinsic_json: { max_bytes: 132 * kib },
   chain_rpc_response: { max_bytes: 4 * mib },
@@ -210,7 +192,6 @@ const route = (method: string, path: RegExp, resource_key: ResourceKey = 'api_js
 /** 已登记路由是 Worker 进入风控和 D1 前的白名单。 */
 const routeLimits: readonly RouteLimit[] = [
   route('GET', /^\/health$/),
-  route('POST', /^\/chat\/attachments\/(?:prepare|complete|download|ack|abort)$/, 'chat_attachment'),
   route('GET', /^\/download\/(?:citizenapp\/android|citizenwallet\/android|citizenchain\/(?:macOS(?:\/updater)?|Windows|LinuxARM|LinuxAMD))$/),
   route('GET', /^\/operations\/citizenchain\/download-publications\/(?:linux-arm|linux-amd|macos|windows)$/),
   route('PUT', /^\/operations\/citizenchain\/download-publications\/(?:linux-arm|linux-amd|macos|windows)$/),
@@ -258,14 +239,7 @@ const routeLimits: readonly RouteLimit[] = [
   route('DELETE', /^\/square\/follows\/[^/]+$/),
   route('GET', /^\/square\/notify\/unread$/),
   route('POST', /^\/square\/notify\/read$/),
-  route('PUT', /^\/chat\/push-endpoint$/, 'chat_push_endpoint'),
-  route('GET', /^\/chat\/signals$/),
-  route('PUT', /^\/chat\/key-package$/, 'chat_signal'),
-  route('POST', /^\/chat\/key-package\/resolve$/, 'chat_signal'),
-  route('POST', /^\/chat\/ice$/, 'chat_ice'),
-  route('POST', /^\/chat\/messages$/, 'chat_envelope'),
-  route('GET', /^\/chat\/messages$/),
-  route('POST', /^\/chat\/messages\/ack$/, 'chat_ack'),
+  route('PUT', /^\/square\/push-endpoint$/, 'push_endpoint'),
 ];
 
 export function routeResource(method: string, path: string): ResourceKey | null {

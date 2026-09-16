@@ -65,7 +65,7 @@ Host 磁盘用例使用 `citizen_sdk_test_support.hpp`；Flutter 用例使用不
 `citizen_sdk_flutter_test_support.hpp`，两者遵循相同的工作目录安全合同。配置测试时，调用方必须通过
 `-DCITIZENSDK_TEST_WORK_DIR=<绝对路径>` 注入一个已经存在、本次任务独占、有效 UID 所有且
 权限精确为 `0700` 的工作根；本机该路径必须位于
-`/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk` 下。CMake 把同名环境变量注入每个 CTest，
+`CITIZENSDK_WORK_DIR` 下。CMake 把同名环境变量注入每个 CTest，
 helper 再逐级以 no-follow 方式验证该根，才用系统 CSPRNG 生成 128-bit 随机名称，并只通过
 已验证目录 fd 的 `mkdirat` 创建 `0700` 子目录。清理始终持有目录 fd，并只通过
 `openat`/`unlinkat` 处理已验证的精确 inode；不存在 `/tmp`、当前

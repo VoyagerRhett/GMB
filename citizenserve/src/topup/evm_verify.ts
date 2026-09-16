@@ -4,7 +4,7 @@ import type { TopupRail } from './config';
 
 /// EVM 稳定币到账验证:只读该链 JSON-RPC,判定一笔 ERC-20 转账是否足额到达收款地址且已确认。
 ///
-/// Worker 侧初验与本地部署塔塔控制台侧复验都基于同一判定口径;塔塔控制台会独立再验一遍(四方对账)。
+/// Worker侧初验与授权结算客户端侧复验基于同一判定口径；客户端会独立再验一遍（四方对账）。
 
 /// ERC-20 `Transfer(address,address,uint256)` 事件 topic0(固定常量)。
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';

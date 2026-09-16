@@ -37,7 +37,7 @@ dependencies:
   local_auth_android: 2.0.9
   local_auth_darwin: ^2.0.0
   # 二维码设备走本产品内部适配器；本产品只处理签名请求业务。
-  mobile_scanner: ^7.1.4
+  mobile_scanner: 7.4.2
   substrate_bip39: ^0.7.0
   unorm_dart: ^0.3.2
   qr_flutter: ^4.1.0
@@ -49,7 +49,7 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^4.0.0
+  flutter_lints: 6.0.0
   # 两款移动产品共同使用的代码生成器固定同一解析版本。
   build_runner: 2.15.0
   isar_community_generator: ^3.3.2

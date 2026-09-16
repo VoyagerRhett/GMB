@@ -22,7 +22,7 @@
       "adapted": [
         {
           "path": "Cargo.lock",
-          "sha256": "117c9ca6ad5cb034c8fc5792028d9085dbc6483194e1aae25123b536c8c0cddb"
+          "sha256": "94048600d845557d1fe734f212f4f95d6c48db5bd91d50409dcbe1e933f7af9e"
         },
         {
           "path": "Cargo.toml",
@@ -96,7 +96,7 @@
         },
         {
           "path": "src/verified_chain_client.rs",
-          "sha256": "74259d254539eb0178ca3e8909b48d7e993b2023efbe994fe3eb8e2fa6af35b5"
+          "sha256": "7d5d0b3c7b24a644a2aa7ad94fe2cb0dbb78404218dba185af0b2212d12f4a6b"
         },
         {
           "path": "tests/account_nonce_contract.rs",
@@ -125,7 +125,7 @@
       "adapted": [
         {
           "path": "Cargo.lock",
-          "sha256": "6d832fb629bbf19ff6c2cce589c6285c3367cbcb3b55f4819beb7e733d9e038b"
+          "sha256": "72946aa05148e919d625dc551bea987b9cc115fce64546f99a981d2c4ad6a0a9"
         },
         {
           "path": "Cargo.toml",

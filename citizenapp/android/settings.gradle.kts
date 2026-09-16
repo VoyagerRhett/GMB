@@ -4,7 +4,7 @@ pluginManagement {
     val flutterSdkPath =
         run {
             val properties = java.util.Properties()
-            val flutterProjectRoot = System.getenv("TATA_CONSOLE_FLUTTER_ROOT")
+            val flutterProjectRoot = System.getenv("CITIZENAPP_PROJECT_ROOT")
                 ?.let { java.io.File(it) }
                 ?: settingsDir.parentFile
             flutterProjectRoot.resolve("android/local.properties").inputStream().use { properties.load(it) }
@@ -24,7 +24,7 @@ pluginManagement {
 
 // Flutter/Pub在当前产品根生成插件元数据；Gradle始终从本产品真实android根启动，
 // 因此不会再把跨根符号链接设置脚本当成另一个Gradle根。
-val flutterProjectRoot = System.getenv("TATA_CONSOLE_FLUTTER_ROOT")
+val flutterProjectRoot = System.getenv("CITIZENAPP_PROJECT_ROOT")
     ?.let { java.io.File(it) }
     ?: settingsDir.parentFile
 val flutterPlugins = flutterProjectRoot.resolve(".flutter-plugins-dependencies")

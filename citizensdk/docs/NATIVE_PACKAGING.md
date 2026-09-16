@@ -42,7 +42,7 @@ Simulator ARM64 Swift 链接。后两项不声称真机运行，也不要求上�
 ## 静态依赖准备与证据（第 10.5 步）
 
 产品依赖合同由本产品 `scripts/dependencies.json` 保存，`scripts/dependencies.mjs` 的
-prepare-native 子命令执行准备；塔塔依赖库只保存离线原件，不决定或阻断产品依赖。
+`prepare-native`子命令执行准备；外部缓存只保存锁定原件，不决定或阻断产品依赖。
 release.mjs 只固定子合同规范 JSON 的 SHA256，并验证输入收据
 内的合同副本。不自动升级，不使用 latest；SQLite 的官方 SHA3-256 与独立计算的 SHA256
 分别保存、分别验证，绝不混写算法。
@@ -123,7 +123,7 @@ CITIZENSDK_NATIVE_OUTPUT_DIR=<原生产物目录>
 
 脚本在首次 `mkdir` 前要求两个目录都是绝对规范路径，拒绝 `.`、`..`、重复或末尾分隔符，
 并逐级拒绝既存符号链接及非目录祖先。发布器对 candidate、archive 和 verify 路径执行同一
-预检，不能借中间符号链接或路径穿越把生成状态写进 SDK 源码树或 TataConsole 中央目录之外。
+预检，不能借中间符号链接或路径穿越把生成状态写进SDK源码树或指定工作目录之外。
 
 脚本使用 `cargo build --locked`。Android 产品目标构建唯一
 `libcitizensdk.so` 与薄 `libcitizensdk_jni.so`，拒绝 `libsmoldot`、共享 C++ 运行库、额外 ABI
@@ -131,8 +131,18 @@ CITIZENSDK_NATIVE_OUTPUT_DIR=<原生产物目录>
 `darwin/Sources/CitizenSDK` Swift 源码、根产品头、Privacy Manifest 与完整 CitizenChain 资产组合为一个
 `CitizenSDK.xcframework`。其闭集只有 iOS 设备变体、iOS 模拟器变体与 macOS；三个
 Apple machine slice 的架构元数据均为 `arm64`；
-每个 slice 精确导出产品头声明的 121 个符号及 3 个 QR 图像符号，并拒绝 `smoldot_*`、`citizen_sr25519_*`、
+每个 slice 精确导出产品头声明的 121 个符号及 3 个 QR 图像符号，因此最终公开允许集为 124 项；
+构建期未过滤链接另含 4 个只供 SDK 安全界面使用的内部符号，所以必须精确为 128 项，过滤后内部符号不进入交付。
+交付同时拒绝 `smoldot_*`、`citizen_sr25519_*`、
 `account_crypto_*` 和其它架构。
+Apple podspec的`vendored_frameworks`永远只使用pod根内固定相对名称
+`CitizenSDK.xcframework`。正式Git包和公开包直接携带该目录；本机直接开发由消费产品在自己的
+源码外只读工程视图中，把当轮生成的Framework链接投影到SDK视图pod根的同名位置。podspec不接收
+外部绝对路径、不跨出pod根，也不复制、移动或回写SDK源码。
+
+Android原生构建默认保持标准Gradle联网行为；只有调用方显式设置
+`CITIZENSDK_OFFLINE=true`时才向Gradle传入`--offline`，其他值失败关闭。该选择不改变依赖版本、
+来源或缓存位置，也不为调用方决定网络策略。
 
 legacy `libsmoldot.dylib` 只允许作为源码树外的 macOS `arm64` 差分测试宿主库生成；它绝不进入
 XCFramework、Hosted 或 GitHub 候选。其 `LC_ID_DYLIB` 是编译工作区的 build-local 路径，只适合
@@ -171,7 +181,7 @@ pending CAS 成功后才广播。第 4.2 步完成 Rust 内部 provider/runtime/
 `citizensdk_create_with_host`、五类 typed stores/KEK-DEK Vault 合同以及账户、钱包、签名、
 高层转账和历史投影。第 5.2 步进一步完成 Dart 公共入口、Android Kotlin/JNI/安全界面、
 Flutter tuple channel 与 Android 候选投影；第 6 步共享 Darwin 源码把同一产品 ABI 投影为
-Swift/Flutter、typed SQLite 与 Apple Vault。TataConsole Flow 同步仍由后续步骤验收。
+Swift/Flutter、typed SQLite与Apple Vault。产品Flow同步仍由后续步骤验收。
 
 同一未发布 ABI v1 还把平台链数据库接点固定在既有 start/export/stop：host start 自动恢复，
 host export 与 graceful stop 自动 exact-CAS 持久化；legacy constructor 跳过这些自动动作。
@@ -187,7 +197,7 @@ Android NDK 版本在 SDK 原生入口中固定为 `28.2.13676358`，与 GMB 官
 调用方提供 `ANDROID_NDK_HOME` 时必须精确指向该版本；同时提供 `ANDROID_HOME` 与
 `ANDROID_SDK_ROOT` 时两者必须一致。若三个 Android 环境变量均缺失，本机入口只从宿主标准
 SDK 目录（macOS 为 `$HOME/Library/Android/sdk`，LinuxARM 或 LinuxAMD 为 `$HOME/Android/Sdk`）解析该固定
-版本，不扫描或选择“最新”NDK。这样 SDK 本机构建不依赖塔塔控制台版本，同时仍拒绝版本漂移。
+版本，不扫描或选择“最新”NDK。这样 SDK 本机构建不依赖产品构建调用方版本，同时仍拒绝版本漂移。
 
 Apple 产品构建固定 `ios_deployment_target=16.0` 与 `macos_deployment_target=13.0`。iOS 设备变体、
 iOS 模拟器变体与 macOS 三次 `cargo build` 分别使用 `aarch64-apple-ios`、
@@ -260,7 +270,7 @@ CMake 的 Config 前缀、完整导入目标与 Release 属性按官方生成指
 已经得到完整依赖溯源。合成 ELF 测试仅证明这些检查有效，不证明平台执行或 TPM 功能。
 
 本机 Linux 构建与测试状态必须写入
-`/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk` 下的任务独占工作目录；GitHub runner 使用统一
+`CITIZENSDK_WORK_DIR` 下的任务独占工作目录；GitHub runner 使用统一
 工作流的 checkout 外独占目录，不照搬本机绝对路径。第 7.1 步只固定源码
 和 Release 源文件反向闭集；上述 Linux 安装、ELF、GLIBC、TPM 和两种机器运行门禁尚未执行，
 第 7.4 步候选 manifest 合同已同步为 Android、iOS、macOS、LinuxARM、LinuxAMD；这是源码
@@ -284,7 +294,7 @@ CITIZENSDK_ANDROID_CORE_DIR=<直接包含双 SO 的 arm64-v8a 目录>
 第 8.2.1 步仅修改发布器本机门禁，没有修改或重新验证 Android 构建器的路径接纳范围。根 Flutter 模块
 通过 source set 编译 `android/native/src/main/kotlin` 的同一生产 facade，不依赖或嵌套 AAR。
 正式候选另外放置 `android/citizensdk.aar` 供原生宿主使用。
-Gradle/Kotlin 的 persistent project state 必须由构建器显式定向到 TataConsole 中央 work
+Gradle/Kotlin的persistent project state必须由构建器显式定向到调用方源码外work
 directory；源码树不得生成或保存 `android/.kotlin`，候选构造与反向验证也必须将其视为错误。
 
 Apple 构建不读取 legacy iOS 静态库目录。统一原生入口在外部工作目录生成
@@ -315,17 +325,15 @@ iOS 两种变体、XCFramework 其他位置和候选其他目录不允许任何�
 若目标、相对路径、节点类型或数量漂移，或出现绝对路径、`..`、dangling、环路、逃逸，同样
 失败关闭。
 
-## 本机 TataConsole
+## 本机源码外工作目录
 
-CitizenSDK 的永久最终容器为 `/Users/rhett/TATA/tataconsole/target/gmb/citizensdk`，
-永久工作容器为 `/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk`。
-唯一 `release.mjs` 对 native 输入、候选输出和归档路径只接受上述两根的严格后代；拒绝
-永久根自身、旧根、相邻仓库/产品/平台、伪前缀、非规范路径及既存链接。只核验本次命中的
-根存在且为普通目录，不要求未使用的另一个根存在。GitHub 的隔离路径分支保持不变。
-该函数不负责 UID/权限、清理或事务提交；执行方仍须验证任务归属，只清理自己的内容，
-保留永久容器。第 8.2.1 步未修改原生构建器、控制台实现或 GitHub 流程。
+CitizenSDK工作目录由`CITIZENSDK_WORK_DIR`指定，原生产物目录由
+`CITIZENSDK_NATIVE_OUTPUT_DIR`指定。两者必须是互不嵌套的源码外规范绝对路径；本机、CI、
+正式Release与第三方集成使用同一安全边界。`release.mjs`同样接受调用方选择的安全源码外
+native输入、候选输出和归档路径，并在首次写入前拒绝源码内路径、非规范路径及既存链接。
+执行方只可清理自己创建的准确工作目录。
 
-下述为既有本机构建快照和三件套事务职责，不是本步重新验收控制台的声明。本机构建先读取
+下述为既有本机构建快照和三件套事务职责。本机构建先读取
 GMB 当前提交 SHA，再通过 `git archive <sha> citizensdk` 建立无生成状态的打包快照；构建
 快照从该提交快照派生。这样工作区未提交修改不会被错误标注为已提交 HEAD。
 
@@ -341,7 +349,7 @@ GMB 当前提交 SHA，再通过 `git archive <sha> citizensdk` 建立无生成�
 SHA-256 同时识别。它只允许作为准确历史前驱被完整备份、原子替换或失败恢复；任何其他
 324 行先前清单、部分集合或损坏字节均不在接受范围内并失败关闭。
 
-TataConsole 本机构建以 `work/gmb/citizensdk/candidate-transaction.lock` 覆盖初始化、构建、提交和恢复的完整
+产品发布流程以任务工作目录中的`candidate-transaction.lock`覆盖初始化、构建、提交和恢复的完整
 跨进程事务。锁 owner 先以 noclobber 完整写入 PID 与随机 token，再由同文件系统硬链接原子
 声明固定普通文件锁，不存在空 owner 固定态。活动、非法或无法确认死亡的 owner 均失败关闭，
 失效锁只有在两种本机进程检查均证明 PID 已死亡后才可原子接管。退出清理只能移除逐字节属于
@@ -368,7 +376,7 @@ CitizenSDK 复用 GMB 唯一顶层 Workflow 和现有产品流程。第 10.6 步
 CI 与 Release 都使用确定性候选算法，但 Release 的成立条件是来源绑定、独立重建与完整
 验证，不宣称不同 Runner、不同 run 的压缩包在所有环境下必然逐字节相同。
 
-工具来源和准备属于既有中央 dependencies.json / dependencies.mjs；SDK 源码不依赖 TATA。
+工具来源和准备由`scripts/dependencies.lock.json`与`scripts/dependencies.mjs`负责；SDK源码不依赖外部仓库。
 Flutter 固定 3.44.4 官方提交，Android 明确选 NDK 28.2.13676358、Gradle 8.14、CMake 3.31.6；
 后者由 sdkmanager 维护安装元数据，并将安装文件与已验 SHA256 的官方归档逐字节比较。
 Windows 初始化 runner 已装 MSVC，保留 /MD。Linux 使用固定官方 Debian rootfs、签名 APT
@@ -456,12 +464,12 @@ Flutter SDK 与 `polkadart_keyring`；legacy/差分依赖是 dev-only，不进�
 `linux/CMakeLists.txt` 与 `windows/CMakeLists.txt` 已统一冻结为 `1.0.0`。发布器要求五者、请求软件版本及候选 manifest
 完全一致；版本升级必须先形成新的
 源码提交，不能只向 Release 输入另一个版本。本步骤不执行 Hosted 上传，在首次发布完成前
-不得宣称已经可由 `citizen_sdk: ^1.0.0` 获取。正式发布由 TataConsole 的 SDK 发布按钮触发；
+不得宣称已经可由`citizen_sdk: ^1.0.0`获取。正式发布由CitizenSDK产品入口触发；
 不接任何产品下载指针。Android、iOS、macOS、Linux 与 Windows 源码投影均使用同一
 产品 ABI。此前已完成 Android AAR、Apple 单一 XCFramework、本机 Apple 编译、macOS XCTest
 和最终 smoke；本机无
 Simulator runtime 和真实 Apple 移动设备，因此不声称 iOS XCTest 已运行或真机硬件金库
-已验收。当前 TataConsole Flow 已接阶段 0 原生入口、完整候选闭集汇总、同包消费与正式发布阶段，
+已验收。当前产品Flow已接阶段0原生入口、完整候选闭集汇总、同包消费与正式发布阶段，
 但尚未运行的远程 CI、正式 Release、Hosted 上传或 Git 不能记为通过。
 
 Linux 第 7.1 步源码已进入 GitHub 审计候选的受控源闭集，第 7.2 步已完成 Flutter adapter 源码，
@@ -568,7 +576,7 @@ Package.swift。Flutter 的 Xcode backend 会再次调用 bin/dart、bin/flutter
 来源、状态隔离或失败门禁；第 9.2 步本机开发范围可收尾，但不代表远程验收或发布完成。
 
 第 10.3 步的目录预检由同一构建器按执行环境选择：本机固定
-`/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk`；当
+`CITIZENSDK_WORK_DIR`；当
 `GITHUB_ACTIONS=true` 时固定 `RUNNER_TEMP/citizensdk`，必须提供 GitHub 官方
 `RUNNER_TEMP`、`GITHUB_WORKSPACE`，且 SDK 来源是该 checkout 的严格子目录。
 受控根与 checkout/SDK 源树在任一方向都不得交叠。根、输入目录和工作/输出容器须预先存在，

@@ -6,7 +6,6 @@ import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
-import 'package:citizenapp/chat/chat_product_policy.dart';
 import 'package:citizenapp/my/membership/membership_revision.dart';
 import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
@@ -102,6 +101,87 @@ class SubscriptionService {
   static final Map<String, _MembershipAuthorization> _authorizations =
       <String, _MembershipAuthorization>{};
 
+  /// 聊天等会员消费者只读本次 CitizenServe 会话已经确认的会员事实。
+  /// 该状态属于会员模块；聊天模块不得保存 CID、会员档或附件权益副本。
+  static final Map<String, int> _authorizedChatFileMaxBytes = <String, int>{};
+  static String? _currentAuthorizedCidNumber;
+
+  static bool membershipResolvedFor(String cidNumber) =>
+      _memorySnapshots.containsKey(cidNumber.trim());
+
+  static bool chatAuthorizationResolvedFor(String cidNumber) =>
+      _authorizedChatFileMaxBytes.containsKey(cidNumber.trim());
+
+  static bool chatAuthorizedFor(String cidNumber) =>
+      chatFileMaxBytesFor(cidNumber) > 0;
+
+  static int chatFileMaxBytesFor(String cidNumber) =>
+      _authorizedChatFileMaxBytes[cidNumber.trim()] ?? 0;
+
+  static int get currentChatFileMaxBytes {
+    final cidNumber = _currentAuthorizedCidNumber;
+    return cidNumber == null ? 0 : chatFileMaxBytesFor(cidNumber);
+  }
+
+  static String get currentChatFileSizeLabel {
+    final cidNumber = _currentAuthorizedCidNumber;
+    return cidNumber == null ? '0MB' : chatFileSizeLabelFor(cidNumber);
+  }
+
+  static String chatFileSizeLabelFor(String cidNumber) =>
+      _chatFileSizeLabel(chatFileMaxBytesFor(cidNumber));
+
+  static void markChatAuthorizationUnavailable(String cidNumber) {
+    final normalized = cidNumber.trim();
+    _currentAuthorizedCidNumber = normalized;
+    _authorizedChatFileMaxBytes.remove(normalized);
+  }
+
+  static void _rememberChatAuthorization(
+    String cidNumber,
+    SquareMembershipState state,
+  ) {
+    final normalized = cidNumber.trim();
+    _currentAuthorizedCidNumber = normalized;
+    _authorizedChatFileMaxBytes[normalized] =
+        state.activePlan?.chatFileMaxBytes ?? 0;
+  }
+
+  @visibleForTesting
+  static void setChatAuthorizationForTesting(
+    String cidNumber,
+    int? chatFileMaxBytes,
+  ) {
+    final normalized = cidNumber.trim();
+    _memorySnapshots.remove(normalized);
+    _authorizedChatFileMaxBytes.remove(normalized);
+    _currentAuthorizedCidNumber = normalized;
+    if (chatFileMaxBytes == null) return;
+    final state = SquareMembershipState(
+      active: chatFileMaxBytes > 0,
+      paidUntil: 1,
+      membershipLevel: chatFileMaxBytes > 0 ? 'test' : null,
+    );
+    _memorySnapshots[normalized] = MembershipDisplaySnapshot(
+      state: state,
+      prices: const <String, int>{},
+      subscriptionFetchedAtMs: 1,
+      pricesFetchedAtMs: 1,
+    );
+    _authorizedChatFileMaxBytes[normalized] = chatFileMaxBytes;
+  }
+
+  static String _chatFileSizeLabel(int bytes) {
+    const mib = 1024 * 1024;
+    if (bytes >= 1024 * mib) {
+      final gib = bytes / (1024 * mib);
+      return gib == gib.roundToDouble()
+          ? '${gib.round()}GB'
+          : '${gib.toStringAsFixed(1)}GB';
+    }
+    return '${(bytes / mib).round()}MB';
+  }
+
   /// 最近一次平台订阅动作已经 finalized，但 Worker 镜像仍等待确认。
   ///
   /// 该状态只供会员页显示同步提示；会员资格以 CitizenServe D1 与本机统一缓存为准。
@@ -139,10 +219,7 @@ class SubscriptionService {
   ) async {
     final state = await _api.fetchMembership(session);
     await _rememberServerState(session, state);
-    ChatMediaLimits.applyAuthorizedMembershipLevel(
-      state.active ? state.membershipLevel : null,
-      cidNumber: session.cidNumber,
-    );
+    _rememberChatAuthorization(session.cidNumber, state);
     return state;
   }
 
@@ -260,10 +337,6 @@ class SubscriptionService {
           );
     final previous = _memorySnapshots[cidNumber];
     _memorySnapshots[cidNumber] = effective;
-    ChatMediaLimits.applyMembershipLevel(
-      effective.state.active ? effective.state.membershipLevel : null,
-      cidNumber: cidNumber,
-    );
     if (notify && !_sameMembership(previous?.state, effective.state)) {
       MembershipRevision.instance.notifyChanged(cidNumber);
     }
@@ -439,9 +512,8 @@ class SubscriptionService {
           proof: proof,
         );
       }
-      _mirrorSyncPending = (await _readList(
-        _pendingKey(subscriberCidNumber),
-      )).isNotEmpty;
+      _mirrorSyncPending = (await _readList(_pendingKey(subscriberCidNumber)))
+          .isNotEmpty;
     } on Exception {
       // 保留未完成证明；链上订阅与自动续费不依赖 Cloudflare。
     }
@@ -477,10 +549,7 @@ class SubscriptionService {
         blockHashHex: blockHashHex,
       );
       await _rememberServerState(session, confirmed);
-      ChatMediaLimits.applyAuthorizedMembershipLevel(
-        confirmed.active ? confirmed.membershipLevel : null,
-        cidNumber: session.cidNumber,
-      );
+      _rememberChatAuthorization(session.cidNumber, confirmed);
       _authorizations[subscriberCidNumber] = _MembershipAuthorization(
         _authorizationKey(session),
         Future<SquareMembershipState>.value(confirmed),
@@ -537,9 +606,9 @@ class SubscriptionService {
   }
 
   Future<String?> _readState(String key) => WalletIsar.instance.read(
-    (isar) async => (await isar.walletMembershipStateEntitys.getByStateKey(
-      key,
-    ))?.payloadJson,
+    (isar) async =>
+        (await isar.walletMembershipStateEntitys.getByStateKey(key))
+            ?.payloadJson,
   );
 
   Future<void> _writeState(String key, String payloadJson) =>

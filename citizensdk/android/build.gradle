@@ -9,27 +9,6 @@ if (sdkSourceValue != null && !new File(sdkSourceValue).isAbsolute()) {
 def sdkProductRoot = sdkSourceValue == null
     ? project.projectDir.parentFile.canonicalFile : new File(sdkSourceValue).canonicalFile
 def androidSourceRoot = new File(sdkProductRoot, 'android')
-def tataConsoleTargetRoot = file('/Users/rhett/TATA/tataconsole/target').canonicalFile
-def localCitizenSdkRoots = { boolean buildOnly = false ->
-    def roots = [new File(tataConsoleTargetRoot.parentFile, 'cache/gmb/citizensdk').canonicalFile]
-    // 编译只能写测试库；验真原件输入仍可消费产物库的正式成功文件。
-    if (!buildOnly) roots.add(new File(tataConsoleTargetRoot, 'gmb/citizensdk').canonicalFile)
-    def taskWorkValue = System.getenv('TATA_CONSOLE_CACHE_DIR')
-    if (taskWorkValue != null && !taskWorkValue.trim().isEmpty()) {
-        def taskWork = file(taskWorkValue).canonicalFile
-        def sharedWorkRoot = new File(tataConsoleTargetRoot.parentFile, 'cache').canonicalFile
-        if (taskWork.path.startsWith(sharedWorkRoot.path + File.separator)) {
-            // 宿主产品只得到自己任务目录下的 CitizenSDK 工作空间，不获得任意外部写权限。
-            roots.add(new File(taskWork, 'citizensdk').canonicalFile)
-        }
-    }
-    roots
-}
-def staysInLocalCitizenSdkRoot = { File candidate, boolean buildOnly = false ->
-    localCitizenSdkRoots(buildOnly).any { File root ->
-        candidate.path == root.path || candidate.path.startsWith(root.path + File.separator)
-    }
-}
 def androidBuildValue = System.getenv('CITIZENSDK_ANDROID_BUILD_DIR')
 if (androidBuildValue != null && !androidBuildValue.trim().isEmpty()) {
     def androidBuildInput = file(androidBuildValue)
@@ -45,8 +24,6 @@ if (androidBuildValue != null && !androidBuildValue.trim().isEmpty()) {
                 throw new GradleException('CitizenSDK Android output must remain outside the GitHub source checkout')
             }
         }
-    } else if (!staysInLocalCitizenSdkRoot(androidBuildRoot, true)) {
-        throw new GradleException('Local CitizenSDK Android build output must stay in its central work directory or current host task')
     }
     if (androidBuildRoot.toPath().startsWith(sdkProductRoot.toPath())) {
         throw new GradleException('CitizenSDK Android output must remain outside the source tree')
@@ -84,10 +61,6 @@ if (stagedAndroidAbiValue != null && !stagedAndroidAbiValue.trim().isEmpty()) {
             selectedAndroidAbiDirectory.toPath().startsWith(file(githubWorkspaceValue).canonicalFile.toPath())) {
             throw new GradleException('CitizenSDK Android native staging must remain outside the GitHub source checkout')
         }
-    } else {
-        if (!staysInLocalCitizenSdkRoot(selectedAndroidAbiDirectory)) {
-            throw new GradleException('Local CitizenSDK Android staging must stay in the CitizenSDK product root or current host task')
-        }
     }
     if (selectedAndroidAbiDirectory.toPath().startsWith(sdkProductRoot.toPath())) {
         throw new GradleException('CitizenSDK Android native staging must remain outside the source tree')
@@ -122,6 +95,8 @@ android {
     }
     defaultConfig {
         minSdk = 24
+        // Flutter宿主直接编译本模块；必须与独立AAR消费同一份JNI准确名称规则。
+        consumerProguardFiles new File(androidSourceRoot, 'native/consumer-rules.pro')
         ndk {
             abiFilters 'arm64-v8a'
         }

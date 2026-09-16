@@ -16,7 +16,7 @@ dev_dependencies:
   # 正式 Binding/资产测试和受保护 smoldot 来源测试；无第二套 Dart 钱包或交易。
   crypto: ^3.0.7
   ffi: ^2.2.0
-  flutter_lints: ^5.0.0
+  flutter_lints: 6.0.0
   flutter_test:
     sdk: flutter
   meta: ^1.15.0

@@ -1,6 +1,6 @@
 import type { Env, SquareNotifyJob } from '../types';
 import { nowMs } from '../shared/time';
-import { createPushAuth, sendSquarePostAlert, type PushDevice } from '../chat/push';
+import { createPushAuth, sendSquarePostAlert, type PushDevice } from '../shared/push';
 
 /// 每页粉丝数：满页则 keyset 续跑下一页（不是丢弃上限，队列消费者跨调用推完全部）。
 // 单 CID 最多 8 个推送端点；每页 5 人确保 D1、OAuth/APNs 与最多 40 次推送不超过
@@ -41,7 +41,7 @@ export async function fanOutPage(
   const placeholders = cidNumbers.map(() => '?').join(',');
   const devices = await env.DB.prepare(
     `SELECT DISTINCT e.push_provider, e.push_token, e.apns_environment
-       FROM chat_push_endpoints e
+       FROM push_endpoints e
        JOIN users u ON u.cid_number = e.cid_number
         AND u.binding_revision = e.binding_revision
         AND u.account_id = e.account_id

@@ -2,8 +2,6 @@ import type { Env, MediaAssetRow } from '../types';
 import { manifestObjectKey } from '../storage/r2_keys';
 import { deleteR2MediaAssets } from '../media/service';
 import { clearIdentitySessions } from '../auth/session_index';
-import { closeChatRealtime } from '../chat/realtime';
-import { purgeChatAttachmentsForCid } from '../chat/attachments';
 import { HttpError } from '../shared/http';
 
 export interface PurgeIdentityResult {
@@ -21,22 +19,17 @@ interface PurgeUploadRow {
 
 /// 按唯一身份主键 CID 硬删除其在 Cloudflare 中可清除的身份、社交、鉴权、会话和媒体数据。
 /// 边界：
-/// - Chat 消息只存有界密文；注销会删除推送端点、本人附件及共享附件收件人映射。
+/// - 普通应用推送端点随当前身份删除；聊天数据由独立 CitizenChatServer 管理。
 /// - 身份内容、设备、会话和 off-chain 关系全部按 cid_number 删除。
 /// - finalized 交易最小证明与充值订单都带 CID 归属并随身份完整删除；链上原始交易事实
 ///   仍由公链保存，不以 D1 台账残留为审计前提。
 /// - 会员与创作者订阅投影由 users 外键级联删除；注销不代签链上退订。
-/// - 媒体提供商失败不得阻塞 Chat 隐私数据硬删除。
+/// - 媒体提供商失败必须让注销失败关闭，禁止丢失后续清理所需的对象索引。
 export async function purgeIdentity(
   env: Env,
   cidNumber: string
 ): Promise<PurgeIdentityResult> {
-  // 1. Chat 信令连接、推送端点和七天密文附件索引均属于 CID。
-  await closeChatRealtime(env, cidNumber);
-  await env.DB.prepare(`DELETE FROM chat_push_endpoints WHERE cid_number = ?`).bind(cidNumber).run();
-  const deletedChatObjects = await purgeChatAttachmentsForCid(env, cidNumber);
-
-  // 2. 先完整读取并校验该 CID 的上传对象索引；清单损坏或已发布帖缺上传索引时 fail-closed，
+  // 1. 先完整读取并校验该 CID 的上传对象索引；清单损坏或已发布帖缺上传索引时 fail-closed，
   //    禁止先删 R2/D1 后丢失继续清理所需的唯一对象事实。
   const uploads = (
     await env.DB.prepare(
@@ -60,7 +53,7 @@ export async function purgeIdentity(
   }
   const postObjectKeys = [...new Set(uploads.map((upload) => manifestObjectKey(upload)))];
 
-  // 3. R2 媒体：注销=删身份，按 cid_number 取该身份全部主媒体及衍生图并硬删除。
+  // 2. R2 媒体：注销=删身份，按 cid_number 取该身份全部主媒体及衍生图并硬删除。
   const mediaRows = (
     await env.DB.prepare(
       `SELECT upload_id, post_id, cid_number, account_id, media_index, media_kind, object_key,
@@ -75,25 +68,25 @@ export async function purgeIdentity(
   ).results ?? [];
   await deleteR2MediaAssets(env, mediaRows);
 
-  // 4. R2：资料按 CID 前缀；帖子只按上方已严格验证的 D1 对象清单精确删除，覆盖历次换绑
+  // 3. R2：资料按 CID 前缀；帖子只按上方已严格验证的 D1 对象清单精确删除，覆盖历次换绑
   //    账户的发布路径。禁止按当前账户前缀猜测，也不保留生产期迁移工具兜底。
   for (let index = 0; index < postObjectKeys.length; index += 1000) {
     await env.SQUARE_PRIVATE.delete(postObjectKeys.slice(index, index + 1000));
   }
   const deletedProfileObjects = await deleteR2Prefix(env, `profile/${cidNumber}/`);
-  const deletedR2 =
-    deletedChatObjects + postObjectKeys.length + mediaRows.length * 2 + deletedProfileObjects;
+  const deletedR2 = postObjectKeys.length + mediaRows.length * 2 + deletedProfileObjects;
 
-  // 5. KV：注销按 CID 失效历次换绑账户签发的全部会话；用户身份不再使用 KV 缓存。
+  // 4. KV：注销按 CID 失效历次换绑账户签发的全部会话；用户身份不再使用 KV 缓存。
   await clearIdentitySessions(env, cidNumber);
 
-  // 6. D1 原子批删。存储总量回收必须和媒体/内容行删除同批提交：任一语句失败时
+  // 5. D1 原子批删。存储总量回收必须和媒体/内容行删除同批提交：任一语句失败时
   //    D1 整批回滚，重试仍能从媒体行重建同一释放量；成功后媒体行已删除，后续重试
   //    不会再次扣减全局 resource_totals。
   //    所有有 CID 归属的身份、内容、关系、设备与用量数据均按 CID 删除。登录挑战
   //    记录 CID 归属，必须覆盖历次换绑账户，不能只删当前授权账户。
   const statements = [
     env.DB.prepare(`DELETE FROM square_device_subkeys WHERE cid_number = ?`).bind(cidNumber),
+    env.DB.prepare(`DELETE FROM push_endpoints WHERE cid_number = ?`).bind(cidNumber),
     env.DB.prepare(`DELETE FROM square_sessions WHERE cid_number = ?`).bind(cidNumber),
     env.DB.prepare(`DELETE FROM square_login_challenges WHERE cid_number = ?`).bind(cidNumber),
     env.DB.prepare(`DELETE FROM square_uploads WHERE cid_number = ?`).bind(cidNumber),

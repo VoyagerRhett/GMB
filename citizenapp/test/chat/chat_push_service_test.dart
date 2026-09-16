@@ -7,7 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   test('新应用标识使用各自登记的唯一 Firebase App ID', () {
     final source = File(
-      'lib/chat/chat_product_configuration.dart',
+      'lib/notifications/app_push_service.dart',
     ).readAsStringSync();
     final appIds = RegExp(
       r"'(1:124593150477:(?:android|ios):[0-9a-f]+)'",
@@ -26,7 +26,7 @@ void main() {
 
   test('Firebase 客户端 Key 按平台隔离且禁止共享回退', () {
     final source = File(
-      'lib/chat/chat_product_configuration.dart',
+      'lib/notifications/app_push_service.dart',
     ).readAsStringSync();
     final keys = RegExp(
       r"const _firebase(?:Android|Ios)ApiKey = '(AIza[^']+)'",
@@ -80,13 +80,13 @@ void main() {
     final android = File(
       'android/app/src/main/kotlin/com/crcfrcn/citizenapp/MainActivity.kt',
     ).readAsStringSync();
-    final client = File(
-      'lib/chat/chat_product_configuration.dart',
+    final appPush = File(
+      'lib/notifications/app_push_service.dart',
     ).readAsStringSync();
 
     expect(android, contains('CHAT_NOTIFICATION_CHANNEL_ID = "chat_messages"'));
     expect(android, contains('.setContentText("你有一条新消息")'));
-    expect(client, contains('setForegroundNotificationPresentationOptions'));
+    expect(appPush, contains('setForegroundNotificationPresentationOptions'));
     expect(android, contains('clearChatNotifications(conversationId)'));
     expect(
       File('ios/Runner/AppDelegate.swift').readAsStringSync(),
@@ -94,11 +94,24 @@ void main() {
     );
   });
 
-  test('APNs 环境只接受原生签名映射后的两个固定值', () {
-    expect(requireApnsEnvironment('sandbox'), 'sandbox');
-    expect(requireApnsEnvironment('production'), 'production');
-    expect(() => requireApnsEnvironment('development'), throwsStateError);
-    expect(() => requireApnsEnvironment(null), throwsStateError);
+  test('聊天桥不拥有Firebase配置或非聊天通知', () {
+    final source = File(
+      'lib/chat/chat_product_configuration.dart',
+    ).readAsStringSync();
+    expect(source, isNot(contains('FirebaseOptions')));
+    expect(source, isNot(contains('_firebaseAndroidApiKey')));
+    expect(source, isNot(contains('square_post')));
+    expect(source, contains('AppPushService'));
+  });
+
+  test('普通应用推送由CitizenServe会话登记且不使用聊天数据面', () {
+    final client = File(
+      'lib/8964/services/square_api_client.dart',
+    ).readAsStringSync();
+    final main = File('lib/main.dart').readAsStringSync();
+    expect(client, contains("'/square/push-endpoint'"));
+    expect(main, contains('registerPushEndpoint'));
+    expect(main, contains("data['kind'] == 'storage_cleanup'"));
   });
 
   test('iOS APNs 环境以 provisioning profile 和 App Store 收据为真源', () {

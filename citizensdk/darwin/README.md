@@ -93,10 +93,10 @@ invalid.
 The checked-in package manifest and podspec consume the XCFramework injected
 into this directory by the canonical candidate builder. Build intermediates,
 archives, DerivedData, Pods, SwiftPM state and the XCFramework itself must stay
-under TataConsole's central CitizenSDK work directory and never be committed.
+under 调用方's central CitizenSDK work directory and never be committed.
 本机当前工作根固定为
-`/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk`，只使用本任务独占子目录。
-成功产物根为 `/Users/rhett/TATA/tataconsole/target/gmb/citizensdk`，已有产物不能被
+`CITIZENSDK_WORK_DIR`，只使用本任务独占子目录。
+成功产物根为 `CITIZENSDK_NATIVE_OUTPUT_DIR`，已有产物不能被
 失败验收覆盖。第 6 步路径仅是任务卡内已结束的历史记录，不是当前生成目录。
 
 The Step 6 Flutter consumer built an Android release APK for ABI `arm64-v8a`, an unsigned iOS

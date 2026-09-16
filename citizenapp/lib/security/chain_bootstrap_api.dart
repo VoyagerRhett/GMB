@@ -22,8 +22,9 @@ class ChainBootstrapApiConfig {
 
   static const prodBaseUrl = 'https://www.crcfrcn.com/api';
 
-  static const _configuredBaseUrl =
-      String.fromEnvironment(edgeBaseUrlDefineName);
+  static const _configuredBaseUrl = String.fromEnvironment(
+    edgeBaseUrlDefineName,
+  );
 
   static String get defaultBaseUrl {
     if (_configuredBaseUrl.trim().isNotEmpty) {
@@ -38,7 +39,8 @@ class ChainBootstrapApiConfig {
     if (trimmed.isEmpty || uri == null || !uri.hasScheme || uri.host.isEmpty) {
       throw UnsupportedError('$edgeBaseUrlDefineName 必须是完整的 Worker API URL');
     }
-    final isLocalHttp = uri.scheme == 'http' &&
+    final isLocalHttp =
+        uri.scheme == 'http' &&
         (uri.host == '127.0.0.1' ||
             uri.host == 'localhost' ||
             uri.host == '::1');
@@ -56,10 +58,10 @@ class ChainBootstrapApi {
     String? baseUrl,
     http.Client? httpClient,
     this.timeout = const Duration(seconds: 6),
-  })  : baseUrl = ChainBootstrapApiConfig.normalizeBaseUrl(
-          baseUrl ?? ChainBootstrapApiConfig.defaultBaseUrl,
-        ),
-        _http = httpClient ?? http.Client();
+  }) : baseUrl = ChainBootstrapApiConfig.normalizeBaseUrl(
+         baseUrl ?? ChainBootstrapApiConfig.defaultBaseUrl,
+       ),
+       _http = httpClient ?? http.Client();
 
   final String baseUrl;
   final http.Client _http;
@@ -67,14 +69,12 @@ class ChainBootstrapApi {
 
   Future<ChainBootstrapManifest> fetchManifest() async {
     final uri = Uri.parse('$baseUrl/chain/bootstrap');
-    final response = await _http.get(uri, headers: const {
-      'accept': 'application/json',
-    }).timeout(timeout);
+    final response = await _http
+        .get(uri, headers: const {'accept': 'application/json'})
+        .timeout(timeout);
 
     if (response.statusCode != 200) {
-      throw ChainBootstrapApiException(
-        '链启动清单读取失败:HTTP ${response.statusCode}',
-      );
+      throw ChainBootstrapApiException('链启动清单读取失败:HTTP ${response.statusCode}');
     }
 
     final raw = jsonDecode(response.body);
@@ -210,9 +210,7 @@ class ChainBootstrapLightClient {
     };
     if (json.length != requiredKeys.length ||
         !requiredKeys.every(json.containsKey)) {
-      throw const ChainBootstrapApiException(
-        '链启动清单 light_client 字段不完整或包含未知字段',
-      );
+      throw const ChainBootstrapApiException('链启动清单 light_client 字段不完整或包含未知字段');
     }
     final bundledAssets = json['bundled_assets_required'];
     if (bundledAssets is! List ||
@@ -267,14 +265,12 @@ class ChainBootstrapP2p {
 class ChainBootstrapServices {
   const ChainBootstrapServices({
     required this.squareBaseUrl,
-    required this.chatBaseUrl,
     required this.mediaBaseUrl,
     required this.signedExtrinsicRelayEnabled,
     required this.signedExtrinsicRelayPath,
   });
 
   final String squareBaseUrl;
-  final String chatBaseUrl;
   final String mediaBaseUrl;
   final bool signedExtrinsicRelayEnabled;
   final String? signedExtrinsicRelayPath;
@@ -287,7 +283,6 @@ class ChainBootstrapServices {
     final relay = _map(json, 'signed_extrinsic_relay');
     return ChainBootstrapServices(
       squareBaseUrl: _httpsOrLocalUrl(json, 'square_base_url'),
-      chatBaseUrl: _httpsOrLocalUrl(json, 'chat_base_url'),
       mediaBaseUrl: _httpsOrLocalUrl(json, 'media_base_url'),
       signedExtrinsicRelayEnabled: _bool(relay, 'enabled'),
       signedExtrinsicRelayPath: _relayPath(relay),
@@ -361,7 +356,8 @@ String _hex32(Map<String, dynamic> json, String key) {
 String _httpsOrLocalUrl(Map<String, dynamic> json, String key) {
   final value = _string(json, key);
   final uri = Uri.tryParse(value);
-  final isLocalHttp = uri?.scheme == 'http' &&
+  final isLocalHttp =
+      uri?.scheme == 'http' &&
       (uri?.host == '127.0.0.1' ||
           uri?.host == 'localhost' ||
           uri?.host == '::1');
@@ -384,7 +380,8 @@ String? _relayPath(Map<String, dynamic> json) {
     return value as String;
   }
   throw const ChainBootstrapApiException(
-      '链启动清单 signed_extrinsic_relay path 无效');
+    '链启动清单 signed_extrinsic_relay path 无效',
+  );
 }
 
 bool _isBootnode(String value) {

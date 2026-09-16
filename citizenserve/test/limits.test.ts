@@ -14,13 +14,13 @@ import { afterEach, vi } from 'vitest';
 afterEach(() => vi.unstubAllGlobals());
 
 describe('Cloudflare 统一资源限制', () => {
-  it('固定压缩后的图片、视频和聊天硬上限', () => {
+  it('固定压缩后的图片、视频和普通推送硬上限', () => {
     expect(resourceLimit('profile_avatar').max_bytes).toBe(512 * 1024);
     expect(resourceLimit('square_image_freedom').max_bytes).toBe(1_000_000);
     expect(resourceLimit('square_image_spark').max_bytes).toBe(4_000_000);
     expect(resourceLimit(videoResource('freedom')).max_bytes).toBe(16_000_000);
     expect(resourceLimit(videoResource('spark')).max_seconds).toBe(3 * 60 * 60);
-    expect(resourceLimit('chat_push_endpoint').max_bytes).toBe(16 * 1024);
+    expect(resourceLimit('push_endpoint').max_bytes).toBe(16 * 1024);
     expect(resourceLimit('contact_ciphertext').max_bytes).toBe(16 * 1024);
   });
 
@@ -32,6 +32,7 @@ describe('Cloudflare 统一资源限制', () => {
     );
     expect(() => assertKnownRoute('PUT', '/square/uploads/media')).toThrowError(HttpError);
     expect(assertKnownRoute('GET', '/square/contacts')).toBe('api_json_small');
+    expect(assertKnownRoute('PUT', '/square/push-endpoint')).toBe('push_endpoint');
     expect(assertKnownRoute('PUT', `/square/contacts/${'ab'.repeat(32)}`)).toBe('contact_ciphertext');
     expect(assertKnownRoute('GET', '/download/citizenapp/android')).toBe('api_json_small');
     for (const path of [
@@ -76,15 +77,15 @@ describe('Cloudflare 统一资源限制', () => {
   });
 
   it('拒绝没有 Content-Length 或声明超限的写请求', () => {
-    expect(() => assertRequestBodyLimit(new Request('https://worker.test/chat/ice', {
-      method: 'POST',
+    expect(() => assertRequestBodyLimit(new Request('https://worker.test/square/push-endpoint', {
+      method: 'PUT',
       body: '{}',
-    }), '/chat/ice')).toThrow(expect.objectContaining({ code: 'content_length_required' }));
+    }), '/square/push-endpoint')).toThrow(expect.objectContaining({ code: 'content_length_required' }));
 
-    expect(() => assertRequestBodyLimit(new Request('https://worker.test/chat/ice', {
-      method: 'POST',
-      headers: { 'content-length': String(1024 + 1) },
-    }), '/chat/ice')).toThrow(expect.objectContaining({ code: 'request_too_large' }));
+    expect(() => assertRequestBodyLimit(new Request('https://worker.test/square/push-endpoint', {
+      method: 'PUT',
+      headers: { 'content-length': String(16 * 1024 + 1) },
+    }), '/square/push-endpoint')).toThrow(expect.objectContaining({ code: 'request_too_large' }));
   });
 
   it('没有可信声明长度时仍在流读取阶段截断', async () => {

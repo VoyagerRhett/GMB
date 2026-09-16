@@ -240,7 +240,7 @@ describe('topup 稳定币充值后端', () => {
     expect(body.orders[0]).not.toHaveProperty('settlement_claim_id');
   });
 
-  it('历史镜像经结算令牌鉴权并使用稳定游标重建塔塔控制台 SQLite', async () => {
+  it('历史镜像经结算令牌鉴权并使用稳定游标重建结算客户端状态', async () => {
     const { env, orderId } = await preparedOrder();
     const response = await topupHistoryRoute(
       settleGet('https://x.test/square/topup/settlement/history?after_confirmed_at=0&after_order_id='),

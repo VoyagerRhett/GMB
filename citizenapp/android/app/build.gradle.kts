@@ -2,11 +2,11 @@ import java.util.Properties
 
 plugins {
     id("com.android.application")
-    // AGP提供内置Kotlin；Flutter插件在Android插件之后应用。
+    // AGP 9提供内置Kotlin；Flutter插件在Android插件之后接入唯一工具链。
     id("dev.flutter.flutter-gradle-plugin")
 }
 
-val flutterProductRoot = System.getenv("TATA_CONSOLE_FLUTTER_ROOT")
+val flutterProductRoot = System.getenv("CITIZENAPP_PROJECT_ROOT")
     ?.let { file(it) }
     ?: rootProject.projectDir.parentFile
 val flutterBuildProperties = Properties().apply {
@@ -22,8 +22,8 @@ android {
     // 设备测试必须挂到正式 Release 变体，禁止为验收生成影子 Debug 应用。
     testBuildType = "release"
 
-    // TataConsole本机编译只从中央工作目录打包Rust库，产品仓库不得保留生成的jniLibs。
-    System.getenv("TATA_CONSOLE_NATIVE_ANDROID_DIR")?.takeIf { it.isNotBlank() }?.let { nativeDir ->
+    // 调用方只从本次源码外目录打包原生库，产品仓库不得保留生成的jniLibs。
+    System.getenv("CITIZENAPP_NATIVE_ANDROID_DIR")?.takeIf { it.isNotBlank() }?.let { nativeDir ->
         sourceSets.getByName("main").jniLibs.directories.apply {
             clear()
             add(nativeDir)
@@ -51,8 +51,8 @@ android {
 
     buildTypes {
         release {
-            // 所有环境只生成无私钥 Release 候选。正式 JKS 只存在 TataConsole 的
-            // Data Protection Keychain，并由原生安全进程在 Touch ID 后通过匿名 stdin 使用。
+            // 所有环境只生成无私钥 Release 候选。正式 JKS 只进入产品安全发布执行器，
+            // 并在完成产品要求的本机授权后通过匿名 stdin 使用。
             signingConfig = null
             // Release 包不保留本地调试符号；CitizenSDK 原生库的构建与
             // 符号归档由 CitizenSDK 自己的产品流程负责。
@@ -84,6 +84,6 @@ kotlin {
 }
 
 flutter {
-    // 本机任务从缓存Flutter根读取生成状态；普通产品构建仍以本工程根为Flutter根。
-    source = System.getenv("TATA_CONSOLE_FLUTTER_ROOT") ?: "../.."
+    // 调用方可以提供源码外Flutter工程视图；普通产品构建仍以本工程根为Flutter根。
+    source = System.getenv("CITIZENAPP_PROJECT_ROOT") ?: "../.."
 }

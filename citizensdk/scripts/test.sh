@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CitizenSDK 唯一本地测试入口；源码只读，所有测试生成物写入塔塔缓存库。
+# CitizenSDK唯一本地测试入口；源码只读，所有测试生成物写入产品外部工作目录。
 set -euo pipefail
 
 script_path="${BASH_SOURCE[0]}"
@@ -10,14 +10,13 @@ while [[ -L "$script_path" ]]; do
 done
 script_dir="$(cd "$(dirname "$script_path")" && pwd -P)"
 sdk_dir="$(dirname "$script_dir")"
-cache_root="${TATA_CONSOLE_CACHE_DIR:-/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk}"
-test_root="$cache_root/test"
+test_root="${CITIZENSDK_TEST_WORK_DIR:-${TMPDIR:-/tmp}/citizensdk/test}"
 test_smoldot_library="${CITIZENSDK_TEST_SMOLDOT_LIBRARY:-}"
 
-case "$cache_root/" in
+case "$test_root/" in
   "$sdk_dir/"*) echo 'CitizenSDK 测试缓存禁止位于产品源码树' >&2; exit 1 ;;
 esac
-[[ "$cache_root" == /* && "$cache_root" != / ]] \
+[[ "$test_root" == /* && "$test_root" != / ]] \
   || { echo 'CitizenSDK 测试缓存必须是绝对目录' >&2; exit 1; }
 
 mkdir -p "$test_root/cargo" "$test_root/flutter" "$test_root/flutter-config" "$test_root/release-tmp"
@@ -27,8 +26,6 @@ export XDG_CONFIG_HOME="$test_root/flutter-config"
 flutter_bin="${FLUTTER:-$(command -v flutter || true)}"
 cargo_bin="${CARGO:-$(command -v cargo || true)}"
 node_bin="${NODE:-$(command -v node || true)}"
-central_flow_root="${TATA_CONSOLE_FLOW_ROOT:-/Users/rhett/TATA/tataconsole/flows}"
-central_workspace_root="${TATA_WORKSPACE_ROOT:-${TATA_ROOT:-/Users/rhett/TATA}}"
 
 configure_flutter_output() {
   [[ -n "$flutter_bin" && -x "$flutter_bin" ]] \
@@ -45,8 +42,14 @@ refresh_flutter_packages() {
   dart_bin="$flutter_sdk_root/bin/dart"
   [[ -x "$dart_bin" ]] \
     || { echo 'CitizenSDK 测试缺少 Flutter 同版 Dart' >&2; return 1; }
+  local -a pub_get_args=(--enforce-lockfile)
+  case "${CITIZENSDK_OFFLINE:-false}" in
+    true) pub_get_args+=(--offline) ;;
+    false) ;;
+    *) echo 'CitizenSDK测试的CITIZENSDK_OFFLINE只接受true或false' >&2; return 1 ;;
+  esac
   (cd "$sdk_dir" && FLUTTER_ROOT="$flutter_sdk_root" \
-    "$dart_bin" pub get --offline --enforce-lockfile)
+    "$dart_bin" pub get "${pub_get_args[@]}")
 }
 
 prepare_flutter_project() {
@@ -144,14 +147,8 @@ run_cargo() {
 run_release() {
   [[ -n "$node_bin" && -x "$node_bin" ]] \
     || { echo 'CitizenSDK 测试缺少 Node' >&2; exit 1; }
-  [[ "$central_flow_root" == /* && -d "$central_flow_root" ]] \
-    || { echo 'CitizenSDK 发布测试缺少 TataConsole 中央流程目录' >&2; exit 1; }
-  [[ "$central_workspace_root" == /* && -d "$central_workspace_root/tataconsole" ]] \
-    || { echo 'CitizenSDK 发布测试缺少 TataConsole 中央工作区' >&2; exit 1; }
   (cd "$sdk_dir" && TMPDIR="$test_root/release-tmp" \
-    TATA_CONSOLE_CACHE_DIR="$test_root/release-work" \
-    TATA_CONSOLE_FLOW_ROOT="$central_flow_root" \
-    TATA_WORKSPACE_ROOT="$central_workspace_root" \
+    CITIZENSDK_RELEASE_TEST_WORK_DIR="$test_root/release-work" \
     "$node_bin" --test scripts/release.test.mjs "$@")
 }
 

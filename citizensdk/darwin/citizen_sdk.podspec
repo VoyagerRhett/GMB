@@ -1,3 +1,6 @@
+framework_path = 'CitizenSDK.xcframework'
+raise "Missing CitizenSDK framework: #{framework_path}" unless Dir.exist?(File.join(__dir__, framework_path))
+
 Pod::Spec.new do |spec|
   spec.name             = 'citizen_sdk'
   spec.version          = '1.0.0'
@@ -14,7 +17,7 @@ API and a secret-free Flutter adapter for iOS and macOS.
   spec.osx.deployment_target = '13.0'
   spec.swift_version    = '5.9'
   spec.source_files     = 'Sources/CitizenSDKFlutter/**/*.swift'
-  spec.vendored_frameworks = 'CitizenSDK.xcframework'
+  spec.vendored_frameworks = framework_path
   spec.frameworks = 'AVFoundation', 'CoreVideo'
   spec.ios.dependency 'Flutter'
   spec.osx.dependency 'FlutterMacOS'

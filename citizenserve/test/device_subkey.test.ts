@@ -112,7 +112,7 @@ class DeviceStmt {
     if (this.sql.includes('DELETE FROM square_login_challenges')) {
       return { meta: { changes: this.db.purgeStale(this.db.loginChallenges, this.binds) } };
     }
-    if (this.sql.includes('DELETE FROM chat_push_endpoints')) {
+    if (this.sql.includes('DELETE FROM push_endpoints')) {
       return { meta: { changes: this.db.purgeStale(this.db.pushEndpoints, this.binds) } };
     }
     if (this.sql.includes('DELETE FROM square_device_subkeys')) {
@@ -218,22 +218,11 @@ class DeviceCache {
   }
 }
 
-function deviceEnv(
-  db = new DeviceDb(),
-  options: {
-    cache?: DeviceCache;
-    realtimeFetch?: (request: Request) => Promise<Response>;
-  } = {},
-): Env {
+function deviceEnv(db = new DeviceDb(), options: { cache?: DeviceCache } = {}): Env {
   const cache = options.cache ?? new DeviceCache();
   return {
     DB: db,
     SQUARE_CACHE: cache,
-    CHAT: options.realtimeFetch == null
-      ? undefined
-      : {
-          getByName: (_name: string) => ({ fetch: options.realtimeFetch }),
-        },
   } as unknown as Env;
 }
 
@@ -418,16 +407,9 @@ describe('registerDeviceSubkey 原子单调更新', () => {
     db.pushEndpoints.set('current-push-endpoint', current);
     cache.keys.add('square_session:stale-session');
     cache.keys.add('square_session:current-session');
-    const realtimeRequests: Request[] = [];
     await registerDeviceSubkey(
       registerRequest(Date.now()),
-      deviceEnv(db, {
-        cache,
-        realtimeFetch: async (request) => {
-          realtimeRequests.push(request);
-          return Response.json({ ok: true, closed: 1 });
-        },
-      }),
+      deviceEnv(db, { cache }),
     );
     expect([...db.rows.values()].some((row) => row.device_id === 'old')).toBe(false);
     expect([...db.rows.values()]).toHaveLength(1);
@@ -441,20 +423,5 @@ describe('registerDeviceSubkey 原子单调更新', () => {
     expect(db.pushEndpoints.has('stale-push-endpoint')).toBe(false);
     expect(db.pushEndpoints.has('current-push-endpoint')).toBe(true);
     expect(db.deletes.join('\n')).toContain('DELETE FROM square_login_challenges');
-    expect(realtimeRequests).toHaveLength(1);
-    expect(new URL(realtimeRequests[0]!.url).pathname).toBe('/__close_stale');
-    await expect(realtimeRequests[0]!.json()).resolves.toEqual({
-      binding_revision: 1,
-      account_id: DEVICE_BIND_INPUT.account_id,
-    });
-  });
-
-  it('此前信令连接撤销失败时设备子钥登记失败关闭并要求重试', async () => {
-    const env = deviceEnv(new DeviceDb(), {
-      realtimeFetch: async () => new Response('failed', { status: 503 }),
-    });
-
-    await expect(registerDeviceSubkey(registerRequest(Date.now()), env))
-      .rejects.toMatchObject({ code: 'chat_realtime_revoke_failed', status: 503 });
   });
 });

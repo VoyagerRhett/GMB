@@ -119,13 +119,13 @@ Android AAR 与 Apple 单一 XCFramework 构建通过；
 iOS 的两组测试 bundle；因无
 Simulator runtime 未执行 iOS XCTest。macOS Core 50 项和 Flutter adapter 22 项 XCTest
 0 失败，1 项真机硬件用例跳过；normal/supervisor smoke 通过。这不代表真机 Apple
-金库已验收，也不代表 TataConsole Flow、远程 CI 或正式 Release 已运行。
+金库已验收，也不代表产品Flow、远程CI或正式Release已运行。
 
 iOS 设备与模拟器变体是浅层 framework，install ID 为
 `@rpath/CitizenSDK.framework/CitizenSDK`；macOS 使用标准 `Versions/A` framework，install
 ID 为 `@rpath/CitizenSDK.framework/Versions/A/CitizenSDK`。候选只允许后者标准布局中的
 精确五个内部相对符号链接。Android Gradle/Kotlin persistent project state 必须在
-TataConsole 中央 work directory，源码 `android/.kotlin` 禁止。
+调用方指定的源码外work directory，源码`android/.kotlin`禁止。
 
 同一真实 Flutter consumer 已构建 Android release APK（ABI `arm64-v8a`）、iOS device Release
 no-codesign、iOS 模拟器变体（Rust target `aarch64-apple-ios-sim`）和 macOS Release；这些是 compile/link 结果，不是
@@ -137,8 +137,8 @@ no-codesign、iOS 模拟器变体（Rust target `aarch64-apple-ios-sim`）和 ma
 Kotlin/Java 单元测试 Gradle 17 个 task 成功。
 
 任何编译状态和原生产物都必须写入源码树外的中央目录。本机成功产物容器是
-`/Users/rhett/TATA/tataconsole/target/gmb/citizensdk`，工作状态容器是
-`/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk`；永久容器保留，只清理本次
+`CITIZENSDK_NATIVE_OUTPUT_DIR`，工作状态容器是
+`CITIZENSDK_WORK_DIR`；永久容器保留，只清理本次
 有明确归属的子项，不能在产品源码内生成构建记录。
 
 ## Windows Host 与同一 Core

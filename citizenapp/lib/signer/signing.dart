@@ -80,7 +80,7 @@ const int kOpSignAccountDataKeyProvision = 0x22;
 /// 只用于 CitizenApp 本机重标验证，不提交链。
 const int kOpSignWalletMode = 0x23;
 
-/// TataConsole 生产发布授权；CitizenApp 不签此域，仅镜像全仓签名真源。
+/// 产品正式发布授权；CitizenApp 不签此域，仅镜像全仓签名真源。
 const int kOpSignPublish = 0x24;
 
 /// 注册局代办换绑：新钱包对完整 `CidRebindAuthorization` 的授权签名；载荷与自助

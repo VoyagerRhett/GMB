@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# TataConsole 节点本机 Build 入口：只构建、签名验真并替换中央成功产物。
-# 本入口不启动或停止节点，不修改链数据；启动由控制台独立 Start 流程负责。
+# CitizenChain节点本机Build入口：只构建、签名验真并写入产品产物目录。
+# 本入口不启动或停止节点，不修改链数据；启动由产品独立Start入口负责。
 # 测试、手工调试和清库不走本入口。
 set -euo pipefail
 
@@ -27,7 +27,7 @@ trap 'cleanup 143' TERM
 trap 'cleanup 129' HUP
 
 # macOS 产品 App 只接受今后唯一的新团队 Developer ID；禁止按枚举顺序选证书，
-# 否则 Apple Development 或其它团队身份可能被静默当成塔塔控制台运行软件的签名。
+# 否则Apple Development或其它团队身份可能被静默当成产品正式签名。
 MACOS_SIGNING_IDENTITY='Developer ID Application: WEI CHENG (MHYMVRN6FC)'
 MACOS_TEAM_ID='MHYMVRN6FC'
 MACOS_BUNDLE_ID='macOS.citizenappchain'
@@ -104,27 +104,24 @@ resolve_macos_profile() {
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"   # citizenchain/
 GMB_REPOSITORY_ROOT="$(dirname "$REPO_ROOT")"
-TATA_CONSOLE_CACHE_DIR="${TATA_CONSOLE_CACHE_DIR:-${TMPDIR:-/tmp}/citizenchain-macos}"
-BUILD_WORK_DIR="${TATA_CONSOLE_BUILD_CACHE_DIR:-$TATA_CONSOLE_CACHE_DIR/work}"
-TATA_CONSOLE_DEPENDENCY_CACHE_DIR="${TATA_CONSOLE_DEPENDENCY_CACHE_DIR:-$TATA_CONSOLE_CACHE_DIR/dependencies}"
+CITIZENCHAIN_WORK_DIR="${CITIZENCHAIN_WORK_DIR:-${TMPDIR:-/tmp}/citizenchain/macos}"
+BUILD_WORK_DIR="${CITIZENCHAIN_BUILD_WORK_DIR:-$CITIZENCHAIN_WORK_DIR/work}"
+CITIZENCHAIN_DEPENDENCY_DIR="${CITIZENCHAIN_DEPENDENCY_DIR:-$CITIZENCHAIN_WORK_DIR/dependencies}"
 TARGET_DIR="$BUILD_WORK_DIR/cargo-target"
 export CARGO_TARGET_DIR="$TARGET_DIR"
-NODE_FRONTEND_DIST="$TATA_CONSOLE_CACHE_DIR/node-frontend"
-ONCHINA_BUILD_DIST="$TATA_CONSOLE_CACHE_DIR/onchina-frontend/dist"
-PACKAGE_RESOURCES="$TATA_CONSOLE_CACHE_DIR/resources"
-# Build 只能形成当前任务的候选 App。正式产物由塔塔控制台在完成验真与数据库记录后
-# 统一提交；此处绝不直写 target。
-ARTIFACT_DIR="$TATA_CONSOLE_CACHE_DIR"
+NODE_FRONTEND_DIST="$CITIZENCHAIN_WORK_DIR/node-frontend"
+ONCHINA_BUILD_DIST="$CITIZENCHAIN_WORK_DIR/onchina-frontend/dist"
+PACKAGE_RESOURCES="$CITIZENCHAIN_WORK_DIR/resources"
+# Build只形成当前调用的候选App；正式Release与Publish由产品发布流程另行验真。
+ARTIFACT_DIR="${CITIZENCHAIN_ARTIFACT_DIR:-$CITIZENCHAIN_WORK_DIR/artifacts}"
 
-# 产品自行使用当前环境中的工具，并按自己的锁文件在中央Build流程视图准备依赖。
-source "${TATA_ROOT:?缺少 TATA_ROOT}/tataconsole/flows/local/build-common.sh"
-build_initialize build gmb citizenchain-node macos "$REPO_ROOT"
+# 产品自行使用当前环境中的工具，并按自己的锁文件在源码外工作目录准备依赖。
 source "$GMB_REPOSITORY_ROOT/citizenchain/scripts/prepare-toolchain.sh"
 
 # 本机Build脚本只使用当前工作区源码构建 runtime WASM，禁止接受外部 WASM 覆盖。
 unset WASM_FILE
 # Cargo/Tauri 的 release profile 只是本机优化配置；gmb.dev 是本机开发数据隔离环境。
-# 本任务不修改正式 gmb 数据，也不让塔塔控制台启动的软件争用正式安装版 RocksDB。
+# 本任务不修改正式gmb数据，也不与正式安装版争用RocksDB。
 export CITIZENCHAIN_DATA_PROFILE=dev
 mkdir -p "$TARGET_DIR" "$npm_config_cache" "$PACKAGE_RESOURCES/onchina-bin" "$PACKAGE_RESOURCES/onchina-frontend"
 
@@ -268,10 +265,10 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     app_bundle="$ARTIFACT_DIR/CitizenChain.app"
     app_executable="$app_bundle/Contents/MacOS/citizenchain"
     export ONCHINA_FRONTEND_DIST="$app_bundle/Contents/Resources/onchina-frontend/dist"
-    # Build只生成并验真中央产物，不终止旧实例，也不启动新实例。
+    # Build只生成并验真产品产物，不终止旧实例，也不启动新实例。
     trap - EXIT INT TERM HUP
     echo "    CitizenChain Node macOS候选产物构建完成；Build不会启动节点"
 else
-    echo "    [error] 本入口只负责 macOS Build；其它平台使用控制台对应本机编译检查" >&2
+    echo "    [error] 本入口只负责macOS Build；其它平台使用各自产品构建入口" >&2
     exit 1
 fi

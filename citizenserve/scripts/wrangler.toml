@@ -1,6 +1,5 @@
-# CitizenServe 是仓库产品身份；citizenapp 是现有生产 Worker 的物理资源名。
-# 目录拆分不得隐式创建新 Worker，物理资源迁名必须通过独立生产迁移完成。
-name = "citizenapp"
+# CitizenServe 的 Worker 与主 D1 使用唯一产品名；下载数据库按 CitizenWeb 公开下载职责命名。
+name = "citizenserve"
 main = "../src/index.ts"
 compatibility_date = "2026-07-23"
 workers_dev = false
@@ -14,7 +13,7 @@ routes = [{ pattern = "www.crcfrcn.com/api/*", zone_name = "crcfrcn.com" }]
 [version_metadata]
 binding = "CF_VERSION_METADATA"
 
-# 正式部署由 TataConsole 一次性提交完整 Secret 集合；公开标识通过 Worker var 单独传入，
+# 正式部署由产品发布器一次性提交完整Secret集合；公开标识通过Worker var单独传入，
 # 不再把账户、Zone、URL、推送项目标识伪装成 Secret。
 [secrets]
 required = [
@@ -25,32 +24,32 @@ required = [
   "CHAT_AUTH_ED25519_PRIVATE_KEY",
 ]
 
-# CitizenServe Cloudflare 只保留唯一生产环境。普通变量与 Secret 都由 TataConsole 在发布
+# CitizenServe Cloudflare只保留唯一生产环境。普通变量与Secret都由产品发布器在发布
 # 时经一次 Touch ID 读取；只有真正凭据进入 Worker Secret，值均不写入仓库。
 
 [[r2_buckets]]
 binding = "SQUARE_PRIVATE"
-bucket_name = "citizenapp-private"
+bucket_name = "citizenserve-private"
 
 # 已发布帖子媒体专用公开桶；仅通过 media.crcfrcn.com 交付，不启用公开开发域名。
 [[r2_buckets]]
 binding = "SQUARE_PUBLIC_MEDIA"
-bucket_name = "citizenapp-media"
+bucket_name = "citizenserve-media"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "citizenapp-db"
-database_id = "e49501dd-9921-4981-822e-3c764a7d11ca"
+database_name = "citizenserve"
+database_id = "e7e7a15f-fd28-4553-9723-30ced7199b8e"
 
-# 公民链官网下载只保存塔塔控制台显式发布的四个平台指针，与 CitizenServe 业务数据物理隔离。
+# 公民链官网下载只保存产品发布器显式提交的四个平台指针，与CitizenServe业务数据物理隔离。
 [[d1_databases]]
 binding = "CITIZENCHAIN_DOWNLOAD_DB"
-database_name = "citizenchain-download-db"
-database_id = "dd665410-b397-4277-8b73-c7ebd4ab3069"
+database_name = "citizenweb-download"
+database_id = "fa70d613-ff33-43d3-aecd-84f1baef3918"
 
 [[kv_namespaces]]
 binding = "SQUARE_CACHE"
-id = "b72bbbcb36d240acb317fdaf79ce46f4"
+id = "d632942d82c94e45ab4058fa69268ce1"
 
 # 边缘本地计数器不写 D1；认证、写请求与读请求分档，避免限流本身放大数据库账单。
 [[ratelimits]]
@@ -77,28 +76,18 @@ namespace_id = "896403"
 limit = 120
 period = 60
 
-[[durable_objects.bindings]]
-name = "CHAT"
-class_name = "Chat"
-
-# 单 CID Chat Durable Object 使用 SQLite 暂存有 TTL/数量/字节硬上限的端到端密文；
-# WSS 必须继续使用 Hibernation API，禁止定时器或标准 WebSocket API 让空闲对象常驻计费。
-[exports.Chat]
-type = "durable-object"
-storage = "sqlite"
-
 [[queues.producers]]
 binding = "NOTIFY"
-queue = "notify"
+queue = "citizenserve"
 
 [[queues.consumers]]
-queue = "notify"
+queue = "citizenserve"
 max_batch_size = 1
 max_retries = 3
 
 [triggers]
 # 五分钟事件执行通用清理、身份投影和唯一订阅投影；订阅投影只走既有国储会节点隧道。
-# TataConsole 发布器必须把这两条准确同步到生产，禁止保留旧五触发器残留。
+# 产品发布器必须把这两条准确同步到生产，禁止保留旧五触发器残留。
 crons = ["*/5 * * * *", "4 3 * * *"]
 
 [vars]
@@ -107,7 +96,7 @@ crons = ["*/5 * * * *", "4 3 * * *"]
 CF_ACCOUNT_ID = "f088b553d27d9c26b81f48f1924c3bbd"
 SESSION_TTL_SECONDS = "86400"
 UPLOAD_TTL_SECONDS = "900"
-SQUARE_PUBLIC_MEDIA_BUCKET_NAME = "citizenapp-media"
+SQUARE_PUBLIC_MEDIA_BUCKET_NAME = "citizenserve-media"
 SQUARE_PUBLIC_MEDIA_BASE_URL = "https://media.crcfrcn.com"
 MEDIA_TTL_SECONDS = "300"
 WEB_ORIGIN = "https://www.crcfrcn.com"

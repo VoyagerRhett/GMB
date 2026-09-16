@@ -101,7 +101,7 @@ CI/Release，不能只凭 ELF 结构、头文件或版本声明视为已取得�
 
 这些运行库由发布构造器从源码树外注入；`/Users/rhett/GMB/citizensdk` 永远不保存生成的
 `.so`、CMake cache、`build/` 或 `target/`。本机 CitizenSDK 生成状态只能进入
-`/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk` 下由任务独占的工作目录；GitHub runner 使用
+`CITIZENSDK_WORK_DIR` 下由任务独占的工作目录；GitHub runner 使用
 统一工作流的 checkout 外独占目录，不照搬本机绝对路径。
 Linux 合同测试配置必须通过
 `-DCITIZENSDK_TEST_WORK_DIR=<绝对路径>` 显式注入其中一个已经存在、有效 UID 所有且权限精确

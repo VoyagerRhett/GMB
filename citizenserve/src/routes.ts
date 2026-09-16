@@ -5,27 +5,11 @@ import {
 } from "./account/user_projection";
 import { createLoginChallenge, createSession, registerDeviceSubkey } from "./auth/service";
 import { issueChatServerAccess } from "./auth/chatserver_access";
+import { registerPushEndpoint } from "./auth/push_endpoint";
 import { chainBootstrapRoute, citizenSdkBootstrapRoute } from "./chain/bootstrap";
 import { constitutionRoute } from "./chain/constitution";
 import { relaySignedExtrinsicRoute } from "./chain/extrinsic_relay";
 import { deleteContactRoute, listContactsRoute, putContactRoute } from "./contacts/service";
-import {
-  acknowledgeChatMailbox,
-  fetchChatEnvelopes,
-  issueChatIce,
-  openChatSignal,
-  publishChatKeyPackage,
-  registerChatPushEndpoint,
-  resolveChatKeyPackages,
-  submitChatEnvelope,
-} from "./chat/service";
-import {
-  abortChatAttachment,
-  acknowledgeChatAttachment,
-  completeChatAttachment,
-  downloadChatAttachment,
-  prepareChatAttachment,
-} from "./chat/attachments";
 import { feedRoute } from "./feeds/service";
 import { followRoute, setFollowNotifyRoute, unfollowRoute } from "./feeds/follows";
 import { getNotifyUnreadRoute, markNotifyReadRoute } from "./feeds/notify";
@@ -69,7 +53,6 @@ import {
 export async function routeRequest(
   request: Request,
   env: Env,
-  ctx?: Pick<ExecutionContext, "waitUntil">,
 ): Promise<Response> {
   const url = new URL(request.url);
   const path = normalizeApiPath(url.pathname);
@@ -85,7 +68,7 @@ export async function routeRequest(
       ok: true,
       service: "citizenapp",
       storage_backend: "d1-r2",
-      // TataConsole 用此不可伪造的运行时绑定确认 Version Override 和正式切流命中同一候选版本。
+      // 发布器用此不可伪造的运行时绑定确认Version Override和正式切流命中同一候选版本。
       worker_version_id: env.CF_VERSION_METADATA?.id ?? null,
       // 广场正文元数据进入 D1，manifest、图片、视频和衍生图统一进入 R2。
       content_on_chain: false,
@@ -147,7 +130,7 @@ export async function routeRequest(
   if (request.method === "POST" && path === "/square/users/confirm") {
     return confirmFinalizedUsersRoute(request, env);
   }
-  // 稳定币充值购买公民币:App(config/submit/status)+ 本地部署塔塔控制台结算(settlement/*)。
+  // 稳定币充值购买公民币：App(config/submit/status)+授权结算客户端(settlement/*)。
   if (isTopupPath(path)) {
     return routeTopup(request, env, path);
   }
@@ -236,44 +219,8 @@ export async function routeRequest(
   if (request.method === "POST" && path === "/square/notify/read") {
     return markNotifyReadRoute(request, env);
   }
-  if (request.method === "PUT" && path === "/chat/push-endpoint") {
-    return registerChatPushEndpoint(request, env);
-  }
-  if (request.method === "GET" && path === "/chat/signals") {
-    return openChatSignal(request, env);
-  }
-  // 私聊与群聊只使用同一套 RFC 9420 Last Resort KeyPackage 目录。
-  if (request.method === "PUT" && path === "/chat/key-package") {
-    return publishChatKeyPackage(request, env);
-  }
-  if (request.method === "POST" && path === "/chat/key-package/resolve") {
-    return resolveChatKeyPackages(request, env);
-  }
-  // WebRTC 只读取固定公开 STUN 地址；没有中继密钥、短期凭证或流量回退。
-  if (request.method === "POST" && path === "/chat/ice") {
-    return issueChatIce(request, env);
-  }
-  if (path === "/chat/messages") {
-    if (request.method === "POST") return submitChatEnvelope(request, env, ctx);
-    if (request.method === "GET") return fetchChatEnvelopes(request, env);
-  }
-  if (request.method === "POST" && path === "/chat/messages/ack") {
-    return acknowledgeChatMailbox(request, env);
-  }
-  if (request.method === "POST" && path === "/chat/attachments/prepare") {
-    return prepareChatAttachment(request, env);
-  }
-  if (request.method === "POST" && path === "/chat/attachments/complete") {
-    return completeChatAttachment(request, env);
-  }
-  if (request.method === "POST" && path === "/chat/attachments/download") {
-    return downloadChatAttachment(request, env);
-  }
-  if (request.method === "POST" && path === "/chat/attachments/ack") {
-    return acknowledgeChatAttachment(request, env);
-  }
-  if (request.method === "POST" && path === "/chat/attachments/abort") {
-    return abortChatAttachment(request, env);
+  if (request.method === "PUT" && path === "/square/push-endpoint") {
+    return registerPushEndpoint(request, env);
   }
   throw new HttpError(404, "route_not_found", "广场接口不存在");
 }

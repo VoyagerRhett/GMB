@@ -3,8 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 // CitizenServe 只验证自身产品合同，以及必须与链运行时一致的链上存储项。
-// ChatSDK 与 ChatServer 的通用协议由各自共享 Protobuf 和双运行时合同测试验证；
-// 禁止在这里读取宿主应用源码来固化已经冻结的旧聊天架构。
+// 聊天通用协议由TataChatSDK与TataChatServer各自验证，本产品只保留短期授权控制面。
 const REPOSITORY_ROOT = join(import.meta.dirname, "../..");
 const WRANGLER_CONFIGURATION = readFileSync(
   join(import.meta.dirname, "../scripts/wrangler.toml"),
@@ -93,7 +92,9 @@ describe("Cloudflare Workers Paid 成本硬边界", () => {
       /\[secrets\][\s\S]*required = \[[\s\S]*"R2_KEY", "R2_SECRET"[\s\S]*\]/u,
     );
     expect(WRANGLER_CONFIGURATION).toContain('binding = "SQUARE_PRIVATE"');
-    expect(WRANGLER_CONFIGURATION).toContain('bucket_name = "citizenapp-private"');
+    expect(WRANGLER_CONFIGURATION).toContain('bucket_name = "citizenserve-private"');
+    expect(WRANGLER_CONFIGURATION).toContain('binding = "SQUARE_PUBLIC_MEDIA"');
+    expect(WRANGLER_CONFIGURATION).toContain('bucket_name = "citizenserve-media"');
   });
 });
 
@@ -103,11 +104,10 @@ describe("CitizenServe 最终结构和定时任务保持单一合同", () => {
     const { resolve } = await import("node:path");
     const schema = await readFile(resolve(process.cwd(), "schema/citizenserve.sql"), "utf8");
 
-    expect(schema.match(/CREATE TABLE IF NOT EXISTS /g)?.length).toBe(27);
+    expect(schema.match(/CREATE TABLE IF NOT EXISTS /g)?.length).toBe(25);
     expect(schema).not.toMatch(/CREATE TABLE (?!IF NOT EXISTS )/);
     expect(schema).not.toMatch(/CREATE (?:UNIQUE )?INDEX (?!IF NOT EXISTS )/);
-    expect(schema).toContain("CREATE TABLE IF NOT EXISTS chat_attachments");
-    expect(schema).toContain("CREATE TABLE IF NOT EXISTS chat_attachment_recipients");
+    expect(schema).toContain("CREATE TABLE IF NOT EXISTS push_endpoints");
   });
 
   it("清理失败不会阻断身份与会员投影启动", async () => {
@@ -121,7 +121,7 @@ describe("CitizenServe 最终结构和定时任务保持单一合同", () => {
     expect(source).not.toContain("ctx.waitUntil(job.catch");
   });
 });
-// CitizenServe 发布契约必须同时固定公开账户标识、机密访问凭据和正式附件桶，避免附件签名配置再次漏项。
+// CitizenServe发布契约必须同时固定公开账户标识、机密访问凭据和广场私有媒体桶。
 
 // 中文注释：Wrangler 配置新增公开绑定后必须同步生成类型，避免正式 CI 才发现绑定声明过期。
 describe("CitizenServe Worker 绑定类型保持同步", () => {
@@ -143,6 +143,6 @@ describe("CitizenServe Worker 绑定类型保持同步", () => {
     const { resolve } = await import("node:path");
     const routes = await readFile(resolve(process.cwd(), "src/routes.ts"), "utf8");
     expect(routes).toContain('path === "/auth/chatserver/access"');
-    expect(routes).not.toContain("/auth/tatachatserver/access");
+    expect(routes.match(/path === "\/auth\/chatserver\/access"/gu)).toHaveLength(1);
   });
 });

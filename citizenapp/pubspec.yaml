@@ -13,7 +13,7 @@ dependencies:
   # 统一由同仓 CitizenSDK 提供；CitizenApp 只保留产品 UI 和业务语义。
   citizen_sdk:
     path: ../citizensdk
-  cupertino_icons: ^1.0.8
+  cupertino_icons: 1.0.9
   http: ^1.2.2
   shared_preferences: ^2.5.5
   polkadart: ^0.7.0
@@ -21,7 +21,7 @@ dependencies:
   # ss58 2.x，会造成解依赖冲突。两款移动产品统一锁定同一兼容版本。
   polkadart_keyring: 0.7.1
   # 扫码设备适配已归入 lib/qr/scanner，不再保留内部 package 包装层。
-  mobile_scanner: ^7.1.4
+  mobile_scanner: 7.4.2
   qr: ^3.0.2
   qr_flutter: ^4.1.0
   flutter_svg: ^2.3.0
@@ -48,8 +48,7 @@ dependencies:
   isar_community: ^3.3.2
   isar_community_flutter_libs: ^3.3.2
   path_provider: ^2.1.6
-  saver_gallery: 4.1.0
-  file_picker: ^10.3.10
+  saver_gallery: 5.1.0
   # CitizenApp 不实现 sr25519；钱包签名与验签全部由 CitizenSDK 提供。
   # polkadart_keyring 仅用于 App 现有 SS58 地址编解码，禁止用它另造签名实现。
   protobuf: ^6.0.0
@@ -67,7 +66,6 @@ dependencies:
   video_player: 2.11.1
   image_size_getter: ^2.4.1
   flutter_image_compress: 2.4.0
-  video_compress: ^3.1.4
   blurhash_dart: ^1.2.1
   image: 4.9.1
   # 文章正文富文本编辑器；11.5.1 实现 Flutter 3.44 新增的 TextInputClient.onFocusReceived。
@@ -78,11 +76,11 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: 4.0.0
+  flutter_lints: 6.0.0
   # 两款移动产品共同使用的代码生成器固定同一解析版本。
   build_runner: 2.15.0
   isar_community_generator: ^3.3.2
-  protoc_plugin: ^25.0.0
+  protoc_plugin: 25.0.0
 
 flutter:
   # 两款移动产品在 Flutter 3.44.4 下统一使用 CocoaPods，禁止本机全局配置

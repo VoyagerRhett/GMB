@@ -1,16 +1,15 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-export default defineConfig(({ command }) => {
-  if (command === 'build' && !process.env.ONCHINA_FRONTEND_DIST && process.env.CI !== 'true') {
-    throw new Error('本机编译必须由TataConsole提供ONCHINA_FRONTEND_DIST，禁止恢复产品目录dist');
-  }
+export default defineConfig(() => {
   return {
   // OnChina 后端同源托管 dist,base 用相对路径以适配任意内网挂载路径。
   base: './',
   plugins: [react()],
   build: {
-    outDir: process.env.ONCHINA_FRONTEND_DIST || 'dist'
+    outDir: process.env.ONCHINA_FRONTEND_DIST || join(tmpdir(), 'citizenchain', 'onchina-frontend')
   },
   server: {
     port: 5179,

@@ -7,7 +7,7 @@ const { deletePostCloudflareDataByCid, sendStorageCleanupAlert } = vi.hoisted(()
 vi.mock('../src/posts/confirm', () => ({
   deletePostCloudflareDataByCid,
 }));
-vi.mock('../src/chat/push', () => ({
+vi.mock('../src/shared/push', () => ({
   sendStorageCleanupAlert,
 }));
 

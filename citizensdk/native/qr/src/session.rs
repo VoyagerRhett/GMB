@@ -144,7 +144,7 @@ impl<C: QrClock> QrSessionStore<C> {
             ));
         }
         let mut entropy = [0_u8; 16];
-        getrandom::getrandom(&mut entropy).map_err(|_| {
+        getrandom::fill(&mut entropy).map_err(|_| {
             QrError::new(
                 QrErrorCode::EntropyUnavailable,
                 "无法生成加密安全的 request_id",

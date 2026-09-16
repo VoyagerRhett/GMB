@@ -62,7 +62,7 @@ pub struct SystemWalletEntropy;
 
 impl WalletEntropySource for SystemWalletEntropy {
     fn fill(&self, output: &mut [u8]) -> ContractResult<()> {
-        getrandom::getrandom(output).map_err(|_| {
+        getrandom::fill(output).map_err(|_| {
             ContractError::new(ContractErrorCode::Unavailable, "操作系统安全随机数不可用")
         })
     }

@@ -4,7 +4,7 @@ pluginManagement {
     val flutterSdkPath =
         run {
             val properties = java.util.Properties()
-            val flutterProjectRoot = System.getenv("TATA_CONSOLE_FLUTTER_ROOT")
+            val flutterProjectRoot = System.getenv("CITIZENWALLET_PROJECT_ROOT")
                 ?.let { java.io.File(it) }
                 ?: settingsDir.parentFile
             flutterProjectRoot.resolve("android/local.properties").inputStream().use { properties.load(it) }
@@ -24,7 +24,7 @@ pluginManagement {
 
 // 插件清单属于产品自己的Flutter解析结果；Gradle根固定为真实android目录，
 // 缓存工程只提供生成状态，不再用跨根设置脚本参与Gradle根解析。
-val flutterProjectRoot = System.getenv("TATA_CONSOLE_FLUTTER_ROOT")
+val flutterProjectRoot = System.getenv("CITIZENWALLET_PROJECT_ROOT")
     ?.let { java.io.File(it) }
     ?: settingsDir.parentFile
 val flutterPlugins = flutterProjectRoot.resolve(".flutter-plugins-dependencies")

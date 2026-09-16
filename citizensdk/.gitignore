@@ -10,7 +10,7 @@
 /darwin/.swiftpm/
 /darwin/Pods/
 /darwin/DerivedData/
-# Linux 运行库只允许由 Release 候选从 TataConsole 中央 target 注入；
+# Linux运行库只允许由Release候选从产品源码外产物目录注入；
 # 源码树永远不能保存 Core/Host ELF、CMake cache 或安装投影。
 /linux/lib/
 /linux/.cache/

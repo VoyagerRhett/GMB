@@ -67,7 +67,7 @@ class _QrDisplayScaffoldState extends State<QrDisplayScaffold> {
       final result = await SaverGallery.saveImage(
         byteData.buffer.asUint8List(),
         fileName: 'my_qr_${DateTime.now().millisecondsSinceEpoch}.png',
-        androidRelativePath: 'Pictures/CitizenApp',
+        albumPath: 'CitizenApp',
         skipIfExists: false,
       );
       if (!mounted) return;

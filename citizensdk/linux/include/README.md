@@ -1,6 +1,6 @@
 # Linux public headers
 
-当前根 Core 为 117 个函数，薄 Host 为 17 个函数；安装的 `citizensdk_qr_image.h` 另声明 3 个 ZXing-C++ 图像函数。新增 `citizensdk_host_create_with_modules`
+当前根 Core 为 121 个函数，薄 Host 为 17 个函数；安装的 `citizensdk_qr_image.h` 另声明 3 个 ZXing-C++ 图像函数。新增 `citizensdk_host_create_with_modules`
 与原入口进入同一私有装配，既有 Host ABI v1 enable_wallet 布局和布尔含义不变。
 C++ Config 仅以 modules 选择功能；wallet 与 signing 独立，未选 wallet 不开放钱包 UI。
 `citizensdk_host_view_account_private_key` 和 C++ `view_account_private_key` 只提供原生安全查看控制，

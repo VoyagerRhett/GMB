@@ -159,4 +159,4 @@ the same trusted-host boundary.
 
 Build and test state must be redirected outside this source tree. For local
 CitizenSDK work, only
-`/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk` is permitted.
+`CITIZENSDK_WORK_DIR` is permitted.

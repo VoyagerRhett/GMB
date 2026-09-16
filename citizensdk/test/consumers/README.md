@@ -9,4 +9,4 @@
 - `external_signer/`：只消费通用 QR_V1 签名公开面的测试签名器，不依赖 CitizenWallet。
 
 这些文件是发布合同夹具，不是可复制进 SDK 生产目录的业务实现。测试生成物仍只能写入仓库外
-TataConsole 缓存。
+调用方指定的源码外缓存。

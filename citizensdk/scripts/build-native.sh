@@ -27,9 +27,6 @@ target_name="${1:-all}"
 # 六个显式参数表示消费最终包；没有参数的原生构建仍由各平台原入口负责。
 hosted_consumer=false
 if [[ "$#" -gt 1 ]]; then hosted_consumer=true; fi
-tata_console_target_root="${TATA_CONSOLE_TARGET_ROOT:-/Users/rhett/TATA/tataconsole/target}"
-citizensdk_target_root="$tata_console_target_root/gmb/citizensdk"
-tata_console_cache_root="${tata_console_target_root%/target}/cache"
 standalone_root="${TMPDIR:-/tmp}"
 standalone_root="${standalone_root%/}/citizensdk-${UID:-0}"
 : "${CITIZENSDK_WORK_DIR:=$standalone_root/work}"
@@ -121,7 +118,7 @@ output_paths_preflight() {
 local_build_path_is_allowed() {
   local path="$1"
   # 产品入口只禁止写入自身源码；调用方可以选择任意其它绝对输出目录，
-  # 不要求安装或使用 TataConsole。
+  # 不要求安装或使用任何外部控制程序。
   case "$path/" in "$sdk_dir/"*) return 1 ;; esac
   [[ "$path" == /* && "$path" != / ]]
 }
@@ -129,7 +126,7 @@ local_build_path_is_allowed() {
 if [[ "$target_name" == Windows ]]; then windows_path_preflight; fi
 output_paths_preflight
 
-# 本机调用只要求输出位于产品源码树之外；TataConsole 是可选调用方，不是产品门禁。
+# 本机调用只要求输出位于产品源码树之外；产品入口不依赖特定调用程序。
 if [[ "${GITHUB_ACTIONS:-}" != true ]]; then
   for path in "${CITIZENSDK_WORK_DIR:-}" "${CITIZENSDK_NATIVE_OUTPUT_DIR:-}"; do
     assert_safe_directory_path "$path" 本机构建目录
@@ -152,8 +149,8 @@ else
   output_dir="$(canonical_directory "${CITIZENSDK_NATIVE_OUTPUT_DIR:-}" CITIZENSDK_NATIVE_OUTPUT_DIR)"
 fi
 
-# 无论本机、TataConsole 还是 GitHub runner，都禁止把 Cargo、二进制或符号清单
-# 回写到 SDK 源码树；除此之外，产品入口不要求调用方使用特定控制台目录。
+# 无论本机还是CI runner，都禁止把Cargo、二进制或符号清单
+# 回写到SDK源码树；除此之外，产品入口不要求调用方使用特定外部目录。
 for directory in "$work_dir" "$output_dir"; do
   case "$directory/" in
     "$sdk_dir/"*) fail "工作目录或产物目录位于 CitizenSDK 源码树：$directory" ;;
@@ -309,7 +306,7 @@ product_header_symbols() {
     "$product_header" | sort -u
 }
 
-# 公开117符号与内部4符号各自精确封闭；私有头只在本轮工作目录生成。
+# 公开121符号与内部4符号各自精确封闭；私有头只在本轮工作目录生成。
 product_internal_symbols() {
   node --input-type=module - "$script_dir/release.mjs" <<'NODE'
 import {pathToFileURL} from 'node:url';
@@ -379,7 +376,7 @@ verify_product_abi_symbols() {
     local missing extra
     missing="$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))"
     extra="$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))"
-    fail "$label 与117公开+4内部符号闭集不一致；缺失=${missing:-无}；额外=${extra:-无}"
+    fail "$label 与121公开+4内部符号闭集不一致；缺失=${missing:-无}；额外=${extra:-无}"
   }
 }
 
@@ -549,9 +546,9 @@ verify_linux_install() {
   fi
   core_symbols="$(product_header_symbols)"
   host_symbols="$(linux_host_header_symbols)"
-  [[ "$(printf '%s\n' "$core_symbols" | wc -l | tr -d ' ')" == 117 \
+  [[ "$(printf '%s\n' "$core_symbols" | wc -l | tr -d ' ')" == 121 \
     && "$(printf '%s\n' "$host_symbols" | wc -l | tr -d ' ')" == 17 ]] \
-    || fail "$platform 公开 ABI 必须精确为 117 Core / 17 Host"
+    || fail "$platform 公开 ABI 必须精确为 121 Core / 17 Host"
   verify_linux_elf_identity "$platform" "$prefix/lib/$platform/libcitizensdk.so" \
     "$prefix/lib/$platform/libcitizensdk_host.so" "$readelf_bin" "$nm_bin"
 }
@@ -681,15 +678,21 @@ verify_linux_elf_identity() {
 }
 
 resolve_gradle() {
-  local executable="${CITIZENSDK_GRADLE:-}"
+  local executable="${CITIZENSDK_GRADLE:-}" link_target
   if [[ -z "$executable" ]]; then
     executable="$(command -v gradle || true)"
   fi
   [[ -n "$executable" ]] \
     || fail "缺少 Gradle；请用 CITIZENSDK_GRADLE 指向受控 gradle/gradlew 绝对路径"
   [[ "$executable" == /* ]] || fail "CITIZENSDK_GRADLE 必须解析为绝对路径"
-  [[ -f "$executable" && ! -L "$executable" && -x "$executable" ]] \
-    || fail "Gradle 必须是可执行普通文件且不能是符号链接：$executable"
+  while [[ -L "$executable" ]]; do
+    link_target="$(readlink "$executable")"
+    [[ "$link_target" == /* ]] || link_target="$(cd "$(dirname "$executable")" && pwd -P)/$link_target"
+    executable="$link_target"
+  done
+  executable="$(cd "$(dirname "$executable")" && pwd -P)/$(basename "$executable")"
+  [[ -f "$executable" && -x "$executable" ]] \
+    || fail "Gradle必须解析到可执行普通文件：$executable"
   printf '%s\n' "$executable"
 }
 
@@ -836,16 +839,21 @@ build_android() {
   prepare_internal_header
   require_rust_target aarch64-linux-android
   local toolchain gradle_bin android_build_dir gradle_project_cache gradle_user_home
-  local kotlin_persistent_dir
+  local kotlin_persistent_dir gradle_network_arg=''
   local android_gradle_project="$work_dir/gradle-project"
   local core_stage core_destination jni_destination aar_destination source_library
   local built_aar aar_jni nm_bin strip_bin
   toolchain="$(android_toolchain)"
   gradle_bin="$(resolve_gradle)"
+  case "${CITIZENSDK_OFFLINE:-false}" in
+    true) gradle_network_arg='--offline' ;;
+    false) ;;
+    *) fail "CITIZENSDK_OFFLINE只接受true或false" ;;
+  esac
   android_build_dir="$work_dir/gradle-native"
   gradle_project_cache="$work_dir/gradle-project-cache"
   # 调用产品可以提供位于自身任务缓存中的统一 GRADLE_USER_HOME，使已下载依赖
-  # 自动归入塔塔依赖库；它不是 SDK 编译物，因此不要求位于 SDK 子工作根。
+  # 自动归入调用方依赖缓存；它不是SDK编译物，因此不要求位于SDK子工作根。
   gradle_user_home="${GRADLE_USER_HOME:-$work_dir/gradle-home}"
   kotlin_persistent_dir="$work_dir/kotlin-project-persistent"
   core_stage="$work_dir/android-core/arm64-v8a"
@@ -893,7 +901,7 @@ build_android() {
   CITIZENSDK_INTERNAL_INCLUDE_DIR="$work_dir/private-include" \
   CITIZENSDK_ZXING_SOURCE_DIR="$CITIZENSDK_ZXING_SOURCE_DIR" \
   GRADLE_USER_HOME="$gradle_user_home" \
-    "$gradle_bin" --no-daemon --stacktrace --no-problems-report \
+    "$gradle_bin" ${gradle_network_arg:+"$gradle_network_arg"} --no-daemon --stacktrace --no-problems-report \
       --project-cache-dir "$gradle_project_cache" \
       -Pkotlin.project.persistent.dir="$kotlin_persistent_dir" \
       -p "$android_gradle_project" :native:assembleRelease
@@ -939,8 +947,8 @@ verify_apple_product_abi_symbols() {
   actual="$(printf '%s\n' "$all_symbols" | grep '^citizensdk_' || true)"
   expected="$(apple_public_symbols)"
   expected_count="$(printf '%s\n' "$expected" | grep -c '^citizensdk_' || true)"
-  [[ "$expected_count" == 120 ]] \
-    || fail "Apple 产品头必须精确声明 117 个 Core 与 3 个图像函数"
+  [[ "$expected_count" == 124 ]] \
+    || fail "Apple 产品头必须精确声明 121 个 Core 与 3 个图像函数"
   forbidden="$(printf '%s\n' "$all_symbols" \
     | grep -E '^(smoldot_|citizen_sr25519_|account_crypto_)' || true)"
   [[ -z "$forbidden" ]] \
@@ -949,11 +957,11 @@ verify_apple_product_abi_symbols() {
     local missing extra
     missing="$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))"
     extra="$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))"
-    fail "$label 的 citizensdk_* 与 117 Core + 3 图像函数产品头不一致；缺失=${missing:-无}；额外=${extra:-无}"
+    fail "$label 的 citizensdk_* 与 121 Core + 3 图像函数产品头不一致；缺失=${missing:-无}；额外=${extra:-无}"
   }
   # 动态 framework 同时提供 Swift API 和 C ABI。Swift public/ABI-support 符号
   # 只能属于本模块 mangling；除这组 Swift 符号外，全部外部已定义符号必须正好
-  # 是产品头中的 117 个 Core + 3 个图像 C ABI，Rust staticlib 及其依赖不得穿透边界。
+  # 是产品头中的 121 个 Core + 3 个图像 C ABI，Rust staticlib 及其依赖不得穿透边界。
   swift_symbols="$(printf '%s\n' "$all_symbols" | grep '^\$s10CitizenSDK' || true)"
   [[ -n "$swift_symbols" ]] || fail "$label 未导出 CitizenSDK Swift 模块符号"
   foreign="$(printf '%s\n' "$all_symbols" \
@@ -970,7 +978,7 @@ write_apple_exported_symbols() {
   actual="$(printf '%s\n' "$all_symbols" | grep '^citizensdk_' || true)"
   expected="$(apple_linked_symbols)"
   [[ "$actual" == "$expected" ]] \
-    || fail "$label 未过滤链接不等于117公开+4内部+3图像符号闭集（共124项）"
+    || fail "$label 未过滤链接不等于121公开+4内部+3图像符号闭集（共128项）"
   swift_symbols="$(printf '%s\n' "$all_symbols" | grep '^\$s10CitizenSDK' || true)"
   [[ -n "$swift_symbols" ]] || fail "$label 未过滤链接没有 CitizenSDK Swift 导出"
   prepare_safe_output_file "$work_dir" "$destination" "$label 导出允许集"
@@ -978,8 +986,8 @@ write_apple_exported_symbols() {
     apple_public_symbols
     printf '%s\n' "$swift_symbols"
   } | sed 's/^/_/' | LC_ALL=C sort -u >"$destination"
-  [[ "$(grep -c '^_citizensdk_' "$destination" || true)" == 120 ]] \
-    || fail "$label 导出允许集没有精确 117 个 Core + 3 个图像 C ABI"
+  [[ "$(grep -c '^_citizensdk_' "$destination" || true)" == 124 ]] \
+    || fail "$label 导出允许集没有精确 121 个 Core + 3 个图像 C ABI"
 }
 
 write_framework_plist() {
@@ -1079,7 +1087,7 @@ resolve_xcframework_framework_slice() {
   printf '%s\n' "$found"
 }
 
-# Hosted 消费只接受本轮中央候选、官方归档及已隔离工具，不运行工具来探测版本。
+# Hosted消费只接受调用方提供的本轮候选、官方归档及已隔离工具，不运行工具探测版本。
 # 预检保持只读；真正解包仍由唯一 release.mjs 再次逐项验真，目录名不是证明。
 macos_hosted_root() {
   local root checkout path
@@ -1092,7 +1100,7 @@ macos_hosted_root() {
     checkout="$GITHUB_WORKSPACE"
     assert_descendant_path "$checkout" "$sdk_dir" "CitizenSDK checkout"
   else
-    root="$tata_console_cache_root/gmb/citizensdk/citizensdk"
+    root="${CITIZENSDK_HOSTED_ROOT:-$work_dir}"
     checkout="$(dirname "$sdk_dir")"
   fi
   assert_readonly_dependency_directory "$root" "macOS Hosted 受控根"
@@ -1371,7 +1379,7 @@ for (const entry of config.packages) {
 if (sdkCount !== 1) throw Error('Consumer CitizenSDK package is not unique');
 const plugins = JSON.parse(fs.readFileSync(path.join(runner, '.flutter-plugins-dependencies'), 'utf8'));
 const entries = plugins.plugins?.macos?.filter((entry) => entry.name === 'citizen_sdk') ?? [];
-// APFS 可保留与调用方不同的路径大小写；同版来源按实际目录身份判断，不改中央目录命名。
+// APFS可保留与调用方不同的路径大小写；同版来源按实际目录身份判断，不改产品目录命名。
 const sameDirectory = (left, right) => {
   const actual = fs.statSync(left), expected = fs.statSync(right);
   return actual.isDirectory() && expected.isDirectory() && actual.dev === expected.dev && actual.ino === expected.ino;
@@ -2755,7 +2763,7 @@ build_linux_flutter_consumer() (
     prepare_safe_directory "$work_dir" "$path" "$platform Flutter 独占目录"
     chmod 0700 "$path"
   done
-  # 仅复制调用方显式提供的工具/缓存，全部锁、package_config 与构建记录留本轮中央根。
+  # 仅复制调用方显式提供的工具/缓存，全部锁、package_config与构建记录留在本轮工作根。
   cp -a "$flutter_source/." "$tool_root/"
   cp -a "$cache_source/." "$cache_root/"
   cp -a "${package:-$sdk_dir}/." "$sdk_stage/"
@@ -2971,7 +2979,7 @@ build_linux() (
   prepare_safe_directory "$work_dir" "$linux_test_work" "$platform 测试状态目录"
   prepare_safe_directory "$work_dir" "$install_prefix" "$platform 安装验证前缀"
   prepare_safe_directory "$work_dir" "$consumer_build" "$platform 安装后消费者构建目录"
-  # Linux Host 测试只可在当前平台任务独占的中央目录落盘；0700 是
+  # Linux Host测试只可在当前平台任务独占的工作目录落盘；0700是
   # CITIZENSDK_TEST_WORK_DIR 的公开前置条件，不能依赖 runner 的 umask。
   chmod 0700 "$linux_test_work"
   [[ "$(stat -c '%a' "$linux_test_work")" == 700 ]] \
@@ -3813,7 +3821,7 @@ build_windows() {
 
 verify_windows_exports() {
   local library="$1" header="$2" label="$3" exports internal_symbols=""
-  # 只有 Core 采用 117 公开 + 4 内部闭集；Host 另导出自己的 17 项和 3 项统一图像接口。
+  # 只有 Core 采用 121 公开 + 4 内部闭集；Host 另导出自己的 17 项和 3 项统一图像接口。
   if [[ "$header" == "$product_header" ]]; then
     internal_symbols="$(product_internal_symbols)"
   else

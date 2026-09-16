@@ -14,7 +14,6 @@ import 'package:citizenapp/citizen/public/data/area_path_formatter.dart';
 import 'package:citizenapp/citizen/public/data/isar_admin_division_store.dart';
 import 'package:citizenapp/citizen/public/data/public_provinces.dart';
 import 'package:citizenapp/citizen/cid/cid_generator.dart';
-import 'package:citizenapp/chat/tatachat_sdk_adapter.dart';
 import 'package:citizenapp/my/user/contact_service.dart';
 import 'package:citizenapp/my/myid/citizen_identity_transaction.dart';
 import 'package:citizenapp/my/myid/citizen_identity_chain_reader.dart';
@@ -76,8 +75,8 @@ class CidAccountDataHandover {
     );
     try {
       await _chatRuntime.stageAccountHandover(
-        source: source.toChatDataBinding(),
-        target: target.toChatDataBinding(),
+        source: _chatBinding(source),
+        target: _chatBinding(target),
       );
       await _contactService.stageAccountHandover(
         source: source,
@@ -114,8 +113,8 @@ class CidAccountDataHandover {
       throw StateError('CID 私有数据交接仍处于 preparing，禁止 commit');
     }
     await _chatRuntime.commitAccountHandover(
-      source: source.toChatDataBinding(),
-      target: target.toChatDataBinding(),
+      source: _chatBinding(source),
+      target: _chatBinding(target),
     );
     await _contactService.commitAccountHandover(source: source, target: target);
     await _accountSecurity.clearPendingAccountDataHandover(
@@ -137,8 +136,8 @@ class CidAccountDataHandover {
     final failures = <String>[];
     try {
       await _chatRuntime.discardAccountHandover(
-        source: source.toChatDataBinding(),
-        target: target.toChatDataBinding(),
+        source: _chatBinding(source),
+        target: _chatBinding(target),
       );
     } catch (error) {
       failures.add('Chat：$error');
@@ -209,8 +208,8 @@ class CidAccountDataHandover {
     }
     await _contactService.isolateInaccessibleBinding(previous);
     await _chatRuntime.isolateInaccessibleBinding(
-      previous: previous.toChatDataBinding(),
-      current: current.toChatDataBinding(),
+      previous: _chatBinding(previous),
+      current: _chatBinding(current),
     );
   }
 
@@ -223,7 +222,7 @@ class CidAccountDataHandover {
     );
     await resumeForFinalizedBinding(current);
     try {
-      await _chatRuntime.convergeFinalizedBinding(current.toChatDataBinding());
+      await _chatRuntime.convergeFinalizedBinding(_chatBinding(current));
     } catch (error) {
       // Chat 初始化依赖推送与网络；失败不能回滚已经 finalized 的 CID 控制权。
       // 当前绑定已生效且此前凭证已由 Worker 撤销，进入 Chat 时会继续幂等补齐。
@@ -236,6 +235,15 @@ class CidAccountDataHandover {
       left.cidNumber == right.cidNumber &&
       left.bindingRevision == right.bindingRevision &&
       left.accountId == right.accountId;
+
+  /// 身份模块只在调用聊天交接边界时构造中性快照，不依赖公民聊天模块的适配代码。
+  static ChatDataBinding _chatBinding(AccountDataBinding binding) =>
+      ChatDataBinding(
+        keyDomain: binding.genesisHash,
+        userId: binding.cidNumber,
+        bindingRevision: binding.bindingRevision,
+        accountId: binding.accountId,
+      );
 
   Future<
     ({

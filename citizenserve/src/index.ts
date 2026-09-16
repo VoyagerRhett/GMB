@@ -10,10 +10,7 @@ import { cleanupExpiredSessionIndexes } from './auth/session_index';
 import { reconcileFinalizedUserProjection } from './account/user_projection';
 import { reconcileFinalizedSubscriptionProjection } from './membership/subscription_projection';
 import { auditSquareR2Consistency } from './media/service';
-import { cleanupExpiredChatPushEndpoints } from './chat/service';
-import { cleanupExpiredChatAttachments } from './chat/attachments';
-
-export { Chat } from './chat/realtime';
+import { cleanupExpiredPushEndpoints } from './auth/push_endpoint';
 
 type ScheduledJob = {
   readonly name: string;
@@ -36,9 +33,9 @@ async function runIndependentScheduledJobs(
   }
 }
 export default {
-  async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, _ctx?: ExecutionContext): Promise<Response> {
     try {
-      return applyCors(request, env, await routeRequest(request, env, ctx));
+      return applyCors(request, env, await routeRequest(request, env));
     } catch (error) {
       return applyCors(request, env, errorResponse(error));
     }
@@ -54,8 +51,7 @@ async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContex
       { name: 'cleanup-security', run: () => cleanupSecurityState(env) },
       { name: 'cleanup-reservations', run: () => cleanupExpiredReservations(env) },
       { name: 'cleanup-sessions', run: () => cleanupExpiredSessionIndexes(env) },
-      { name: 'cleanup-chat-push', run: () => cleanupExpiredChatPushEndpoints(env) },
-      { name: 'cleanup-chat-attachments', run: () => cleanupExpiredChatAttachments(env) },
+      { name: 'cleanup-push-endpoints', run: () => cleanupExpiredPushEndpoints(env) },
       { name: 'project-users', run: () => reconcileFinalizedUserProjection(env) },
       { name: 'project-subscriptions', run: () => reconcileFinalizedSubscriptionProjection(env) },
     ];

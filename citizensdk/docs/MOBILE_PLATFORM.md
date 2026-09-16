@@ -137,7 +137,7 @@ CITIZENSDK_ANDROID_BUILD_DIR
 CITIZENSDK_ANDROID_CORE_DIR
 ```
 
-本机路径必须位于 `/Users/rhett/TATA/tataconsole/cache/gmb/citizensdk`，GitHub Actions 路径必须位于 checkout
+本机路径必须位于 `CITIZENSDK_WORK_DIR`，GitHub Actions 路径必须位于 checkout
 之外。源码树不得产生 Gradle、CMake、SO、AAR 或测试报告。
 独立 AAR 的 `settings.gradle` 通过 `CITIZENSDK_WORK_DIR/gradle-project` 显式绑定 `:native`；即使入口脚本
 从源码目录 `apply from`，Gradle 也只把当前任务中的 `gradle-project/native` 当作可写项目目录。
@@ -244,7 +244,7 @@ AAR 与 XCFramework 投影。本轮本机 Android AAR 构建通过，Apple 单�
 由于没有 Simulator runtime，没有把 iOS XCTest 记为已运行。macOS 已运行 Core 50 项与
 Flutter adapter 22 项 XCTest，0 失败，1 项真机硬件用例跳过；最终 normal/supervisor
 smoke 均通过。本机无真实 Apple 移动设备，不声称 Secure Enclave、生物认证或
-device-only Keychain 已完成真机验收。TataConsole Flow 已接入本闭集，但本机记录
+device-only Keychain已完成真机验收。产品Flow已接入本闭集，但本机记录
 不冒充远程 CI、正式 Release、Hosted 上传或 Git 已运行。
 
 iOS 设备与模拟器变体使用浅层 framework 和

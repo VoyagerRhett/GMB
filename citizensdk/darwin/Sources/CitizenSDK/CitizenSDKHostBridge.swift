@@ -358,7 +358,7 @@ private func citizenSDKTransactionHistoryQuery(_ context: UnsafeMutableRawPointe
                                                _ completion: citizensdk_host_record_completion_v1_t?) -> Int32 {
     guard let host = citizenSDKHost(context), completion != nil else { return CitizenSDKErrorCode.invalidArgument.rawValue }
     do {
-        let bytes = citizenSDKData(query)
+        let bytes = try citizenSDKData(query)
         guard bytes.count == 58 else { return CitizenSDKErrorCode.invalidArgument.rawValue }
         citizenSDKCompleteRecord(operationID, sdkContext, completion, try host.historyQuery(bytes)); return 0
     }

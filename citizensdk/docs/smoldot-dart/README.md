@@ -56,7 +56,7 @@ All official native builds use `scripts/build-native.sh`. All local build,
 test, cache, generated and candidate state must stay below:
 
 ```text
-/Users/rhett/TATA/tataconsole/target/GMB/citizensdk/SDK
+CITIZENSDK_NATIVE_OUTPUT_DIR
 ```
 
 See `BUILD.md` for the exact current target matrix and output boundary. Do not

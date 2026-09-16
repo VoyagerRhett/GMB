@@ -1,4 +1,4 @@
-# 真打包产物只在CI临时Runner或TataConsole中央工作区生成，产品仓库不保留占位目录。
+# 真打包产物只在CI或产品源码外工作目录生成，产品仓库不保留占位目录。
 onchina-bin/
 postgres/*
 !postgres/.gitkeep

@@ -43,11 +43,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CHAIN_ROOT="$(dirname "$SCRIPT_DIR")"   # citizenchain/
 GMB_REPOSITORY_ROOT="$(dirname "$CHAIN_ROOT")"
 
-# 在杀进程、清库之前先校验中央任务身份和工具，依赖只在本任务目录离线安装。
-# 本脚本不会自行创建任务或选择用户工具；未由控制台提供准确环境时立即失败。
+CITIZENCHAIN_WORK_DIR="${CITIZENCHAIN_WORK_DIR:-${TMPDIR:-/tmp}/citizenchain/clean-run}"
+CITIZENCHAIN_DEPENDENCY_DIR="${CITIZENCHAIN_DEPENDENCY_DIR:-$CITIZENCHAIN_WORK_DIR/dependencies}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$CITIZENCHAIN_WORK_DIR/cargo-target}"
+# 在清库前先按产品锁文件准备工具依赖；生成状态只进入本次源码外工作目录。
 source "$GMB_REPOSITORY_ROOT/citizenchain/scripts/prepare-toolchain.sh"
-NODE_FRONTEND_DIST="$TATA_CONSOLE_CACHE_DIR/node-frontend"
-ONCHINA_BUILD_DIST="$TATA_CONSOLE_CACHE_DIR/onchina-frontend/dist"
+NODE_FRONTEND_DIST="$CITIZENCHAIN_WORK_DIR/node-frontend"
+ONCHINA_BUILD_DIST="$CITIZENCHAIN_WORK_DIR/onchina-frontend/dist"
 
 cleanup() {
     echo ""

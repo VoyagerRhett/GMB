@@ -125,7 +125,7 @@
     - key_purposes
     - expires_at
 
-# 塔塔控制台本机发布授权——冷钱包审阅并签署精确产品、平台、Release、产物摘要、
+# 产品正式发布授权——冷钱包审阅并签署精确产品、平台、Release、产物摘要、
 # 回滚锚点和短时随机挑战。该签名只授权一次本机发布，不向平台发送钱包信息。
 # 产品端是产品语义，不是供应商名。闭集固定为 citizenapp/ios|android、
 # citizenwallet/ios|android、citizenserve/cloudflare、citizenweb/web、

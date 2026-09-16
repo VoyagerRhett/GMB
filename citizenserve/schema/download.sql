@@ -1,8 +1,8 @@
--- 公民链官网下载数据库唯一完整 schema。该数据库只保存塔塔控制台显式发布的四个平台指针，
+-- 公民链官网下载数据库唯一完整schema。该数据库只保存产品发布流程显式提交的四个平台指针，
 -- 不保存 CitizenServe 用户数据、安装包字节、任意外部 URL 或版本历史。
 
 -- 空字段表示该平台尚未发布；revision 永不回退，既用于条件更新，也防止回滚后重放旧请求。
-CREATE TABLE citizenchain_download_publications (
+CREATE TABLE IF NOT EXISTS citizenchain_download_publications (
   platform TEXT PRIMARY KEY CHECK(platform IN ('linux-arm', 'linux-amd', 'macos', 'windows')),
   version_tag TEXT,
   source_sha TEXT,
@@ -19,5 +19,5 @@ CREATE TABLE citizenchain_download_publications (
   )
 );
 
-INSERT INTO citizenchain_download_publications(platform) VALUES
+INSERT OR IGNORE INTO citizenchain_download_publications(platform) VALUES
   ('linux-arm'), ('linux-amd'), ('macos'), ('windows');

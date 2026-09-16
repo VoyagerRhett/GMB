@@ -67,7 +67,7 @@ sr25519 仍由同一 Rust signer 实现。设备解锁口令不是业务账户�
 
 唯一入口是根 `scripts/build-native.sh Windows`。预先提供 MSVC、Rust 目标、CMake、Node、
 已固定 SQLite MSVC 静态归档与头；不由脚本安装工具或联网补依赖。工作区和安装前缀只在
-TataConsole/runner checkout 外中央目录，源码目录禁止任何编译缓存、DLL、LIB 或日志。
+调用方或runner checkout外的工作目录，源码目录禁止任何编译缓存、DLL、LIB或日志。
 具体环境、未实测门禁和秘密边界见 [Windows 技术说明](../docs/WINDOWS_PLATFORM.md)。
 
 原生构建先保留原有 14 项合同测试，再安装到本次工作目录，核对精确 21 文件、安装清单、

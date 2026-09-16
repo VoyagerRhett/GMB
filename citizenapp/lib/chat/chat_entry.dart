@@ -2,13 +2,16 @@ import 'package:provider/provider.dart';
 import 'package:citizen_sdk/citizen_sdk.dart';
 
 import 'dart:async';
+
 import 'package:flutter_chat_core/flutter_chat_core.dart';
 import 'package:flutter_chat_ui/flutter_chat_ui.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:tatachat_sdk/tatachat_sdk.dart';
+
 import 'chat_product_policy.dart';
+
 import 'package:citizenapp/8964/profile/models/citizen_profile.dart';
 import 'package:citizenapp/8964/profile/models/profile_presentation.dart';
 import 'package:citizenapp/8964/profile/services/citizen_profile_api.dart';
@@ -35,114 +38,9 @@ import 'package:citizenapp/ui/widgets/identity_register_guide.dart';
 import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/wallet/widgets/wallet_qr_dialog.dart';
 
-typedef CitizenChatDownloadAttachmentCallback =
-    Future<ChatDownloadedAttachment> Function(
-      String conversationId,
-      String controlPlaintext,
-    );
-typedef CitizenChatResolveMediaPathsCallback =
-    Future<Map<String, String>> Function(
-      String conversationId,
-      List<ChatContent> contents,
-    );
-typedef ChatResolvePeerAddressCallback =
-    Future<String> Function(String peerUserId);
-
-/// CitizenApp 的产品宿主薄层；完整会话页面与通用交互由 TataChatSDK 提供。
-class CitizenChatPage extends StatelessWidget {
-  CitizenChatPage({
-    super.key,
-    required this.conversationId,
-    required this.ownerUserId,
-    required this.accountId,
-    required this.peerUserId,
-    required this.title,
-    this.isGroup = false,
-    ChatStore? store,
-    this.onSendText,
-    this.onSendMedia,
-    this.onSendSticker,
-    this.onDownloadAttachment,
-    this.onResolveMediaPaths,
-    this.pickMedia,
-    this.onSync,
-    this.onStartRealtime,
-    this.onDeleteConversation,
-    this.onMarkRead,
-    this.resolvePeerAddress,
-    this.initialProfile,
-    this.initialProfileMedia,
-    this.profileApi,
-    this.profileCache,
-    this.profileMediaCache,
-    this.sessionProvider,
-  }) : store = store ?? ChatStore();
-
-  final String conversationId;
-  final String ownerUserId;
-  final String accountId;
-  final String peerUserId;
-  final String title;
-  final bool isGroup;
-  final ChatStore store;
-  final ChatSendTextCallback? onSendText;
-  final ChatSendMediaCallback? onSendMedia;
-  final ChatSendStickerCallback? onSendSticker;
-  final CitizenChatDownloadAttachmentCallback? onDownloadAttachment;
-  final CitizenChatResolveMediaPathsCallback? onResolveMediaPaths;
-  final ChatPickMediaCallback? pickMedia;
-  final ChatSyncCallback? onSync;
-  final ChatStartRealtimeCallback? onStartRealtime;
-  final ChatDeleteConversationCallback? onDeleteConversation;
-  final ChatMarkReadCallback? onMarkRead;
-  final ChatResolvePeerAddressCallback? resolvePeerAddress;
-  final CitizenProfile? initialProfile;
-  final CitizenProfileMediaSnapshot? initialProfileMedia;
-  final CitizenProfileApi? profileApi;
-  final CitizenProfileCache? profileCache;
-  final CitizenProfileMediaCache? profileMediaCache;
-  final SquareSessionProvider? sessionProvider;
-
-  @override
-  Widget build(BuildContext context) {
-    return ChatConversationPage(
-      conversationId: conversationId,
-      currentUserId: ownerUserId,
-      accountId: accountId,
-      peerUserId: peerUserId,
-      title: title,
-      isGroup: isGroup,
-      store: store,
-      host: _citizenConversationHost(
-        peerUserId: peerUserId,
-        title: title,
-        isGroup: isGroup,
-        resolvePeerAddress: resolvePeerAddress,
-        initialProfile: initialProfile,
-        initialProfileMedia: initialProfileMedia,
-        profileApi: profileApi,
-        profileCache: profileCache,
-        profileMediaCache: profileMediaCache,
-        sessionProvider: sessionProvider,
-      ),
-      onSendText: onSendText,
-      onSendMedia: onSendMedia,
-      onSendSticker: onSendSticker,
-      onDownloadAttachment: onDownloadAttachment == null
-          ? null
-          : (controlPlaintext) =>
-                onDownloadAttachment!(conversationId, controlPlaintext),
-      onResolveMediaPaths: onResolveMediaPaths == null
-          ? null
-          : (contents) => onResolveMediaPaths!(conversationId, contents),
-      pickMedia: pickMedia,
-      onSync: onSync,
-      onStartRealtime: onStartRealtime,
-      onDeleteConversation: onDeleteConversation,
-      onMarkRead: onMarkRead,
-    );
-  }
-}
+typedef ChatResolvePeerAddressCallback = Future<String> Function(
+  String peerUserId,
+);
 
 class _CitizenChatConversationHost extends ChatConversationHost {
   const _CitizenChatConversationHost({
@@ -160,7 +58,7 @@ class _CitizenChatConversationHost extends ChatConversationHost {
 
   @override
   String attachmentTooLargeMessage(ChatMessageKind kind) =>
-      '文件超出当前会员单个附件上限（${ChatMediaLimits.currentLimitLabel}）';
+      '文件超出当前会员单个附件上限（${SubscriptionService.currentChatFileSizeLabel}）';
 }
 
 ChatConversationHost _citizenConversationHost({
@@ -188,11 +86,11 @@ ChatConversationHost _citizenConversationHost({
   return _CitizenChatConversationHost(
     style: style,
     mediaLimits: const CitizenChatMediaLimitPolicy(),
-    canSend: ChatMediaLimits.chatAuthorizedFor,
+    canSend: SubscriptionService.chatAuthorizedFor,
     unavailableMessage: (userId) {
       final resolved =
-          ChatMediaLimits.authorizationResolvedFor(userId) &&
-          ChatMediaLimits.resolvedFor(userId);
+          SubscriptionService.chatAuthorizationResolvedFor(userId) &&
+          SubscriptionService.membershipResolvedFor(userId);
       return resolved ? '尚未开通会员，订阅任一会员后即可使用聊天' : '暂时无法验证会员状态，请稍后重试';
     },
     errorMessage: chatUserErrorMessage,
@@ -385,9 +283,8 @@ class _CitizenChatHeaderState extends State<_CitizenChatHeader> {
     if (widget.isGroup) {
       return Text(widget.title, maxLines: 1, overflow: TextOverflow.ellipsis);
     }
-    final name = ProfilePresentation.forIdentityKey(
-      widget.peerUserId,
-    ).resolveDisplayName(publicName: _profile?.displayName ?? widget.title);
+    final name = ProfilePresentation.forIdentityKey(widget.peerUserId)
+        .resolveDisplayName(publicName: _profile?.displayName ?? widget.title);
     return InkWell(
       key: const ValueKey('chat-peer-profile-entry'),
       borderRadius: BorderRadius.circular(AppLayout.scaledValue(10)),
@@ -455,14 +352,6 @@ String _shortAccount(String value) {
   return '${value.substring(0, 8)}...${value.substring(value.length - 6)}';
 }
 
-typedef ChatSendTextFactory =
-    ChatSendTextCallback? Function(String peerUserId, String conversationId);
-typedef ChatSyncFactory = ChatSyncCallback? Function(String peerUserId);
-typedef ChatSendMediaFactory =
-    ChatSendMediaCallback? Function(String peerUserId, String conversationId);
-typedef ChatDownloadAttachmentFactory =
-    CitizenChatDownloadAttachmentCallback? Function(String peerUserId);
-
 /// 聊天页加号菜单 5 个动作的可注入入口。
 ///
 /// 默认全为 null，各动作走真实实现；测试整体替换后即可断言路由，
@@ -507,11 +396,7 @@ class ChatTab extends StatefulWidget {
     this.wallet,
     this.cidNumber,
     this.accountId,
-    this.sendTextFactory,
-    this.sendMediaFactory,
-    this.downloadAttachmentFactory,
-    this.syncFactory,
-    this.runtime,
+    required this.runtime,
     this.selectedTab,
     this.tabIndex = 2,
     this.openers,
@@ -521,17 +406,14 @@ class ChatTab extends StatefulWidget {
     this.sessionProvider,
     this.contactService,
     this.subscriptionService,
-  }) : store = store ?? ChatStore();
+  }) : store = store ?? runtime.store;
 
+  /// 生产固定使用同一 ChatSdk 的 Store；显式值只用于不启动原生运行时的组件测试。
   final ChatStore store;
   final CitizenSdkWallet? wallet;
   final String? cidNumber;
   final String? accountId;
-  final ChatSendTextFactory? sendTextFactory;
-  final ChatSendMediaFactory? sendMediaFactory;
-  final ChatDownloadAttachmentFactory? downloadAttachmentFactory;
-  final ChatSyncFactory? syncFactory;
-  final ChatSdk? runtime;
+  final ChatSdk runtime;
   final ValueListenable<int>? selectedTab;
   final int tabIndex;
 
@@ -588,9 +470,9 @@ class _ChatTabState extends State<ChatTab> {
   void initState() {
     super.initState();
     _listController = ChatConversationListController(
+      sdk: widget.runtime,
       onCoordinate: () => _reload(syncFirst: true),
       onRefresh: _syncAndRefresh,
-      onStartRealtime: _startRealtime,
     );
     _listController.start(visible: _isTabSelected);
     MembershipRevision.instance.listenable.addListener(_onMembershipChanged);
@@ -700,7 +582,7 @@ class _ChatTabState extends State<ChatTab> {
       return;
     }
     if (_accountId.isNotEmpty) {
-      await widget.runtime?.invalidateAccount(_accountId);
+      await widget.runtime.invalidateAccount(_accountId);
     }
     _profileSession = null;
     _pauseSync();
@@ -800,7 +682,7 @@ class _ChatTabState extends State<ChatTab> {
   }
 
   /// 当前 CID 在身份鉴权时读取一次 CitizenServe；聊天列表和窗口复用统一本地缓存。
-  /// 结果由 [ChatMediaLimits] 绑定 CID，切换钱包后旧 CID 权益不能复用。
+  /// 结果由会员模块按 CID 隔离，切换钱包后旧 CID 权益不能复用。
   Future<void> _ensureChatEntitlement(
     String cidNumber,
     int reloadGeneration,
@@ -824,7 +706,7 @@ class _ChatTabState extends State<ChatTab> {
       await subscriptionService.authorizeMembership(session);
     } on Exception {
       // 展示仍可复用本地快照，但发送授权必须由本次会话的 CitizenServe 结果确认。
-      ChatMediaLimits.markAuthorizationUnavailable(cidNumber);
+      SubscriptionService.markChatAuthorizationUnavailable(cidNumber);
     }
     if (mounted &&
         reloadGeneration == _reloadGeneration &&
@@ -970,48 +852,16 @@ class _ChatTabState extends State<ChatTab> {
     }
   }
 
-  Future<bool> _retryOutgoingSilently() async {
-    if (!_isActive) {
-      return false;
-    }
-    final runtime = widget.runtime;
-    if (runtime == null) {
-      return true;
-    }
-    try {
-      await runtime.retryOutgoing();
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
-
   void _configurePolling(String activeWallet) {
-    if (!_isActive || activeWallet.isEmpty || widget.runtime == null) {
+    if (!_isActive || activeWallet.isEmpty) {
       _pauseSync();
       return;
     }
     _listController.configureScope(activeWallet);
   }
 
-  Future<Future<void> Function()?> _startRealtime(
-    String activeWallet, {
-    required Future<void> Function() onNotice,
-    Future<void> Function()? onDisconnected,
-  }) async {
-    final runtime = widget.runtime;
-    if (!_isActive || runtime == null || _accountId != activeWallet) {
-      return null;
-    }
-    return runtime.startRealtimeSync(
-      onNotice: onNotice,
-      onDisconnected: onDisconnected,
-    );
-  }
-
   Future<bool> _syncAndRefresh(String accountId) async {
     if (!_isActive || _accountId != accountId) return false;
-    final retried = await _retryOutgoingSilently();
     final conversations = await widget.store.readConversationPreviews(
       ownerUserId: _cidNumber,
       currentAccountId: accountId,
@@ -1022,7 +872,7 @@ class _ChatTabState extends State<ChatTab> {
       _conversations = visible;
     });
     unawaited(_hydratePeerProfiles(visible));
-    return retried;
+    return true;
   }
 
   void _pauseSync() {
@@ -1033,12 +883,9 @@ class _ChatTabState extends State<ChatTab> {
     if (widget.cidNumber != null && widget.accountId != null) {
       return (cidNumber: widget.cidNumber!, accountId: widget.accountId!);
     }
-    final runtime = widget.runtime;
-    if (runtime != null) {
-      final current = await runtime.readCurrentUser();
-      if (current.accountId.isNotEmpty) {
-        return (cidNumber: current.userId, accountId: current.accountId);
-      }
+    final current = await widget.runtime.readCurrentUser();
+    if (current.accountId.isNotEmpty) {
+      return (cidNumber: current.userId, accountId: current.accountId);
     }
     if (!mounted) return (cidNumber: '', accountId: '');
     final identity = await context.read<CurrentUserContext>().resolve();
@@ -1049,13 +896,7 @@ class _ChatTabState extends State<ChatTab> {
   }
 
   Future<void> _deleteLocalConversation(String conversationId) {
-    final runtime = widget.runtime;
-    if (runtime != null) {
-      return runtime.deleteLocalConversation(conversationId);
-    }
-    return Future<void>.error(
-      StateError('删除 Chat 会话必须由持久 binding fence Runtime 协调'),
-    );
+    return widget.runtime.deleteLocalConversation(conversationId);
   }
 
   /// 逻辑删除先于物理删除完成：调用本方法的同步阶段立刻移除卡片并登记过滤，
@@ -1156,11 +997,11 @@ class _ChatTabState extends State<ChatTab> {
   }
 
   bool _requireChatMembership() {
-    if (ChatMediaLimits.chatAuthorizedFor(_cidNumber)) return true;
+    if (SubscriptionService.chatAuthorizedFor(_cidNumber)) return true;
     setState(() {
       _error =
-          ChatMediaLimits.authorizationResolvedFor(_cidNumber) &&
-              ChatMediaLimits.resolvedFor(_cidNumber)
+          SubscriptionService.chatAuthorizationResolvedFor(_cidNumber) &&
+              SubscriptionService.membershipResolvedFor(_cidNumber)
           ? '尚未开通会员，订阅任一会员后即可使用聊天'
           : '暂时无法验证会员状态，请稍后重试';
     });
@@ -1290,100 +1131,29 @@ class _ChatTabState extends State<ChatTab> {
   }
 
   void _openDirectConversation(ChatConversationPreview preview) {
-    Navigator.of(context)
-        .push(
-          MaterialPageRoute<void>(
-            builder: (context) => CitizenChatPage(
-              conversationId: preview.conversationId,
-              ownerUserId: _cidNumber,
-              accountId: _accountId,
-              peerUserId: preview.peerUserId,
-              title: preview.title,
-              store: widget.store,
-              onSendText:
-                  widget.sendTextFactory?.call(
-                    preview.peerUserId,
-                    preview.conversationId,
-                  ) ??
-                  (widget.runtime == null
-                      ? null
-                      : (text) => widget.runtime!.sendText(
-                          peerUserId: preview.peerUserId,
-                          conversationId: preview.conversationId,
-                          text: text,
-                        )),
-              onSendMedia:
-                  widget.sendMediaFactory?.call(
-                    preview.peerUserId,
-                    preview.conversationId,
-                  ) ??
-                  (widget.runtime == null
-                      ? null
-                      : (media, {onLocalCommitted}) =>
-                            widget.runtime!.sendMedia(
-                              peerUserId: preview.peerUserId,
-                              conversationId: preview.conversationId,
-                              media: media,
-                              onLocalCommitted: onLocalCommitted,
-                            )),
-              onSendSticker: widget.runtime == null
-                  ? null
-                  : (packId, stickerId) => widget.runtime!.sendSticker(
-                      peerUserId: preview.peerUserId,
-                      conversationId: preview.conversationId,
-                      packId: packId,
-                      stickerId: stickerId,
-                    ),
-              onResolveMediaPaths: widget.runtime == null
-                  ? null
-                  : (String conversationId, List<ChatContent> contents) =>
-                        widget.runtime!.resolveCachedMediaPaths(
-                          conversationId: conversationId,
-                          contents: contents,
-                        ),
-              onDownloadAttachment:
-                  widget.downloadAttachmentFactory?.call(preview.peerUserId) ??
-                  (widget.runtime == null
-                      ? null
-                      : (String conversationId, String controlPlaintext) =>
-                            widget.runtime!.downloadAttachment(
-                              conversationId: conversationId,
-                              controlPlaintext: controlPlaintext,
-                            )),
-              onSync:
-                  widget.syncFactory?.call(preview.peerUserId) ??
-                  (widget.runtime == null
-                      ? null
-                      : () => widget.runtime!.retryOutgoing(
-                          conversationId: preview.conversationId,
-                          recipientUserId: preview.peerUserId,
-                        )),
-              onStartRealtime: widget.runtime == null
-                  ? null
-                  : ({required onNotice, onDisconnected}) =>
-                        widget.runtime!.startRealtimeSync(
-                          onNotice: onNotice,
-                          onDisconnected: onDisconnected,
-                          retryOutgoingOnConnect: false,
-                        ),
-              onDeleteConversation: () =>
-                  _deleteConversationInBackground(preview.conversationId),
-              onMarkRead: widget.runtime == null
-                  ? null
-                  : (readThroughMillis) => widget.runtime!.markConversationRead(
-                      conversationId: preview.conversationId,
-                      readThroughMillis: readThroughMillis,
-                    ),
-              initialProfile: _peerProfiles[preview.peerUserId],
-              initialProfileMedia: _peerProfileMedia[preview.peerUserId],
-              profileApi: _profileApi,
-              profileCache: _profileCache,
-              profileMediaCache: _profileMediaCache,
-              sessionProvider: _sessionProvider,
-            ),
-          ),
-        )
-        .then((_) => _reload());
+    unawaited(
+      ChatConversationRoutes.openDirect(
+        context,
+        sdk: widget.runtime,
+        host: _citizenConversationHost(
+          peerUserId: preview.peerUserId,
+          title: preview.title,
+          isGroup: false,
+          initialProfile: _peerProfiles[preview.peerUserId],
+          initialProfileMedia: _peerProfileMedia[preview.peerUserId],
+          profileApi: _profileApi,
+          profileCache: _profileCache,
+          profileMediaCache: _profileMediaCache,
+          sessionProvider: _sessionProvider,
+        ),
+        currentUserId: _cidNumber,
+        accountId: _accountId,
+        peerUserId: preview.peerUserId,
+        title: preview.title,
+        onDeleteConversation: () =>
+            _deleteConversationInBackground(preview.conversationId),
+      ).then((_) => _reload()),
+    );
   }
 
   ChatConversationListItem _conversationItem(
@@ -1395,11 +1165,10 @@ class _ChatTabState extends State<ChatTab> {
     final resolved = _resolvedPeerCidNumbers.contains(preview.peerUserId);
     final publicName = preview.isGroup
         ? preview.title
-        : ProfilePresentation.forIdentityKey(
-            preview.peerUserId,
-          ).resolveDisplayName(
-            publicName: profile?.displayName ?? preview.title,
-          );
+        : ProfilePresentation.forIdentityKey(preview.peerUserId)
+              .resolveDisplayName(
+                publicName: profile?.displayName ?? preview.title,
+              );
     final remark = _peerContactRemarks[preview.peerUserId]?.trim() ?? '';
     final title = !preview.isGroup && remark.isNotEmpty
         ? '$remark（$publicName）'
@@ -1578,12 +1347,11 @@ Future<bool> _confirmDeleteConversationList(BuildContext context) async {
 }
 
 /// 群聊打开器；测试可注入替身，正式运行走 [openGroupChat]。
-typedef GroupChatOpener =
-    Future<void> Function(
-      BuildContext context, {
-      required String groupId,
-      required String title,
-    });
+typedef GroupChatOpener = Future<void> Function(
+  BuildContext context, {
+  required String groupId,
+  required String title,
+});
 
 /// 聊天搜索页：一个输入框，三段结果 —— 会话 / 联系人 / 聊天记录。
 ///
@@ -1844,9 +1612,8 @@ class _ChatSearchPageState extends State<ChatSearchPage> {
                   color: AppTheme.textSecondary,
                 ),
                 title: item.contactRemark.isEmpty
-                    ? ProfilePresentation.forIdentityKey(
-                        item.cidNumber,
-                      ).fallbackName
+                    ? ProfilePresentation.forIdentityKey(item.cidNumber)
+                          .fallbackName
                     : item.contactRemark,
                 subtitle: item.cidNumber,
                 onTap: () => unawaited(_openContact(item)),
@@ -2223,9 +1990,8 @@ Future<void> openGroupChat(
   if (!context.mounted) return;
   if (accountId.isEmpty || currentUserId.isEmpty) {
     if (context.mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('请先在「我的 → 我的钱包」添加钱包账户')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('请先在「我的 → 我的钱包」添加钱包账户')));
     }
     return;
   }
@@ -2245,12 +2011,11 @@ Future<void> openGroupChat(
   );
 }
 
-typedef DirectChatOpener =
-    Future<void> Function(
-      BuildContext context, {
-      required String peerUserId,
-      required String title,
-    });
+typedef DirectChatOpener = Future<void> Function(
+  BuildContext context, {
+  required String peerUserId,
+  required String title,
+});
 
 /// 打开私聊详情；产品身份与自聊门禁留在 CitizenApp，消息链路由 SDK 路由组装。
 Future<void> openDirectChat(
@@ -2264,17 +2029,15 @@ Future<void> openDirectChat(
   if (!context.mounted) return;
   if (accountId.isEmpty || currentUserId.isEmpty) {
     if (context.mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('请先添加钱包账户并注册 CID')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('请先添加钱包账户并注册 CID')));
     }
     return;
   }
   if (peerUserId.trim() == currentUserId) {
     if (context.mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('不能和自己发起聊天')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('不能和自己发起聊天')));
     }
     return;
   }

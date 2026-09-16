@@ -364,7 +364,7 @@ detach 先停止接纳，并保活未完成 route 至真实完成后再收口会
 
 ## CI、Release 与平台边界
 
-CitizenSDK 最终只能接入 GMB/TataConsole 已有的唯一顶层路由，不建第二套
+CitizenSDK 最终只能接入 GMB/调用方 已有的唯一顶层路由，不建第二套
 Workflow、缓存或发布系统。目标产品动作为：
 
 - `gmb.citizensdk.sdk.ci`
@@ -385,7 +385,7 @@ Dart 生成的 `.dart_tool`
 包实现成两个源码真源。Release 还会验证指定
 成功 CI 的 workflow、显示标题、产品目标、成功状态与准确 source SHA，不读取、下载或比较
 CI 资产，并从同一提交重新构建；不以跨 Runner 归档字节必然一致作为发布成立条件。
-TataConsole Flow 已同步 Apple 三个技术 slice、单一 XCFramework 与本步测试闭集；
+产品Flow已同步Apple三个技术slice、单一XCFramework与本步测试闭集；
 流程接线不等于远程 CI、正式 Release 或 Hosted 上传已经实际运行，运行结果仍以对应记录为准。
 
 测试执行合同要求根 Flutter 包一次发现并执行全部根测试及已经迁入的 smoldot 测试，不再把
@@ -412,12 +412,12 @@ Kotlin 迁移提示推迟到第 9 步 Hosted/Flutter 集成处理。
 同一本机闭集对 Hosted 精确 17 个 Dart 文件分析为 0 问题，完整 Dart 套件以
 `--timeout=2m` 执行 316/316；根 Rust workspace 285/285、compile-fail 文档测试 1/1、
 Clippy 与格式检查通过；Android 原生 Kotlin/Java 单元测试 Gradle 17 个 task 成功。
-这些结果未经过 TataConsole 远程 Flow，也不是正式 Release、Hosted 上传或 Git 记录。
+这些结果未经过 调用方 远程 Flow，也不是正式 Release、Hosted 上传或 Git 记录。
 
-2026-08-29 包边界重构前的 TataConsole `.work` 隔离快照已实际通过根 Flutter
+2026-08-29 包边界重构前的 调用方 `.work` 隔离快照已实际通过根 Flutter
 230/230 和独立 smoldot Dart 51/51。signer Rust 6/6、FFI Rust 5/5、PoW Rust
 290/290（另有 3 项上游 ignored、14 个 benchmark 目标成功）、Android JUnit 3/3
-与 TataConsole 99/99 是同一次任务中的先前执行记录；这些历史结果不冒充包边界重构后的
+与 调用方 99/99 是同一次任务中的先前执行记录；这些历史结果不冒充包边界重构后的
 验证结论。iOS 的 2 项 XCTest
 已编译链接，但本机没有 Simulator runtime，未宣称本地执行成功；正式 workflow
 在 GitHub macOS Runner 上要求真实执行并失败关闭。
@@ -429,7 +429,7 @@ Core 和逐字节相同的双 SO；Apple 的 Swift 原生 API 与 Flutter adapte
 Secure Enclave，硬件金库与钱包能力必须报告不可用。Android Core/JNI 的 SONAME 固定为
 `libcitizensdk.so` 与
 `libcitizensdk_jni.so`，JNI 只能按 Core SONAME 依赖一次，任何含 `/` 的 `DT_NEEDED` 都失败。
-Android Gradle/Kotlin persistent project state 只允许位于 TataConsole 中央 work directory；
+Android Gradle/Kotlin persistent project state只允许位于调用方指定的源码外工作目录；
 源码和候选均禁止 `android/.kotlin`。iOS 设备与模拟器变体使用浅层 framework 和
 `@rpath/CitizenSDK.framework/CitizenSDK` install ID；macOS 使用标准 `Versions/A` framework
 和 `@rpath/CitizenSDK.framework/Versions/A/CitizenSDK` install ID。候选只允许 macOS
@@ -459,7 +459,7 @@ Linux 完整设计、GNU target、glibc 2.31 基线、TPM fail-closed 规则和�
 编译与 CTest、Dart/Flutter/Cargo 测试、Git、远程 CI、Release 或 Hosted 上传；获准执行的
 Node Release 来源合同测试与脚本语法检查不等于 Linux 运行验证。第 7.4 步候选合并要求共享
 头/资产字节一致，平台库与 CMake package 分别隔离；实际产物、依赖和许可证证据不齐不得
-生成可分发候选。没有修改 TataConsole 执行流程。
+生成可分发候选。没有修改 调用方 执行流程。
 
 ## 产品外部边界
 

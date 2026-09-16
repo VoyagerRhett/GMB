@@ -71,12 +71,12 @@ export interface SquareNotifyJob {
 }
 
 /// Wrangler 根据 scripts/wrangler.toml 生成固定变量与资源绑定；发布期变量和 Secret 只保留名称契约，
-/// 实际值由 TataConsole 分别通过 `--var` 与受保护 Secret FIFO 注入。
+/// 实际值由产品发布环境分别通过`--var`与受保护Secret输入注入。
 interface WorkerSecretsAndOptionalVars {
   // ChatServer 私钥只签发短期 EdDSA JWT；服务地址是公开 HTTPS 配置。
   CHAT_AUTH_ED25519_PRIVATE_KEY?: string;
   CHAT_SERVER_URL?: string;
-  // 平台推送只发送无内容 Chat 唤醒；私钥只允许使用 Worker Secret 配置。
+  // 普通应用通知只发送广场公开提醒和会员存储清理预告；私钥只允许使用Worker Secret配置。
   APNS_KEY?: string;
   APNS_KID?: string;
   APNS_TEAM?: string;
@@ -88,7 +88,7 @@ interface WorkerSecretsAndOptionalVars {
   CF_ACCOUNT_ID?: string;
   R2_KEY?: string;
   R2_SECRET?: string;
-  /// 私有聊天附件桶的公开资源名；凭据仍只来自 R2_KEY / R2_SECRET。
+  /// 广场私有上传桶的公开资源名；凭据仍只来自R2_KEY/R2_SECRET。
   SQUARE_PRIVATE_BUCKET_NAME?: string;
   // 公开媒体删除后按精确 URL 清理全网 CDN；令牌权限只允许 Cache Purge。
   ZONE_ID?: string;
@@ -101,15 +101,15 @@ interface WorkerSecretsAndOptionalVars {
   CONSTITUTION_TTL_SECONDS?: string;
   TURNSTILE_SECRET?: string;
   HASH_KEY?: string;
-  // 本地部署塔塔控制台↔Worker 结算接口鉴权令牌，只放 Worker Secret。
+  // 授权结算客户端↔Worker结算接口鉴权令牌，只放Worker Secret。
   SETTLE_TOKEN?: string;
   // 付款意图 HMAC 密钥，只放 Worker Secret；用于把登录账户、付款钱包和报价绑定为短期令牌。
   TOPUP_INTENT_SECRET?: string;
-  // 塔塔控制台更新公民链官网下载指针的独立 HMAC 密钥，不得与部署或结算凭据复用。
+  // 产品发布器更新公民链官网下载指针的独立HMAC密钥，不得与部署或结算凭据复用。
   CITIZENCHAIN_DOWNLOAD_PUBLISH_SECRET?: string;
 }
 
-/// Wrangler 会把配置值推导为字面量；Worker 运行期仍需接受测试覆盖值和塔塔控制台注入的字符串。
+/// Wrangler会把配置值推导为字面量；Worker运行期仍需接受测试覆盖值和发布环境注入的字符串。
 type WidenWorkerVar<T> = T extends string ? string : T;
 type GeneratedBindings = {
   [K in keyof CloudflareBindings]: WidenWorkerVar<CloudflareBindings[K]>;
@@ -121,12 +121,11 @@ type RequiredRuntimeBinding =
   | 'SQUARE_PRIVATE'
   | 'SQUARE_PUBLIC_MEDIA'
   | 'SQUARE_CACHE';
-type SpecializedRuntimeBinding = 'CHAT' | 'NOTIFY';
+type SpecializedRuntimeBinding = 'NOTIFY';
 type RuntimeBindings =
   Pick<GeneratedBindings, RequiredRuntimeBinding>
   & Partial<Omit<GeneratedBindings, RequiredRuntimeBinding | SpecializedRuntimeBinding>>
   & {
-    CHAT?: DurableObjectNamespace;
     NOTIFY?: Queue<SquareNotifyJob>;
   };
 
@@ -143,23 +142,6 @@ export interface SessionState {
   device_key_hash: string;
   created_at: number;
   expires_at: number;
-}
-
-/// CitizenServe 只接收序列化后的 OpenMLS ChatEnvelope 密文，不解析正文或附件密钥。
-/// envelope_id 是协议已有的唯一幂等键；禁止再增加 operation_id 或服务端消息编号。
-export interface ChatEnvelopePayload {
-  envelope_id: string;
-  recipient_cid_number: string;
-  recipient_device_id: string;
-  conversation_id: string;
-  envelope: string;
-  created_at_millis: number;
-  ttl_millis: number;
-}
-
-/// 单个 CID 的临时密文邮箱行；sender_cid_number 由已认证 Session 注入，客户端不得伪造。
-export interface ChatMailboxItem extends ChatEnvelopePayload {
-  sender_cid_number: string;
 }
 
 export interface LoginChallengeRow {

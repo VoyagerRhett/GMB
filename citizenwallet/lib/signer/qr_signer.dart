@@ -56,7 +56,7 @@ class QrSigner {
   /// 广场账户敏感动作；与 primitives::sign::OP_SIGN_SQUARE_ACTION 同值。
   static const int _opSignSquareAction = 0x1d;
 
-  /// TataConsole 生产发布授权；对齐 primitives::sign::OP_SIGN_PUBLISH。
+  /// 产品正式发布授权；对齐 primitives::sign::OP_SIGN_PUBLISH。
   static const int _opSignPublish = 0x24;
   static final RegExp _idPattern = RegExp(r'^[A-Za-z0-9_-]{16,128}$');
 

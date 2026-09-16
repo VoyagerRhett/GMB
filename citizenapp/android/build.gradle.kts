@@ -1,4 +1,4 @@
-// AGP与KGP必须由同一个根classpath解析，避免settings先锁定AGP内置的另一版KGP。
+// 全部Android产品和SDK只使用AGP 9.0.1与Kotlin 2.2.20；根classpath不允许第二版本。
 buildscript {
     repositories {
         google()
@@ -29,17 +29,16 @@ allprojects {
     }
 }
 
-// 本机编译必须由TataConsole把Gradle输出导向中央工作目录；GitHub临时Runner仍使用其短命工作区。
-val programTataConsoleBuildDir = System.getenv("TATA_CONSOLE_BUILD_DIR")
-val newBuildDir: Directory =
-    if (!programTataConsoleBuildDir.isNullOrBlank()) {
-        rootProject.layout.dir(rootProject.provider { rootProject.file(programTataConsoleBuildDir) }).get()
-    } else {
-        if (System.getenv("CI") != "true") {
-            throw GradleException("本机Android编译必须由TataConsole提供TATA_CONSOLE_BUILD_DIR")
-        }
-        rootProject.layout.buildDirectory.dir("../../build").get()
-    }
+// 产品构建默认写系统临时目录；任何调用方都可提供源码外绝对目录，不依赖特定运维工具。
+val citizenAppBuildValue = System.getenv("CITIZENAPP_BUILD_DIR")
+    ?.takeIf { it.isNotBlank() }
+    ?: "${System.getProperty("java.io.tmpdir")}/citizenapp/android"
+val citizenAppBuildFile = rootProject.file(citizenAppBuildValue).canonicalFile
+val citizenAppSourcePath = rootProject.projectDir.parentFile.canonicalFile.toPath()
+require(citizenAppBuildFile.isAbsolute && !citizenAppBuildFile.toPath().startsWith(citizenAppSourcePath)) {
+    "CITIZENAPP_BUILD_DIR必须是CitizenApp源码树外的绝对目录"
+}
+val newBuildDir: Directory = rootProject.layout.dir(rootProject.provider { citizenAppBuildFile }).get()
 rootProject.layout.buildDirectory.value(newBuildDir)
 
 subprojects {

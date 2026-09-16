@@ -24,10 +24,8 @@ interface CitizenChainPublicationInteropFixture {
 const secret = 'citizenchain-download-test-secret-32-bytes';
 const basePath = '/operations/citizenchain/download-publications/';
 const downloadSchema = readFileSync(resolve(process.cwd(), 'schema/download.sql'), 'utf8');
-const tataFlowRoot = process.env.TATA_CONSOLE_FLOW_ROOT;
-if (!tataFlowRoot) throw new Error('缺少 TATA_CONSOLE_FLOW_ROOT，无法读取下载发布互操作合同');
 const interopFixture = JSON.parse(readFileSync(resolve(
-  tataFlowRoot, '..', 'test', 'citizenchain-download-publication-interop-v1.json',
+  process.cwd(), 'test/citizenchain_download_publication_interop_v1.json',
 ), 'utf8')) as CitizenChainPublicationInteropFixture;
 let miniflare: Miniflare;
 let env: Env;
@@ -98,6 +96,16 @@ describe('公民链官网显式发布指针', () => {
     expect(businessTables.results).toEqual([]);
   });
 
+  it('下载数据库最终schema可重复执行且不复制四个平台指针', async () => {
+    const database = env.CITIZENCHAIN_DOWNLOAD_DB;
+    if (!database) throw new Error('测试缺少公民链下载数据库 binding');
+    for (const statement of schemaStatements(downloadSchema)) await database.prepare(statement).run();
+    const count = await database.prepare(
+      'SELECT COUNT(*) AS n FROM citizenchain_download_publications',
+    ).first<{ n: number }>();
+    expect(count?.n).toBe(4);
+  });
+
   it('未显式发布时官网入口返回未发布且不查询 GitHub', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch');
     await expect(citizenchainDownloadRoute(
@@ -106,7 +114,7 @@ describe('公民链官网显式发布指针', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('与 TataConsole 共用唯一 publication wire golden 并拒绝动作域字段', async () => {
+  it('产品自有publication wire golden固定互操作字段并拒绝动作域字段', async () => {
     expect(Object.keys(interopFixture).sort()).toEqual([
       'action_tag_field', 'contract_version', 'download_path', 'github_repository',
       'location', 'platform', 'publication_tag_field', 'put_body_json',
@@ -303,13 +311,13 @@ describe('公民链官网显式发布指针', () => {
     )).rejects.toMatchObject({ code: 'publication_revision_conflict' });
   });
 
-  it('错误或过期的塔塔控制台签名在读取 D1 前拒绝', async () => {
+  it('错误或过期的产品发布签名在读取D1前拒绝', async () => {
     const path = `${basePath}macos`;
     const invalid = new Request(`https://worker.test/api${path}`, {
       headers: {
-        'x-tataconsole-time': String(Date.now()),
-        'x-tataconsole-nonce': '11'.repeat(16),
-        'x-tataconsole-signature': '00'.repeat(32),
+        'x-citizenserve-request-time': String(Date.now()),
+        'x-citizenserve-request-nonce': '11'.repeat(16),
+        'x-citizenserve-request-signature': '00'.repeat(32),
       },
     });
     await expect(routeRequest(invalid, env)).rejects.toMatchObject({
@@ -372,9 +380,9 @@ async function signedRequest(
     'HMAC', key, new TextEncoder().encode(canonical),
   )));
   const headers: Record<string, string> = {
-    'x-tataconsole-time': String(timestamp),
-    'x-tataconsole-nonce': nonce,
-    'x-tataconsole-signature': signature,
+    'x-citizenserve-request-time': String(timestamp),
+    'x-citizenserve-request-nonce': nonce,
+    'x-citizenserve-request-signature': signature,
   };
   if (body) {
     headers['content-type'] = 'application/json';

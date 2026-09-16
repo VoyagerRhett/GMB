@@ -11,11 +11,11 @@ endif()
 # Linux 合同测试直接编译与正式 Host 相同的生产源码；不维护测试专用实现。
 find_package(Threads REQUIRED)
 
-# 测试状态必须由 TataConsole/调用方放进本次任务独占的中央构建目录。
+# 测试状态必须由调用方放进本次任务独占的源码外构建目录。
 # 此处只消费一个已存在、绝对且非根的目录；测试 helper 会在运行时再次
 # 逐级 no-follow 校验所有权和 0700 权限，并且绝不回退到 /tmp。
 set(CITIZENSDK_TEST_WORK_DIR "" CACHE PATH
-  "Required task-exclusive CitizenSDK test root under the central TataConsole target")
+  "Required task-exclusive CitizenSDK test root outside the source tree")
 if(CITIZENSDK_TEST_WORK_DIR STREQUAL "" OR
    NOT IS_ABSOLUTE "${CITIZENSDK_TEST_WORK_DIR}" OR
    CITIZENSDK_TEST_WORK_DIR STREQUAL "/" OR
