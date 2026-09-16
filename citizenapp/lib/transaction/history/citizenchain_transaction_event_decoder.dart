@@ -3,6 +3,8 @@ import 'dart:typed_data';
 
 import 'package:polkadart/polkadart.dart' show Events, RuntimeMetadata;
 
+/// 本文件按准确区块的 Runtime metadata 投影 System 执行终态和 CitizenApp 业务转账事件；
+/// 它不维护轻节点、扫描游标或 CitizenSDK 自有 execution history。
 /// One CitizenApp business transfer decoded from exact-block Runtime metadata.
 final class CitizenChainTransferEvent {
   const CitizenChainTransferEvent({

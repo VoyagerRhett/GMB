@@ -7,6 +7,8 @@ import 'package:citizenapp/citizen/proposal/admins-change/models/admin_set_chang
 import 'package:citizenapp/citizen/proposal/admins-change/models/admin_account.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/services/admin_set_validation.dart';
 
+/// 本服务校验并编码管理员集合变更业务 RuntimeCall，再委托 CitizenSDK 准备和执行通用交易；
+/// 热签、QR_V1 冷签和链上终态观察均由 SDK 提供，不在 CitizenApp 业务层重复实现。
 class AdminsChangeService {
   const AdminsChangeService({required CitizenTransactions transactions})
       : _transactions = transactions;

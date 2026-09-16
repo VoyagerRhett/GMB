@@ -4,6 +4,8 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
+// 本脚本依据 pubspec 版本种子、正式 Release Tag 和同端成功 CI 元数据，
+// 计算唯一候选版本并拒绝来源、提交或工作流身份不一致的 Release。
 const semanticVersionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d?)\.(0|[1-9]\d?)$/;
 const tagPrefixPattern = /^[a-z0-9][a-z0-9-]*-v$/;
 const sourceSHAPattern = /^[0-9a-f]{40}$/;

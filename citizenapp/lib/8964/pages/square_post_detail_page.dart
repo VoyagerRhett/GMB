@@ -12,6 +12,8 @@ import 'package:citizenapp/8964/widgets/square_post_card.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
+/// 本页面编排广场帖子详情加载、链上索引展示以及编辑和删除入口；
+/// 正文与媒体操作仍经 Square API 协调，钱包会话和区块链底层不在页面内实现。
 class SquarePostDetailResult {
   const SquarePostDetailResult({this.deleted = false, this.replacement});
 

@@ -3,6 +3,8 @@ import 'dart:typed_data';
 import 'package:citizenapp/citizen/shared/pallet_registry.dart';
 import 'package:polkadart/scale_codec.dart' show ByteOutput, CompactBigIntCodec;
 
+/// 本编码器把目标账户、金额和备注编码为 CitizenApp 自有业务 RuntimeCall；
+/// CitizenSDK 只接收返回的 opaque callData，不解释这些应用字段。
 /// CitizenApp-owned encoder for `OnchainTransaction.transfer_with_remark`.
 ///
 /// Destination, amount and remark are application business fields. The generic

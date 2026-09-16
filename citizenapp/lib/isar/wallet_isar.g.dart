@@ -1,4 +1,6 @@
 // GENERATED CODE - DO NOT MODIFY BY HAND
+// 本生成文件只提供 CitizenApp 业务实体的 Isar schema、序列化和查询扩展；
+// 钱包密钥、签名和链交易底层仍由 CitizenSDK 唯一承担。
 
 part of 'wallet_isar.dart';
 

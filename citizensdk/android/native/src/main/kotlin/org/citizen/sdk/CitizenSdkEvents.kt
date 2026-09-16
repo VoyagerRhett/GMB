@@ -1,6 +1,6 @@
 package org.citizen.sdk
 
-/** Non-secret Core events emitted on one ordered executor. */
+/** Android 桥接层在同一有序执行器发布无秘密的历史失效、最终区块、生命周期和能力快照事件。 */
 object CitizenSdkEvents {
     sealed class Event(open val sequence: String) {
         /** Invalidation only; query the existing history API for the current state. */

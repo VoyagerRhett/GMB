@@ -21,6 +21,7 @@ import org.citizen.sdk.CitizenWalletState
 import org.citizen.sdk.CitizenPreparedTransaction
 import org.citizen.sdk.CitizenTransactionExecution
 
+/** JNI 完成结果的内部闭集；只承载原生结果到公开 Kotlin 模型的投影，不形成第二套业务接口。 */
 internal sealed class CitizenSdkNativeResult {
     data object Empty : CitizenSdkNativeResult()
     class Block(val value: CitizenBlockRef) : CitizenSdkNativeResult()

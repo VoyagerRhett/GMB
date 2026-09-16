@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+/* 本头文件是CitizenSDK跨语言公共C ABI类型、常量、结构布局与所有权合同的唯一真源。 */
+
 /* Public numeric constants use direct typed literals so C, C++ and Swift all
  * consume the same exported ABI names without platform-specific projections. */
 

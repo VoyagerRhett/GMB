@@ -1,7 +1,6 @@
-//! Stable C ownership boundary for generic opaque transaction preparations.
+//! 通用 opaque 交易准备、冷热执行、历史读取与安全结果复制的稳定 C ABI 边界。
 //!
-//! Native handles stay bound to one CitizenSDK instance. Only the safe summary crosses the ABI;
-//! signer messages, signatures and extrinsic templates remain in the Engine registry.
+//! 原生句柄始终绑定单个 CitizenSDK 实例；只有安全摘要跨越 ABI，签名消息、签名和交易模板留在 Engine。
 
 #[cfg(all(feature = "transactions", feature = "qr"))]
 use std::future::Future;

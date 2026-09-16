@@ -1,6 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
+// 本模块锁定 CitizenApp 远端 Job 的仓库、流程、阶段和参数闭集，
+// 并按产品声明逐项执行命令，不承载 TataConsole 仓库操作或产品选择逻辑。
 function requireIdentity(identity, environment) {
   const fields = identity && typeof identity === 'object' ? Object.keys(identity).sort() : [];
   if (JSON.stringify(fields) !== JSON.stringify(['job', 'pipeline'])
