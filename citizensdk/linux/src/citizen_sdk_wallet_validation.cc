@@ -1,9 +1,24 @@
 #include "citizen_sdk_wallet_validation.hpp"
 
+#include <algorithm>
+
 #include "citizen_sdk_host_record.hpp"
 #include "citizen_sdk_input_limits.hpp"
 
 namespace citizen_sdk::linux {
+
+namespace {
+std::string initialization_text(citizensdk_bytes_view_t value) {
+  const auto bytes = copy_view(value, 768, "wallet initialization text is too long");
+  require(!bytes.empty(), CITIZENSDK_ERROR_INVALID_ARGUMENT,
+          "wallet initialization text is empty");
+  require(std::none_of(bytes.begin(), bytes.end(), [](uint8_t byte) {
+            return byte <= 0x1f || byte == 0x7f;
+          }), CITIZENSDK_ERROR_INVALID_ARGUMENT,
+          "wallet initialization text contains controls");
+  return std::string(bytes.begin(), bytes.end());
+}
+}
 
 ValidatedWalletRequest validate_wallet_request(
     const citizensdk_wallet_flow_request_v1_t &request) {
@@ -13,6 +28,29 @@ ValidatedWalletRequest validate_wallet_request(
   ValidatedWalletRequest result{};
   result.kind = request.kind;
   switch (request.kind) {
+    case CITIZENSDK_WALLET_FLOW_IMPORT_COLD_ACCOUNT:
+      require(request.word_count == 0 && request.account_indices == nullptr &&
+                  request.account_index_count == 0,
+              CITIZENSDK_ERROR_INVALID_ARGUMENT,
+              "cold-account import contains fields for another flow kind");
+      result.initialization_text = {
+          initialization_text(request.wallet_cold_account_text),
+      };
+      break;
+    case CITIZENSDK_WALLET_FLOW_INITIALIZE:
+      input_limits::validate_word_count(request.word_count);
+      require(request.account_indices == nullptr && request.account_index_count == 0,
+              CITIZENSDK_ERROR_INVALID_ARGUMENT,
+              "wallet initialization must not include account indices");
+      result.word_count = request.word_count;
+      result.initialization_text = {
+          initialization_text(request.wallet_account_role_text),
+          initialization_text(request.wallet_authorization_text),
+          initialization_text(request.wallet_completion_text),
+          initialization_text(request.wallet_backup_text),
+          initialization_text(request.wallet_cold_account_text),
+      };
+      break;
     case CITIZENSDK_WALLET_FLOW_CREATE:
       input_limits::validate_word_count(request.word_count);
       require(request.account_indices == nullptr && request.account_index_count == 0,

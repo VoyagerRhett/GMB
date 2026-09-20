@@ -35,6 +35,17 @@ citizen_sdk::windows::ValidatedWalletRequest validate_contract(
   native.account_indices = request.account_indices.empty()
                                ? nullptr : request.account_indices.data();
   native.account_index_count = static_cast<uint32_t>(request.account_indices.size());
+  if (request.initialization_text.size() == 5) {
+    auto view = [](const std::string &value) { return citizensdk_bytes_view_t{
+        reinterpret_cast<const uint8_t *>(value.data()), value.size()}; };
+    native.wallet_account_role_text = view(request.initialization_text[0]);
+    native.wallet_authorization_text = view(request.initialization_text[1]);
+    native.wallet_completion_text = view(request.initialization_text[2]);
+    native.wallet_backup_text = view(request.initialization_text[3]);
+    native.wallet_cold_account_text = view(request.initialization_text[4]);
+  } else if (request.initialization_text.size() == 1) {
+    native.wallet_cold_account_text = {reinterpret_cast<const uint8_t *>(request.initialization_text[0].data()), request.initialization_text[0].size()};
+  }
   return citizen_sdk::windows::validate_wallet_request(native);
 }
 
@@ -74,6 +85,19 @@ int main() {
   assert(validate_contract(FlutterWalletFlows::contract(eighteen)).word_count ==
          CITIZENSDK_WALLET_WORDS_18);
   assert(citizen_sdk::WalletFlowRequest{}.word_count == 12);
+  DecodedRequest initialize;
+  initialize.method = Method::initialize_wallet;
+  initialize.word_count = 18;
+  initialize.wallet_initialization_text = {"账户角色", "授权说明", "完成说明", "备份说明", "冷账户说明"};
+  const auto initialize_contract = FlutterWalletFlows::contract(initialize);
+  assert(initialize_contract.kind == WalletFlowKind::Initialize);
+  assert(validate_contract(initialize_contract).word_count == CITIZENSDK_WALLET_WORDS_18);
+  DecodedRequest cold;
+  cold.method = Method::import_cold_account_with_ui;
+  cold.wallet_initialization_text = {"只接受账户码"};
+  const auto cold_contract = FlutterWalletFlows::contract(cold);
+  assert(cold_contract.kind == WalletFlowKind::ImportColdAccount);
+  assert(validate_contract(cold_contract).kind == CITIZENSDK_WALLET_FLOW_IMPORT_COLD_ACCOUNT);
 
   int completions = 0;
   // Deliberately complete before the presenter returns. The production bridge

@@ -11,19 +11,21 @@ import 'package:citizenapp/ui/app_theme.dart';
 
 /// 应用级账户门禁：CitizenSDK 中存在任一可用热／冷账户即可放行业务页面。
 ///
-/// 创建、导入和助记词输入全部由 SDK 安全窗口承担；本页只保留 CitizenApp 的入口、
-/// 加载、错误与初始化后身份引导，不保存钱包资料或秘密副本。
+/// 目录为空时直接启动 SDK 唯一初始化窗口；任一热／冷账户均放行。SDK 负责
+/// 创建、助记词导入和账户码冷导入，本页只保留加载、错误与初始化后身份引导。
 class WalletGate extends StatefulWidget {
   const WalletGate({
     super.key,
     required this.child,
     this.walletStateLoader,
+    this.walletInitializer,
     this.onInitialized,
     this.loadTimeout = const Duration(seconds: 5),
   });
 
   final Widget child;
   final Future<CitizenWalletState> Function()? walletStateLoader;
+  final Future<CitizenWalletState> Function()? walletInitializer;
   final void Function(BuildContext context)? onInitialized;
 
   @visibleForTesting
@@ -80,6 +82,11 @@ class _WalletGateState extends State<WalletGate> {
         _status =
             state.accounts.isEmpty ? _GateStatus.needsWallet : _GateStatus.ready;
       });
+      if (state.accounts.isEmpty) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) unawaited(_initializeWallet());
+        });
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() => _error = _message(error));
@@ -104,29 +111,46 @@ class _WalletGateState extends State<WalletGate> {
     Navigator.of(context).popUntil((route) => route.isFirst);
     if (!mounted) return;
     setState(() => _status = _GateStatus.needsWallet);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_initializeWallet());
+    });
   }
 
-  Future<void> _openWalletFlow({required bool importing}) async {
+  Future<void> _initializeWallet() async {
     if (_submitting) return;
     setState(() {
       _submitting = true;
       _error = null;
     });
     try {
-      final wallet = context.read<CitizenSdk>().wallet;
-      if (importing) {
-        await wallet.importWallet();
-      } else {
-        await wallet.create();
-      }
+      final state = await (widget.walletInitializer?.call() ??
+          context.read<CitizenSdk>().wallet.initialize(
+            content: CitizenWalletInitializationContent(
+              walletAccountRoleText:
+                  '钱包账户是 公民App 唯一的账户，请务必妥善保存助记词和钱包密码（如设置），若丢失或遗忘将永久无法找回。',
+              walletAuthorizationText:
+                  '每次动钱动权（转账/投票/发布）需通过指纹或人脸验证',
+              walletCompletionText: '创建完成后进入公民广场',
+              walletBackupText:
+                  '公民不保存助记词，关闭本弹窗后将无法再次显示。请立即手抄备份，或在「公民钱包」中妥善保管——这是恢复钱包与追加其他账户的唯一凭证。设置过钱包密码时，还必须单独备份密码。不支持复制，不支持截屏。',
+              walletColdAccountText:
+                  '私钥保存在 公民钱包 签名设备上，签名请通过 公民钱包 扫码完成。',
+            ),
+          ));
       if (!mounted) return;
+      if (state.accounts.isEmpty) {
+        throw const CitizenSdkException(
+          code: CitizenSdkErrorCode.integrity,
+          message: '钱包初始化完成但账户目录仍为空',
+        );
+      }
       setState(() => _status = _GateStatus.ready);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         (widget.onInitialized ?? _introduceIdentity)(context);
       });
     } on CitizenSdkException catch (error) {
-      if (!mounted || error.code == CitizenSdkErrorCode.cancelled) return;
+      if (!mounted) return;
       setState(() => _error = error.message);
     } finally {
       if (mounted) setState(() => _submitting = false);
@@ -163,76 +187,21 @@ class _WalletGateState extends State<WalletGate> {
             ),
           ),
         ),
-      _GateStatus.needsWallet => _walletEntry(context),
-      _GateStatus.ready => widget.child,
-    };
-  }
-
-  Widget _walletEntry(BuildContext context) => Scaffold(
-        backgroundColor: AppTheme.scaffoldBg,
-        body: SafeArea(
-          child: Center(
-            child: ConstrainedBox(
-              constraints: BoxConstraints(
-                maxWidth: AppLayout.scaled(context, 420),
-              ),
-              child: Padding(
-                padding: EdgeInsets.all(AppLayout.scaled(context, 24)),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Container(
-                      width: AppLayout.scaled(context, 56),
-                      height: AppLayout.scaled(context, 56),
-                      decoration: BoxDecoration(
-                        gradient: AppTheme.primaryGradient,
-                        borderRadius: BorderRadius.circular(AppTheme.radiusMd),
-                      ),
-                      child: const Icon(
-                        Icons.account_balance_wallet_outlined,
-                        color: Colors.white,
-                      ),
-                    ),
-                    SizedBox(height: AppLayout.scaled(context, 16)),
-                    Text(
-                      '创建钱包',
-                      style: TextStyle(
-                        fontSize: AppLayout.scaled(context, 20),
-                        fontWeight: FontWeight.w700,
-                        color: AppTheme.textPrimary,
-                      ),
-                    ),
-                    SizedBox(height: AppLayout.scaled(context, 8)),
-                    const Text(
-                      '钱包账户是 公民App 唯一的账户。助记词、密码和私钥只会进入公民软件包安全界面。',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: AppTheme.textSecondary),
-                    ),
-                    SizedBox(height: AppLayout.scaled(context, 24)),
-                    SizedBox(
-                      width: double.infinity,
-                      height: AppLayout.scaled(context, 48),
-                      child: FilledButton(
-                        onPressed: _submitting
-                            ? null
-                            : () => _openWalletFlow(importing: false),
-                        child: Text(_submitting ? '处理中…' : '创建钱包'),
-                      ),
-                    ),
-                    SizedBox(height: AppLayout.scaled(context, 8)),
-                    TextButton(
-                      onPressed: _submitting
-                          ? null
-                          : () => _openWalletFlow(importing: true),
-                      child: const Text('已有钱包？导入助记词'),
-                    ),
-                  ],
-                ),
+      _GateStatus.needsWallet => Scaffold(
+          body: Center(
+            child: SizedBox(
+              width: AppLayout.scaled(context, 24),
+              height: AppLayout.scaled(context, 24),
+              child: const CircularProgressIndicator(
+                strokeWidth: 2.5,
+                color: AppTheme.primary,
               ),
             ),
           ),
         ),
-      );
+      _GateStatus.ready => widget.child,
+    };
+  }
 
   Widget _errorPage(BuildContext context) => Scaffold(
         backgroundColor: AppTheme.scaffoldBg,

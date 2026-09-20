@@ -74,6 +74,8 @@ final class CitizenSdkFlutterCodec {
     'getWalletProfile',
     'viewAccountPrivateKey',
     'getWalletState',
+    'initializeWallet',
+    'importColdAccountWithUi',
     'importColdAccountId',
     'importColdAccountSs58',
     'reorderWalletAccountsWithoutDefaultChange',
@@ -1136,6 +1138,35 @@ final class CitizenSdkFlutterCodec {
           throw _decodeFailure('wordCount 只能是 12、18 或 24');
         }
         return;
+      case 'initializeWallet':
+        _expectLength(fields, 6, 'initializeWallet fields');
+        final initializationWordCount =
+            _positiveInt(fields[0], 'initializeWallet.wordCount');
+        if (initializationWordCount != 12 &&
+            initializationWordCount != 18 &&
+            initializationWordCount != 24) {
+          throw _decodeFailure('wordCount 只能是 12、18 或 24');
+        }
+        for (var index = 1; index < fields.length; index += 1) {
+          final value = _string(fields[index], 'initializeWallet.text[$index]');
+          if (value.trim() != value ||
+              value.runes.isEmpty ||
+              value.runes.length > 256 ||
+              value.runes.any((scalar) => scalar <= 0x1f || scalar == 0x7f)) {
+            throw _decodeFailure('钱包初始化展示文字必须是已修剪的单行 1..256 字符文本');
+          }
+        }
+        return;
+      case 'importColdAccountWithUi':
+        _expectLength(fields, 1, 'importColdAccountWithUi fields');
+        final coldText = _string(fields[0], 'walletColdAccountText');
+        if (coldText.trim() != coldText ||
+            coldText.runes.isEmpty ||
+            coldText.runes.length > 256 ||
+            coldText.runes.any((scalar) => scalar <= 0x1f || scalar == 0x7f)) {
+          throw _decodeFailure('冷账户说明必须是已修剪的单行 1..256 字符文本');
+        }
+        return;
       case 'addWalletAccounts':
         _expectLength(fields, 1, 'addWalletAccounts fields');
         _validateIndices(fields[0]);
@@ -1498,6 +1529,8 @@ final class CitizenSdkFlutterCodec {
         decodeWalletProfile(value[0]);
         return;
       case 'getWalletState':
+      case 'initializeWallet':
+      case 'importColdAccountWithUi':
       case 'importColdAccountId':
       case 'importColdAccountSs58':
       case 'reorderWalletAccountsWithoutDefaultChange':

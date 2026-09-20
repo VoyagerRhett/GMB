@@ -4376,7 +4376,7 @@ test('Dart、Android、Darwin、Linux、Windows 固定同一 Flutter 双通道�
     );
     assert.throws(
       () => assertFlutterBindingContract(root),
-      /Linux Flutter 方法合同漂移：必须精确为固定 65 项/,
+      /Linux Flutter 方法合同漂移：必须精确为固定 67 项/,
     );
 
     writeFileSync(
@@ -4386,7 +4386,7 @@ test('Dart、Android、Darwin、Linux、Windows 固定同一 Flutter 双通道�
     );
     assert.throws(
       () => assertFlutterBindingContract(root),
-      /Linux Flutter 方法合同漂移：必须精确为固定 65 项/,
+      /Linux Flutter 方法合同漂移：必须精确为固定 67 项/,
     );
     writeFileSync(linuxMethods, methodSource);
 

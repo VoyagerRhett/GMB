@@ -192,8 +192,29 @@ internal func citizenSDKRequireWalletUI(_ snapshot: CitizenSDKCapabilities) thro
     }
 }
 
-/// Secret-free selection for the SDK-owned wallet interface.
+/// 宿主钱包初始化的非秘密展示内容；SDK只渲染，不解释宿主业务或接收行为回调。
+public struct CitizenSDKWalletInitializationContent: Sendable, Equatable {
+    public let walletAccountRoleText: String
+    public let walletAuthorizationText: String
+    public let walletCompletionText: String
+    public let walletBackupText: String
+    public let walletColdAccountText: String
+
+    public init(walletAccountRoleText: String, walletAuthorizationText: String,
+                walletCompletionText: String, walletBackupText: String,
+                walletColdAccountText: String) {
+        self.walletAccountRoleText = walletAccountRoleText
+        self.walletAuthorizationText = walletAuthorizationText
+        self.walletCompletionText = walletCompletionText
+        self.walletBackupText = walletBackupText
+        self.walletColdAccountText = walletColdAccountText
+    }
+}
+
+/// SDK唯一钱包界面请求；初始化与冷账户导入均不把秘密或业务二维码交给宿主。
 public enum CitizenSDKWalletFlowRequest: Sendable, Equatable {
+    case initialize(wordCount: UInt32, content: CitizenSDKWalletInitializationContent)
+    case importColdAccount(walletColdAccountText: String)
     case create(wordCount: UInt32)
     case importWallet
     case addAccounts(indices: [UInt32])
@@ -387,7 +408,25 @@ internal func citizenSDKSensitiveText(_ value: String, label: String) throws -> 
 
 internal func citizenSDKValidateWalletFlowRequest(_ request: CitizenSDKWalletFlowRequest) throws
     -> CitizenSDKWalletFlowRequest {
+    func validText(_ value: String) -> Bool {
+        value == value.trimmingCharacters(in: .whitespacesAndNewlines)
+            && (1...256).contains(value.unicodeScalars.count)
+            && !value.unicodeScalars.contains(where: { $0.value <= 0x1f || $0.value == 0x7f })
+    }
     switch request {
+    case let .initialize(wordCount, content):
+        guard [12, 18, 24].contains(wordCount) else {
+            throw CitizenSDKError(.invalidArgument, "word count must be 12, 18 or 24")
+        }
+        guard [content.walletAccountRoleText, content.walletAuthorizationText,
+               content.walletCompletionText, content.walletBackupText,
+               content.walletColdAccountText].allSatisfy(validText) else {
+            throw CitizenSDKError(.invalidArgument, "wallet initialization presentation text is invalid")
+        }
+    case let .importColdAccount(text):
+        guard validText(text) else {
+            throw CitizenSDKError(.invalidArgument, "wallet cold account text is invalid")
+        }
     case let .create(wordCount):
         guard [12, 18, 24].contains(wordCount) else {
             throw CitizenSDKError(.invalidArgument, "word count must be 12, 18 or 24")

@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 #include "citizen_sdk/citizensdk_host.h"
 
@@ -14,6 +15,7 @@ struct ValidatedWalletRequest final {
   citizensdk_wallet_flow_kind_t kind{};
   citizensdk_wallet_word_count_t word_count{};
   std::vector<uint32_t> account_indices;
+  std::vector<std::string> initialization_text;
 };
 
 ValidatedWalletRequest validate_wallet_request(

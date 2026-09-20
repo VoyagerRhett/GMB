@@ -34,6 +34,8 @@ typedef uint32_t citizensdk_wallet_flow_kind_t;
 #define CITIZENSDK_WALLET_FLOW_CREATE UINT32_C(1)
 #define CITIZENSDK_WALLET_FLOW_IMPORT UINT32_C(2)
 #define CITIZENSDK_WALLET_FLOW_ADD_ACCOUNTS UINT32_C(3)
+#define CITIZENSDK_WALLET_FLOW_INITIALIZE UINT32_C(4)
+#define CITIZENSDK_WALLET_FLOW_IMPORT_COLD_ACCOUNT UINT32_C(5)
 
 typedef struct citizensdk_wallet_flow_request_v1 {
   uint32_t struct_size;
@@ -42,6 +44,11 @@ typedef struct citizensdk_wallet_flow_request_v1 {
   citizensdk_wallet_word_count_t word_count;
   const uint32_t *account_indices;
   uint32_t account_index_count;
+  citizensdk_bytes_view_t wallet_account_role_text;
+  citizensdk_bytes_view_t wallet_authorization_text;
+  citizensdk_bytes_view_t wallet_completion_text;
+  citizensdk_bytes_view_t wallet_backup_text;
+  citizensdk_bytes_view_t wallet_cold_account_text;
 } citizensdk_wallet_flow_request_v1_t;
 
 typedef uint32_t citizensdk_wallet_flow_status_t;

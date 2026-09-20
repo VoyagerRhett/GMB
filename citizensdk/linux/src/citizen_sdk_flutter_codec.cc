@@ -295,7 +295,7 @@ constexpr const char *kMethods[] = {
     "getStorageKeysPaged", "callRuntimeApi",
     "getSystemEvents", "exportState", "importState", "getGenesisHash",
     "getAccountBalance", "getAccountBalances", "getAccountNonce", "getFeeSnapshot", "getWalletProfile", "viewAccountPrivateKey",
-    "getWalletState", "importColdAccountId", "importColdAccountSs58",
+    "getWalletState", "initializeWallet", "importColdAccountWithUi", "importColdAccountId", "importColdAccountSs58",
     "reorderWalletAccountsWithoutDefaultChange", "renameAccount", "deleteAccount",
     "createWallet", "importWallet", "addWalletAccounts", "setActiveWalletAccount",
     "renameWalletAccount", "deleteWalletAccount", "deleteWallet",
@@ -309,7 +309,7 @@ constexpr const char *kMethods[] = {
     "qrConsumeSignResponse", "qrCancelSignRequest", "qrEncodeAccountId",
     "qrDecodeLuminance", "qrEncode", "qrScan", "signQrRequest",
 };
-static_assert(std::size(kMethods) == 65);
+static_assert(std::size(kMethods) == 67);
 
 [[noreturn]] void fail(citizensdk_error_code_t code, const char *message) {
   throw ContractFailure(code, message);
@@ -939,6 +939,33 @@ DecodedRequest decode_request(const std::string &name, FlValue *arguments) {
                 CITIZENSDK_ERROR_INVALID_ARGUMENT,
                 "wordCount must be 12, 18, or 24");
         result.word_count = static_cast<uint32_t>(words); break;
+      }
+      case Method::initialize_wallet: {
+        (void)list(root, 9); const auto words = integer(fields[3]);
+        require(words == 12 || words == 18 || words == 24,
+                CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                "wordCount must be 12, 18, or 24");
+        result.word_count = static_cast<uint32_t>(words);
+        for (std::size_t index = 4; index <= 8; ++index) {
+          auto text = string(fields[index], 1, 768); UnicodeInfo unicode;
+          (void)inspect_utf8(text, &unicode);
+          require(unicode.scalars <= 256 && !unicode.controls &&
+                      !trim_space(unicode.first) && !trim_space(unicode.last),
+                  CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                  "wallet initialization text is invalid");
+          result.wallet_initialization_text.push_back(std::move(text));
+        }
+        break;
+      }
+      case Method::import_cold_account_with_ui: {
+        (void)list(root, 4); auto text = string(fields[3], 1, 768); UnicodeInfo unicode;
+        (void)inspect_utf8(text, &unicode);
+        require(unicode.scalars <= 256 && !unicode.controls &&
+                    !trim_space(unicode.first) && !trim_space(unicode.last),
+                CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                "wallet cold account text is invalid");
+        result.wallet_initialization_text.push_back(std::move(text));
+        break;
       }
       case Method::add_wallet_accounts: {
         (void)list(root, 4); std::set<uint32_t> unique;
@@ -1905,7 +1932,7 @@ Value copy_public_result(Method method, citizensdk_result_handle_t result) {
     case Method::rename_wallet_account:
       (void)inspect_result(result, CITIZENSDK_RESULT_WALLET_PROFILE);
       return checked(tuple({profile(result)}));
-    case Method::get_wallet_state: case Method::import_cold_account_id:
+    case Method::get_wallet_state: case Method::initialize_wallet: case Method::import_cold_account_with_ui: case Method::import_cold_account_id:
     case Method::import_cold_account_ss58:
     case Method::reorder_wallet_accounts_without_default_change:
     case Method::rename_account: case Method::delete_account:
@@ -2149,7 +2176,7 @@ void validate_public_value(Method method, const Value &value) {
       case Method::rename_wallet_account: case Method::delete_wallet_account:
       case Method::delete_wallet: case Method::reconcile_wallet_cleanup:
         validate_profile(item); return;
-      case Method::get_wallet_state: case Method::import_cold_account_id:
+      case Method::get_wallet_state: case Method::initialize_wallet: case Method::import_cold_account_with_ui: case Method::import_cold_account_id:
       case Method::import_cold_account_ss58:
       case Method::reorder_wallet_accounts_without_default_change:
       case Method::rename_account: case Method::delete_account:

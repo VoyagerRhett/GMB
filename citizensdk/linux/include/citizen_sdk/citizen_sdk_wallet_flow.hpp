@@ -10,13 +10,15 @@
 
 namespace citizen_sdk {
 
-enum class WalletFlowKind : uint32_t { Create = 1, Import = 2, AddAccounts = 3 };
+// 初始化与公开冷账户导入都使用SDK唯一钱包窗口；展示文字不参与业务判断。
+enum class WalletFlowKind : uint32_t { Create = 1, Import = 2, AddAccounts = 3, Initialize = 4, ImportColdAccount = 5 };
 enum class WalletFlowStatus : uint32_t { Completed = 1, Cancelled = 2, Failed = 3 };
 
 struct WalletFlowRequest {
   WalletFlowKind kind{WalletFlowKind::Create};
   uint32_t word_count{12};
   std::vector<uint32_t> account_indices;
+  std::vector<std::string> initialization_text;
 };
 
 struct WalletFlowResult {

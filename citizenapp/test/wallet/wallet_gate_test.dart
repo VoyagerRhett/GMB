@@ -26,24 +26,36 @@ void main() {
 
   tearDown(() => security.dispose());
 
-  Widget gate(Future<CitizenWalletState> Function() loader) =>
+  Widget gate(
+    Future<CitizenWalletState> Function() loader, {
+    Future<CitizenWalletState> Function()? initializer,
+  }) =>
       Provider<AccountSecurityService>.value(
         value: security,
         child: MaterialApp(
           home: WalletGate(
             walletStateLoader: loader,
+            walletInitializer: initializer,
             onInitialized: (_) {},
             child: const Scaffold(body: Text('main-shell')),
           ),
         ),
       );
 
-  testWidgets('空目录保留创建和助记词导入入口', (tester) async {
-    await tester.pumpWidget(gate(() async => _state(const [])));
+  testWidgets('空目录直接启动SDK唯一初始化且不保留App简化入口', (tester) async {
+    var initializationCalls = 0;
+    await tester.pumpWidget(gate(
+      () async => _state(const []),
+      initializer: () async {
+        initializationCalls += 1;
+        return _state([_account(CitizenWalletSignMode.cold)]);
+      },
+    ));
     await tester.pumpAndSettle();
-    expect(find.text('main-shell'), findsNothing);
-    expect(find.widgetWithText(FilledButton, '创建钱包'), findsOneWidget);
-    expect(find.text('已有钱包？导入助记词'), findsOneWidget);
+    expect(initializationCalls, 1);
+    expect(find.text('main-shell'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, '创建钱包'), findsNothing);
+    expect(find.text('已有钱包？导入助记词'), findsNothing);
   });
 
   testWidgets('热账户或冷账户任一存在都放行', (tester) async {
@@ -69,17 +81,24 @@ void main() {
   });
 
   testWidgets('运行期 SDK 账户删空后回到门禁', (tester) async {
+    var initializationCalls = 0;
     var accounts = <CitizenWalletStateAccount>[
       _account(CitizenWalletSignMode.hot),
     ];
-    await tester.pumpWidget(gate(() async => _state(accounts)));
+    await tester.pumpWidget(gate(
+      () async => _state(accounts),
+      initializer: () async {
+        initializationCalls += 1;
+        return _state([_account(CitizenWalletSignMode.cold)]);
+      },
+    ));
     await tester.pumpAndSettle();
     expect(find.text('main-shell'), findsOneWidget);
     accounts = const [];
     security.notifyDefaultAccountChanged();
     await tester.pumpAndSettle();
-    expect(find.text('main-shell'), findsNothing);
-    expect(find.widgetWithText(FilledButton, '创建钱包'), findsOneWidget);
+    expect(initializationCalls, 1);
+    expect(find.text('main-shell'), findsOneWidget);
   });
 
   testWidgets('永久 pending 会按门禁超时显示错误', (tester) async {

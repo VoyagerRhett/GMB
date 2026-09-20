@@ -16,14 +16,6 @@ private enum CitizenSDKWalletThemeMacOS {
                                 blue: CGFloat(0x44) / 255, alpha: 1)
 }
 
-private func citizenSDKHostAppNameMacOS() -> String {
-    let label = (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
-        ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
-        ?? ""
-    if label.isEmpty { return "当前应用" }
-    return label.hasSuffix("App") ? label : label + "App"
-}
-
 public extension CitizenSdk {
     /// 公开结果只有完成状态；私钥只能由 SDK 自有、禁止共享的窗口显示。
     @MainActor
@@ -55,6 +47,8 @@ public extension CitizenSdk {
         }
         let window = NSWindow(contentViewController: controller)
         window.title = switch request {
+        case .initialize: "创建钱包"
+        case .importColdAccount: "导入冷钱包"
         case .create: "创建钱包"
         case .importWallet: "输入助记词"
         case .addAccounts: "添加账户"
@@ -216,6 +210,8 @@ internal final class CitizenSDKWalletViewControllerMacOS: NSViewController, NSTe
     private let wordStatus = NSTextField(labelWithString: "")
     private let suggestions = NSStackView()
     private let action = NSButton(title: "", target: nil, action: nil)
+    private let importHot = NSButton(title: "", target: nil, action: nil)
+    private let importCold = NSButton(title: "", target: nil, action: nil)
     private let cancel = NSButton(title: "取消", target: nil, action: nil)
     private let status = NSTextField(labelWithString: "")
     private let backup = NSButton(checkboxWithTitle: "我已在离线安全位置备份助记词", target: nil, action: nil)
@@ -225,6 +221,9 @@ internal final class CitizenSDKWalletViewControllerMacOS: NSViewController, NSTe
     private var cancelRequested = false
     private var irreversible = false
     private var finished = false
+    private var initializationContent: CitizenSDKWalletInitializationContent?
+    private enum InitializationMode { case create, importHot, importCold }
+    private var initializationMode: InitializationMode = .create
 
     init(sdk: CitizenSdk, request: CitizenSDKWalletFlowRequest,
          completion: @escaping (CitizenSDKWalletFlowResult) -> Void) {
@@ -239,7 +238,7 @@ internal final class CitizenSDKWalletViewControllerMacOS: NSViewController, NSTe
         status.maximumNumberOfLines = 0
         status.textColor = CitizenSDKWalletThemeMacOS.textSecondary
         password.placeholderString = "钱包密码（选填）"
-        wordCount.addItems(withTitles: ["12 个助记词 · 推荐", "24 个助记词"])
+        wordCount.addItems(withTitles: ["12 个助记词 · 推荐", "18 个助记词", "24 个助记词"])
         wordCount.target = self; wordCount.action = #selector(wordCountChanged)
         accountMode.addItems(withTitles: ["下一个账户", "指定编号"])
         accountMode.selectItem(at: 1)
@@ -256,10 +255,12 @@ internal final class CitizenSDKWalletViewControllerMacOS: NSViewController, NSTe
         mnemonic.isContinuousSpellCheckingEnabled = false
         mnemonic.delegate = self
         action.target = self; action.action = #selector(actionPressed)
+        importHot.target = self; importHot.action = #selector(importHotPressed)
+        importCold.target = self; importCold.action = #selector(importColdPressed)
         action.bezelStyle = .rounded
         cancel.target = self; cancel.action = #selector(cancelPressed)
         let buttons = NSStackView(views: [cancel, action]); buttons.spacing = 12
-        let stack = NSStackView(views: [status, wordCount, accountMode, accountIndices, scroll, wordStatus, suggestions, password, backup, buttons])
+        let stack = NSStackView(views: [status, wordCount, accountMode, accountIndices, scroll, wordStatus, suggestions, password, backup, buttons, importHot, importCold])
         stack.orientation = .vertical; stack.spacing = 14; stack.alignment = .leading
         view.addSubview(stack); stack.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -276,30 +277,95 @@ internal final class CitizenSDKWalletViewControllerMacOS: NSViewController, NSTe
         accountMode.isHidden = true; accountIndices.isHidden = true
         status.stringValue = CitizenSDKWalletInput.explanation
         switch request {
+        case let .initialize(words, content):
+            initializationContent = content
+            wordCount.selectItem(at: words == 18 ? 1 : words == 24 ? 2 : 0)
+            status.stringValue = content.walletAccountRoleText + "\n\n" +
+                content.walletAuthorizationText + "\n\n" + content.walletCompletionText
+            scroll.isHidden = true; action.title = "创建钱包"; wordStatus.isHidden = true
+            importHot.title = "已有钱包？导入助记词"; importCold.title = "导入冷钱包"
+            cancel.isHidden = true
+        case let .importColdAccount(text):
+            initializationMode = .importCold; status.stringValue = text
+            wordCount.isHidden = true; wordStatus.isHidden = true; suggestions.isHidden = true
+            password.isHidden = true; mnemonic.enclosingScrollView?.isHidden = false
+            action.title = "确认导入"
+            importHot.title = "扫描钱包二维码"; importHot.action = #selector(scanColdAccount)
+            importCold.title = "取消"; importCold.action = #selector(cancelPressed)
         case let .create(words):
-            wordCount.selectItem(at: words == 24 ? 1 : 0)
-            status.stringValue = "钱包账户是 \(citizenSDKHostAppNameMacOS()) 唯一的账户，请务必妥善保存助记词和钱包密码（如设置），若丢失或遗忘将永久无法找回。"
+            wordCount.selectItem(at: words == 18 ? 1 : words == 24 ? 2 : 0)
+            status.stringValue = "请务必妥善保存助记词和钱包密码（如设置），若丢失或遗忘将永久无法找回。"
             scroll.isHidden = true; action.title = "创建钱包"
             wordStatus.isHidden = true
+            importHot.isHidden = true; importCold.isHidden = true
         case .importWallet:
             status.isHidden = true; wordCount.isHidden = true
             action.title = "确认导入"
+            importHot.isHidden = true; importCold.isHidden = true
         case let .addAccounts(indices):
             status.stringValue = "无根设备不保存助记词或密码，追加账户需重新录入两者校验归属。"
             wordCount.isHidden = true; action.title = "确认添加"
             accountMode.isHidden = false; accountIndices.isHidden = false
             accountIndices.stringValue = indices.map(String.init).joined(separator: ",")
+            importHot.isHidden = true; importCold.isHidden = true
         }
         refreshWords()
     }
 
     private var selectedWords: UInt32 {
-        if case .create = request { return wordCount.indexOfSelectedItem == 1 ? 24 : 12 }
+        if case .create = request { return UInt32([12, 18, 24][wordCount.indexOfSelectedItem]) }
+        if case .initialize = request, initializationMode == .create {
+            return UInt32([12, 18, 24][wordCount.indexOfSelectedItem])
+        }
         let count = mnemonic.string.split(whereSeparator: { $0.isWhitespace }).count
         return count == 18 || count == 24 ? UInt32(count) : 12
     }
     @objc private func wordCountChanged() { refreshWords() }
     @objc private func accountModeChanged() { accountIndices.isHidden = accountMode.indexOfSelectedItem == 0 }
+    @objc private func importHotPressed() {
+        guard initializationContent != nil, task == nil else { return }
+        initializationMode = .importHot; status.isHidden = true; wordCount.isHidden = true
+        mnemonic.enclosingScrollView?.isHidden = false; wordStatus.isHidden = false
+        suggestions.isHidden = false; password.isHidden = false; action.title = "确认导入"
+        importHot.title = "返回创建钱包"; importHot.action = #selector(returnToInitializationCreate)
+        importCold.isHidden = true; refreshWords()
+    }
+    @objc private func importColdPressed() {
+        guard let content = initializationContent, task == nil else { return }
+        initializationMode = .importCold; status.isHidden = false; status.stringValue = content.walletColdAccountText
+        wordCount.isHidden = true; wordStatus.isHidden = true; suggestions.isHidden = true
+        password.isHidden = true; password.stringValue = ""; mnemonic.string = ""
+        mnemonic.enclosingScrollView?.isHidden = false; action.title = "确认导入"
+        importHot.title = "扫描钱包二维码"; importHot.action = #selector(scanColdAccount)
+        importCold.title = "返回"; importCold.action = #selector(returnToInitializationCreate)
+    }
+    @objc private func returnToInitializationCreate() {
+        guard let content = initializationContent, task == nil else { return }
+        initializationMode = .create; status.isHidden = false
+        status.stringValue = content.walletAccountRoleText + "\n\n" +
+            content.walletAuthorizationText + "\n\n" + content.walletCompletionText
+        wordCount.isHidden = false; wordStatus.isHidden = true; suggestions.isHidden = true
+        mnemonic.string = ""; mnemonic.enclosingScrollView?.isHidden = true
+        password.stringValue = ""; password.isHidden = false; action.title = "创建钱包"
+        importHot.title = "已有钱包？导入助记词"; importHot.action = #selector(importHotPressed)
+        importCold.isHidden = false; importCold.title = "导入冷钱包"; importCold.action = #selector(importColdPressed)
+    }
+    @objc private func scanColdAccount() {
+        guard task == nil, let window = view.window else { return }
+        do {
+            let operation = try sdk.qrScan(from: window)
+            task = Task { [weak self] in
+                guard let self else { return }; defer { self.task = nil }
+                do {
+                    let document = try await operation.value()
+                    guard case let .accountID(accountID) = document.content else {
+                        throw CitizenSDKError(.invalidArgument, "未识别到可导入的钱包账户地址")
+                    }
+                    self.mnemonic.string = accountID
+                } catch { self.fail(error) }
+            }
+        } catch { fail(error) }
+    }
     func textDidChange(_ notification: Notification) { refreshWords() }
     func textViewDidChangeSelection(_ notification: Notification) { refreshWords() }
 
@@ -341,7 +407,9 @@ internal final class CitizenSDKWalletViewControllerMacOS: NSViewController, NSTe
         if prepared != nil { commitCreatedWallet(); return }
         do {
             try CitizenSDKWalletInput.validatePassword(password.stringValue)
-            if case .create = request { } else { try CitizenSDKWalletInput.validateMnemonic(mnemonic.string, wordCount: selectedWords) }
+            if case .create = request { }
+            else if case .initialize = request, initializationMode == .create { }
+            else if initializationMode != .importCold { try CitizenSDKWalletInput.validateMnemonic(mnemonic.string, wordCount: selectedWords) }
             if CitizenSDKWalletInput.requiresRiskConfirmation(password: password.stringValue, request: request) {
                 guard let window = view.window else { throw CitizenSDKError(.invalidState, "钱包窗口未就绪") }
                 setInputEnabled(false)
@@ -364,48 +432,16 @@ internal final class CitizenSDKWalletViewControllerMacOS: NSViewController, NSTe
             let passwordBuffer = try citizenSDKSensitiveText(passwordText, label: "password")
             setInputEnabled(false)
             switch request {
+            case .initialize:
+                if initializationMode == .create { beginCreate(passwordBuffer) }
+                else if initializationMode == .importHot { beginImport(passwordBuffer) }
+                else { beginColdImport(passwordBuffer) }
+            case .importColdAccount:
+                beginColdImport(passwordBuffer)
             case .create:
-                let wordCount = selectedWords
-                task = Task { [weak self] in
-                    guard let self else { return }; defer { self.task = nil }
-                    do {
-                        if self.cancelRequested { passwordBuffer.clear(); self.finish(.cancelled); return }
-                        let prepared = try await self.sdk.prepareWallet(wordCount: wordCount, password: passwordBuffer)
-                        passwordBuffer.clear()
-                        if self.cancelRequested {
-                            self.finish(citizenSDKPreparedCancellationResult { try prepared.release() })
-                            return
-                        }
-                        self.prepared = prepared
-                        let phrase = try prepared.recoveryPhrase(); self.phrase = phrase
-                        try phrase.render { self.mnemonic.string = $0 }
-                        self.mnemonic.isEditable = false; self.mnemonic.isSelectable = false
-                        self.mnemonic.enclosingScrollView?.isHidden = false
-                        self.password.isHidden = true; self.password.stringValue = ""; self.backup.isHidden = true
-                        self.wordCount.isHidden = true; self.wordStatus.isHidden = true; self.suggestions.isHidden = true
-                        self.status.isHidden = false
-                        self.status.stringValue = "公民不保存助记词，关闭本弹窗后将无法再次显示。\n请立即手抄备份，或在「公民钱包」中妥善保管——这是恢复钱包与追加其他账户的唯一凭证。设置过钱包密码时，还必须单独备份密码。\n不支持复制，不支持截屏。"
-                        self.action.title = "我已备份"; self.action.isEnabled = true
-                    } catch { passwordBuffer.clear(); self.fail(error) }
-                }
+                beginCreate(passwordBuffer)
             case .importWallet:
-                let mnemonicBuffer = try citizenSDKSensitiveText(mnemonic.string, label: "mnemonic")
-                task = Task { [weak self] in
-                    guard let self else { return }; defer { mnemonicBuffer.clear(); passwordBuffer.clear(); self.task = nil }
-                    do {
-                        if self.cancelRequested {
-                            citizenSDKAfterClearingSecrets([mnemonicBuffer, passwordBuffer]) { self.finish(.cancelled) }
-                            return
-                        }
-                        self.irreversible = true
-                        let profile = try await self.sdk.importWallet(mnemonic: mnemonicBuffer, password: passwordBuffer)
-                        citizenSDKAfterClearingSecrets([mnemonicBuffer, passwordBuffer]) {
-                            self.finish(.completed(profile))
-                        }
-                    } catch {
-                        citizenSDKAfterClearingSecrets([mnemonicBuffer, passwordBuffer]) { self.fail(error) }
-                    }
-                }
+                beginImport(passwordBuffer)
             case let .addAccounts(indices):
                 let mnemonicBuffer = try citizenSDKSensitiveText(mnemonic.string, label: "mnemonic")
                 let useNext = accountMode.indexOfSelectedItem == 0
@@ -432,6 +468,82 @@ internal final class CitizenSDKWalletViewControllerMacOS: NSViewController, NSTe
                 }
             }
         } catch { fail(error) }
+    }
+
+    private func beginCreate(_ passwordBuffer: CitizenSDKSensitiveBuffer) {
+        let words = selectedWords
+        task = Task { [weak self] in
+            guard let self else { return }; defer { self.task = nil }
+            do {
+                if self.cancelRequested { passwordBuffer.clear(); self.finish(.cancelled); return }
+                let prepared = try await self.sdk.prepareWallet(wordCount: words, password: passwordBuffer)
+                passwordBuffer.clear()
+                if self.cancelRequested {
+                    self.finish(citizenSDKPreparedCancellationResult { try prepared.release() }); return
+                }
+                self.prepared = prepared
+                let phrase = try prepared.recoveryPhrase(); self.phrase = phrase
+                try phrase.render { self.mnemonic.string = $0 }
+                self.mnemonic.isEditable = false; self.mnemonic.isSelectable = false
+                self.mnemonic.enclosingScrollView?.isHidden = false
+                self.password.isHidden = true; self.password.stringValue = ""; self.backup.isHidden = true
+                self.wordCount.isHidden = true; self.wordStatus.isHidden = true; self.suggestions.isHidden = true
+                self.importHot.isHidden = true; self.importCold.isHidden = true
+                self.status.isHidden = false
+                self.status.stringValue = self.initializationContent?.walletBackupText
+                    ?? "SDK 不保存助记词，关闭后将无法再次显示。请立即离线手抄备份；设置过钱包密码时，还必须单独备份密码。不支持复制，不支持截屏。"
+                self.action.title = "我已备份"; self.action.isEnabled = true
+            } catch { passwordBuffer.clear(); self.fail(error) }
+        }
+    }
+
+    private func beginImport(_ passwordBuffer: CitizenSDKSensitiveBuffer) {
+        do {
+            let mnemonicBuffer = try citizenSDKSensitiveText(mnemonic.string, label: "mnemonic")
+            task = Task { [weak self] in
+                guard let self else { return }; defer { mnemonicBuffer.clear(); passwordBuffer.clear(); self.task = nil }
+                do {
+                    if self.cancelRequested {
+                        citizenSDKAfterClearingSecrets([mnemonicBuffer, passwordBuffer]) { self.finish(.cancelled) }; return
+                    }
+                    self.irreversible = true
+                    let profile = try await self.sdk.importWallet(mnemonic: mnemonicBuffer, password: passwordBuffer)
+                    citizenSDKAfterClearingSecrets([mnemonicBuffer, passwordBuffer]) { self.finish(.completed(profile)) }
+                } catch { citizenSDKAfterClearingSecrets([mnemonicBuffer, passwordBuffer]) { self.fail(error) } }
+            }
+        } catch { passwordBuffer.clear(); fail(error) }
+    }
+
+    private func beginColdImport(_ passwordBuffer: CitizenSDKSensitiveBuffer) {
+        passwordBuffer.clear()
+        let value = mnemonic.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        irreversible = true
+        task = Task { [weak self] in
+            guard let self else { return }; defer { self.task = nil }
+            do {
+                if value.hasPrefix("0x"), value.count == 66 {
+                    _ = try await self.sdk.importColdAccount(accountID: try Self.accountID(value), name: "冷钱包")
+                } else {
+                    _ = try await self.sdk.importColdAccount(ss58Address: value, name: "冷钱包")
+                }
+                self.mnemonic.string = ""; self.finish(.completed(nil))
+            } catch { self.fail(error) }
+        }
+    }
+
+    private static func accountID(_ value: String) throws -> Data {
+        guard value.hasPrefix("0x"), value.count == 66 else {
+            throw CitizenSDKError(.invalidArgument, "账户标识格式无效")
+        }
+        var bytes = Data(capacity: 32); var index = value.index(value.startIndex, offsetBy: 2)
+        for _ in 0..<32 {
+            let end = value.index(index, offsetBy: 2)
+            guard let byte = UInt8(value[index..<end], radix: 16) else {
+                throw CitizenSDKError(.invalidArgument, "账户标识格式无效")
+            }
+            bytes.append(byte); index = end
+        }
+        return bytes
     }
 
     private func commitCreatedWallet() {

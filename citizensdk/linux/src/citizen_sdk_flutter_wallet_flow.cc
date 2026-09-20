@@ -70,6 +70,26 @@ FlutterWalletFlows::~FlutterWalletFlows() = default;
 WalletFlowRequest FlutterWalletFlows::contract(const DecodedRequest &request) {
   WalletFlowRequest value;
   switch (request.method) {
+    case Method::import_cold_account_with_ui:
+      if (request.wallet_initialization_text.size() != 1)
+        throw ContractFailure(CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                              "wallet cold account text closure is invalid");
+      value.kind = WalletFlowKind::ImportColdAccount;
+      value.word_count = 0;
+      value.initialization_text = request.wallet_initialization_text;
+      break;
+    case Method::initialize_wallet:
+      if (request.word_count != 12 && request.word_count != 18 &&
+          request.word_count != 24)
+        throw ContractFailure(CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                              "wallet word count must be 12, 18, or 24");
+      if (request.wallet_initialization_text.size() != 5)
+        throw ContractFailure(CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                              "wallet initialization text closure is invalid");
+      value.kind = WalletFlowKind::Initialize;
+      value.word_count = request.word_count;
+      value.initialization_text = request.wallet_initialization_text;
+      break;
     case Method::create_wallet:
       if (request.word_count != 12 && request.word_count != 18 &&
           request.word_count != 24)

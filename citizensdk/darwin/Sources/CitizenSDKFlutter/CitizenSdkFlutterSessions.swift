@@ -312,6 +312,7 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
         case let .importState(_, _, state): run(session, request, result) {
             try await session.sdk.importState(state); return []
         }
+        case .initialize, .importColdAccountWithUI: initializeWallet(session, request, result)
         case .create, .addAccounts: wallet(session, request, result)
         case let .rename(method, _, _, accountID, name): run(session, request, result) {
             if method == "renameWalletAccount" {
@@ -433,6 +434,17 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
             if let id = request.sessionID { self?.walletFlow.cancelSession(id) }
         }) { [walletFlow] in
             [CitizenSdkFlutterCodec.profile(try await walletFlow.launch(sdk: session.sdk, request: request))]
+        }
+    }
+
+    /// 初始化可能提交热钱包或公开冷账户，统一回读完整冷热目录作为唯一公开终态。
+    private func initializeWallet(_ session: Session, _ request: CitizenSdkFlutterCodec.Request,
+                                  _ result: @escaping FlutterResult) {
+        run(session, request, result, cancel: { [weak self] in
+            if let id = request.sessionID { self?.walletFlow.cancelSession(id) }
+        }) { [walletFlow] in
+            _ = try await walletFlow.launch(sdk: session.sdk, request: request)
+            return [CitizenSdkFlutterCodec.walletState(try await session.sdk.walletState())]
         }
     }
 

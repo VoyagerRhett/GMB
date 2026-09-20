@@ -113,7 +113,7 @@ function verifyCandidate(root, sourceSHA) {
   const upstream = JSON.parse(readFileSync(join(root, 'upstream-release.json'), 'utf8'));
   const upstreamKeys = [
     'git_commit_sha', 'instance_source_sha', 'product_id', 'release_asset_sha256',
-    'release_tag', 'repository',
+    'repository', 'version_tag',
   ];
   if (JSON.stringify(Object.keys(product).sort()) !== JSON.stringify(productKeys)
       || product.product_id !== 'citizenchatserver' || product.platform !== 'cloudflare'
@@ -124,7 +124,7 @@ function verifyCandidate(root, sourceSHA) {
       || JSON.stringify(Object.keys(upstream).sort()) !== JSON.stringify(upstreamKeys)
       || upstream.instance_source_sha !== sourceSHA || upstream.repository !== 'VoyagerRhett/TATA'
       || upstream.product_id !== 'tatachatserver'
-      || !/^tatachatserver-cloudflare-v\d+\.\d{1,2}\.\d{1,2}$/.test(upstream.release_tag)
+      || !/^tatachatserver-cloudflare-v\d+\.\d{1,2}\.\d{1,2}$/.test(upstream.version_tag)
       || !/^[0-9a-f]{40}$/.test(upstream.git_commit_sha)
       || !/^[0-9a-f]{64}$/.test(upstream.release_asset_sha256)) {
     fail('CI 候选产品、上游或当前源码锚点无效');
@@ -202,7 +202,7 @@ export function verifyPackagedRelease({ archive }) {
     const manifestKeys = [
       'ci_run_id', 'files', 'git_commit_sha', 'platform', 'product_id', 'schema',
       'software_version', 'upstream_git_commit_sha', 'upstream_product_id',
-      'upstream_release_tag', 'upstream_repository',
+      'upstream_repository', 'upstream_version_tag',
     ];
     if (JSON.stringify(Object.keys(manifest).sort()) !== JSON.stringify(manifestKeys)
         || manifest.schema !== 1 || manifest.product_id !== 'citizenchatserver'
@@ -212,7 +212,7 @@ export function verifyPackagedRelease({ archive }) {
         || !/^[0-9a-f]{40}$/.test(manifest.git_commit_sha)
         || manifest.upstream_repository !== 'VoyagerRhett/TATA'
         || manifest.upstream_product_id !== 'tatachatserver'
-        || !/^tatachatserver-cloudflare-v\d+\.\d+\.\d+$/.test(manifest.upstream_release_tag)
+        || !/^tatachatserver-cloudflare-v\d+\.\d+\.\d+$/.test(manifest.upstream_version_tag)
         || !/^[0-9a-f]{40}$/.test(manifest.upstream_git_commit_sha)
         || !Array.isArray(manifest.files) || !manifest.files.length) {
       fail('CitizenChatServer Release manifest 无效');
@@ -246,7 +246,7 @@ export function verifyPackagedRelease({ archive }) {
     const upstream = JSON.parse(readFileSync(join(extracted, 'upstream-release.json'), 'utf8'));
     const upstreamKeys = [
       'git_commit_sha', 'instance_source_sha', 'product_id', 'release_asset_sha256',
-      'release_tag', 'repository',
+      'repository', 'version_tag',
     ];
     if (JSON.stringify(Object.keys(product).sort()) !== JSON.stringify(productKeys)
         || product.product_id !== manifest.product_id || product.platform !== manifest.platform
@@ -258,7 +258,7 @@ export function verifyPackagedRelease({ archive }) {
         || JSON.stringify(Object.keys(upstream).sort()) !== JSON.stringify(upstreamKeys)
         || upstream.repository !== manifest.upstream_repository
         || upstream.product_id !== manifest.upstream_product_id
-        || upstream.release_tag !== manifest.upstream_release_tag
+        || upstream.version_tag !== manifest.upstream_version_tag
         || upstream.git_commit_sha !== manifest.upstream_git_commit_sha
         || upstream.instance_source_sha !== manifest.git_commit_sha
         || !/^[0-9a-f]{64}$/.test(upstream.release_asset_sha256)) {
@@ -304,7 +304,7 @@ export function packageRelease(values) {
       schema: 1, product_id: 'citizenchatserver', platform: 'cloudflare',
       software_version: softwareVersion, git_commit_sha: sourceSHA, ci_run_id: Number(ciRunID),
       upstream_repository: upstream.repository, upstream_product_id: upstream.product_id,
-      upstream_release_tag: upstream.release_tag, upstream_git_commit_sha: upstream.git_commit_sha,
+      upstream_version_tag: upstream.version_tag, upstream_git_commit_sha: upstream.git_commit_sha,
       files: payloadFiles.map((path) => ({ path, sha256: sha256(join(stage, path)) })),
     };
     const manifestPath = join(stage, 'release-manifest.json');

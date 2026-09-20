@@ -106,6 +106,19 @@ internal final class CitizenSdkFlutterWalletFlow {
 
     static func contract(for request: CitizenSdkFlutterCodec.Request) throws -> CitizenSDKWalletFlowRequest {
         switch request {
+        case let .initialize(_, _, words, text):
+            return .initialize(
+                wordCount: words,
+                content: CitizenSDKWalletInitializationContent(
+                    walletAccountRoleText: text[0],
+                    walletAuthorizationText: text[1],
+                    walletCompletionText: text[2],
+                    walletBackupText: text[3],
+                    walletColdAccountText: text[4]
+                )
+            )
+        case let .importColdAccountWithUI(_, _, text):
+            return .importColdAccount(walletColdAccountText: text)
         case let .create(_, _, words): return .create(wordCount: words)
         case let .empty(method, _, _) where method == "importWallet": return .importWallet
         case let .addAccounts(_, _, indices): return .addAccounts(indices: indices)

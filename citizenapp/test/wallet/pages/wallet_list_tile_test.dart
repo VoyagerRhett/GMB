@@ -87,37 +87,14 @@ void main() {
     expect(isBrokenCitizenWalletStateAccount(broken), isTrue);
   });
 
-  test('冷钱包账户码由 CitizenQr 解析，业务用户码仍由 App 解析', () async {
-    const accountId =
-        '0x1111111111111111111111111111111111111111111111111111111111111111';
-    const qr = _AccountQr(accountId);
-    expect(
-      await extractColdWalletImportAddress(qr, 'sdk-account-code'),
-      ss58FromAccountIdText(accountId),
-    );
-    const userQr =
-        '{"p":"QR_V1","k":3,"b":{"c":"CN001-CTZN-000000001-2026","n":"$accountId"}}';
-    expect(
-      await extractColdWalletImportAddress(qr, userQr),
-      ss58FromAccountIdText(accountId),
-    );
+  test('冷钱包导入只启动SDK账户码界面且不复用App业务二维码', () {
+    final source = File('lib/wallet/pages/wallet_page.dart').readAsStringSync();
+    expect(source, contains('importColdAccountWithUi'));
+    expect(source, isNot(contains('extractColdWalletImportAddress')));
+    expect(source, isNot(contains('QrRouter().route')));
+    expect(source, isNot(contains('QrRouteType.userContact')));
+    expect(source, isNot(contains('QrRouteType.userTransfer')));
   });
+
 }
-
-final class _AccountQr implements CitizenQr {
-  const _AccountQr(this.accountId);
-  final String accountId;
-
-  @override
-  Future<CitizenQrDocument> parse(String text) async {
-    if (text != 'sdk-account-code') throw const FormatException('business');
-    return CitizenQrDocument(
-      kind: CitizenQrKind.accountId,
-      canonicalText: text,
-      accountId: accountId,
-    );
-  }
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
-}
+import 'dart:io';

@@ -34,6 +34,7 @@ class WalletWindow final {
   bool backup_confirmed() const noexcept;
   // 词数、账户模式和显式索引只存在于 SDK 原生窗口，不扩大 Flutter/C 公共协议。
   citizensdk_wallet_word_count_t word_count() const;
+  citizensdk_wallet_flow_kind_t flow_kind() const noexcept { return kind_; }
   bool use_next_account() const noexcept;
   std::vector<uint32_t> account_indices() const;
   SensitiveBuffer take_mnemonic();
@@ -72,13 +73,16 @@ class WalletWindow final {
   void *word_count_{};
   void *password_{};
   void *next_account_{};
+  void *initialization_mode_{};
   void *account_indices_{};
   void *backup_{};
   void *action_button_{};
+  void *cancel_button_{};
   void *status_{};
   Action action_;
   Action cancel_;
   citizensdk_wallet_flow_kind_t kind_{};
+  std::vector<std::string> initialization_text_;
   std::thread::id ui_thread_;
   bool destroying_{false};
   bool password_reentry_required_{false};

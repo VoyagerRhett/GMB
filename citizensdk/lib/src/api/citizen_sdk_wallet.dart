@@ -14,11 +14,25 @@ abstract interface class CitizenSdkWallet {
   /// 返回热／冷账户的统一公开目录；第一项是只读默认账户。
   Future<CitizenWalletState> getState();
 
+  /// 打开 SDK 唯一钱包初始化界面。
+  ///
+  /// 界面固定提供创建热钱包、导入热钱包和导入冷账户；宿主只提供非秘密展示内容，
+  /// 不取得助记词、密码、账户私钥、原生句柄或内部操作结果。
+  Future<CitizenWalletState> initialize({
+    required CitizenWalletInitializationContent content,
+    CitizenWalletWordCount wordCount = CitizenWalletWordCount.words12,
+  });
+
   /// 导入独立冷账户的公开事实。`accountId` 与 `ss58Address` 必须且只能提供一个。
   Future<CitizenWalletState> importColdAccount({
     String? accountId,
     String? ss58Address,
     required String name,
+  });
+
+  /// 在 SDK 唯一公开冷账户界面手输或扫描账户码；宿主只提供非秘密说明文字。
+  Future<CitizenWalletState> importColdAccountWithUi({
+    required String walletColdAccountText,
   });
 
   /// 基于同一 revision 重排完整目录；第一项必须仍是当前默认账户。

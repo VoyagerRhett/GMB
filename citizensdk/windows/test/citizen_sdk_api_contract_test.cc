@@ -47,7 +47,7 @@ int main() {
   static_assert(
       sizeof(static_cast<citizensdk_host_config_v1_t *>(nullptr)->reserved) ==
       7);
-  static_assert(sizeof(citizensdk_wallet_flow_request_v1_t) == 32);
+  static_assert(sizeof(citizensdk_wallet_flow_request_v1_t) == 112);
   static_assert(offsetof(citizensdk_wallet_flow_request_v1_t, struct_size) == 0);
   static_assert(offsetof(citizensdk_wallet_flow_request_v1_t, abi_version) == 4);
   static_assert(offsetof(citizensdk_wallet_flow_request_v1_t, kind) == 8);
@@ -56,6 +56,10 @@ int main() {
                 16);
   static_assert(offsetof(citizensdk_wallet_flow_request_v1_t,
                          account_index_count) == 24);
+  static_assert(offsetof(citizensdk_wallet_flow_request_v1_t,
+                         wallet_account_role_text) == 32);
+  static_assert(offsetof(citizensdk_wallet_flow_request_v1_t,
+                         wallet_cold_account_text) == 96);
   static_assert(sizeof(citizensdk_wallet_flow_result_v1_t) == 16);
   static_assert(offsetof(citizensdk_wallet_flow_result_v1_t, struct_size) == 0);
   static_assert(offsetof(citizensdk_wallet_flow_result_v1_t, abi_version) == 4);
@@ -66,6 +70,8 @@ int main() {
   assert(citizensdk_host_abi_version() == CITIZENSDK_HOST_ABI_VERSION);
   assert(citizensdk_host_config_size() == sizeof(citizensdk_host_config_v1_t));
   assert(CITIZENSDK_WALLET_FLOW_CREATE == 1);
+  assert(CITIZENSDK_WALLET_FLOW_INITIALIZE == 4);
+  assert(CITIZENSDK_WALLET_FLOW_IMPORT_COLD_ACCOUNT == 5);
   assert(CITIZENSDK_WALLET_FLOW_IMPORT == 2);
   assert(CITIZENSDK_WALLET_FLOW_ADD_ACCOUNTS == 3);
   assert(CITIZENSDK_WALLET_FLOW_COMPLETED == 1);

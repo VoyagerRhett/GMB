@@ -619,13 +619,13 @@ fn finalized_refs_from_snapshot(
 
     let mut refs = Vec::with_capacity(expected_len);
     for (index, block) in snapshot.blocks.into_iter().enumerate() {
-        let offset = u64::try_from(index).map_err(|_| {
+        let block_offset = u64::try_from(index).map_err(|_| {
             contract_error(
                 ContractErrorCode::Integrity,
                 "finalized ancestry 索引超过 u64",
             )
         })?;
-        let expected_number = start_number.checked_add(offset).ok_or_else(|| {
+        let expected_number = start_number.checked_add(block_offset).ok_or_else(|| {
             contract_error(
                 ContractErrorCode::Integrity,
                 "finalized ancestry 高度顺序溢出",

@@ -735,7 +735,7 @@ class _AppLockGateState extends State<_AppLockGate>
     }
 
     if (_authenticated) {
-      // 账户门禁排在最后一环：无热钱包先进强制创建页，再放行主界面。
+      // 账户门禁排在最后一环：任一热／冷账户均放行，目录为空才进入SDK唯一初始化页。
       return const AppPermissionGate(child: WalletGate(child: HomeTabGate()));
     }
 

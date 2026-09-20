@@ -231,7 +231,7 @@ class HostTransport final : public NativeTransport {
       case Method::cancel_prepared_transaction_execution:
       case Method::verify_signature:
       case Method::open: case Method::close: case Method::get_capabilities: case Method::get_genesis_hash:
-      case Method::create_wallet: case Method::import_wallet: case Method::add_wallet_accounts:
+      case Method::initialize_wallet: case Method::import_cold_account_with_ui: case Method::create_wallet: case Method::import_wallet: case Method::add_wallet_accounts:
       case Method::qr_parse: case Method::qr_create_sign_request:
       case Method::qr_scan: case Method::sign_qr_request:
       case Method::qr_consume_sign_response: case Method::qr_cancel_sign_request:
@@ -816,7 +816,7 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
       // 查看持有钱包代际租约，沿用同一 UI 排他/关闭排空门。
       case Method::qr_scan: case Method::sign_qr_request:
       case Method::view_account_private_key:
-      case Method::create_wallet: case Method::import_wallet:
+      case Method::initialize_wallet: case Method::import_cold_account_with_ui: case Method::create_wallet: case Method::import_wallet:
       case Method::add_wallet_accounts: case Method::set_active_wallet_account:
       case Method::rename_wallet_account: case Method::delete_wallet_account:
       case Method::import_cold_account_id: case Method::import_cold_account_ss58:
@@ -855,7 +855,7 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
       switch (route->request.method) {
         case Method::qr_scan: case Method::sign_qr_request: qr_flow(session, route); break;
         case Method::view_account_private_key:
-        case Method::create_wallet: case Method::import_wallet:
+        case Method::initialize_wallet: case Method::import_cold_account_with_ui: case Method::create_wallet: case Method::import_wallet:
         case Method::add_wallet_accounts: wallet(session, route); break;
         default: submit(session, route); break;
       }
@@ -976,7 +976,9 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
             }
             // The Win32 flow contains private prepared/import/add operations. Only
             // a new public-profile query is projected onto the original tuple.
-            route->native_method = Method::get_wallet_profile;
+            route->native_method = (route->request.method == Method::initialize_wallet ||
+                                    route->request.method == Method::import_cold_account_with_ui)
+                ? Method::get_wallet_state : Method::get_wallet_profile;
             state->submit(session, route);
             return;
           }

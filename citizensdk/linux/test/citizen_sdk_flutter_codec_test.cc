@@ -68,6 +68,7 @@ void test_method_closure_and_requests() {
       Method::get_genesis_hash,
       Method::get_account_balance, Method::get_account_balances, Method::get_account_nonce,
       Method::get_fee_snapshot, Method::get_wallet_profile, Method::get_wallet_state,
+      Method::initialize_wallet, Method::import_cold_account_with_ui,
       Method::import_cold_account_id, Method::import_cold_account_ss58,
       Method::reorder_wallet_accounts_without_default_change, Method::rename_account,
       Method::delete_account, Method::view_account_private_key,
@@ -90,7 +91,7 @@ void test_method_closure_and_requests() {
   };
   std::set<std::string> names;
   for (Method method : all) names.insert(citizen_sdk::flutter::method_name(method));
-  assert(names.size() == 65 && names.count("open") == 1 &&
+  assert(names.size() == 67 && names.count("open") == 1 &&
          names.count("getTransactionHistory") == 1);
 
   assert(decode("open", list({Value::integer(1), Value::integer(63)})).modules == 63);

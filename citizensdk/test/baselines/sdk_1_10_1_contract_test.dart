@@ -21,7 +21,7 @@ void main() {
     expect(CitizenSdkModules.full, 63);
     expect(CitizenCapabilityName.values, hasLength(10));
     expect(CitizenSdkErrorCode.values, hasLength(22));
-    expect(CitizenSdkFlutterCodec.methods, hasLength(65));
+    expect(CitizenSdkFlutterCodec.methods, hasLength(67));
 
     final facade = File('lib/src/api/citizen_sdk.dart').readAsStringSync();
     for (final declaration in <String>[

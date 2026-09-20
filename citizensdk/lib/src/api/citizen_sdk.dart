@@ -407,6 +407,25 @@ final class _CitizenSdkWallet implements CitizenSdkWallet {
   }
 
   @override
+  Future<CitizenWalletState> initialize({
+    required CitizenWalletInitializationContent content,
+    CitizenWalletWordCount wordCount = CitizenWalletWordCount.words12,
+  }) async {
+    final value = await _session.invoke(
+      'initializeWallet',
+      fields: <Object?>[
+        wordCount.value,
+        content.walletAccountRoleText,
+        content.walletAuthorizationText,
+        content.walletCompletionText,
+        content.walletBackupText,
+        content.walletColdAccountText,
+      ],
+    );
+    return _codec.decodeWalletState(value[0]);
+  }
+
+  @override
   Future<CitizenWalletState> importColdAccount({
     String? accountId,
     String? ss58Address,
@@ -426,6 +445,17 @@ final class _CitizenSdkWallet implements CitizenSdkWallet {
     final value = await _session.invoke(
       method,
       fields: <Object?>[identity, normalizedName],
+    );
+    return _codec.decodeWalletState(value[0]);
+  }
+
+  @override
+  Future<CitizenWalletState> importColdAccountWithUi({
+    required String walletColdAccountText,
+  }) async {
+    final value = await _session.invoke(
+      'importColdAccountWithUi',
+      fields: <Object?>[walletColdAccountText],
     );
     return _codec.decodeWalletState(value[0]);
   }

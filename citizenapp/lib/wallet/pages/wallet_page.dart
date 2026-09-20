@@ -8,11 +8,7 @@ import 'package:citizenapp/log/app_log.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/isar/wallet_isar.dart';
-import 'package:citizenapp/qr/bodies/user_contact_body.dart';
-import 'package:citizenapp/qr/bodies/user_transfer_body.dart';
-import 'package:citizenapp/qr/pages/qr_scan_page.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/qr/qr_router.dart';
 import 'package:citizenapp/qr/scan_dispatch_flow.dart';
 import 'package:citizenapp/transaction/history/local_tx_store.dart';
 import 'package:citizenapp/transaction/history/presentation/tx_auto_refresh_mixin.dart';
@@ -56,39 +52,6 @@ bool isBrokenCitizenWalletStateAccount(CitizenWalletStateAccount wallet) {
     return true;
   }
   return wallet.ss58Address != ss58FromAccountIdText(wallet.accountId);
-}
-
-/// 导入冷钱包扫码只提取 SS58 展示地址；
-/// 不在这里触发导入，避免用户还没确认就写入本地钱包库。
-@visibleForTesting
-Future<String?> extractColdWalletImportAddress(CitizenQr qr, String raw) async {
-  final text = raw.trim();
-  if (text.isEmpty) {
-    return null;
-  }
-
-  try {
-    final document = await qr.parse(text);
-    if (document.kind == CitizenQrKind.accountId &&
-        document.accountId != null) {
-      return ss58FromAccountIdText(document.accountId!);
-    }
-  } on Object {
-    // 非 SDK 通用码继续交由 App 业务二维码路由。
-  }
-  final result = QrRouter().route(text);
-  switch (result.type) {
-    // 三种码都只声明 account_id;SS58 是展示形态,一律在本机派生。
-    case QrRouteType.userContact:
-      final body = result.envelope!.body as UserContactBody;
-      return ss58FromAccountIdText(body.accountId);
-    case QrRouteType.userTransfer:
-      final body = result.envelope!.body as UserTransferBody;
-      return ss58FromAccountIdText(body.accountId);
-    case QrRouteType.accountDataKeyResponse:
-    case QrRouteType.unknown:
-      return null;
-  }
 }
 
 /// 钱包列表页（单列横向卡片）：
@@ -445,12 +408,19 @@ class _WalletTabState extends State<WalletTab> {
 
   Future<void> _openImportColdWalletPage() async {
     if (_mutationInProgress) return;
-    final imported = await Navigator.of(context).push<bool>(
-      MaterialPageRoute(builder: (_) => const ImportColdWalletPage()),
-    );
-    if (imported == true && mounted) {
+    try {
+      await _wallet.importColdAccountWithUi(
+        walletColdAccountText:
+            '私钥保存在 公民钱包 签名设备上，签名请通过 公民钱包 扫码完成。',
+      );
+      if (!mounted) return;
       _accountSecurity.notifyDefaultAccountChanged();
       await _reload();
+    } on CitizenSdkException catch (error) {
+      if (!mounted || error.code == CitizenSdkErrorCode.cancelled) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('导入冷钱包失败：${error.message}')),
+      );
     }
   }
 
@@ -1620,138 +1590,5 @@ class WalletIconRegistry {
       }
     }
     return Icons.account_balance_wallet_outlined;
-  }
-}
-
-/// 导入冷钱包页面：只接受本链 SS58 展示地址，不导入私钥。
-class ImportColdWalletPage extends StatefulWidget {
-  const ImportColdWalletPage({super.key});
-
-  @override
-  State<ImportColdWalletPage> createState() => _ImportColdWalletPageState();
-}
-
-class _ImportColdWalletPageState extends State<ImportColdWalletPage> {
-  final TextEditingController _addressController = TextEditingController();
-  bool _isImporting = false;
-  String? _error;
-
-  Future<void> _scanWalletAddress() async {
-    final raw = await Navigator.of(context).push<String>(
-      MaterialPageRoute(
-        builder: (_) => const QrScanPage(
-          mode: QrScanMode.accountTarget,
-          customTitle: '扫描钱包二维码',
-        ),
-      ),
-    );
-    if (!mounted || raw == null || raw.trim().isEmpty) {
-      return;
-    }
-
-    final address = await extractColdWalletImportAddress(
-      context.read<CitizenSdk>().qr,
-      raw,
-    );
-    if (address == null || address.isEmpty) {
-      setState(() {
-        _error = '未识别到可导入的钱包账户地址';
-      });
-      return;
-    }
-
-    setState(() {
-      _addressController.text = address;
-      _addressController.selection = TextSelection.collapsed(
-        offset: address.length,
-      );
-      _error = null;
-    });
-  }
-
-  Future<void> _import() async {
-    setState(() {
-      _error = null;
-      _isImporting = true;
-    });
-    try {
-      await context.read<CitizenSdk>().wallet.importColdAccount(
-        ss58Address: _addressController.text,
-        name: '冷钱包',
-      );
-      if (!mounted) return;
-      Navigator.of(context).pop(true);
-    } catch (error) {
-      if (!mounted) return;
-      setState(() {
-        _error = _WalletTabState._errorMessage(error);
-      });
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isImporting = false;
-        });
-      }
-    }
-  }
-
-  @override
-  void dispose() {
-    _addressController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('导入冷钱包'),
-        actions: [
-          IconButton(
-            tooltip: '扫码填入地址',
-            onPressed: _isImporting ? null : _scanWalletAddress,
-            icon: SvgPicture.asset(
-              'assets/icons/scan-line.svg',
-              width: AppLayout.scaled(context, 22),
-              height: AppLayout.scaled(context, 22),
-            ),
-          ),
-        ],
-      ),
-      body: Padding(
-        padding: EdgeInsets.all(AppLayout.scaled(context, 16)),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('请输入冷钱包账户地址'),
-            SizedBox(height: AppLayout.scaled(context, 8)),
-            Text(
-              '私钥保存在 公民钱包 签名设备上，签名请通过 公民钱包 扫码完成。',
-              style: TextStyle(
-                color: AppTheme.textSecondary,
-                fontSize: AppLayout.scaled(context, 13),
-              ),
-            ),
-            SizedBox(height: AppLayout.scaled(context, 12)),
-            TextField(
-              controller: _addressController,
-              minLines: 2,
-              maxLines: 3,
-              decoration: const InputDecoration(
-                hintText: '请输入冷钱包账户地址',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            SizedBox(height: AppLayout.scaled(context, 12)),
-            if (_error != null)
-              Text(_error!, style: const TextStyle(color: AppTheme.danger)),
-            FilledButton(
-              onPressed: _isImporting ? null : _import,
-              child: Text(_isImporting ? '导入中...' : '确认导入'),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 }

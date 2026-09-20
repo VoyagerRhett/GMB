@@ -23,7 +23,7 @@ internal enum CitizenSdkFlutterCodec {
         "getStorageKeysPaged", "callRuntimeApi",
         "getSystemEvents", "exportState", "importState",
         "getGenesisHash", "getAccountBalance", "getAccountBalances", "getAccountNonce", "getFeeSnapshot", "getWalletProfile", "viewAccountPrivateKey",
-        "getWalletState", "importColdAccountId", "importColdAccountSs58",
+        "getWalletState", "initializeWallet", "importColdAccountWithUi", "importColdAccountId", "importColdAccountSs58",
         "reorderWalletAccountsWithoutDefaultChange", "renameAccount", "deleteAccount",
         "createWallet", "importWallet", "addWalletAccounts", "setActiveWalletAccount",
         "renameWalletAccount", "deleteWalletAccount", "deleteWallet", "reconcileWalletCleanup",
@@ -52,6 +52,8 @@ internal enum CitizenSdkFlutterCodec {
                         method: String, arguments: Data)
         case importState(session: String, sequence: Int64, state: CitizenChainState)
         case create(session: String, sequence: Int64, wordCount: UInt32)
+        case initialize(session: String, sequence: Int64, wordCount: UInt32, text: [String])
+        case importColdAccountWithUI(session: String, sequence: Int64, text: String)
         case addAccounts(session: String, sequence: Int64, indices: [UInt32])
         case rename(method: String, session: String, sequence: Int64, accountID: Data, name: String)
         case coldSS58(session: String, sequence: Int64, address: String, name: String)
@@ -78,6 +80,8 @@ internal enum CitizenSdkFlutterCodec {
             switch self {
             case .open, .verify: return nil
             case let .empty(_, value, _), let .account(_, value, _, _), let .create(value, _, _),
+                 let .initialize(value, _, _, _),
+                 let .importColdAccountWithUI(value, _, _),
                  let .addAccounts(value, _, _), let .rename(_, value, _, _, _), let .coldSS58(value, _, _, _),
                  let .reorder(value, _, _, _), let .sign(value, _, _, _),
                  let .beginSigning(value, _, _), let .externalSignature(_, value, _, _, _),
@@ -99,6 +103,8 @@ internal enum CitizenSdkFlutterCodec {
             switch self {
             case .open, .verify: return nil
             case let .empty(_, _, value), let .account(_, _, value, _), let .create(_, value, _),
+                 let .initialize(_, value, _, _),
+                 let .importColdAccountWithUI(_, value, _),
                  let .addAccounts(_, value, _), let .rename(_, _, value, _, _), let .coldSS58(_, value, _, _),
                  let .reorder(_, value, _, _), let .sign(_, value, _, _),
                  let .beginSigning(_, value, _), let .externalSignature(_, _, value, _, _),
@@ -134,6 +140,8 @@ internal enum CitizenSdkFlutterCodec {
             case .runtimeAPI: return "callRuntimeApi"
             case .importState: return "importState"
             case .create: return "createWallet"
+            case .initialize: return "initializeWallet"
+            case .importColdAccountWithUI: return "importColdAccountWithUi"
             case .addAccounts: return "addWalletAccounts"
             case .coldSS58: return "importColdAccountSs58"
             case .reorder: return "reorderWalletAccountsWithoutDefaultChange"
@@ -290,6 +298,32 @@ internal enum CitizenSdkFlutterCodec {
                 let words = try integer(tuple[3], "wordCount")
                 guard words == 12 || words == 18 || words == 24 else { throw failure(.invalidArgument, "wordCount must be 12, 18 or 24") }
                 return .create(session: session, sequence: sequence, wordCount: UInt32(words))
+            case "initializeWallet":
+                try length(9)
+                let words = try integer(tuple[3], "wordCount")
+                guard words == 12 || words == 18 || words == 24 else {
+                    throw failure(.invalidArgument, "wordCount must be 12, 18 or 24")
+                }
+                let text = try (4...8).map { index -> String in
+                    let value = try string(tuple[index], "wallet initialization text", 1...768)
+                    guard value == value.trimmingCharacters(in: .whitespacesAndNewlines),
+                          (1...256).contains(value.unicodeScalars.count),
+                          !value.unicodeScalars.contains(where: { $0.value <= 0x1f || $0.value == 0x7f }) else {
+                        throw failure(.invalidArgument, "wallet initialization text is invalid")
+                    }
+                    return value
+                }
+                return .initialize(session: session, sequence: sequence,
+                                   wordCount: UInt32(words), text: text)
+            case "importColdAccountWithUi":
+                try length(4)
+                let text = try string(tuple[3], "walletColdAccountText", 1...768)
+                guard text == text.trimmingCharacters(in: .whitespacesAndNewlines),
+                      (1...256).contains(text.unicodeScalars.count),
+                      !text.unicodeScalars.contains(where: { $0.value <= 0x1f || $0.value == 0x7f }) else {
+                    throw failure(.invalidArgument, "wallet cold account text is invalid")
+                }
+                return .importColdAccountWithUI(session: session, sequence: sequence, text: text)
             case "addWalletAccounts":
                 try length(4)
                 guard let raw = tuple[3] as? [Any?], (1...1_989).contains(raw.count) else {

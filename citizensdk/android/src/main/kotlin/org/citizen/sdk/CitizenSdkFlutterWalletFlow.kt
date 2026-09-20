@@ -148,6 +148,21 @@ internal class CitizenSdkFlutterWalletFlow {
         internal fun contractRequest(
             request: CitizenSdkFlutterCodec.Request.SessionRequest,
         ): CitizenSdkWalletFlowContract.Request = when (request) {
+            is CitizenSdkFlutterCodec.Request.InitializeWallet ->
+                CitizenSdkWalletFlowContract.Request.Initialize(
+                    request.wordCount,
+                    CitizenSdkWalletFlowContract.InitializationContent(
+                        walletAccountRoleText = request.text[0],
+                        walletAuthorizationText = request.text[1],
+                        walletCompletionText = request.text[2],
+                        walletBackupText = request.text[3],
+                        walletColdAccountText = request.text[4],
+                    ),
+                )
+            is CitizenSdkFlutterCodec.Request.ImportColdAccountWithUi ->
+                CitizenSdkWalletFlowContract.Request.ImportColdAccount(
+                    request.walletColdAccountText,
+                )
             is CitizenSdkFlutterCodec.Request.CreateWallet ->
                 CitizenSdkWalletFlowContract.Request.Create(request.wordCount)
             is CitizenSdkFlutterCodec.Request.AddWalletAccounts ->

@@ -48,6 +48,7 @@ class WalletFlow final : public std::enable_shared_from_this<WalletFlow> {
   void begin_prepare();
   void commit_prepared();
   void begin_import_or_add();
+  void begin_cold_import();
   void submit_import_or_add(std::shared_ptr<SensitiveBuffer> mnemonic,
                             std::shared_ptr<SensitiveBuffer> password,
                             std::vector<uint32_t> account_indices);

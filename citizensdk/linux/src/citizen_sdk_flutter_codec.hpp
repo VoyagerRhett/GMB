@@ -67,7 +67,7 @@ enum class Method {
   call_runtime_api, get_system_events,
   export_state, import_state, get_genesis_hash,
   get_account_balance, get_account_balances, get_account_nonce, get_fee_snapshot, get_wallet_profile, view_account_private_key,
-  get_wallet_state, import_cold_account_id, import_cold_account_ss58,
+  get_wallet_state, initialize_wallet, import_cold_account_with_ui, import_cold_account_id, import_cold_account_ss58,
   reorder_wallet_accounts_without_default_change, rename_account, delete_account,
   create_wallet, import_wallet, add_wallet_accounts, set_active_wallet_account,
   rename_wallet_account, delete_wallet_account, delete_wallet,
@@ -102,6 +102,7 @@ struct DecodedRequest final {
   std::vector<uint8_t> state_database;
   citizensdk_account_id_t account_id{};
   uint32_t word_count{};
+  std::vector<std::string> wallet_initialization_text;
   std::vector<uint32_t> indices;
   std::string name;
   std::vector<uint8_t> payload;

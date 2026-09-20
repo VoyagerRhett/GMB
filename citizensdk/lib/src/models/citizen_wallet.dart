@@ -18,6 +18,43 @@ enum CitizenWalletWordCount {
   final int value;
 }
 
+/// 宿主传给 SDK 唯一钱包初始化界面的非秘密展示内容。
+///
+/// SDK 只按固定位置显示这些文字，不解释宿主业务、不接收路由或行为回调。所有字段
+/// 必须是单行、已修剪的 1..256 个 Unicode scalar；助记词、密码、公钥和私钥绝对
+/// 不得进入本对象。
+final class CitizenWalletInitializationContent {
+  CitizenWalletInitializationContent({
+    required this.walletAccountRoleText,
+    required this.walletAuthorizationText,
+    required this.walletCompletionText,
+    required this.walletBackupText,
+    required this.walletColdAccountText,
+  }) {
+    for (final entry in <String, String>{
+      'walletAccountRoleText': walletAccountRoleText,
+      'walletAuthorizationText': walletAuthorizationText,
+      'walletCompletionText': walletCompletionText,
+      'walletBackupText': walletBackupText,
+      'walletColdAccountText': walletColdAccountText,
+    }.entries) {
+      final value = entry.value;
+      if (value.trim() != value ||
+          value.runes.isEmpty ||
+          value.runes.length > 256 ||
+          value.runes.any((scalar) => scalar <= 0x1f || scalar == 0x7f)) {
+        throw ArgumentError.value(value, entry.key, '必须是已修剪的单行 1..256 字符文本');
+      }
+    }
+  }
+
+  final String walletAccountRoleText;
+  final String walletAuthorizationText;
+  final String walletCompletionText;
+  final String walletBackupText;
+  final String walletColdAccountText;
+}
+
 /// 一只无根热钱包的公开资料；不包含 generation、secret owner 或任何秘密。
 final class CitizenWalletProfile {
   CitizenWalletProfile({

@@ -66,6 +66,7 @@ WalletWindow::WalletWindow(void *parent, const ValidatedWalletRequest &request,
                            Action action, Action cancel)
     : action_(std::move(action)), cancel_(std::move(cancel)) {
   kind_ = request.kind;
+  initialization_text_ = request.initialization_text;
   private_key_mode_ = request.account_id.has_value();
   ui_thread_ = std::this_thread::get_id();
 #if !CITIZENSDK_ENABLE_WALLET_UI
@@ -81,12 +82,14 @@ WalletWindow::WalletWindow(void *parent, const ValidatedWalletRequest &request,
           "GTK thread-default context is unavailable for CitizenSDK wallet UI");
   GtkWidget *dialog = gtk_dialog_new_with_buttons(
       request.account_id ? "查看私钥" :
-          request.kind == CITIZENSDK_WALLET_FLOW_CREATE ? "创建钱包" :
-          request.kind == CITIZENSDK_WALLET_FLOW_IMPORT ? "输入助记词" : "添加账户",
+      (request.kind == CITIZENSDK_WALLET_FLOW_CREATE || request.kind == CITIZENSDK_WALLET_FLOW_INITIALIZE) ? "创建钱包" :
+          request.kind == CITIZENSDK_WALLET_FLOW_IMPORT ? "输入助记词" :
+          request.kind == CITIZENSDK_WALLET_FLOW_IMPORT_COLD_ACCOUNT ? "导入冷钱包" : "添加账户",
       static_cast<GtkWindow *>(parent),
       static_cast<GtkDialogFlags>(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
       "取消", GTK_RESPONSE_CANCEL, nullptr);
   window_ = dialog;
+  cancel_button_ = gtk_dialog_get_widget_for_response(GTK_DIALOG(dialog), GTK_RESPONSE_CANCEL);
   gtk_window_set_default_size(GTK_WINDOW(dialog), 560, 560);
   gtk_window_set_resizable(GTK_WINDOW(dialog), TRUE);
   GtkWidget *area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
@@ -194,22 +197,20 @@ WalletWindow::WalletWindow(void *parent, const ValidatedWalletRequest &request,
   gtk_box_pack_start(GTK_BOX(box), static_cast<GtkWidget *>(suggestion_apply_), FALSE, FALSE, 0);
 
   word_count_ = gtk_combo_box_text_new();
-  const std::vector<const char *> counts = request.kind == CITIZENSDK_WALLET_FLOW_CREATE
-      ? std::vector<const char *>{"12", "24"}
+  const std::vector<const char *> counts = request.kind == CITIZENSDK_WALLET_FLOW_CREATE ||
+          request.kind == CITIZENSDK_WALLET_FLOW_INITIALIZE
+      ? std::vector<const char *>{"12", "18", "24"}
       : std::vector<const char *>{"12", "18", "24"};
   for (const char *count : counts) {
     gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(word_count_), count, count);
   }
   const std::string initial_words = std::to_string(
-      request.kind == CITIZENSDK_WALLET_FLOW_CREATE &&
-              request.word_count == CITIZENSDK_WALLET_WORDS_18
-          ? CITIZENSDK_WALLET_WORDS_12
-          : request.word_count == 0 ? CITIZENSDK_WALLET_WORDS_12 : request.word_count);
+      request.word_count == 0 ? CITIZENSDK_WALLET_WORDS_12 : request.word_count);
   require(gtk_combo_box_set_active_id(GTK_COMBO_BOX(word_count_),
                                       initial_words.c_str()) != FALSE,
           CITIZENSDK_ERROR_INVALID_ARGUMENT,
           "CitizenSDK wallet word count is unsupported");
-  GtkWidget *word_count_label = gtk_label_new("助记词长度（12 个推荐；24 个安全性更高）");
+  GtkWidget *word_count_label = gtk_label_new("助记词长度（12 个推荐；支持 18／24 个）");
   gtk_box_pack_start(GTK_BOX(box), word_count_label, FALSE, FALSE, 0);
   gtk_box_pack_start(GTK_BOX(box), static_cast<GtkWidget *>(word_count_), FALSE, FALSE, 0);
 
@@ -222,6 +223,12 @@ WalletWindow::WalletWindow(void *parent, const ValidatedWalletRequest &request,
 
   next_account_ = gtk_check_button_new_with_label("自动添加下一个可用账户索引");
   gtk_box_pack_start(GTK_BOX(box), static_cast<GtkWidget *>(next_account_), FALSE, FALSE, 0);
+  initialization_mode_ = gtk_combo_box_text_new();
+  gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(initialization_mode_), "create", "创建热钱包");
+  gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(initialization_mode_), "import", "导入热钱包");
+  gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(initialization_mode_), "cold", "导入冷钱包");
+  gtk_combo_box_set_active(GTK_COMBO_BOX(initialization_mode_), 0);
+  gtk_box_pack_start(GTK_BOX(box), static_cast<GtkWidget *>(initialization_mode_), FALSE, FALSE, 0);
   account_indices_ = gtk_entry_new();
   gtk_entry_set_placeholder_text(GTK_ENTRY(account_indices_), "指定账户索引，例如 1,2,3");
   std::ostringstream initial_indices;
@@ -236,27 +243,67 @@ WalletWindow::WalletWindow(void *parent, const ValidatedWalletRequest &request,
   action_button_ = gtk_button_new();
   gtk_box_pack_start(GTK_BOX(box), static_cast<GtkWidget *>(action_button_), FALSE, FALSE, 0);
 
-  if (request.kind == CITIZENSDK_WALLET_FLOW_CREATE) {
+  if (request.kind == CITIZENSDK_WALLET_FLOW_CREATE ||
+      request.kind == CITIZENSDK_WALLET_FLOW_INITIALIZE) {
     gtk_widget_hide(scroll);
     gtk_widget_hide(static_cast<GtkWidget *>(backup_));
     gtk_button_set_label(GTK_BUTTON(action_button_), "创建钱包");
-    const std::string intro = "钱包账户是 " + host_application +
-        " 唯一的账户，请务必妥善保存助记词和钱包密码（如设置），若丢失或遗忘将永久无法找回。";
+    const std::string intro = request.kind == CITIZENSDK_WALLET_FLOW_INITIALIZE
+        ? request.initialization_text.at(0) + "\n\n" + request.initialization_text.at(1) +
+              "\n\n" + request.initialization_text.at(2)
+        : "请务必妥善保存助记词和钱包密码（如设置），若丢失或遗忘将永久无法找回。";
     gtk_label_set_text(GTK_LABEL(status_), intro.c_str());
   } else {
     gtk_widget_hide(word_count_label);
     gtk_widget_hide(static_cast<GtkWidget *>(word_count_));
     gtk_widget_hide(static_cast<GtkWidget *>(backup_));
     gtk_button_set_label(GTK_BUTTON(action_button_),
+                         request.kind == CITIZENSDK_WALLET_FLOW_IMPORT_COLD_ACCOUNT
+                             ? "确认导入冷钱包" :
                          request.kind == CITIZENSDK_WALLET_FLOW_IMPORT ? "确认导入" : "确认添加");
     gtk_label_set_text(GTK_LABEL(status_),
         request.kind == CITIZENSDK_WALLET_FLOW_IMPORT ? "" :
+        request.kind == CITIZENSDK_WALLET_FLOW_IMPORT_COLD_ACCOUNT
+            ? request.initialization_text.at(0).c_str() :
         "无根设备不保存助记词或密码，追加账户需重新录入两者校验归属。");
+    if (request.kind == CITIZENSDK_WALLET_FLOW_IMPORT_COLD_ACCOUNT) {
+      gtk_widget_hide(static_cast<GtkWidget *>(password_));
+      gtk_widget_hide(static_cast<GtkWidget *>(mnemonic_state_));
+      gtk_widget_hide(static_cast<GtkWidget *>(suggestions_));
+      gtk_widget_hide(static_cast<GtkWidget *>(suggestion_apply_));
+    }
   }
   if (request.kind != CITIZENSDK_WALLET_FLOW_ADD_ACCOUNTS) {
     gtk_widget_hide(static_cast<GtkWidget *>(next_account_));
     gtk_widget_hide(static_cast<GtkWidget *>(account_indices_));
   }
+  if (request.kind != CITIZENSDK_WALLET_FLOW_INITIALIZE)
+    gtk_widget_hide(static_cast<GtkWidget *>(initialization_mode_));
+  g_signal_connect(initialization_mode_, "changed", G_CALLBACK((+[](GtkComboBox *box, gpointer data) {
+    auto *self = static_cast<WalletWindow *>(data);
+    const char *mode = gtk_combo_box_get_active_id(box);
+    if (mode == nullptr) return;
+    if (std::strcmp(mode, "create") == 0) {
+      self->kind_ = CITIZENSDK_WALLET_FLOW_CREATE;
+      gtk_widget_hide(static_cast<GtkWidget *>(self->mnemonic_scroll_));
+      gtk_widget_show(static_cast<GtkWidget *>(self->word_count_));
+      gtk_widget_show(static_cast<GtkWidget *>(self->password_));
+      gtk_button_set_label(GTK_BUTTON(self->action_button_), "创建钱包");
+    } else if (std::strcmp(mode, "import") == 0) {
+      self->kind_ = CITIZENSDK_WALLET_FLOW_IMPORT;
+      gtk_widget_show(static_cast<GtkWidget *>(self->mnemonic_scroll_));
+      gtk_widget_hide(static_cast<GtkWidget *>(self->word_count_));
+      gtk_widget_show(static_cast<GtkWidget *>(self->password_));
+      gtk_button_set_label(GTK_BUTTON(self->action_button_), "确认导入");
+    } else {
+      self->kind_ = CITIZENSDK_WALLET_FLOW_INITIALIZE;
+      gtk_widget_show(static_cast<GtkWidget *>(self->mnemonic_scroll_));
+      gtk_widget_hide(static_cast<GtkWidget *>(self->word_count_));
+      gtk_widget_hide(static_cast<GtkWidget *>(self->password_));
+      gtk_label_set_text(GTK_LABEL(self->status_), self->initialization_text_.at(4).c_str());
+      gtk_button_set_label(GTK_BUTTON(self->action_button_), "确认导入冷钱包");
+    }
+  })), this);
   g_signal_connect(gtk_text_view_get_buffer(GTK_TEXT_VIEW(mnemonic_)), "changed",
       G_CALLBACK((+[](GtkTextBuffer *buffer, gpointer data) {
         try {
@@ -281,6 +328,7 @@ WalletWindow::WalletWindow(void *parent, const ValidatedWalletRequest &request,
             separated = whitespace;
           }
           if (self->kind_ != CITIZENSDK_WALLET_FLOW_CREATE &&
+              self->kind_ != CITIZENSDK_WALLET_FLOW_INITIALIZE &&
               (word_total == 12 || word_total == 18 || word_total == 24)) {
             const std::string inferred = std::to_string(word_total);
             gtk_combo_box_set_active_id(
@@ -414,8 +462,18 @@ void WalletWindow::show() {
   if (private_key_mode_) install_private_monitor();
   gtk_widget_show_all(static_cast<GtkWidget *>(window_));
   if (private_key_mode_) return;
-  if (kind_ == CITIZENSDK_WALLET_FLOW_CREATE) {
+  if (kind_ == CITIZENSDK_WALLET_FLOW_CREATE ||
+      kind_ == CITIZENSDK_WALLET_FLOW_INITIALIZE) {
     gtk_widget_hide(static_cast<GtkWidget *>(mnemonic_scroll_));
+    gtk_widget_hide(static_cast<GtkWidget *>(mnemonic_state_));
+    gtk_widget_hide(static_cast<GtkWidget *>(suggestions_));
+    gtk_widget_hide(static_cast<GtkWidget *>(suggestion_apply_));
+    gtk_widget_hide(static_cast<GtkWidget *>(backup_));
+    if (kind_ == CITIZENSDK_WALLET_FLOW_INITIALIZE)
+      gtk_widget_hide(static_cast<GtkWidget *>(cancel_button_));
+  } else if (kind_ == CITIZENSDK_WALLET_FLOW_IMPORT_COLD_ACCOUNT) {
+    gtk_widget_hide(static_cast<GtkWidget *>(word_count_));
+    gtk_widget_hide(static_cast<GtkWidget *>(password_));
     gtk_widget_hide(static_cast<GtkWidget *>(mnemonic_state_));
     gtk_widget_hide(static_cast<GtkWidget *>(suggestions_));
     gtk_widget_hide(static_cast<GtkWidget *>(suggestion_apply_));
@@ -427,6 +485,8 @@ void WalletWindow::show() {
     gtk_widget_hide(static_cast<GtkWidget *>(next_account_));
     gtk_widget_hide(static_cast<GtkWidget *>(account_indices_));
   }
+  if (kind_ != CITIZENSDK_WALLET_FLOW_INITIALIZE)
+    gtk_widget_hide(static_cast<GtkWidget *>(initialization_mode_));
 #endif
 }
 
@@ -495,10 +555,10 @@ void WalletWindow::show_prepared_mnemonic(const SensitiveBuffer &mnemonic) {
   gtk_widget_hide(static_cast<GtkWidget *>(account_indices_));
   gtk_button_set_label(GTK_BUTTON(action_button_), "我已备份");
   gtk_widget_set_sensitive(static_cast<GtkWidget *>(action_button_), TRUE);
-  gtk_label_set_text(GTK_LABEL(status_),
-      "公民不保存助记词，关闭本弹窗后将无法再次显示。\n"
-      "请立即手抄备份，或在「公民钱包」中妥善保管——这是恢复钱包与追加其他账户的唯一凭证。"
-      "设置过钱包密码时，还必须单独备份密码。\n不支持复制，不支持截屏。");
+  const std::string backup_text = initialization_text_.size() == 5
+      ? initialization_text_[3]
+      : "SDK 不保存助记词，关闭后将无法再次显示。请立即离线手抄备份；设置过钱包密码时，还必须单独备份密码。不支持复制，不支持截屏。";
+  gtk_label_set_text(GTK_LABEL(status_), backup_text.c_str());
 #else
   (void)mnemonic;
 #endif

@@ -76,7 +76,7 @@ function createCandidate(identity, wranglerIdentity = {}) {
   const upstream = {
     repository: 'VoyagerRhett/TATA',
     product_id: 'tatachatserver',
-    release_tag: 'tatachatserver-cloudflare-v1.0.0',
+    version_tag: 'tatachatserver-cloudflare-v1.0.0',
     git_commit_sha: '89abcdef0123456789abcdef0123456789abcdef',
     release_asset_sha256: 'a'.repeat(64),
     instance_source_sha: sourceSHA,

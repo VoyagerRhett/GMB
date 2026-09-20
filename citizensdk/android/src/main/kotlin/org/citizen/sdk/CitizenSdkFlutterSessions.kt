@@ -445,6 +445,10 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
                 "getWalletState" -> complete(session, request, result, sdk.getWalletState()) {
                     listOf(CitizenSdkFlutterCodec.walletState(it))
                 }
+                "initializeWallet" -> throw CitizenSdkException(
+                    CitizenSdkErrorCode.INVALID_ARGUMENT,
+                    "initializeWallet requires its typed request",
+                )
                 "importWallet" -> walletFlow(session, request, result)
                 "deleteWallet" -> complete(session, request, result, sdk.deleteWallet()) {
                     listOf(CitizenSdkFlutterCodec.profile(it))
@@ -457,6 +461,18 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
                 ) { listOf(CitizenSdkFlutterCodec.profile(it)) }
                 else -> throw CitizenSdkException(CitizenSdkErrorCode.UNSUPPORTED, "Unsupported method")
             }
+            is CitizenSdkFlutterCodec.Request.InitializeWallet -> complete(
+                session,
+                request,
+                result,
+                walletFlow.launch(session.sdk, activity, request).thenCompose { session.sdk.getWalletState() },
+            ) { listOf(CitizenSdkFlutterCodec.walletState(it)) }
+            is CitizenSdkFlutterCodec.Request.ImportColdAccountWithUi -> complete(
+                session,
+                request,
+                result,
+                walletFlow.launch(session.sdk, activity, request).thenCompose { session.sdk.getWalletState() },
+            ) { listOf(CitizenSdkFlutterCodec.walletState(it)) }
             is CitizenSdkFlutterCodec.Request.Account -> when (request.method) {
                 "viewAccountPrivateKey" -> complete(
                     session, request, result,

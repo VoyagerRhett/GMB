@@ -309,6 +309,29 @@ class CitizenSdkWalletFlowCoordinator private constructor(
         }
     }
 
+    /** 冷账户导入只提交公开账户事实；成功终态不伪造热钱包 profile。 */
+    @JvmSynthetic
+    internal fun acceptColdImport(future: CompletableFuture<CitizenWalletState>) {
+        synchronized(operationGate) {
+            check(!irreversibleInFlight && pendingTerminal == null) {
+                "a wallet mutation is already attached to this flow"
+            }
+            irreversibleAccepted = true
+            irreversibleInFlight = true
+        }
+        future.whenComplete { _, failure ->
+            MAIN.post {
+                val result = if (failure == null) {
+                    CitizenSdkWalletFlowContract.Result.Completed(null)
+                } else {
+                    CitizenSdkWalletFlowContract.Result.Failed(unwrapWalletFailure(failure))
+                }
+                synchronized(operationGate) { irreversibleInFlight = false }
+                deliverTerminal(result)
+            }
+        }
+    }
+
     private fun deliverTerminal(result: CitizenSdkWalletFlowContract.Result) {
         val (activity, waitForRecreation) = synchronized(operationGate) {
             pendingTerminal = result

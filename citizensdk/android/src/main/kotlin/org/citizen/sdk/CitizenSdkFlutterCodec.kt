@@ -37,7 +37,7 @@ internal object CitizenSdkFlutterCodec {
         "getStorageKeysPaged", "callRuntimeApi",
         "getSystemEvents", "exportState", "importState",
         "getGenesisHash", "getAccountBalance", "getAccountBalances", "getAccountNonce", "getFeeSnapshot", "getWalletProfile", "viewAccountPrivateKey",
-        "getWalletState", "importColdAccountId", "importColdAccountSs58",
+        "getWalletState", "initializeWallet", "importColdAccountWithUi", "importColdAccountId", "importColdAccountSs58",
         "reorderWalletAccountsWithoutDefaultChange", "renameAccount", "deleteAccount",
         "createWallet", "importWallet", "addWalletAccounts", "setActiveWalletAccount",
         "renameWalletAccount", "deleteWalletAccount", "deleteWallet",
@@ -127,6 +127,17 @@ internal object CitizenSdkFlutterCodec {
             override val sessionId: String,
             override val requestSequence: Long,
             val wordCount: Int,
+        ) : SessionRequest
+        data class InitializeWallet(
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val wordCount: Int,
+            val text: List<String>,
+        ) : SessionRequest
+        data class ImportColdAccountWithUi(
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val walletColdAccountText: String,
         ) : SessionRequest
         data class AddWalletAccounts(
             override val sessionId: String,
@@ -255,6 +266,8 @@ internal object CitizenSdkFlutterCodec {
         is Request.StorageKeysPage -> "getStorageKeysPaged"
         is Request.RuntimeApi -> "callRuntimeApi"
         is Request.ImportState -> "importState"
+        is Request.InitializeWallet -> "initializeWallet"
+        is Request.ImportColdAccountWithUi -> "importColdAccountWithUi"
         is Request.CreateWallet -> "createWallet"
         is Request.AddWalletAccounts -> "addWalletAccounts"
         is Request.RenameWalletAccount -> request.method
@@ -418,6 +431,30 @@ internal object CitizenSdkFlutterCodec {
                         sequence,
                     )
                     Request.CreateWallet(sessionId, sequence, wordCount)
+                }
+                "initializeWallet" -> {
+                    length(9)
+                    val wordCount = exactInt(tuple[3], "wordCount")
+                    if (wordCount !in listOf(12, 18, 24)) badRequest(
+                        "wordCount must be 12, 18 or 24", sessionId, sequence,
+                    )
+                    val text = (4..8).map { index ->
+                        val value = string(tuple[index], "wallet initialization text", 1, 768)
+                        if (value != value.trim() ||
+                            value.codePointCount(0, value.length) !in 1..256 ||
+                            value.any { character -> character.code <= 0x1f || character.code == 0x7f }
+                        ) badRequest("wallet initialization text is invalid", sessionId, sequence)
+                        value
+                    }
+                    Request.InitializeWallet(sessionId, sequence, wordCount, text)
+                }
+                "importColdAccountWithUi" -> {
+                    length(4)
+                    val text = string(tuple[3], "walletColdAccountText", 1, 768)
+                    if (text != text.trim() || text.codePointCount(0, text.length) !in 1..256 ||
+                        text.any { character -> character.code <= 0x1f || character.code == 0x7f }
+                    ) badRequest("wallet cold account text is invalid", sessionId, sequence)
+                    Request.ImportColdAccountWithUi(sessionId, sequence, text)
                 }
                 "addWalletAccounts" -> {
                     length(4)

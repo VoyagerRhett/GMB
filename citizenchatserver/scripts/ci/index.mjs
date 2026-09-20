@@ -207,11 +207,11 @@ function verifyCandidate(root, sourceSHA) {
   const upstream = JSON.parse(readFileSync(join(root, 'upstream-release.json'), 'utf8'));
   const upstreamKeys = [
     'git_commit_sha', 'instance_source_sha', 'product_id', 'release_asset_sha256',
-    'release_tag', 'repository',
+    'repository', 'version_tag',
   ];
   if (JSON.stringify(Object.keys(upstream).sort()) !== JSON.stringify(upstreamKeys)
       || upstream.repository !== upstreamRepository || upstream.product_id !== 'tatachatserver'
-      || !/^tatachatserver-cloudflare-v\d+\.\d{1,2}\.\d{1,2}$/.test(upstream.release_tag)
+      || !/^tatachatserver-cloudflare-v\d+\.\d{1,2}\.\d{1,2}$/.test(upstream.version_tag)
       || !/^[0-9a-f]{40}$/.test(upstream.git_commit_sha)
       || !/^[0-9a-f]{40}$/.test(upstream.instance_source_sha)
       || !/^[0-9a-f]{64}$/.test(upstream.release_asset_sha256)) {
@@ -253,7 +253,7 @@ function action(values) {
     cpSync(findUnique(extracted, 'schema.sql'), join(output, 'schema.sql'), { force: true });
     writeFileSync(join(output, 'upstream-release.json'), `${JSON.stringify({
       repository: upstreamRepository, product_id: 'tatachatserver',
-      release_tag: release.tag_name, git_commit_sha: upstreamSourceSHA,
+      version_tag: release.tag_name, git_commit_sha: upstreamSourceSHA,
       release_asset_sha256: sha256(archive),
       instance_source_sha: sourceSHA,
     }, null, 2)}\n`);

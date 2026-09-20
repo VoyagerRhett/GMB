@@ -28,6 +28,7 @@ constexpr int kAccountIndices = 107;
 constexpr int kSuggestionApply = 108;
 constexpr int kMnemonicState = 109;
 constexpr int kPrivateKey = 110;
+constexpr int kInitializationMode = 111;
 constexpr int kAction = IDOK;
 constexpr UINT kMnemonicChanged = WM_APP + 31;
 constexpr std::size_t kInputUnits = input_limits::kMaximumUnlockPasswordBytes;
@@ -412,9 +413,11 @@ struct WalletWindow::Impl final {
   HWND mnemonic_state{};
   HWND word_count{};
   HWND next_account{};
+  HWND initialization_mode{};
   HWND account_indices{};
   HWND backup{};
   HWND action_button{};
+  HWND cancel_button{};
   HINSTANCE module{};
   std::wstring class_name;
   std::unique_ptr<SensitiveInput> mnemonic;
@@ -430,6 +433,7 @@ struct WalletWindow::Impl final {
   Action action;
   Action cancel;
   citizensdk_wallet_flow_kind_t kind{};
+  std::vector<std::wstring> initialization_text;
   bool registered{};
   bool destroying{};
   bool owner_disabled{};
@@ -515,6 +519,27 @@ struct WalletWindow::Impl final {
           EnableWindow(self->account_indices, next ? FALSE : TRUE);
           return 0;
         }
+        if (identity == kInitializationMode && HIWORD(wp) == CBN_SELCHANGE) {
+          const LRESULT selected = SendMessageW(self->initialization_mode, CB_GETCURSEL, 0, 0);
+          if (selected == 0) {
+            self->kind = CITIZENSDK_WALLET_FLOW_CREATE;
+            ShowWindow(static_cast<HWND>(self->mnemonic->native_handle()), SW_HIDE);
+            ShowWindow(self->word_count, SW_SHOW); ShowWindow(static_cast<HWND>(self->password->native_handle()), SW_SHOW);
+            SetWindowTextW(self->action_button, L"创建钱包");
+          } else if (selected == 1) {
+            self->kind = CITIZENSDK_WALLET_FLOW_IMPORT;
+            ShowWindow(static_cast<HWND>(self->mnemonic->native_handle()), SW_SHOW);
+            ShowWindow(self->word_count, SW_HIDE); ShowWindow(static_cast<HWND>(self->password->native_handle()), SW_SHOW);
+            SetWindowTextW(self->action_button, L"确认导入");
+          } else {
+            self->kind = CITIZENSDK_WALLET_FLOW_INITIALIZE;
+            ShowWindow(static_cast<HWND>(self->mnemonic->native_handle()), SW_SHOW);
+            ShowWindow(self->word_count, SW_HIDE); ShowWindow(static_cast<HWND>(self->password->native_handle()), SW_HIDE);
+            SetWindowTextW(self->status, self->initialization_text.at(4).c_str());
+            SetWindowTextW(self->action_button, L"确认导入冷钱包");
+          }
+          return 0;
+        }
         if (identity == kSuggestionApply && self->mnemonic && self->suggestions) {
           const LRESULT selected = SendMessageW(self->suggestions, CB_GETCURSEL, 0, 0);
           if (selected != CB_ERR) {
@@ -574,7 +599,7 @@ struct WalletWindow::Impl final {
         self->suggestion_apply = nullptr;
         self->mnemonic_state = nullptr;
         self->word_count = nullptr;
-        self->next_account = nullptr; self->account_indices = nullptr;
+        self->next_account = nullptr; self->initialization_mode = nullptr; self->account_indices = nullptr;
         self->backup = nullptr; self->action_button = nullptr;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         self->restore_owner();
@@ -594,6 +619,8 @@ WalletWindow::WalletWindow(WindowLease parent, const ValidatedWalletRequest &req
   require(impl_->parent.valid(), CITIZENSDK_ERROR_UNAVAILABLE,
           "CitizenSDK parent window was destroyed");
   impl_->kind = request.kind;
+  for (const auto &text : request.initialization_text)
+    impl_->initialization_text.push_back(public_text(text));
   impl_->private_key_mode = request.account_id.has_value();
   impl_->action = std::move(action); impl_->cancel = std::move(cancel);
   impl_->module = module_for(Impl::procedure);
@@ -601,8 +628,9 @@ WalletWindow::WalletWindow(WindowLease parent, const ValidatedWalletRequest &req
   register_class(impl_->class_name, impl_->module, Impl::procedure);
   impl_->registered = true;
   const wchar_t *window_title = impl_->private_key_mode ? L"查看私钥" :
-      request.kind == CITIZENSDK_WALLET_FLOW_CREATE ? L"创建钱包" :
-      request.kind == CITIZENSDK_WALLET_FLOW_IMPORT ? L"输入助记词" : L"添加账户";
+      (request.kind == CITIZENSDK_WALLET_FLOW_CREATE || request.kind == CITIZENSDK_WALLET_FLOW_INITIALIZE) ? L"创建钱包" :
+      request.kind == CITIZENSDK_WALLET_FLOW_IMPORT ? L"输入助记词" :
+      request.kind == CITIZENSDK_WALLET_FLOW_IMPORT_COLD_ACCOUNT ? L"导入冷钱包" : L"添加账户";
   impl_->hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, impl_->class_name.c_str(), window_title,
       WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 620, 800,
       static_cast<HWND>(impl_->parent.get()), nullptr, impl_->module, impl_.get());
@@ -652,16 +680,14 @@ WalletWindow::WalletWindow(WindowLease parent, const ValidatedWalletRequest &req
   control(impl_->hwnd, impl_->module, L"STATIC", L"助记词数量", SS_LEFT, 0, 20, 370, 120, 24);
   impl_->word_count = control(impl_->hwnd, impl_->module, L"COMBOBOX", L"",
       CBS_DROPDOWNLIST | WS_TABSTOP, kWordCount, 150, 365, 120, 120);
-  const std::vector<const wchar_t *> counts = request.kind == CITIZENSDK_WALLET_FLOW_CREATE
-      ? std::vector<const wchar_t *>{L"12 · 推荐", L"24"}
+  const std::vector<const wchar_t *> counts = request.kind == CITIZENSDK_WALLET_FLOW_CREATE ||
+          request.kind == CITIZENSDK_WALLET_FLOW_INITIALIZE
+      ? std::vector<const wchar_t *>{L"12 · 推荐", L"18", L"24"}
       : std::vector<const wchar_t *>{L"12", L"18", L"24"};
   for (const wchar_t *count : counts)
     SendMessageW(impl_->word_count, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(count));
-  const uint32_t selected_words = request.kind == CITIZENSDK_WALLET_FLOW_CREATE &&
-      request.word_count == 18 ? 12 : request.word_count == 0 ? 12 : request.word_count;
-  const int selected = request.kind == CITIZENSDK_WALLET_FLOW_CREATE
-      ? selected_words == 12 ? 0 : selected_words == 24 ? 1 : -1
-      : selected_words == 12 ? 0 : selected_words == 18 ? 1 : selected_words == 24 ? 2 : -1;
+  const uint32_t selected_words = request.word_count == 0 ? 12 : request.word_count;
+  const int selected = selected_words == 12 ? 0 : selected_words == 18 ? 1 : selected_words == 24 ? 2 : -1;
   require(selected >= 0, CITIZENSDK_ERROR_INVALID_ARGUMENT,
           "CitizenSDK wallet word count is unsupported");
   SendMessageW(impl_->word_count, CB_SETCURSEL, selected, 0);
@@ -672,6 +698,11 @@ WalletWindow::WalletWindow(WindowLease parent, const ValidatedWalletRequest &req
   impl_->next_account = control(impl_->hwnd, impl_->module, L"BUTTON",
       L"自动添加下一个可用账户索引", BS_AUTOCHECKBOX | WS_TABSTOP,
       kNextAccount, 20, 495, 570, 30);
+  impl_->initialization_mode = control(impl_->hwnd, impl_->module, L"COMBOBOX", L"",
+      CBS_DROPDOWNLIST | WS_TABSTOP, kInitializationMode, 20, 495, 570, 120);
+  for (const wchar_t *mode : {L"创建热钱包", L"导入热钱包", L"导入冷钱包"})
+    SendMessageW(impl_->initialization_mode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(mode));
+  SendMessageW(impl_->initialization_mode, CB_SETCURSEL, 0, 0);
   impl_->account_indices = control(impl_->hwnd, impl_->module, L"EDIT", L"",
       WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, kAccountIndices, 20, 530, 570, 34);
   std::wstring initial_indices;
@@ -684,8 +715,9 @@ WalletWindow::WalletWindow(WindowLease parent, const ValidatedWalletRequest &req
       BS_AUTOCHECKBOX | WS_TABSTOP, kBackup, 20, 595, 570, 30);
   impl_->action_button = control(impl_->hwnd, impl_->module, L"BUTTON", L"", BS_DEFPUSHBUTTON | WS_TABSTOP,
       kAction, 340, 680, 250, 40);
-  control(impl_->hwnd, impl_->module, L"BUTTON", L"取消", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL, 20, 680, 130, 40);
-  if (request.kind == CITIZENSDK_WALLET_FLOW_CREATE) {
+  impl_->cancel_button = control(impl_->hwnd, impl_->module, L"BUTTON", L"取消", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL, 20, 680, 130, 40);
+  if (request.kind == CITIZENSDK_WALLET_FLOW_CREATE ||
+      request.kind == CITIZENSDK_WALLET_FLOW_INITIALIZE) {
     std::wstring host_application = L"当前应用";
     const HWND owner = static_cast<HWND>(impl_->parent.get());
     const int title_size = owner == nullptr ? 0 : GetWindowTextLengthW(owner);
@@ -700,8 +732,10 @@ WalletWindow::WalletWindow(WindowLease parent, const ValidatedWalletRequest &req
         host_application = L"当前应用";
       }
     }
-    const std::wstring intro = L"钱包账户是 " + host_application +
-        L" 唯一的账户，请务必妥善保存助记词和钱包密码（如设置），若丢失或遗忘将永久无法找回。";
+    const std::wstring intro = request.kind == CITIZENSDK_WALLET_FLOW_INITIALIZE
+        ? impl_->initialization_text.at(0) + L"\r\n\r\n" + impl_->initialization_text.at(1) +
+              L"\r\n\r\n" + impl_->initialization_text.at(2)
+        : L"请务必妥善保存助记词和钱包密码（如设置），若丢失或遗忘将永久无法找回。";
     SetWindowTextW(impl_->status, intro.c_str());
     SetWindowTextW(impl_->action_button, L"创建钱包");
     ShowWindow(static_cast<HWND>(impl_->mnemonic->native_handle()), SW_HIDE);
@@ -710,19 +744,34 @@ WalletWindow::WalletWindow(WindowLease parent, const ValidatedWalletRequest &req
     ShowWindow(impl_->suggestion_apply, SW_HIDE);
   } else {
     SetWindowTextW(impl_->status, request.kind == CITIZENSDK_WALLET_FLOW_IMPORT ? L"" :
+        request.kind == CITIZENSDK_WALLET_FLOW_IMPORT_COLD_ACCOUNT
+            ? impl_->initialization_text.at(0).c_str() :
         L"无根设备不保存助记词或密码，追加账户需重新录入两者校验归属。");
     SetWindowTextW(impl_->action_button,
+        request.kind == CITIZENSDK_WALLET_FLOW_IMPORT_COLD_ACCOUNT
+            ? L"确认导入冷钱包" :
         request.kind == CITIZENSDK_WALLET_FLOW_IMPORT ? L"确认导入" : L"确认添加");
+    if (request.kind == CITIZENSDK_WALLET_FLOW_IMPORT_COLD_ACCOUNT) {
+      ShowWindow(static_cast<HWND>(impl_->password->native_handle()), SW_HIDE);
+      ShowWindow(impl_->mnemonic_state, SW_HIDE);
+      ShowWindow(impl_->suggestions, SW_HIDE);
+      ShowWindow(impl_->suggestion_apply, SW_HIDE);
+    }
   }
   if (request.kind != CITIZENSDK_WALLET_FLOW_ADD_ACCOUNTS) {
     ShowWindow(impl_->next_account, SW_HIDE);
     ShowWindow(impl_->account_indices, SW_HIDE);
   }
+  if (request.kind != CITIZENSDK_WALLET_FLOW_INITIALIZE)
+    ShowWindow(impl_->initialization_mode, SW_HIDE);
+  else
+    ShowWindow(impl_->cancel_button, SW_HIDE);
   ShowWindow(impl_->backup, SW_HIDE);
   }
 }
 WalletWindow::~WalletWindow() = default;
 bool WalletWindow::on_ui_thread() const noexcept { return impl_->parent.on_ui_thread(); }
+citizensdk_wallet_flow_kind_t WalletWindow::flow_kind() const noexcept { return impl_->kind; }
 void WalletWindow::show() {
   require(on_ui_thread() && impl_->hwnd != nullptr && impl_->parent.valid(),
           CITIZENSDK_ERROR_UNAVAILABLE, "CitizenSDK wallet window is unavailable");
@@ -735,7 +784,8 @@ void WalletWindow::show() {
     SetFocus(impl_->action_button);
     return;
   }
-  SetFocus(static_cast<HWND>((impl_->kind == CITIZENSDK_WALLET_FLOW_CREATE ?
+  SetFocus(static_cast<HWND>(((impl_->kind == CITIZENSDK_WALLET_FLOW_CREATE ||
+      impl_->kind == CITIZENSDK_WALLET_FLOW_INITIALIZE) ?
       impl_->password : impl_->mnemonic)->native_handle()));
 }
 void WalletWindow::destroy() noexcept { impl_->destroy(); }
@@ -773,10 +823,10 @@ void WalletWindow::show_prepared_mnemonic(const SensitiveBuffer &mnemonic) {
   ShowWindow(impl_->next_account, SW_HIDE);
   ShowWindow(impl_->account_indices, SW_HIDE);
   SetWindowTextW(impl_->action_button, L"我已备份");
-  SetWindowTextW(impl_->status,
-      L"公民不保存助记词，关闭本弹窗后将无法再次显示。\r\n"
-      L"请立即手抄备份，或在「公民钱包」中妥善保管——这是恢复钱包与追加其他账户的唯一凭证。"
-      L"设置过钱包密码时，还必须单独备份密码。\r\n不支持复制，不支持截屏。");
+  const std::wstring backup_text = impl_->initialization_text.size() == 5
+      ? impl_->initialization_text[3]
+      : L"SDK 不保存助记词，关闭后将无法再次显示。请立即离线手抄备份；设置过钱包密码时，还必须单独备份密码。不支持复制，不支持截屏。";
+  SetWindowTextW(impl_->status, backup_text.c_str());
   EnableWindow(impl_->action_button, TRUE);
   impl_->busy = false;
 }

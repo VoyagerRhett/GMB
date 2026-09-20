@@ -69,6 +69,54 @@ void main() {
     await sdk.close();
   });
 
+  test('唯一初始化与冷账户界面只传非秘密文案并返回统一冷热目录', () async {
+    final sdk = await CitizenSdk.open();
+    final initialized = await sdk.wallet.initialize(
+      wordCount: CitizenWalletWordCount.words18,
+      content: _initializationContent(),
+    );
+    final importedCold = await sdk.wallet.importColdAccountWithUi(
+      walletColdAccountText: '冷账户只保存公开账户标识',
+    );
+
+    expect(initialized.accounts, isNotEmpty);
+    expect(importedCold.accounts.last.signMode, CitizenWalletSignMode.cold);
+    expect(platform.argumentsByMethod['initializeWallet'], <Object?>[
+      1,
+      'session-a',
+      1,
+      18,
+      '账户角色说明',
+      '授权说明',
+      '完成说明',
+      '备份说明',
+      '冷账户说明',
+    ]);
+    expect(platform.argumentsByMethod['importColdAccountWithUi']!.last,
+        '冷账户只保存公开账户标识');
+    await sdk.close();
+  });
+
+  test('初始化展示文字拒绝空值、控制字符和超限输入', () {
+    for (final invalid in <String>[
+      '',
+      ' 含空格',
+      '含\n换行',
+      List<String>.filled(257, '字').join(),
+    ]) {
+      expect(
+        () => CitizenWalletInitializationContent(
+          walletAccountRoleText: invalid,
+          walletAuthorizationText: '授权',
+          walletCompletionText: '完成',
+          walletBackupText: '备份',
+          walletColdAccountText: '冷账户',
+        ),
+        throwsArgumentError,
+      );
+    }
+  });
+
   test('原生输入合同拒绝十五词、二十一词及任意其他数量', () {
     const codec = CitizenSdkFlutterCodec();
     for (final count in [0, 11, 15, 21, 25]) {
@@ -345,6 +393,10 @@ final class _WalletPlatform implements CitizenSdkPlatform {
       'addWalletAccounts' => <Object?>[_profile('imported', 3)],
       'signWalletPayload' => <Object?>[Uint8List(64)],
       'getWalletState' => <Object?>[_state(includeCold: false, revision: 1)],
+      'initializeWallet' => <Object?>[_state(includeCold: false, revision: 2)],
+      'importColdAccountWithUi' => <Object?>[
+        _state(includeCold: true, revision: 3),
+      ],
       'importColdAccountId' => <Object?>[
         _state(includeCold: true, revision: 2),
       ],
@@ -367,6 +419,15 @@ final class _WalletPlatform implements CitizenSdkPlatform {
 
   Future<void> dispose() => _events.close();
 }
+
+CitizenWalletInitializationContent _initializationContent() =>
+    CitizenWalletInitializationContent(
+      walletAccountRoleText: '账户角色说明',
+      walletAuthorizationText: '授权说明',
+      walletCompletionText: '完成说明',
+      walletBackupText: '备份说明',
+      walletColdAccountText: '冷账户说明',
+    );
 
 List<Object?> _profile(String origin, int accountCount) {
   final accounts = List<List<Object?>>.generate(accountCount, (index) {

@@ -18,14 +18,29 @@ class CitizenSdkFlutterWalletFlowTest {
             ) as CitizenSdkWalletFlowContract.Request.Create
             assertEquals(count, create.wordCount)
         }
+        val initialize = CitizenSdkFlutterWalletFlow.contractRequest(
+            CitizenSdkFlutterCodec.Request.InitializeWallet(
+                "session", 2, 18,
+                listOf("账户角色", "授权说明", "完成说明", "备份说明", "冷账户说明"),
+            ),
+        ) as CitizenSdkWalletFlowContract.Request.Initialize
+        assertEquals(18, initialize.wordCount)
+        assertEquals("冷账户说明", initialize.content.walletColdAccountText)
+
+        val cold = CitizenSdkFlutterWalletFlow.contractRequest(
+            CitizenSdkFlutterCodec.Request.ImportColdAccountWithUi(
+                "session", 3, "只接受账户码",
+            ),
+        ) as CitizenSdkWalletFlowContract.Request.ImportColdAccount
+        assertEquals("只接受账户码", cold.walletColdAccountText)
 
         val imported = CitizenSdkFlutterWalletFlow.contractRequest(
-            CitizenSdkFlutterCodec.Request.Empty("importWallet", "session", 2),
+            CitizenSdkFlutterCodec.Request.Empty("importWallet", "session", 4),
         )
         assertTrue(imported is CitizenSdkWalletFlowContract.Request.Import)
 
         val add = CitizenSdkFlutterWalletFlow.contractRequest(
-            CitizenSdkFlutterCodec.Request.AddWalletAccounts("session", 3, listOf(2, 7)),
+            CitizenSdkFlutterCodec.Request.AddWalletAccounts("session", 5, listOf(2, 7)),
         ) as CitizenSdkWalletFlowContract.Request.AddAccounts
         assertEquals(listOf(2, 7), add.indices)
     }

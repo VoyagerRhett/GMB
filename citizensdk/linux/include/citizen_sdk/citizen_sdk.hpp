@@ -322,6 +322,21 @@ class Host final {
                                  ? nullptr : request.account_indices.data();
     native.account_index_count =
         static_cast<uint32_t>(request.account_indices.size());
+    if (!request.initialization_text.empty()) {
+      if (request.kind == WalletFlowKind::ImportColdAccount &&
+          request.initialization_text.size() == 1) {
+        native.wallet_cold_account_text = bytes_view(request.initialization_text[0]);
+      } else if (request.initialization_text.size() != 5) {
+        throw Error(CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                    "wallet initialization requires five presentation texts");
+      } else {
+        native.wallet_account_role_text = bytes_view(request.initialization_text[0]);
+        native.wallet_authorization_text = bytes_view(request.initialization_text[1]);
+        native.wallet_completion_text = bytes_view(request.initialization_text[2]);
+        native.wallet_backup_text = bytes_view(request.initialization_text[3]);
+        native.wallet_cold_account_text = bytes_view(request.initialization_text[4]);
+      }
+    }
     auto state = std::make_unique<detail::WalletCompletionContext>();
     state->completion = std::move(completion);
     citizensdk_wallet_flow_handle_t flow = 0;

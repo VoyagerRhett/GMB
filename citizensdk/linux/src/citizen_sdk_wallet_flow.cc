@@ -139,7 +139,9 @@ void WalletFlow::action() {
       if (code != CITIZENSDK_OK) end_private_key_view(true, code);
       return;
     }
-    if (request_.kind == CITIZENSDK_WALLET_FLOW_CREATE) {
+    const auto kind = window_->flow_kind();
+    request_.kind = kind;
+    if (kind == CITIZENSDK_WALLET_FLOW_CREATE) {
       citizensdk_prepared_wallet_handle_t prepared = 0;
       {
         std::lock_guard<std::mutex> guard(prepared_lock_);
@@ -147,6 +149,9 @@ void WalletFlow::action() {
       }
       if (prepared == 0) begin_prepare();
       else commit_prepared();
+    } else if (kind == CITIZENSDK_WALLET_FLOW_INITIALIZE ||
+               kind == CITIZENSDK_WALLET_FLOW_IMPORT_COLD_ACCOUNT) {
+      begin_cold_import();
     } else {
       begin_import_or_add();
     }
@@ -563,6 +568,27 @@ void WalletFlow::begin_import_or_add() {
       return;
     }
     show_error(code, "无法读取钱包账户；助记词与钱包密码已清除，请重新输入");
+  }
+}
+
+void WalletFlow::begin_cold_import() {
+  SensitiveBuffer address = window_->take_mnemonic();
+  window_->set_busy("正在导入冷钱包公开账户…");
+  irreversible_.store(true); operation_in_flight_.store(true);
+  const auto self = shared_from_this(); citizensdk_request_id_t request = 0;
+  const std::string name = "冷钱包";
+  const citizensdk_error_code_t code = host_->submit_private(
+      [&](citizensdk_request_id_t *out) {
+        return citizensdk_import_cold_account_ss58(
+            host_->sdk(), view(address),
+            {reinterpret_cast<const uint8_t *>(name.data()), name.size()}, out);
+      }, [self](citizensdk_result_handle_t result) noexcept { self->receive_terminal(result); },
+      &request);
+  address.clear();
+  if (code != CITIZENSDK_OK) {
+    operation_in_flight_.store(false); irreversible_.store(false);
+    if (request != 0) finish(CITIZENSDK_WALLET_FLOW_FAILED, code);
+    else show_error(code, "冷钱包公开账户导入失败，请检查地址后重试");
   }
 }
 

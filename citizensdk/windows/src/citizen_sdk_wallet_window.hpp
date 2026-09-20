@@ -57,6 +57,7 @@ class WalletWindow final {
   bool backup_confirmed() const noexcept;
   // 这些选择属于 SDK 安全窗口，不增加 Flutter/C 方法或秘密字段。
   citizensdk_wallet_word_count_t word_count() const;
+  citizensdk_wallet_flow_kind_t flow_kind() const noexcept;
   bool use_next_account() const noexcept;
   std::vector<uint32_t> account_indices() const;
   SensitiveBuffer take_mnemonic();
