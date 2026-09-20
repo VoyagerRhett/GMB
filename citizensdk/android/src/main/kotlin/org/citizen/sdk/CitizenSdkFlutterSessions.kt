@@ -61,6 +61,26 @@ internal fun citizenSdkFlutterCloseLifecycle(
     return prerequisite.thenRun { dispose() }
 }
 
+private const val CITIZEN_SDK_OPEN_INVALID_STATE =
+    "CitizenSDK operation is invalid in the current state"
+
+/** Open没有业务输入；只允许单行有界宿主不变量穿过Flutter边界，其他内容仍使用通用文案。 */
+internal fun citizenSdkFlutterOpenInvalidState(message: String?): String {
+    val value = message ?: return CITIZEN_SDK_OPEN_INVALID_STATE
+    if (value.toByteArray(Charsets.UTF_8).size !in 1..512 ||
+        value.any { it.code < 0x20 || it.code == 0x7f }
+    ) return CITIZEN_SDK_OPEN_INVALID_STATE
+    return value
+}
+
+/** Open宿主错误同样没有业务输入；只暴露受限类型名与单行消息。 */
+internal fun citizenSdkFlutterOpenHostFailure(error: Throwable): String {
+    val type = error.javaClass.simpleName.takeIf { it.matches(Regex("[A-Za-z][A-Za-z0-9]{0,127}")) }
+        ?: return "CitizenSDK host failure"
+    val message = citizenSdkFlutterOpenInvalidState(error.message)
+    return "$type: $message"
+}
+
 internal fun interface CitizenSdkFlutterRetryScheduler {
     fun schedule(delayMillis: Long, task: () -> Unit)
 }
@@ -805,9 +825,20 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
             )
             is IllegalStateException -> CitizenSdkException(
                 CitizenSdkErrorCode.INVALID_STATE,
-                "CitizenSDK operation is invalid in the current state",
+                if (request is CitizenSdkFlutterCodec.Request.Open) {
+                    citizenSdkFlutterOpenInvalidState(cause.message)
+                } else {
+                    CITIZEN_SDK_OPEN_INVALID_STATE
+                },
             )
-            else -> CitizenSdkException(CitizenSdkErrorCode.INTERNAL, "CitizenSDK host failure")
+            else -> CitizenSdkException(
+                CitizenSdkErrorCode.INTERNAL,
+                if (request is CitizenSdkFlutterCodec.Request.Open) {
+                    citizenSdkFlutterOpenHostFailure(cause)
+                } else {
+                    "CitizenSDK host failure"
+                },
+            )
         }
         fail(
             result,

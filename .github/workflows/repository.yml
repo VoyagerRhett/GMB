@@ -2723,7 +2723,9 @@ jobs:
     timeout-minutes: 120
     permissions:
       actions: write
-      contents: read
+      attestations: write
+      contents: write
+      id-token: write
     env:
       CI: true
       WRANGLER_SEND_METRICS: false
@@ -2770,6 +2772,14 @@ jobs:
       env:
         GH_TOKEN: "${{ github.token }}"
       run: node "$GITHUB_WORKSPACE/citizenchatserver/scripts/release/package/execute.mjs" workflow-step 2
+    - name: 签署公民聊天服务单一正式包来源
+      uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+      with:
+        subject-path: "${{ runner.temp }}/citizenchatserver-release/citizenchatserver-cloudflare.tar.gz"
+    - shell: bash
+      env:
+        GH_TOKEN: "${{ github.token }}"
+      run: node "$GITHUB_WORKSPACE/citizenchatserver/scripts/release/package/execute.mjs" workflow-step 3
     if: "${{ inputs.pipeline == 'gmb.citizenchatserver.cloudflare.release' }}"
     needs: validate_pipeline
   flow_036:

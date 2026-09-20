@@ -45,4 +45,4 @@ light-base/src/sync_service/standalone.rs
 state import/export 合同测试，并证明 legacy `libsmoldot` 的库名、回调及全部既有导出未变。
 
 临时 patch、上游 checkout 和构建目录使用后全部删除，不得进入 Release。完整产品来源分类
-见 `../../docs/SOURCE_PROVENANCE.md`。
+见塔塔文档库中的 CitizenSDK 来源记录。

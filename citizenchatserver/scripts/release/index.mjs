@@ -8,7 +8,7 @@ import {
   cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
   readdirSync, rmSync, writeFileSync,
 } from 'node:fs';
-import { basename, join, relative, resolve, sep } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
@@ -173,43 +173,21 @@ function assertChecksumClosure(actual, expected, label) {
   }
 }
 
-/// 正式三件套的 manifest 与外部 SHA256SUMS 位于归档外，避免把归档自身哈希写入归档形成
-/// 不可解的自引用。归档内只保存候选和候选自己的 SHA256SUMS，两层闭集分别验真。
-export function verifyPackagedRelease({ archive, manifestPath, sumsPath }) {
-  for (const path of [archive, manifestPath, sumsPath]) {
-    if (!existsSync(path) || !lstatSync(path).isFile() || lstatSync(path).isSymbolicLink()) {
-      fail('CitizenChatServer Release 三件套缺失或类型无效');
-    }
+/// 正式分发只有一个归档；manifest 与 SHA256SUMS 只存在于归档内部。
+export function verifyPackagedRelease({ archive }) {
+  if (!existsSync(archive) || !lstatSync(archive).isFile() || lstatSync(archive).isSymbolicLink()) {
+    fail('CitizenChatServer Release 单包缺失或类型无效');
   }
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-  const manifestKeys = [
-    'archive_sha256', 'files', 'git_commit_sha', 'platform', 'product_id', 'schema',
-    'software_version', 'upstream_git_commit_sha', 'upstream_product_id',
-    'upstream_release_tag', 'upstream_repository',
-  ];
-  const archiveSHA256 = sha256(archive);
-  if (JSON.stringify(Object.keys(manifest).sort()) !== JSON.stringify(manifestKeys)
-      || manifest.schema !== 1 || manifest.product_id !== 'citizenchatserver'
-      || manifest.platform !== 'cloudflare'
-      || !/^\d+\.\d+\.\d+$/.test(manifest.software_version)
-      || !/^[0-9a-f]{40}$/.test(manifest.git_commit_sha)
-      || manifest.upstream_repository !== 'VoyagerRhett/TATA'
-      || manifest.upstream_product_id !== 'tatachatserver'
-      || !/^tatachatserver-cloudflare-v\d+\.\d+\.\d+$/.test(manifest.upstream_release_tag)
-      || !/^[0-9a-f]{40}$/.test(manifest.upstream_git_commit_sha)
-      || manifest.archive_sha256 !== archiveSHA256
-      || !Array.isArray(manifest.files) || !manifest.files.length) {
-    fail('CitizenChatServer Release manifest 无效');
+  let rows;
+  let detailRows;
+  try {
+    rows = execFileSync('tar', ['-tzf', archive], { encoding: 'utf8' })
+      .trim().split('\n').filter(Boolean);
+    detailRows = execFileSync('tar', ['-tvzf', archive], { encoding: 'utf8' })
+      .trim().split('\n').filter(Boolean);
+  } catch {
+    fail('CitizenChatServer Release 归档格式无效');
   }
-  assertChecksumClosure(checksumMap(sumsPath), new Map([
-    [basename(archive), archiveSHA256],
-    ['release-manifest.json', sha256(manifestPath)],
-  ]), 'Release 外部 SHA256SUMS');
-
-  const rows = execFileSync('tar', ['-tzf', archive], { encoding: 'utf8' })
-    .trim().split('\n').filter(Boolean);
-  const detailRows = execFileSync('tar', ['-tvzf', archive], { encoding: 'utf8' })
-    .trim().split('\n').filter(Boolean);
   if (!rows.length || rows.some((path) => path.startsWith('/') || path.split('/').includes('..'))
       || detailRows.length !== rows.length || detailRows.some((line) => line[0] !== '-')) {
     fail('CitizenChatServer Release 归档路径或文件类型无效');
@@ -219,6 +197,26 @@ export function verifyPackagedRelease({ archive, manifestPath, sumsPath }) {
     const extracted = join(temporary, 'candidate');
     mkdirSync(extracted, { mode: 0o700 });
     execFileSync('tar', ['-xzf', archive, '-C', extracted]);
+    const manifestPath = join(extracted, 'release-manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    const manifestKeys = [
+      'ci_run_id', 'files', 'git_commit_sha', 'platform', 'product_id', 'schema',
+      'software_version', 'upstream_git_commit_sha', 'upstream_product_id',
+      'upstream_release_tag', 'upstream_repository',
+    ];
+    if (JSON.stringify(Object.keys(manifest).sort()) !== JSON.stringify(manifestKeys)
+        || manifest.schema !== 1 || manifest.product_id !== 'citizenchatserver'
+        || manifest.platform !== 'cloudflare'
+        || !Number.isSafeInteger(manifest.ci_run_id) || manifest.ci_run_id <= 0
+        || !/^\d+\.\d+\.\d+$/.test(manifest.software_version)
+        || !/^[0-9a-f]{40}$/.test(manifest.git_commit_sha)
+        || manifest.upstream_repository !== 'VoyagerRhett/TATA'
+        || manifest.upstream_product_id !== 'tatachatserver'
+        || !/^tatachatserver-cloudflare-v\d+\.\d+\.\d+$/.test(manifest.upstream_release_tag)
+        || !/^[0-9a-f]{40}$/.test(manifest.upstream_git_commit_sha)
+        || !Array.isArray(manifest.files) || !manifest.files.length) {
+      fail('CitizenChatServer Release manifest 无效');
+    }
     const files = new Map();
     for (const entry of manifest.files) {
       if (JSON.stringify(Object.keys(entry).sort()) !== JSON.stringify(['path', 'sha256'])
@@ -230,13 +228,15 @@ export function verifyPackagedRelease({ archive, manifestPath, sumsPath }) {
       }
       files.set(entry.path, entry.sha256);
     }
+    const expectedPackageFiles = [...files.keys(), 'release-manifest.json', 'SHA256SUMS'].sort();
     if (JSON.stringify([...files.keys()]) !== JSON.stringify([...files.keys()].sort())
-        || JSON.stringify(regularFiles(extracted)) !== JSON.stringify([...files.keys()].sort())
-        || !files.has('SHA256SUMS')) fail('CitizenChatServer Release 归档文件闭集无效');
-    const payload = new Map(files);
-    payload.delete('SHA256SUMS');
+        || JSON.stringify(regularFiles(extracted)) !== JSON.stringify(expectedPackageFiles)) {
+      fail('CitizenChatServer Release 归档文件闭集无效');
+    }
+    const internal = new Map(files);
+    internal.set('release-manifest.json', sha256(manifestPath));
     assertChecksumClosure(
-      checksumMap(join(extracted, 'SHA256SUMS')), payload, '候选内部 SHA256SUMS',
+      checksumMap(join(extracted, 'SHA256SUMS')), internal, '单包内部 SHA256SUMS',
     );
     const product = JSON.parse(readFileSync(join(extracted, 'product.json'), 'utf8'));
     const productKeys = [
@@ -264,20 +264,22 @@ export function verifyPackagedRelease({ archive, manifestPath, sumsPath }) {
         || !/^[0-9a-f]{64}$/.test(upstream.release_asset_sha256)) {
       fail('CitizenChatServer Release 内外身份不一致');
     }
+    return manifest;
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
-  return manifest;
 }
 
-/// 只负责从准确 CI 候选生成可离线验证的正式三件套；GitHub 正式分发仍只由 action() 执行。
+/// 只负责从准确 CI 候选生成可离线验证的唯一正式包；GitHub 正式分发仍只由 action() 执行。
 export function packageRelease(values) {
   const candidate = resolve(values.candidate ?? '');
   const output = resolve(values.output ?? '');
   const sourceSHA = values['source-sha'];
   const softwareVersion = values['software-version'];
   const versionTag = values['version-tag'];
+  const ciRunID = values['ci-run-id'];
   if (!existsSync(candidate) || existsSync(output) || !/^[0-9a-f]{40}$/.test(sourceSHA ?? '')
+      || !/^[1-9][0-9]*$/.test(ciRunID ?? '')
       || !/^\d+\.\d+\.\d+$/.test(softwareVersion ?? '') || versionTag !== `${prefix}${softwareVersion}`) fail('Release 封装输入无效');
   const outputFromCandidate = relative(candidate, output);
   const candidateFromOutput = relative(output, candidate);
@@ -292,56 +294,64 @@ export function packageRelease(values) {
     const product = JSON.parse(readFileSync(productPath, 'utf8'));
     product.version = softwareVersion;
     writeFileSync(productPath, `${JSON.stringify(product, null, 2)}\n`);
-    const checksumFiles = regularFiles(stage).filter((path) => path !== 'SHA256SUMS');
-    writeFileSync(join(stage, 'SHA256SUMS'), `${checksumFiles.map((path) => `${sha256(join(stage, path))}  ${path}`).join('\n')}\n`);
-    mkdirSync(output, { mode: 0o700 });
-    const archive = join(output, 'citizenchatserver-cloudflare.tar.gz');
-    const archiveFiles = regularFiles(stage);
-    if (!archiveFiles.length || archiveFiles.some((path) => (
+    rmSync(join(stage, 'SHA256SUMS'), { force: true });
+    const payloadFiles = regularFiles(stage);
+    if (!payloadFiles.length || payloadFiles.some((path) => (
       path.startsWith('/') || path.split('/').includes('..') || !/^[A-Za-z0-9._/-]+$/.test(path)
     ))) fail('CitizenChatServer Release 归档文件名无效');
-    // 中文注释：NUL 文件清单只加入普通文件；--no-recursion 防止 tar 自动写入目录条目，
-    // 与原生发布器“每个 tar 条目首字符必须为 -”的安全合同逐项一致。
+    const upstream = JSON.parse(readFileSync(join(stage, 'upstream-release.json'), 'utf8'));
+    const manifest = {
+      schema: 1, product_id: 'citizenchatserver', platform: 'cloudflare',
+      software_version: softwareVersion, git_commit_sha: sourceSHA, ci_run_id: Number(ciRunID),
+      upstream_repository: upstream.repository, upstream_product_id: upstream.product_id,
+      upstream_release_tag: upstream.release_tag, upstream_git_commit_sha: upstream.git_commit_sha,
+      files: payloadFiles.map((path) => ({ path, sha256: sha256(join(stage, path)) })),
+    };
+    const manifestPath = join(stage, 'release-manifest.json');
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    const internalFiles = [...manifest.files, {
+      path: 'release-manifest.json', sha256: sha256(manifestPath),
+    }].sort((left, right) => left.path.localeCompare(right.path));
+    writeFileSync(join(stage, 'SHA256SUMS'),
+      `${internalFiles.map(({ path, sha256: digest }) => `${digest}  ${path}`).join('\n')}\n`);
+    const packageFiles = regularFiles(stage);
     const archiveList = join(temporary, 'archive-files.list');
-    writeFileSync(archiveList, Buffer.from(`${archiveFiles.join('\0')}\0`));
+    writeFileSync(archiveList, Buffer.from(`${packageFiles.join('\0')}\0`));
+    mkdirSync(output, { mode: 0o700 });
+    const archive = join(output, 'citizenchatserver-cloudflare.tar.gz');
     execFileSync('tar', [
       '-czf', archive, '-C', stage, '--no-recursion', '--null', '-T', archiveList,
     ]);
-    const upstream = JSON.parse(readFileSync(join(stage, 'upstream-release.json'), 'utf8'));
-    // 中文注释：正式 manifest 使用平台闭集中的 Cloudflare；作业 ID、Tag 前缀与
-    // 资产名继续由同一 Release 合同固定。
-    const manifest = {
-      schema: 1, product_id: 'citizenchatserver', platform: 'cloudflare',
-      software_version: softwareVersion, git_commit_sha: sourceSHA,
-      upstream_repository: upstream.repository, upstream_product_id: upstream.product_id,
-      upstream_release_tag: upstream.release_tag, upstream_git_commit_sha: upstream.git_commit_sha,
-      archive_sha256: sha256(archive),
-      files: archiveFiles.map((path) => ({ path, sha256: sha256(join(stage, path)) })),
-    };
-    const manifestPath = join(output, 'release-manifest.json');
-    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-    const sumsPath = join(output, 'SHA256SUMS');
-    writeFileSync(sumsPath, `${sha256(archive)}  citizenchatserver-cloudflare.tar.gz\n${sha256(manifestPath)}  release-manifest.json\n`);
-    verifyPackagedRelease({ archive, manifestPath, sumsPath });
-    return { archive, manifestPath, sumsPath };
+    verifyPackagedRelease({ archive });
+    return { archive };
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
 }
 
-function action(values) {
+function publish(values) {
   const sourceSHA = values['source-sha'];
   const softwareVersion = values['software-version'];
   const versionTag = values['version-tag'];
-  const { archive, manifestPath, sumsPath } = packageRelease(values);
+  const ciRunID = values['ci-run-id'];
+  const releaseRunID = values['release-run-id'];
+  const archive = join(resolve(values.output ?? ''), 'citizenchatserver-cloudflare.tar.gz');
+  if (!/^[0-9a-f]{40}$/.test(sourceSHA ?? '')
+      || !/^[1-9][0-9]*$/.test(ciRunID ?? '') || !/^[1-9][0-9]*$/.test(releaseRunID ?? '')
+      || !/^\d+\.\d+\.\d+$/.test(softwareVersion ?? '')
+      || versionTag !== `${prefix}${softwareVersion}`) fail('Release 发布输入无效');
+  const manifest = verifyPackagedRelease({ archive });
+  if (manifest.git_commit_sha !== sourceSHA || manifest.software_version !== softwareVersion) {
+    fail('Release 单包与发布输入不一致');
+  }
   let exists = true;
   try { execFileSync('gh', ['release', 'view', versionTag, '--repo', repository], { stdio: 'ignore' }); }
   catch { exists = false; }
   if (exists) fail('同名 CitizenChatServer 正式 Release 已存在');
   execFileSync('gh', [
-    'release', 'create', versionTag, archive, manifestPath, sumsPath,
-    '--repo', repository, '--target', sourceSHA, '--title', `CitizenChatServer ${softwareVersion}`,
-    '--notes', `GMB_RELEASE_SOURCE_SHA:${sourceSHA}`,
+    'release', 'create', versionTag, archive,
+    '--repo', repository, '--target', sourceSHA, '--title', '公民聊天服务 · Release · Cloudflare',
+    '--notes', `GMB_RELEASE_CI_RUN_ID:${ciRunID}\nGMB_RELEASE_RUN_ID:${releaseRunID}\nGMB_RELEASE_SOURCE_SHA:${sourceSHA}`,
   ], { stdio: 'inherit' });
 }
 
@@ -352,7 +362,8 @@ if (isMain) {
     const { command, operation, values } = parseArguments(process.argv.slice(2));
     if (command === 'version-tag') printNextSemanticRelease(operation, values);
     else if (command === 'verify-release-source') verifyReleaseSource(values);
-    else if (command === 'action') action(values);
+    else if (command === 'package') packageRelease(values);
+    else if (command === 'publish') publish(values);
     else fail('CitizenChatServer Release 命令无效');
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);

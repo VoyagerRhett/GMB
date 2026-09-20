@@ -64,7 +64,7 @@
       "sdk_only": [
         {
           "path": "Cargo.toml",
-          "sha256": "709936ce2f9a781ff3dbeef6ef743c7b950db377403bb5ca9f471c10afa17426"
+          "sha256": "3865c8b3fccfd3ed94a5492796f4b34a6ac718e24192a9657b0376d0e56b272b"
         },
         {
           "path": "README.md",
@@ -247,7 +247,7 @@
         },
         {
           "path": "tests/source_manifest_contract.rs",
-          "sha256": "b15819958ce9f35c0e5a20ef1a3c03303e7765b6501901a51c68f75b74354011"
+          "sha256": "61b0de179d08968a804be738585191482183d42d6a136481d642ebd02a3ec2c8"
         }
       ],
       "excluded": [],
@@ -900,7 +900,7 @@
       "sdk_only": [
         {
           "path": "README.md",
-          "sha256": "20fd585eeb157e1113acf918376fbe47db95bc797a1c84b373ca5286b4bba5cd"
+          "sha256": "3735f839e85750bce5978f32731a062a9ea52f0c4bbca13bb85cd71ee744a6ef"
         },
         {
           "path": "src/chain/chain_information/README.md",
@@ -944,7 +944,7 @@
         },
         {
           "path": "tests/consensus_source_manifest.rs",
-          "sha256": "d772fb3bd5a8974a583abc774954accbc999e33150c5694f4149761499d0fb27"
+          "sha256": "168a7e7d8c6e5218d2b0bcaacf72274b4e945099ab3dd82c04bfc2cd1cd4907c"
         },
         {
           "path": "tests/light_client_boundary.rs",
@@ -956,7 +956,7 @@
         },
         {
           "path": "tests/network_sync_source_manifest.rs",
-          "sha256": "98cd683c69b8519b2429043bae5fb1f9976dcb1511a5b1f0d4ff4381866fe0a6"
+          "sha256": "f3de0c6d3fdac76a248859accacd4c70f308cc576499edee6c77332253910634"
         },
         {
           "path": "tests/state_runtime_boundary.rs",
@@ -964,7 +964,7 @@
         },
         {
           "path": "tests/state_runtime_source_manifest.rs",
-          "sha256": "dc1cf118473785fa95efba38178ecb2bb746a5473e40e63f886ba7416db46cdd"
+          "sha256": "a98119dcd69aebfb9a5f23a1e75ac8fbf1f5c34102f177e23302fc618502fec4"
         }
       ],
       "excluded": [

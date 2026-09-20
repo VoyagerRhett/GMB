@@ -10,6 +10,21 @@ import java.util.concurrent.CompletableFuture
 
 class CitizenSdkFlutterSessionsTest {
     @Test
+    fun `open exposes only bounded single-line host invariant`() {
+        assertEquals("Core returned reserved request ID 0", citizenSdkFlutterOpenInvalidState("Core returned reserved request ID 0"))
+        for (value in listOf<String?>(null, "", "line\nbreak", "x".repeat(513))) {
+            assertEquals(
+                "CitizenSDK operation is invalid in the current state",
+                citizenSdkFlutterOpenInvalidState(value),
+            )
+        }
+        assertEquals(
+            "IllegalArgumentException: host fixture",
+            citizenSdkFlutterOpenHostFailure(IllegalArgumentException("host fixture")),
+        )
+    }
+
+    @Test
     fun `verification projection needs no context session activity or event subscription`() {
         val request = CitizenSdkFlutterCodec.decode("verifySignature",
             listOf(1, "0x" + "11".repeat(32), ByteArray(64), byteArrayOf())) as CitizenSdkFlutterCodec.Request.VerifySignature

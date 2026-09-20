@@ -68,6 +68,10 @@ CHECK_OUTPUTS
   export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$DEPENDENCY_WORK_DIR/flutter-config}"
   export PUB_CACHE="${PUB_CACHE:-$DEPENDENCY_WORK_DIR/pub}"
   export GRADLE_USER_HOME="$DEPENDENCY_WORK_DIR/gradle"
+  GRADLE_EXECUTABLE="${CITIZENAPP_GRADLE:-$APP_ROOT/android/gradlew}"
+  [[ "$GRADLE_EXECUTABLE" == /* && -f "$GRADLE_EXECUTABLE" && ! -L "$GRADLE_EXECUTABLE"
+      && -x "$GRADLE_EXECUTABLE" ]] \
+    || { echo 'CitizenApp Gradle执行器必须是绝对普通可执行文件' >&2; exit 1; }
   export CP_HOME_DIR="$DEPENDENCY_WORK_DIR/cocoapods"
   export TMPDIR="$CITIZENAPP_WORK_DIR/tmp/"
   export FLUTTER_SUPPRESS_ANALYTICS=true COCOAPODS_DISABLE_STATS=true
@@ -253,13 +257,19 @@ build_android_release() {
   local properties flutter_command flutter_sdk android_sdk product_version version_name version_code
   local flutter_version dart_defines link_target java_home
   properties="$CITIZENAPP_PROJECT_ROOT/android/local.properties"
-  flutter_command="$(command -v flutter)"
-  while [[ -L "$flutter_command" ]]; do
-    link_target="$(readlink "$flutter_command")"
-    [[ "$link_target" == /* ]] || link_target="$(cd "$(dirname "$flutter_command")" && pwd -P)/$link_target"
-    flutter_command="$link_target"
-  done
-  flutter_sdk="$(cd "$(dirname "$flutter_command")/.." && pwd -P)"
+  flutter_sdk="${FLUTTER_ROOT:-}"
+  if [[ -z "$flutter_sdk" ]]; then
+    flutter_command="$(command -v flutter)"
+    while [[ -L "$flutter_command" ]]; do
+      link_target="$(readlink "$flutter_command")"
+      [[ "$link_target" == /* ]] || link_target="$(cd "$(dirname "$flutter_command")" && pwd -P)/$link_target"
+      flutter_command="$link_target"
+    done
+    flutter_sdk="$(cd "$(dirname "$flutter_command")/.." && pwd -P)"
+  fi
+  [[ "$flutter_sdk" == /* && -x "$flutter_sdk/bin/flutter" \
+      && -f "$flutter_sdk/packages/flutter_tools/gradle/build.gradle.kts" ]] \
+    || { echo 'CitizenApp Flutter SDK根目录无效' >&2; exit 1; }
   android_sdk="$ANDROID_SDK_HOME"
   # JDK与Android SDK由CitizenApp产品入口传给同一次Gradle调用；不在Worker增加前置检查。
   java_home="$ANDROID_JAVA_HOME"
@@ -284,11 +294,15 @@ print(",".join(base64.b64encode(f"{name}={value[key]}".encode()).decode() for na
 ')"
   (
     cd "$APP_ROOT/android"
+    # Flutter Gradle included-build 的 Kotlin 会默认在工具源码根写 .kotlin/sessions；
+    # 显式定位到本轮工作目录，共享 Flutter 工具原件始终保持只读。
     ANDROID_HOME="$android_sdk" ANDROID_SDK_ROOT="$android_sdk" JAVA_HOME="$java_home" PATH="$java_home/bin:$PATH" \
     CITIZENAPP_FLUTTER_GRADLE_ROOT="$flutter_sdk/packages/flutter_tools/gradle" \
-    FLUTTER_ROOT="$flutter_sdk" "$APP_ROOT/android/gradlew" ${gradle_network_arg:+"$gradle_network_arg"} --no-daemon --stacktrace --no-problems-report \
+    FLUTTER_ROOT="$flutter_sdk" "$GRADLE_EXECUTABLE" ${gradle_network_arg:+"$gradle_network_arg"} --no-daemon --stacktrace --no-problems-report \
       --init-script "$CITIZENAPP_GRADLE_INIT_SCRIPT" \
       --project-cache-dir "$BUILD_WORK_DIR/gradle-project" \
+      -Pkotlin.project.persistent.dir="$CITIZENAPP_FLUTTER_GRADLE_BUILD_DIR/kotlin-project" \
+      -Pflutter.sdk="$flutter_sdk" \
       -Ptarget-platform=android-arm64 \
       -Ptarget=lib/main.dart \
       -Pbase-application-name=android.app.Application \
@@ -333,7 +347,7 @@ if [[ "$PLATFORM" == ios ]]; then
 else
   CITIZENSDK_WORK_DIR="$CITIZENSDK_PRODUCT_WORK_DIR" \
     CITIZENSDK_NATIVE_OUTPUT_DIR="$CITIZENSDK_PRODUCT_OUTPUT_DIR" \
-    CITIZENSDK_GRADLE="$APP_ROOT/android/gradlew" \
+    CITIZENSDK_GRADLE="$GRADLE_EXECUTABLE" \
     CITIZENSDK_OFFLINE="$CITIZENAPP_GRADLE_OFFLINE" \
     JAVA_HOME="$ANDROID_JAVA_HOME" PATH="$ANDROID_JAVA_HOME/bin:$PATH" \
     ANDROID_HOME="$ANDROID_SDK_HOME" ANDROID_SDK_ROOT="$ANDROID_SDK_HOME" \

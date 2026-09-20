@@ -135,6 +135,8 @@ test('Android从真实产品源码根启动Gradle并把可写状态放入外部�
     < includedBuildRepositories.indexOf('gradlePluginPortal()'));
   assert.doesNotMatch(includedBuildRepositories, /resolutionStrategy|force\(|PUB_CACHE|TATA_CONSOLE/u);
   assert.match(runner, /CITIZENAPP_FLUTTER_GRADLE_ROOT="\$flutter_sdk\/packages\/flutter_tools\/gradle"/u);
+  assert.match(runner, /flutter_sdk="\$\{FLUTTER_ROOT:-\}"/u);
+  assert.match(runner, /CitizenApp Flutter SDK根目录无效/u);
   assert.match(runner, /java_home="\$ANDROID_JAVA_HOME"/u);
   assert.match(runner, /ANDROID_JAVA_HOME="\$\{JAVA_HOME:-\/Applications\/Android Studio\.app\/Contents\/jbr\/Contents\/Home\}"/u);
   assert.match(runner, /ANDROID_SDK_HOME="\$\{ANDROID_HOME:-\$\{ANDROID_SDK_ROOT:-\$HOME\/Library\/Android\/sdk\}\}"/u);
@@ -142,9 +144,14 @@ test('Android从真实产品源码根启动Gradle并把可写状态放入外部�
   assert.match(runner, /ANDROID_SDK_HOME\/ndk\/28\.2\.13676358/u);
   assert.match(runner, /-x "\$ANDROID_JAVA_HOME\/bin\/java"/u);
   assert.match(runner, /ANDROID_HOME="\$android_sdk" ANDROID_SDK_ROOT="\$android_sdk" JAVA_HOME="\$java_home" PATH="\$java_home\/bin:\$PATH"/u);
-  assert.match(runner, /"\$APP_ROOT\/android\/gradlew"[\s\S]*--project-cache-dir "\$BUILD_WORK_DIR\/gradle-project"/u);
-  assert.match(runner, /CITIZENSDK_GRADLE="\$APP_ROOT\/android\/gradlew"[\s\S]*build-native\.sh" android/u);
-  assert.match(runner, /CITIZENSDK_GRADLE="\$APP_ROOT\/android\/gradlew"[\s\S]*JAVA_HOME="\$ANDROID_JAVA_HOME" PATH="\$ANDROID_JAVA_HOME\/bin:\$PATH"/u);
+  assert.match(runner, /GRADLE_EXECUTABLE="\$\{CITIZENAPP_GRADLE:-\$APP_ROOT\/android\/gradlew\}"/u);
+  assert.match(runner, /Gradle执行器必须是绝对普通可执行文件/u);
+  assert.match(runner, /"\$GRADLE_EXECUTABLE"[\s\S]*--project-cache-dir "\$BUILD_WORK_DIR\/gradle-project"/u);
+  assert.match(runner, /-Pkotlin[.]project[.]persistent[.]dir="\$CITIZENAPP_FLUTTER_GRADLE_BUILD_DIR\/kotlin-project"/u);
+  assert.match(runner, /-Pflutter[.]sdk="\$flutter_sdk"/u);
+  assert.match(runner, /CITIZENSDK_GRADLE="\$GRADLE_EXECUTABLE"[\s\S]*build-native\.sh" android/u);
+  assert.match(runner, /CITIZENSDK_GRADLE="\$GRADLE_EXECUTABLE"[\s\S]*JAVA_HOME="\$ANDROID_JAVA_HOME" PATH="\$ANDROID_JAVA_HOME\/bin:\$PATH"/u);
+  assert.doesNotMatch(runner, /TATA_CONSOLE|tataconsole/u);
   assert.match(runner, /CITIZENAPP_GRADLE_OFFLINE="\$\{CITIZENAPP_GRADLE_OFFLINE:-\$\{CITIZENAPP_OFFLINE:-false\}\}"/u);
   assert.match(runner, /gradle_network_arg=''/u);
   assert.match(runner, /true\) gradle_network_arg='--offline'/u);

@@ -1,7 +1,7 @@
 //! 固定 light-base 来源快照的 18 个必需文件。
 //!
 //! include_bytes 在编译测试时直接要求每个文件存在；逐字节 SHA-256 由
-//! docs/SOURCE_PROVENANCE.md 和导入审计共同记录。
+//! 塔塔文档库中的 CitizenSDK 来源记录和导入审计共同记录。
 
 const REQUIRED_FILES: [(&str, &[u8]); 18] = [
     ("Cargo.toml", include_bytes!("../Cargo.toml")),

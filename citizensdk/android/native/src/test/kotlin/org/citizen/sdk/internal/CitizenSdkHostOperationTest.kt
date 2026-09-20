@@ -39,15 +39,16 @@ class CitizenSdkHostOperationTest {
 
     @Test
     fun `QR review ownership is released on orphan failed admission and failed decode`() {
+        // 请求路由只接收原生请求与结果投影；完成、取消和结果所有权不再绑定进度监听器。
         val released = mutableListOf<Long>()
         val router = CitizenSdkRequestRouter({ false }) { if (it is CitizenSdkNativeResult.QrReview) released += it.token }
         fun value(token: Long) = CitizenSdkNativeCodec.Decoded(CitizenSdkNativeResult.QrReview(token, "{}"), null)
         router.onCompletion(91, value(1))
         assertEquals(listOf(1L), released)
         assertThrows(IllegalStateException::class.java) {
-            router.submitOperation<Int>({ router.onCompletion(92, value(2)); error("admission rejected") }, { 1 }, null)
+            router.submitOperation<Int>({ router.onCompletion(92, value(2)); error("admission rejected") }, { 1 })
         }
-        val pending = router.submitOperation<Int>({ 93 }, { error("projection rejected") }, null)
+        val pending = router.submitOperation<Int>({ 93 }, { error("projection rejected") })
         router.onCompletion(93, value(3))
         assertTrue(pending.future.isCompletedExceptionally)
         assertEquals(listOf(1L, 2L, 3L), released)
@@ -58,12 +59,12 @@ class CitizenSdkHostOperationTest {
     fun `QR cancellation waits for a real completion and preserves successful review ownership`() {
         val cancelled = mutableListOf<Long>(); val released = mutableListOf<Long>()
         val router = CitizenSdkRequestRouter({ cancelled += it; true }) { if (it is CitizenSdkNativeResult.QrReview) released += it.token }
-        val pending = router.submitOperation({ 71 }, { it as CitizenSdkNativeResult.QrReview }, null)
+        val pending = router.submitOperation({ 71 }, { it as CitizenSdkNativeResult.QrReview })
         assertTrue(pending.cancel()); assertEquals(listOf(71L), cancelled)
         assertFalse(pending.future.isDone)
         router.onCompletion(71, CitizenSdkNativeCodec.Decoded(null, CitizenSdkException(CitizenSdkErrorCode.CANCELLED, "cancelled")))
         assertTrue(pending.future.isCompletedExceptionally)
-        val retained = router.submitOperation({ 72 }, { it as CitizenSdkNativeResult.QrReview }, null)
+        val retained = router.submitOperation({ 72 }, { it as CitizenSdkNativeResult.QrReview })
         router.onCompletion(72, CitizenSdkNativeCodec.Decoded(CitizenSdkNativeResult.QrReview(9, "{}"), null))
         assertEquals(9L, retained.future.join().token)
         assertTrue(released.isEmpty())
@@ -374,7 +375,6 @@ class CitizenSdkHostOperationTest {
                 41
             },
             decode = { "done" },
-            progressListener = null,
         )
         assertEquals("done", operation.future.get(1, TimeUnit.SECONDS))
         assertFalse(operation.cancel())
@@ -394,7 +394,6 @@ class CitizenSdkHostOperationTest {
         val operation = router.submitOperation(
             begin = { 9 },
             decode = { Unit },
-            progressListener = null,
         )
         val cancelThread = thread { assertTrue(operation.cancel()) }
         assertTrue(entered.await(1, TimeUnit.SECONDS))

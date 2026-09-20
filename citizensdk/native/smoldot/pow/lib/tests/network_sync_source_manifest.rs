@@ -1,7 +1,7 @@
 //! 固定本阶段 chain spec、libp2p、network、sync 与 transactions 的 61 个来源文件。
 //!
 //! `include_bytes` 在后续编译测试时要求每个文件存在；逐字节 SHA-256 由
-//! `docs/SOURCE_PROVENANCE.md` 和导入审计共同记录。
+//! 塔塔文档库中的 CitizenSDK 来源记录和导入审计共同记录。
 
 const REQUIRED_FILES: [(&str, &[u8]); 61] = [
     ("src/chain_spec.rs", include_bytes!("../src/chain_spec.rs")),

@@ -128,28 +128,30 @@ test('CI 与 Release 独立且只消费正式上游成品', () => {
   assert.doesNotMatch(release, /gh[^\n]+VoyagerRhett\/TATA|wrangler deploy/);
 });
 
-test('CI 只接受 TataChatServer 正式 Release 的准确三件套', () => {
+test('CI 只接受 TataChatServer 正式 Release 的准确单包内容', () => {
   const temporary = mkdtempSync(join(tmpdir(), 'citizenchatserver-upstream-contract-'));
   const upstreamSHA = '89abcdef0123456789abcdef0123456789abcdef';
-  const archive = join(temporary, 'tatachatserver-cloudflare.tar.gz');
-  const manifestPath = join(temporary, 'tatachatserver-cloudflare-release.json');
+  const manifestPath = join(temporary, 'release-manifest.json');
   try {
-    writeFileSync(archive, 'formal upstream archive\n');
+    mkdirSync(join(temporary, 'build', 'worker'), { recursive: true });
+    writeFileSync(join(temporary, 'build', 'worker', 'shim.mjs'), 'export default {};\n');
+    writeFileSync(join(temporary, 'schema.sql'), 'SELECT 1;\n');
+    writeFileSync(join(temporary, 'wrangler.jsonc'), '{}\n');
+    const files = ['build/worker/shim.mjs', 'schema.sql', 'wrangler.jsonc']
+      .map((path) => ({ path, sha256: sha256(join(temporary, path)) }));
     writeFileSync(manifestPath, `${JSON.stringify({
       schema: 1,
       product_id: 'tatachatserver',
       platform: 'cloudflare',
       git_commit_sha: upstreamSHA,
       software_version: '1.0.0',
-      artifact: 'tatachatserver-cloudflare.tar.gz',
+      ci_run_id: 1,
       ci_artifact: 'TataChatServer-Cloudflare-CI',
-      files: ['build/worker/shim.mjs', 'schema.sql', 'wrangler.jsonc'],
+      files,
     }, null, 2)}\n`);
-    writeFileSync(join(temporary, 'SHA256SUMS'), [
-      `${sha256(archive)}  tatachatserver-cloudflare.tar.gz`,
-      `${sha256(manifestPath)}  tatachatserver-cloudflare-release.json`,
-      '',
-    ].join('\n'));
+    writeFileSync(join(temporary, 'SHA256SUMS'), `${[
+      ...files, { path: 'release-manifest.json', sha256: sha256(manifestPath) },
+    ].map(({ path, sha256: digest }) => `${digest}  ${path}`).join('\n')}\n`);
     const release = {
       tag_name: 'tatachatserver-cloudflare-v1.0.0',
       target_commitish: upstreamSHA,
@@ -160,11 +162,9 @@ test('CI 只接受 TataChatServer 正式 Release 的准确三件套', () => {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
     manifest.unexpected = true;
     writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-    writeFileSync(join(temporary, 'SHA256SUMS'), [
-      `${sha256(archive)}  tatachatserver-cloudflare.tar.gz`,
-      `${sha256(manifestPath)}  tatachatserver-cloudflare-release.json`,
-      '',
-    ].join('\n'));
+    writeFileSync(join(temporary, 'SHA256SUMS'), `${[
+      ...files, { path: 'release-manifest.json', sha256: sha256(manifestPath) },
+    ].map(({ path, sha256: digest }) => `${digest}  ${path}`).join('\n')}\n`);
     assert.throws(() => verifyUpstream(temporary, release), /上游 Release/);
   } finally {
     rmSync(temporary, { recursive: true, force: true });
@@ -228,6 +228,7 @@ test('CI 与 Release 拒绝把生成内容写回产品输入目录', () => {
       'source-sha': sourceSHA,
       'software-version': '1.0.0',
       'version-tag': 'citizenchatserver-cloudflare-v1.0.0',
+      'ci-run-id': '1',
     }), /不得重叠/);
   } finally {
     rmSync(candidate, { recursive: true, force: true });
@@ -256,7 +257,7 @@ test('正式 Release manifest 只输出 Cloudflare 平台字段', () => {
   assert.match(release, /product_id: 'citizenchatserver', platform: 'cloudflare'/);
 });
 
-test('正式 Release 三件套与原生发布器使用同一非自引用归档合同', () => {
+test('正式 Release 只产出一个自描述归档', () => {
   const candidate = createCandidate({ platform: 'cloudflare' });
   const temporary = mkdtempSync(join(tmpdir(), 'citizenchatserver-release-contract-'));
   const output = join(temporary, 'release');
@@ -267,20 +268,8 @@ test('正式 Release 三件套与原生发布器使用同一非自引用归档�
       'source-sha': sourceSHA,
       'software-version': '1.0.0',
       'version-tag': 'citizenchatserver-cloudflare-v1.0.0',
+      'ci-run-id': '1',
     });
-    const manifest = JSON.parse(readFileSync(paths.manifestPath, 'utf8'));
-    assert.equal(manifest.platform, 'cloudflare');
-    assert.equal(manifest.archive_sha256, sha256(paths.archive));
-    const external = new Map(readFileSync(paths.sumsPath, 'utf8').trim().split('\n').map((line) => {
-      const match = /^([0-9a-f]{64})  ([^\r\n]+)$/.exec(line);
-      assert.ok(match);
-      return [match[2], match[1]];
-    }));
-    assert.deepEqual(external, new Map([
-      ['citizenchatserver-cloudflare.tar.gz', sha256(paths.archive)],
-      ['release-manifest.json', sha256(paths.manifestPath)],
-    ]));
-
     const extracted = join(temporary, 'extracted');
     mkdirSync(extracted);
     const archiveEntries = execFileSync('tar', ['-tvzf', paths.archive], { encoding: 'utf8' })
@@ -288,21 +277,21 @@ test('正式 Release 三件套与原生发布器使用同一非自引用归档�
     assert.ok(archiveEntries.length > 0);
     assert.ok(archiveEntries.every((line) => line[0] === '-'));
     execFileSync('tar', ['-xzf', paths.archive, '-C', extracted]);
-    assert.equal(regularFiles(extracted).includes('release-manifest.json'), false);
+    const manifestPath = join(extracted, 'release-manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    assert.equal(manifest.platform, 'cloudflare');
+    assert.equal(manifest.ci_run_id, 1);
+    assert.equal(regularFiles(extracted).includes('release-manifest.json'), true);
+    assert.equal(regularFiles(extracted).includes('SHA256SUMS'), true);
     assert.deepEqual(
-      regularFiles(extracted), manifest.files.map(({ path }) => path).sort(),
+      regularFiles(extracted), [...manifest.files.map(({ path }) => path), 'release-manifest.json', 'SHA256SUMS'].sort(),
     );
     for (const entry of manifest.files) {
       assert.equal(sha256(join(extracted, entry.path)), entry.sha256);
     }
 
-    manifest.archive_sha256 = 'f'.repeat(64);
-    writeFileSync(paths.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-    writeFileSync(paths.sumsPath, `${sha256(paths.archive)}  citizenchatserver-cloudflare.tar.gz\n${sha256(paths.manifestPath)}  release-manifest.json\n`);
-    assert.throws(
-      () => verifyPackagedRelease(paths),
-      /Release manifest 无效/,
-    );
+    writeFileSync(paths.archive, 'changed');
+    assert.throws(() => verifyPackagedRelease(paths), /归档|格式|文件类型/);
   } finally {
     rmSync(candidate, { recursive: true, force: true });
     rmSync(temporary, { recursive: true, force: true });
@@ -333,6 +322,7 @@ test('GMB 唯一 Workflow 只调用 CitizenChatServer 扁平流程入口', () =>
   ) ?? [];
   assert.deepEqual(paths, [
     'citizenchatserver/scripts/ci/check/execute.mjs',
+    'citizenchatserver/scripts/release/package/execute.mjs',
     'citizenchatserver/scripts/release/package/execute.mjs',
     'citizenchatserver/scripts/release/package/execute.mjs',
     'citizenchatserver/scripts/release/package/execute.mjs',

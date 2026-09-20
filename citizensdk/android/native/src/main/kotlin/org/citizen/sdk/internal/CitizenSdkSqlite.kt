@@ -19,14 +19,21 @@ internal abstract class CitizenSdkSqlite(
     init {
         check(directory.exists() || directory.mkdirs()) { "unable to create CitizenSDK storage directory" }
         val file = File(directory, fileName)
-        database = SQLiteDatabase.openOrCreateDatabase(file, null)
+        // SDK schema不使用LOCALIZED排序；禁用Android locale元数据，确保任何表创建前即可固定文件策略。
+        database = SQLiteDatabase.openDatabase(
+            file.absolutePath,
+            null,
+            SQLiteDatabase.CREATE_IF_NECESSARY or SQLiteDatabase.NO_LOCALIZED_COLLATORS,
+        )
         lock.withLock {
             val version = database.rawQuery("PRAGMA user_version", null).use { cursor ->
                 check(cursor.moveToFirst()) { "CitizenSDK schema version is unavailable" }
                 cursor.getInt(0)
             }
             val objectCount = database.rawQuery(
-                "SELECT count(*) FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'",
+                // Android为新文件自动创建android_metadata；它不是CitizenSDK schema对象。
+                "SELECT count(*) FROM sqlite_master " +
+                    "WHERE name NOT GLOB 'sqlite_*' AND name != 'android_metadata'",
                 null,
             ).use { cursor ->
                 check(cursor.moveToFirst()) { "CitizenSDK schema inventory is unavailable" }
@@ -37,7 +44,10 @@ internal abstract class CitizenSdkSqlite(
                 "CitizenSDK database schema is unsupported; clear the old development database"
             }
             if (initialize) {
-                if (incrementalVacuum) database.execSQL("PRAGMA auto_vacuum=INCREMENTAL")
+                executePragma(
+                    if (incrementalVacuum) "PRAGMA auto_vacuum=INCREMENTAL"
+                    else "PRAGMA auto_vacuum=NONE",
+                )
                 database.beginTransaction()
                 try {
                     createSchema(database)
@@ -53,13 +63,19 @@ internal abstract class CitizenSdkSqlite(
                 cursor.getInt(0)
             }
             check(autoVacuum == if (incrementalVacuum) 2 else 0) {
-                "CitizenSDK database auto-vacuum policy differs from its fixed schema"
+                "CitizenSDK database auto-vacuum policy differs from its fixed schema: " +
+                    "actual=$autoVacuum expected=${if (incrementalVacuum) 2 else 0}"
             }
-            database.execSQL("PRAGMA journal_mode=WAL")
-            database.execSQL("PRAGMA synchronous=FULL")
-            database.execSQL("PRAGMA foreign_keys=ON")
-            database.execSQL("PRAGMA busy_timeout=5000")
+            check(database.enableWriteAheadLogging()) { "CitizenSDK WAL mode is unavailable" }
+            database.setForeignKeyConstraintsEnabled(true)
+            executePragma("PRAGMA synchronous=FULL")
+            executePragma("PRAGMA busy_timeout=5000")
         }
+    }
+
+    /** Android拒绝用execSQL执行返回结果集的PRAGMA；查询必须完整消费后才算应用。 */
+    private fun executePragma(statement: String) {
+        database.rawQuery(statement, null).use { cursor -> while (cursor.moveToNext()) Unit }
     }
 
     protected abstract fun createSchema(database: SQLiteDatabase)
@@ -72,7 +88,8 @@ internal abstract class CitizenSdkSqlite(
         val expected = schemaStatements()
         if (expected.isEmpty()) return
         val count = database.rawQuery(
-            "SELECT count(*) FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'",
+            "SELECT count(*) FROM sqlite_master " +
+                "WHERE name NOT GLOB 'sqlite_*' AND name != 'android_metadata'",
             null,
         ).use { cursor -> check(cursor.moveToFirst()); cursor.getInt(0) }
         check(count == expected.size) { "CitizenSDK SQLite schema contains unexpected objects" }

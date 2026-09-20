@@ -1716,8 +1716,6 @@ function writeCoreRustFixture(root) {
   for (const path of [
     'Cargo.toml',
     'Cargo.lock',
-    'docs/C_ABI.md',
-    'THIRD_PARTY_NOTICES.md',
     'native/README.md',
   ]) {
     const destination = join(root, ...path.split('/'));
@@ -4822,20 +4820,6 @@ test('P1修复的交易恢复与事件容量源码必须按逐文件摘要进入
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('Core Rust 合同拒绝第三方许可证与来源声明漂移', () => {
-  const root = mkdtempSync(join(workRoot, 'release-core-rust-notices-test-'));
-  try {
-    writeCoreRustFixture(root);
-    writeFileSync(join(root, 'THIRD_PARTY_NOTICES.md'), 'drift\n');
-    assert.throws(
-      () => assertCoreRustSource(root),
-      /Core Rust 边界文件哈希漂移：THIRD_PARTY_NOTICES\.md/,
-    );
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
 test('smoldot Rust 收编源码按离线清单固定完整闭集与逐文件哈希', () => {
   assert.doesNotThrow(() => assertSmoldotRustSource(citizenSdkRoot));
   const root = mkdtempSync(join(workRoot, 'release-rust-source-test-'));
@@ -5024,11 +5008,11 @@ test('Release 固定根级许可证入口、GPL-3.0 与 MIT 权威许可证原�
   }
 });
 
-test('产品文档固定根说明、架构与平台模块的完整反向闭集', () => {
+test('产品源码拒绝docs目录并固定模块说明闭集', () => {
   const root = mkdtempSync(join(workRoot, 'release-documentation-test-'));
   try {
     copyFileSync(join(citizenSdkRoot, 'README.md'), join(root, 'README.md'));
-    for (const relativeRoot of ['docs', 'android', 'darwin', 'lib/src', 'linux', 'windows']) {
+    for (const relativeRoot of ['android', 'darwin', 'lib/src', 'linux', 'windows']) {
       const destination = join(root, ...relativeRoot.split('/'));
       mkdirSync(dirname(destination), { recursive: true });
       cpSync(join(citizenSdkRoot, ...relativeRoot.split('/')), destination, {
@@ -5037,21 +5021,13 @@ test('产品文档固定根说明、架构与平台模块的完整反向闭集',
     }
     assert.doesNotThrow(() => assertDocumentationSource(root));
 
-    const extra = join(root, 'docs', 'unreviewed.md');
-    writeFileSync(extra, 'unreviewed\n');
+    const forbidden = join(root, 'docs');
+    mkdirSync(forbidden);
     assert.throws(
       () => assertDocumentationSource(root),
-      /产品文档闭集漂移.*额外=docs\/unreviewed\.md/,
+      /产品源码禁止包含 docs 目录/,
     );
-    rmSync(extra);
-
-    const missing = join(root, 'docs', 'WALLET_MODEL.md');
-    rmSync(missing);
-    assert.throws(
-      () => assertDocumentationSource(root),
-      /产品文档闭集漂移.*缺失=docs\/WALLET_MODEL\.md/,
-    );
-    copyFileSync(join(citizenSdkRoot, 'docs', 'WALLET_MODEL.md'), missing);
+    rmSync(forbidden, { recursive: true });
 
     writeFileSync(join(root, 'README.md'), 'drift\n');
     assert.throws(
@@ -5061,46 +5037,6 @@ test('产品文档固定根说明、架构与平台模块的完整反向闭集',
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
-});
-
-test('1.10.1基线报告固定实测边界、问题分级与只读上游约束', () => {
-  const report = readFileSync(
-    join(citizenSdkRoot, 'docs/audits/SDK_BASELINE_1_10_1.md'),
-    'utf8',
-  );
-  for (const marker of [
-    'P0：未发现',
-    'P1：5 项',
-    'P2：2 项',
-    'public-state-v1.sqlite3',
-    'secure-state-v1.sqlite3',
-    '15 条编码为 31,468,424 bytes',
-    '149 页进入 freelist',
-    'Flutter 测试未运行，不计为通过',
-    '没有修改 `native/smoldot/pow/**`',
-  ]) {
-    assert.match(report, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
-  }
-
-  const engine = readFileSync(
-    join(citizenSdkRoot, 'native/engine/tests/baseline_resource_contract.rs'),
-    'utf8',
-  );
-  assert.match(engine, /SAMPLE_COUNTS: \[usize; 4\] = \[0, 1, 100, 1_000\]/u);
-  assert.match(engine, /persistent_runtime_cache_retains_only_the_latest_sixty_four_contexts/u);
-  const provider = readFileSync(
-    join(citizenSdkRoot, 'native/smoldot/provider/tests/baseline_lifecycle_contract.rs'),
-    'utf8',
-  );
-  assert.match(provider, /offline_start_export_stop_has_five_descriptive_samples/u);
-  assert.match(provider, /bootNodes/u);
-  const dart = readFileSync(
-    join(citizenSdkRoot, 'test/baselines/sdk_1_10_1_contract_test.dart'),
-    'utf8',
-  );
-  assert.match(dart, /CitizenSdkFlutterCodec\.methods, hasLength\(65\)/u);
-  assert.match(dart, /CitizenExternalSignerTransport\.qrV1/u);
-  assert.match(dart, /isNot\(contains\('QR_V2'\)\)/u);
 });
 
 test('1.10.2资源合同保留64MiB链能力并限制持久cache与history总量', () => {
@@ -5208,7 +5144,7 @@ test('Apple podspec只交付pod根内固定Framework相对名称', () => {
   assert.doesNotMatch(podspec, /CITIZENSDK_APPLE_FRAMEWORK_DIR|Pathname|relative_path_from/u);
 });
 
-test('Hosted Package 合同固定过滤规则、变更日志与可解析依赖边界', () => {
+test('Hosted Package 合同固定过滤规则与可解析依赖边界', () => {
   const root = mkdtempSync(join(workRoot, 'release-hosted-package-test-'));
   try {
     cpSync(join(citizenSdkRoot, 'lib'), join(root, 'lib'), { recursive: true });
@@ -5217,7 +5153,6 @@ test('Hosted Package 合同固定过滤规则、变更日志与可解析依赖�
     cpSync(join(citizenSdkRoot, 'windows'), join(root, 'windows'), { recursive: true });
     for (const path of [
       '.pubignore',
-      'CHANGELOG.md',
       'android/build.gradle',
       'darwin/citizen_sdk.podspec',
       'linux/CMakeLists.txt',
@@ -5341,13 +5276,6 @@ test('Hosted Package 合同固定过滤规则、变更日志与可解析依赖�
     );
 
     copyFileSync(join(citizenSdkRoot, '.pubignore'), pubignorePath);
-    writeFileSync(join(root, 'CHANGELOG.md'), 'drift\n');
-    assert.throws(
-      () => assertHostedPackageSource(root),
-      /Hosted Package 合同文件哈希漂移：CHANGELOG\.md/,
-    );
-
-    copyFileSync(join(citizenSdkRoot, 'CHANGELOG.md'), join(root, 'CHANGELOG.md'));
     const pubspecPath = join(root, 'pubspec.yaml');
     const pubspec = readFileSync(pubspecPath, 'utf8');
     writeFileSync(pubspecPath, pubspec.replace('ffi: ^2.2.0', 'ffi: 2.2.0'));
@@ -5702,7 +5630,6 @@ test('smoldot Dart Release 合同拒绝内容和闭集漂移', () => {
   const root = mkdtempSync(join(workRoot, 'release-smoldot-test-'));
   try {
     for (const relativeRoot of [
-      'docs/smoldot-dart',
       'lib/src/smoldot',
       'test/smoldot',
     ]) {
@@ -7507,7 +7434,7 @@ test('Hosted 完整归档绑定审计候选和 Apple 展开字节，验真成功
       assert.deepEqual(entries.get(path).data, readFileSync(join(candidate, target)), path);
     }
     for (const path of [
-      'pubspec.yaml', 'README.md', 'CHANGELOG.md', 'LICENSE',
+      'pubspec.yaml', 'README.md', 'LICENSE',
       'lib/citizen_sdk.dart', 'assets/citizenchain/manifest.json',
       'android/src/main/jniLibs/arm64-v8a/libcitizensdk.so', 'darwin/citizen_sdk.podspec',
       'linux/lib/LinuxARM/libcitizensdk.so', 'linux/lib/LinuxAMD/libcitizensdk.so',

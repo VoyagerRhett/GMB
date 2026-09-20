@@ -14,11 +14,7 @@ import { fileURLToPath } from 'node:url';
 
 const upstreamRepository = 'VoyagerRhett/TATA';
 const upstreamPrefix = 'tatachatserver-cloudflare-v';
-const upstreamAssets = [
-  'tatachatserver-cloudflare.tar.gz',
-  'tatachatserver-cloudflare-release.json',
-  'SHA256SUMS',
-];
+const upstreamAsset = 'tatachatserver-cloudflare.tar.gz';
 
 function fail(message) { throw new Error(message); }
 function sha256(path) { return createHash('sha256').update(readFileSync(path)).digest('hex'); }
@@ -99,7 +95,7 @@ function latestFormalRelease() {
   candidates.sort((left, right) => String(right.published_at).localeCompare(String(left.published_at)));
   const release = candidates[0];
   const assets = new Map((release.assets ?? []).map((asset) => [asset.name, asset]));
-  if (assets.size !== upstreamAssets.length || upstreamAssets.some((name) => !assets.has(name))) {
+  if (assets.size !== 1 || !assets.has(upstreamAsset)) {
     fail('TataChatServer 正式 Release 资产闭集无效');
   }
   return { release, assets };
@@ -109,43 +105,47 @@ function downloadAsset(asset, output) {
     'api', '-H', 'Accept: application/octet-stream',
     `repos/${upstreamRepository}/releases/assets/${asset.id}`,
   ], { encoding: 'buffer' });
-  if (!Buffer.isBuffer(data) || data.length !== asset.size) fail(`上游资产下载长度无效：${asset.name}`);
+  if (!Buffer.isBuffer(data) || data.length !== asset.size
+      || !/^sha256:[0-9a-f]{64}$/.test(String(asset.digest ?? ''))) {
+    fail(`上游资产下载元数据无效：${asset.name}`);
+  }
   writeFileSync(output, data, { mode: 0o600 });
+  if (asset.digest !== `sha256:${sha256(output)}`) fail(`上游资产摘要无效：${asset.name}`);
 }
-export function verifyUpstream(download, release) {
-  const sumsSource = readFileSync(join(download, 'SHA256SUMS'), 'utf8');
-  if (!sumsSource.endsWith('\n') || sumsSource.includes('\r')) fail('上游 SHA256SUMS 编码无效');
-  const indexed = new Map();
-  for (const line of sumsSource.slice(0, -1).split('\n')) {
-    const match = /^([0-9a-f]{64})  ([A-Za-z0-9._-]+)$/.exec(line);
-    if (!match || indexed.has(match[2])) fail('上游 SHA256SUMS 格式无效');
-    indexed.set(match[2], match[1]);
-  }
-  const expectedAssets = upstreamAssets.filter((item) => item !== 'SHA256SUMS');
-  if (indexed.size !== expectedAssets.length
-      || expectedAssets.some((name) => indexed.get(name) !== sha256(join(download, name)))) {
-    fail('上游资产哈希闭集无效');
-  }
-  const metadata = JSON.parse(readFileSync(join(download, 'tatachatserver-cloudflare-release.json'), 'utf8'));
+export function verifyUpstream(extracted, release) {
+  verifyChecksums(extracted);
+  const metadata = JSON.parse(readFileSync(join(extracted, 'release-manifest.json'), 'utf8'));
   const metadataKeys = [
-    'artifact', 'ci_artifact', 'files', 'git_commit_sha', 'platform', 'product_id',
+    'ci_artifact', 'ci_run_id', 'files', 'git_commit_sha', 'platform', 'product_id',
     'schema', 'software_version',
   ];
   if (JSON.stringify(Object.keys(metadata).sort()) !== JSON.stringify(metadataKeys)
       || metadata.schema !== 1 || metadata.product_id !== 'tatachatserver'
       || metadata.platform !== 'cloudflare'
-      || metadata.artifact !== 'tatachatserver-cloudflare.tar.gz'
       || metadata.ci_artifact !== 'TataChatServer-Cloudflare-CI'
-      || !Array.isArray(metadata.files)
-      || !metadata.files.includes('build/worker/shim.mjs')
-      || !metadata.files.includes('schema.sql')
-      || !metadata.files.includes('wrangler.jsonc')
+      || !Number.isSafeInteger(metadata.ci_run_id) || metadata.ci_run_id <= 0
+      || !Array.isArray(metadata.files) || metadata.files.some((file) => (
+        JSON.stringify(Object.keys(file ?? {}).sort()) !== JSON.stringify(['path', 'sha256'])
+        || !/^[0-9a-f]{64}$/.test(String(file.sha256 ?? ''))
+      ))
+      || !metadata.files.some((file) => file.path === 'build/worker/shim.mjs')
+      || !metadata.files.some((file) => file.path === 'schema.sql')
+      || !metadata.files.some((file) => file.path === 'wrangler.jsonc')
       || !/^[0-9a-f]{40}$/.test(metadata.git_commit_sha)
       || !/^\d+\.\d{1,2}\.\d{1,2}$/.test(metadata.software_version)
       || release.tag_name !== `${upstreamPrefix}${metadata.software_version}`
       || release.target_commitish !== metadata.git_commit_sha
       || release.name !== '塔塔聊天服务 · Release · Cloudflare') {
     fail('上游 Release 产品、源码或版本身份无效');
+  }
+  const manifestFiles = metadata.files.map((file) => file.path);
+  const payloadFiles = regularFiles(extracted)
+    .filter((path) => !['release-manifest.json', 'SHA256SUMS'].includes(path));
+  if (JSON.stringify(manifestFiles) !== JSON.stringify([...manifestFiles].sort())
+      || new Set(manifestFiles).size !== manifestFiles.length
+      || JSON.stringify(manifestFiles) !== JSON.stringify(payloadFiles)
+      || metadata.files.some((file) => sha256(join(extracted, file.path)) !== file.sha256)) {
+    fail('上游 Release manifest 文件闭集无效');
   }
   return metadata.git_commit_sha;
 }
@@ -239,10 +239,12 @@ function action(values) {
     const { release, assets } = latestFormalRelease();
     const download = join(temporary, 'download');
     mkdirSync(download, { mode: 0o700 });
-    for (const name of upstreamAssets) downloadAsset(assets.get(name), join(download, name));
-    const upstreamSourceSHA = verifyUpstream(download, release);
+    const archive = join(download, upstreamAsset);
+    downloadAsset(assets.get(upstreamAsset), archive);
+    run('gh', ['attestation', 'verify', archive, '--repo', upstreamRepository]);
     const extracted = join(temporary, 'extracted');
-    safeExtract(join(download, 'tatachatserver-cloudflare.tar.gz'), extracted);
+    safeExtract(archive, extracted);
+    const upstreamSourceSHA = verifyUpstream(extracted, release);
     const build = findUnique(extracted, 'build', true);
     mkdirSync(output, { recursive: false, mode: 0o700 });
     cpSync(build, output, { recursive: true, errorOnExist: true });
@@ -252,7 +254,7 @@ function action(values) {
     writeFileSync(join(output, 'upstream-release.json'), `${JSON.stringify({
       repository: upstreamRepository, product_id: 'tatachatserver',
       release_tag: release.tag_name, git_commit_sha: upstreamSourceSHA,
-      release_asset_sha256: sha256(join(download, 'tatachatserver-cloudflare.tar.gz')),
+      release_asset_sha256: sha256(archive),
       instance_source_sha: sourceSHA,
     }, null, 2)}\n`);
     writeChecksums(output);
