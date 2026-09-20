@@ -122,7 +122,7 @@ class _CityInstitutionListPageState extends State<CityInstitutionListPage> {
     return ListView.separated(
       padding: EdgeInsets.symmetric(vertical: AppLayout.scaledValue(8)),
       itemCount: _items.length,
-      separatorBuilder: (_, __) =>
+      separatorBuilder: (_, _) =>
           const Divider(height: 1, color: AppTheme.divider),
       itemBuilder: (context, i) {
         final inst = _items[i];

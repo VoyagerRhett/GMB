@@ -139,7 +139,7 @@ class _SquareArticleDetailPageState extends State<SquareArticleDetailPage> {
                       Image.network(
                         cover.url,
                         fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                        errorBuilder: (_, _, _) => const SizedBox.shrink(),
                       ),
                     Padding(
                       padding: EdgeInsets.all(AppLayout.scaled(context, 16)),
@@ -213,7 +213,7 @@ class _SquareArticleDetailPageState extends State<SquareArticleDetailPage> {
                 Image.network(
                   item.url,
                   fit: BoxFit.cover,
-                  errorBuilder: (_, __, ___) => const ColoredBox(
+                  errorBuilder: (_, _, _) => const ColoredBox(
                     color: AppTheme.surfaceElevated,
                     child: Center(child: Icon(Icons.broken_image_outlined)),
                   ),

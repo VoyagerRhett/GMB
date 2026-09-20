@@ -167,7 +167,7 @@ class _LawListPageState extends State<LawListPage> {
     return ListView.separated(
       padding: EdgeInsets.all(AppLayout.scaledValue(16)),
       itemCount: _items.length,
-      separatorBuilder: (_, __) => SizedBox(height: AppLayout.scaledValue(10)),
+      separatorBuilder: (_, _) => SizedBox(height: AppLayout.scaledValue(10)),
       itemBuilder: (context, i) => _lawCard(_items[i]),
     );
   }

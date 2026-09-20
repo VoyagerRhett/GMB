@@ -212,7 +212,7 @@ class ListSkeleton extends StatelessWidget {
             horizontal: AppLayout.scaled(context, 16),
             vertical: AppLayout.scaled(context, 24)),
         itemCount: itemCount,
-        separatorBuilder: (_, __) =>
+        separatorBuilder: (_, _) =>
             SizedBox(height: AppLayout.scaled(context, 8)),
         itemBuilder: itemBuilder,
       ),

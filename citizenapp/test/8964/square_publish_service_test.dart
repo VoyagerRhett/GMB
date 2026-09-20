@@ -46,7 +46,7 @@ void main() {
         postType: SquarePostType.document,
         text: '竞选说明',
         mediaDrafts: [_media()],
-        signLoginPayload: (_, __) async => '0x11',
+        signLoginPayload: (_, _) async => '0x11',
         externalSigning: (_) async => 'QR_V1',
       ),
       throwsA(isA<SquarePublishException>()),
@@ -77,7 +77,7 @@ void main() {
       postType: SquarePostType.document,
       text: '公文',
       mediaDrafts: [_media()],
-      signLoginPayload: (_, __) async => '0x11',
+      signLoginPayload: (_, _) async => '0x11',
       externalSigning: (_) async => 'QR_V1',
       onStage: stages.add,
     );
@@ -125,7 +125,7 @@ void main() {
       postType: SquarePostType.document,
       text: '修改后的公文',
       mediaDrafts: [_media()],
-      signLoginPayload: (_, __) async => '0x11',
+      signLoginPayload: (_, _) async => '0x11',
       externalSigning: (_) async => 'QR_V1',
       replacePostId: 'sqp_old',
     );
@@ -162,7 +162,7 @@ void main() {
         postType: SquarePostType.document,
         text: '余额不足的公文',
         mediaDrafts: [_media()],
-        signLoginPayload: (_, __) async => '0x11',
+        signLoginPayload: (_, _) async => '0x11',
         externalSigning: (_) async => 'QR_V1',
       ),
       throwsA(isA<SquarePublishException>()),
@@ -194,7 +194,7 @@ void main() {
         postType: SquarePostType.document,
         text: '链上未入块的公文',
         mediaDrafts: [_media()],
-        signLoginPayload: (_, __) async => '0x11',
+        signLoginPayload: (_, _) async => '0x11',
         externalSigning: (_) async => 'QR_V1',
       ),
       throwsA(isA<SquarePublishException>()),
@@ -223,7 +223,7 @@ void main() {
         postType: SquarePostType.document,
         text: '终态不确定的公文',
         mediaDrafts: [_media()],
-        signLoginPayload: (_, __) async => '0x11',
+        signLoginPayload: (_, _) async => '0x11',
         externalSigning: (_) async => 'QR_V1',
       ),
       throwsA(
@@ -258,7 +258,7 @@ void main() {
       postType: SquarePostType.document,
       text: '远端已成功的公文',
       mediaDrafts: [_media()],
-      signLoginPayload: (_, __) async => '0x11',
+      signLoginPayload: (_, _) async => '0x11',
       externalSigning: (_) async => 'QR_V1',
     );
 
@@ -298,7 +298,7 @@ void main() {
       postType: SquarePostType.document,
       text: '真实本地副本',
       mediaDrafts: [_media()],
-      signLoginPayload: (_, __) async => '0x11',
+      signLoginPayload: (_, _) async => '0x11',
       externalSigning: (_) async => 'QR_V1',
     );
 

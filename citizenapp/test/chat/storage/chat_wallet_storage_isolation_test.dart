@@ -751,7 +751,7 @@ void main() {
     );
     wipe.then<void>(
       (_) => wipeCompleted = true,
-      onError: (Object _, StackTrace __) {
+      onError: (Object _, StackTrace _) {
         wipeCompleted = true;
       },
     );
@@ -1418,11 +1418,11 @@ void main() {
       if (!releaseNewChat.isCompleted) releaseNewChat.complete();
       if (!releaseNewWallet.isCompleted) releaseNewWallet.complete();
       await Future.wait<void>(<Future<void>>[
-        oldChat.then<void>((_) {}, onError: (_, __) {}),
-        oldWallet.then<void>((_) {}, onError: (_, __) {}),
-        if (newChat != null) newChat.then<void>((_) {}, onError: (_, __) {}),
+        oldChat.then<void>((_) {}, onError: (_, _) {}),
+        oldWallet.then<void>((_) {}, onError: (_, _) {}),
+        if (newChat != null) newChat.then<void>((_) {}, onError: (_, _) {}),
         if (newWallet != null)
-          newWallet.then<void>((_) {}, onError: (_, __) {}),
+          newWallet.then<void>((_) {}, onError: (_, _) {}),
       ]);
     }
   });

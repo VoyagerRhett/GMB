@@ -72,7 +72,7 @@ class ProfileActionIcons extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (leading != null) leading!,
+        ?leading,
         for (final button in buttons)
           Padding(
             padding: EdgeInsets.only(left: AppLayout.scaled(context, 8)),

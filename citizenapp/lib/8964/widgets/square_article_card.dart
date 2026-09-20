@@ -85,7 +85,7 @@ class SquareArticleCard extends StatelessWidget {
                     child: Image.network(
                       cover.url,
                       fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => ColoredBox(
+                      errorBuilder: (_, _, _) => ColoredBox(
                         color: AppTheme.surfaceElevated,
                         child: Center(
                           child: Icon(Icons.image_rounded,

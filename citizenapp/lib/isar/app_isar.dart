@@ -287,7 +287,7 @@ class AppIsar {
       (_) {
         if (identical(_deleteInFlight, task)) _deleteInFlight = null;
       },
-      onError: (Object _, StackTrace __) {
+      onError: (Object _, StackTrace _) {
         if (identical(_deleteInFlight, task)) _deleteInFlight = null;
       },
     );

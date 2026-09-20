@@ -455,7 +455,7 @@ class _ProposalViewState extends State<ProposalTab> {
     if (_loading) {
       return ListSkeleton(
         itemCount: 5,
-        itemBuilder: (_, __) => const ProposalCardSkeleton(),
+        itemBuilder: (_, _) => const ProposalCardSkeleton(),
       );
     }
     if (_error != null) {
@@ -517,7 +517,7 @@ class _ProposalViewState extends State<ProposalTab> {
         controller: _scrollController,
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
         itemCount: _items.length + (_hasMore ? 1 : 0),
-        separatorBuilder: (_, __) => SizedBox(height: AppLayout.scaledValue(8)),
+        separatorBuilder: (_, _) => SizedBox(height: AppLayout.scaledValue(8)),
         itemBuilder: (context, index) {
           if (index < _items.length) {
             return _buildProposalCard(_items[index]);

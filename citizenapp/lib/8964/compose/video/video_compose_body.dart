@@ -99,7 +99,7 @@ class SquareVideoComposeBodyState extends State<SquareVideoComposeBody>
 
   @override
   ComposeSnapshot snapshot() =>
-      ComposeSnapshot(text: _text.text, media: [if (_video != null) _video!]);
+      ComposeSnapshot(text: _text.text, media: [?_video]);
 
   Future<void> pickVideo() async {
     final file = await _picker.pickVideo(source: ImageSource.gallery);

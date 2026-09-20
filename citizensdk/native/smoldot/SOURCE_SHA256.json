@@ -39,10 +39,6 @@
       ],
       "sdk_only": [
         {
-          "path": "README.md",
-          "sha256": "63c9d50392451707521f0524905962bbc1ec7563c019c8de5bed5e0299a79753"
-        },
-        {
           "path": "tests/legacy_header_contract.rs",
           "sha256": "7a81e166a80ff2c5f7edee7acba13c4e430eee6ce4cc492af5b50dd57da69f82"
         },
@@ -65,10 +61,6 @@
         {
           "path": "Cargo.toml",
           "sha256": "3865c8b3fccfd3ed94a5492796f4b34a6ac718e24192a9657b0376d0e56b272b"
-        },
-        {
-          "path": "README.md",
-        "sha256": "dfbce3d35e8145e62bb7783a559bdd62f60b888df0bf63557fca65e3c11b6aed"
         },
         {
           "path": "src/account_nonce.rs",
@@ -96,7 +88,7 @@
         },
         {
           "path": "src/verified_chain_client.rs",
-          "sha256": "7d5d0b3c7b24a644a2aa7ad94fe2cb0dbb78404218dba185af0b2212d12f4a6b"
+          "sha256": "9b17b463cddcf2efb882619351f4280d3a1c5940fb8c4e1e8eec2e59b06b7848"
         },
         {
           "path": "tests/account_nonce_contract.rs",
@@ -130,10 +122,6 @@
         {
           "path": "Cargo.toml",
           "sha256": "f5facfa936fc23def8b999e597d1c73b80e3cd75c8e0dc0ed2206921379d5f44"
-        },
-        {
-          "path": "README.md",
-          "sha256": "5bef6ef77b335ea7fbaecb9f35f6bd540abb692a7b7ac193269469ca230d3209"
         }
       ],
       "sdk_only": [],
@@ -225,22 +213,6 @@
         }
       ],
       "sdk_only": [
-        {
-          "path": "README.md",
-          "sha256": "046e3fa2ccc6e4262ee1432c9bd9b24db8bda76cf427eaf0d4ccd67e618bb5c0"
-        },
-        {
-          "path": "examples/README.md",
-          "sha256": "c28a9bda82dbcfdc0437eb0d46c150d7928d449e449c34ec7942211067501564"
-        },
-        {
-          "path": "src/json_rpc_service/README.md",
-          "sha256": "2de6bbcd71ddc9a2e68c3d9b2720d77405959f1eba589e3ee1ce47fbc1aa83c3"
-        },
-        {
-          "path": "src/network_service/README.md",
-          "sha256": "5c6a86ac86b51564ffbec6b8b1c33eaa599a7e330e8fa0150800d1c03371887e"
-        },
         {
           "path": "tests/capability_boundary.rs",
           "sha256": "53a207034fdde1ce3a30a4ee801c1b0b5dc014668784b3a20484d4c781d80462"
@@ -898,50 +870,6 @@
         }
       ],
       "sdk_only": [
-        {
-          "path": "README.md",
-          "sha256": "3735f839e85750bce5978f32731a062a9ea52f0c4bbca13bb85cd71ee744a6ef"
-        },
-        {
-          "path": "src/chain/chain_information/README.md",
-          "sha256": "0bbca03e1baf4d83b15c918f1f2938835f7eb35af6386f5331493265ef9d6e69"
-        },
-        {
-          "path": "src/database/finalized_serialize/README.md",
-          "sha256": "723692b41baf4599c092f474be97e4edb140af495e61b4a578e53a6cc8503589"
-        },
-        {
-          "path": "src/executor/trie_root_calculator/README.md",
-          "sha256": "02ec076917322a60d4ccdbdfb6315f02aaec6a9220d090281a3147938480697d"
-        },
-        {
-          "path": "src/identity/README.md",
-          "sha256": "8dc891d0730f6896fd31a051d17d1d12cf5d70a6fb656a7f77afb26f4846692d"
-        },
-        {
-          "path": "src/libp2p/connection/single_stream_handshake/README.md",
-          "sha256": "4bdf0adbd951e041cce49683a396b38c5192810748c32e1753258fddc0306762"
-        },
-        {
-          "path": "src/network/kademlia/README.md",
-          "sha256": "ea280fbfbacbc2dc24d24dd7d47183d1642c5770410ee5cb831f5d00dda60d11"
-        },
-        {
-          "path": "src/transactions/light_pool/README.md",
-          "sha256": "9b7f16bee8a044ed6d7ab5d3777b9a6a3025673366c89b0183288e9160456359"
-        },
-        {
-          "path": "src/transactions/pool/README.md",
-          "sha256": "9dee1f1e5ea337127d059a7e16579d797e0da3fecb5b3773f5b8785fa65297f6"
-        },
-        {
-          "path": "src/trie/branch_search/README.md",
-          "sha256": "13616429858abde06daa843b7f3eacb354fd25a3a707272932dd05d57f129039"
-        },
-        {
-          "path": "src/trie/trie_structure/README.md",
-          "sha256": "9958acd23398704a2110cfbe24a8837ca719c8784ca670804ff8bce44ecb89d3"
-        },
         {
           "path": "tests/consensus_source_manifest.rs",
           "sha256": "168a7e7d8c6e5218d2b0bcaacf72274b4e945099ab3dd82c04bfc2cd1cd4907c"

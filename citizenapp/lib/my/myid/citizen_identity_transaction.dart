@@ -57,7 +57,7 @@ class CitizenIdentityTransaction {
   static const int _selfRebindCidAccountCallIndex =
       PalletRegistry.selfRebindCidAccountCall; // 9
 
-  /// CidNumberBound = BoundedVec<u8, ConstU32<32>>。
+  /// CidNumberBound = `BoundedVec<u8, ConstU32<32>>`。
   static const int _cidMaxBytes = 32;
 
   /// sr25519 签名固定长度。

@@ -67,7 +67,7 @@ class _InstitutionAccountsPageState extends State<InstitutionAccountsPage> {
       body: ListView.separated(
         padding: EdgeInsets.all(AppLayout.scaled(context, 16)),
         itemCount: _rows.length,
-        separatorBuilder: (_, __) =>
+        separatorBuilder: (_, _) =>
             SizedBox(height: AppLayout.scaled(context, 10)),
         itemBuilder: (context, i) => _AccountCard(
           row: _rows[i],

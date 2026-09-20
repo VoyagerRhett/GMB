@@ -456,7 +456,7 @@ class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
       child: ListView.separated(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
         itemCount: _items.length,
-        separatorBuilder: (_, __) => SizedBox(height: AppLayout.scaledValue(8)),
+        separatorBuilder: (_, _) => SizedBox(height: AppLayout.scaledValue(8)),
         itemBuilder: (_, index) => _buildCard(_items[index]),
       ),
     );

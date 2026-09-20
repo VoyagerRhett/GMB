@@ -1042,7 +1042,7 @@ class UserContactService {
       jsonEncode(<String, Object?>{
         'phase': phase.name,
         'updated_at': state.updatedAt,
-        if (message != null) 'message': message,
+        'message': ?message,
       }),
     );
   }

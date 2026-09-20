@@ -351,7 +351,7 @@ class _ProfilePostsTabState extends State<ProfilePostsTab> {
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
         sliver: SliverList.separated(
           itemCount: _posts.length,
-          separatorBuilder: (_, __) =>
+          separatorBuilder: (_, _) =>
               SizedBox(height: AppLayout.scaledValue(10)),
           itemBuilder: (context, index) {
             final post = _posts[index];
@@ -523,7 +523,7 @@ class _MediaTile extends StatelessWidget {
                 Image.network(
                   imageUrl,
                   fit: BoxFit.cover,
-                  errorBuilder: (_, __, ___) => _fallbackIcon(isVideo),
+                  errorBuilder: (_, _, _) => _fallbackIcon(isVideo),
                 )
               else
                 _fallbackIcon(isVideo),

@@ -230,7 +230,7 @@ class SquareArticleComposeBodyState extends State<SquareArticleComposeBody>
 
   @override
   ComposeSnapshot snapshot() {
-    final media = <SquareLocalMediaDraft>[if (_cover != null) _cover!];
+    final media = <SquareLocalMediaDraft>[?_cover];
     final sections = <Map<String, Object?>>[];
     final textParts = <String>[];
     for (final section in _sections) {
@@ -868,7 +868,7 @@ class _ArticleCoverAction extends StatelessWidget {
                 child: Image.file(
                   File(media.path),
                   fit: BoxFit.cover,
-                  errorBuilder: (_, __, ___) => const Center(
+                  errorBuilder: (_, _, _) => const Center(
                     child: Icon(Icons.broken_image_outlined),
                   ),
                 ),
@@ -972,7 +972,7 @@ class _InlineImage extends StatelessWidget {
               Image.file(
                 File(draft.path),
                 fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => const ColoredBox(
+                errorBuilder: (_, _, _) => const ColoredBox(
                   color: AppTheme.surfaceElevated,
                   child: Center(child: Icon(Icons.broken_image_outlined)),
                 ),

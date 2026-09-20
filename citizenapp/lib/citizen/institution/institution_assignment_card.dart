@@ -36,7 +36,7 @@ class InstitutionAssignmentCard extends StatelessWidget {
               Expanded(
                   child: Text(personName,
                       style: Theme.of(context).textTheme.titleMedium)),
-              if (trailing != null) trailing!,
+              ?trailing,
             ]),
             if (adminView.assignments.isEmpty)
               const Text('岗位：暂无岗位')

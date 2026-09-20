@@ -848,7 +848,7 @@ class SquareApiClient
       'p256_public_key': p256PublicKeyHex,
       'issued_at': issuedAt,
       'binding_signature': bindingSignatureHex,
-      if (turnstileToken != null) 'turnstile_token': turnstileToken,
+      'turnstile_token': ?turnstileToken,
     });
   }
 
@@ -1442,12 +1442,12 @@ class SquareApiClient
     String? bannerContentHash,
   }) async {
     final body = <String, Object?>{
-      if (displayName != null) 'display_name': displayName,
-      if (bio != null) 'bio': bio,
-      if (avatarObjectKey != null) 'avatar_object_key': avatarObjectKey,
-      if (avatarContentHash != null) 'avatar_content_hash': avatarContentHash,
-      if (bannerObjectKey != null) 'banner_object_key': bannerObjectKey,
-      if (bannerContentHash != null) 'banner_content_hash': bannerContentHash,
+      'display_name': ?displayName,
+      'bio': ?bio,
+      'avatar_object_key': ?avatarObjectKey,
+      'avatar_content_hash': ?avatarContentHash,
+      'banner_object_key': ?bannerObjectKey,
+      'banner_content_hash': ?bannerContentHash,
     };
     final data = await _putJson('/square/profile', body, session: session);
     final profile = data['profile'];

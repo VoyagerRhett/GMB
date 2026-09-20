@@ -866,8 +866,6 @@ function writeLinuxProjectionFixture(root) {
 }
 
 const chainAssetPaths = [
-  'assets/README.md',
-  'assets/citizenchain/README.md',
   'assets/citizenchain/chainspec.json',
   'assets/citizenchain/light_sync_state.json',
   'assets/citizenchain/manifest.json',
@@ -1372,8 +1370,6 @@ function androidAarFixture(core, jni, {
     'org/citizen/sdk/ui/CitizenSdkQrCoordinator.class': Buffer.from('CitizenSDK QR coordinator'),
   },
   assets = {
-    'assets/README.md': Buffer.from('asset boundary'),
-    'assets/citizenchain/README.md': Buffer.from('chain asset boundary'),
     'assets/citizenchain/chainspec.json': Buffer.from('chainspec'),
     'assets/citizenchain/light_sync_state.json': Buffer.from('sync-state'),
     'assets/citizenchain/manifest.json': Buffer.from('asset-manifest'),
@@ -1678,8 +1674,6 @@ function writeAndroidProjectionFixture(root, options = {}) {
   const jni = Buffer.from('android-jni');
   const android = join(root, 'android');
   const assets = options.assets ?? {
-    'assets/README.md': Buffer.from('asset boundary'),
-    'assets/citizenchain/README.md': Buffer.from('chain asset boundary'),
     'assets/citizenchain/chainspec.json': Buffer.from('chainspec'),
     'assets/citizenchain/light_sync_state.json': Buffer.from('sync-state'),
     'assets/citizenchain/manifest.json': Buffer.from('asset-manifest'),
@@ -1716,7 +1710,6 @@ function writeCoreRustFixture(root) {
   for (const path of [
     'Cargo.toml',
     'Cargo.lock',
-    'native/README.md',
   ]) {
     const destination = join(root, ...path.split('/'));
     mkdirSync(dirname(destination), { recursive: true });
@@ -3542,12 +3535,6 @@ test('Windows 唯一构建器严格在原生、安装和消费者全部成功后
     assert.match(source('windows/test/citizen_sdk_c_consumer.c'), /citizensdk_result_release\(result\) == CITIZENSDK_OK/u);
     assert.doesNotMatch(source('windows/test/citizen_sdk_cpp_consumer.cc'), /citizensdk_result_release\s*\(/u);
     assert.match(source('windows/test/citizen_sdk_cpp_consumer.cc'), /host\.set_event_observer\(\{\}\)/u);
-    // 链-only 的公开示例与生产 WindowRef 一致，不能引导宿主传入钱包窗口。
-    const example = source('windows/README.md').match(/```cpp\n([\s\S]*?)\n```/u)?.[1];
-    assert.ok(example);
-    assert.match(example, /config\.modules = CITIZENSDK_MODULE_CHAIN;/u);
-    assert.match(example, /config\.hwnd = nullptr;/u);
-    assert.doesNotMatch(example, /parent_window/u);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -4252,16 +4239,11 @@ test('QR_V1 生产公开面不包含任何消费 App 的业务二维码 schema',
 test('三类消费者和独立签名器只依赖同一正式公开面', () => {
   const consumerRoot = join(citizenSdkRoot, 'test', 'consumers');
   const expectedFiles = [
-    'README.md',
-    'citizenapp_fixture/README.md',
     'citizenapp_fixture/citizenapp_fixture.dart',
     'consumer_test_support.dart',
-    'external_signer/README.md',
     'external_signer/generic_qr_v1_signer.dart',
     'multi_consumer_contract_test.dart',
-    'reference/README.md',
     'reference/reference_consumer.dart',
-    'third_party_fixture/README.md',
     'third_party_fixture/third_party_fixture.dart',
   ];
   const actualFiles = [];
@@ -4348,7 +4330,7 @@ test('三类消费者和独立签名器只依赖同一正式公开面', () => {
   assert.equal(CITIZENSDK_INTERNAL_SYMBOLS.length, 4);
 });
 
-test('Dart、Android、Darwin、Linux、Windows 固定同一 Flutter 双通道和 65 方法合同', () => {
+test('Dart、Android、Darwin、Linux、Windows 固定同一 Flutter 双通道和 67 方法合同', () => {
   const root = mkdtempSync(join(workRoot, 'release-flutter-contract-test-'));
   const sources = [
     'lib/src/platform/citizen_sdk_flutter_codec.dart',
@@ -5008,10 +4990,9 @@ test('Release 固定根级许可证入口、GPL-3.0 与 MIT 权威许可证原�
   }
 });
 
-test('产品源码拒绝docs目录并固定模块说明闭集', () => {
+test('产品源码拒绝docs目录和重复产品说明文件', () => {
   const root = mkdtempSync(join(workRoot, 'release-documentation-test-'));
   try {
-    copyFileSync(join(citizenSdkRoot, 'README.md'), join(root, 'README.md'));
     for (const relativeRoot of ['android', 'darwin', 'lib/src', 'linux', 'windows']) {
       const destination = join(root, ...relativeRoot.split('/'));
       mkdirSync(dirname(destination), { recursive: true });
@@ -5029,10 +5010,10 @@ test('产品源码拒绝docs目录并固定模块说明闭集', () => {
     );
     rmSync(forbidden, { recursive: true });
 
-    writeFileSync(join(root, 'README.md'), 'drift\n');
+    writeFileSync(join(root, 'README.md'), 'duplicate product documentation\n');
     assert.throws(
       () => assertDocumentationSource(root),
-      /产品文档文件哈希漂移：README\.md/,
+      /产品文档闭集漂移；.*额外=README\.md/,
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -5597,7 +5578,7 @@ test('sr25519 signer 合同拒绝可改变 Cargo 行为的额外文件', () => {
     writeFileSync(join(signer, 'build.rs'), 'fn main() {}\n');
     assert.throws(
       () => assertSignerSource(root),
-      /signer 10 文件闭集漂移.*额外=native\/signer\/build\.rs/,
+      /signer 8 文件闭集漂移.*额外=native\/signer\/build\.rs/,
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -7434,7 +7415,7 @@ test('Hosted 完整归档绑定审计候选和 Apple 展开字节，验真成功
       assert.deepEqual(entries.get(path).data, readFileSync(join(candidate, target)), path);
     }
     for (const path of [
-      'pubspec.yaml', 'README.md', 'LICENSE',
+      'pubspec.yaml', 'LICENSE',
       'lib/citizen_sdk.dart', 'assets/citizenchain/manifest.json',
       'android/src/main/jniLibs/arm64-v8a/libcitizensdk.so', 'darwin/citizen_sdk.podspec',
       'linux/lib/LinuxARM/libcitizensdk.so', 'linux/lib/LinuxAMD/libcitizensdk.so',

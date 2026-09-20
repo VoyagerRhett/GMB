@@ -121,7 +121,7 @@ class SquareMediaTile extends StatelessWidget {
               Image.network(
                 imageUrl,
                 fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => _fallbackIcon(isVideo),
+                errorBuilder: (_, _, _) => _fallbackIcon(isVideo),
               )
             else
               _fallbackIcon(isVideo),
@@ -308,7 +308,7 @@ class _SquareNetworkVideoState extends State<SquareNetworkVideo> {
             Image.network(
               widget.thumbnailUrl!,
               fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) =>
+              errorBuilder: (_, _, _) =>
                   const ColoredBox(color: AppTheme.surfaceElevated),
             )
           else

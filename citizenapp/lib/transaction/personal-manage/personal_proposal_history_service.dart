@@ -317,7 +317,7 @@ class PersonalProposalHistoryService {
 
   /// 从链上 `VotingEngine.ProposalData[id]` 原始字节解码 `PersonalProposalAction`。
   ///
-  /// ProposalData 是 BoundedVec<u8>:Compact<len> + bytes。
+  /// ProposalData 是 `BoundedVec<u8>:Compact<len> + bytes`。
   ///
   /// 个人多签提案能命中的映射:
   /// - per-mgmt + 0 → create (PersonalAdmins::propose_create)
@@ -367,7 +367,7 @@ class PersonalProposalHistoryService {
     return true;
   }
 
-  /// 读取 `VotingEngine.ProposalData[id]` 原始字节(BoundedVec<u8> SCALE 编码)。
+  /// 读取 `VotingEngine.ProposalData[id]` 原始字节(`BoundedVec<u8>` SCALE 编码)。
   Future<Uint8List?> _fetchProposalDataRaw(int proposalId) async {
     try {
       final key = _buildStorageKey(

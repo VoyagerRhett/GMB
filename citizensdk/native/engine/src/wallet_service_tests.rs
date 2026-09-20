@@ -214,6 +214,8 @@ impl EncryptedSecretBlobStore for MemoryEncryptedSecretStore {
 #[derive(Debug)]
 struct MemorySecretVault {
     availability: Mutex<VaultAvailability>,
+    availability_gate: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
+    availability_entered: Mutex<Option<futures::channel::oneshot::Sender<()>>>,
     wallet_keys: Mutex<HashSet<(u32, VaultGeneration)>>,
     retired_wallets: Mutex<HashSet<(u32, VaultGeneration)>>,
     delete_wallet_calls: AtomicUsize,
@@ -227,6 +229,8 @@ impl Default for MemorySecretVault {
     fn default() -> Self {
         Self {
             availability: Mutex::new(VaultAvailability::Available),
+            availability_gate: Mutex::new(None),
+            availability_entered: Mutex::new(None),
             wallet_keys: Mutex::new(HashSet::new()),
             retired_wallets: Mutex::new(HashSet::new()),
             delete_wallet_calls: AtomicUsize::new(0),
@@ -249,7 +253,16 @@ impl MemorySecretVault {
 
 impl SecretVault for MemorySecretVault {
     fn availability(&self) -> ContractFuture<'_, VaultAvailability> {
-        Box::pin(async move { Ok(*self.availability.lock().unwrap()) })
+        Box::pin(async move {
+            if let Some(entered) = self.availability_entered.lock().unwrap().take() {
+                let _ = entered.send(());
+            }
+            let gate = self.availability_gate.lock().unwrap().take();
+            if let Some(gate) = gate {
+                let _ = gate.await;
+            }
+            Ok(*self.availability.lock().unwrap())
+        })
     }
 
     fn seal(
@@ -1460,9 +1473,20 @@ fn concurrent_instances_loser_never_deletes_the_winner_wallet() {
             .prepare_create(WalletWordCount::Words12, Zeroizing::new(String::new()))
             .await
             .expect("准备创建");
-        let (create_result, import_result) = join!(
+        // `join!` 的轮询次序不是钱包锁所有权证据。让 create 在设备安全检查中
+        // 显式通知已经持有进程级钱包操作锁，再放行 import 进入竞争。
+        let (availability_entered, create_holds_gate) = futures::channel::oneshot::channel();
+        let (release_create, availability_gate) = futures::channel::oneshot::channel();
+        *harness.vault.availability_entered.lock().unwrap() = Some(availability_entered);
+        *harness.vault.availability_gate.lock().unwrap() = Some(availability_gate);
+        let release_after_create_enters = async move {
+            let _ = create_holds_gate.await;
+            let _ = release_create.send(());
+        };
+        let (create_result, import_result, ()) = join!(
             harness.service.commit_create_after_backup(prepared),
             other.import(&import_mnemonic, ""),
+            release_after_create_enters,
         );
 
         let winner = create_result.expect("先取得全局操作所有权的 create 应成功");

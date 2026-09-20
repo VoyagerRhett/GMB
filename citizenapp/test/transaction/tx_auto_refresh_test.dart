@@ -209,7 +209,7 @@ class _TxWatcherHostState extends State<_TxWatcherHost>
 
   @override
   void dispose() {
-    unawaited(stopTxAutoRefresh().catchError((Object _, StackTrace __) {}));
+    unawaited(stopTxAutoRefresh().catchError((Object _, StackTrace _) {}));
     super.dispose();
   }
 

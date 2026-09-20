@@ -293,7 +293,7 @@ class _PublicPageState extends State<PublicTab> {
     return ListView.separated(
       padding: EdgeInsets.symmetric(vertical: AppLayout.scaledValue(8)),
       itemCount: _subscribed.length,
-      separatorBuilder: (_, __) =>
+      separatorBuilder: (_, _) =>
           const Divider(height: 1, color: AppTheme.divider),
       itemBuilder: (context, i) {
         final inst = _subscribed[i];
@@ -323,7 +323,7 @@ class _PublicPageState extends State<PublicTab> {
     return ListView.separated(
       padding: EdgeInsets.symmetric(vertical: AppLayout.scaledValue(8)),
       itemCount: _cities.length,
-      separatorBuilder: (_, __) =>
+      separatorBuilder: (_, _) =>
           const Divider(height: 1, color: AppTheme.divider),
       itemBuilder: (context, i) {
         final city = _cities[i];

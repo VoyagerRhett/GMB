@@ -312,7 +312,7 @@ class VotingIdentityConsentPayload {
     return (text, offset + len);
   }
 
-  /// 解码 SCALE Compact<u32>,返回 (值, 消耗字节数);big-int 模式不会出现在
+  /// 解码 SCALE `Compact<u32>`,返回 (值, 消耗字节数);big-int 模式不会出现在
   /// 本载荷的长度前缀里,按非法处理。
   static (int, int) _decodeCompactU32(Uint8List bytes, int offset) {
     if (offset >= bytes.length) return (0, 0);

@@ -78,7 +78,7 @@ void main() {
 
     await client.ensureSession(
       accountId: _accountId,
-      signLoginPayload: (_, __) async => '0xLOGIN',
+      signLoginPayload: (_, _) async => '0xLOGIN',
     );
     await client.deleteAccount(
       accountId: _accountId,
@@ -145,7 +145,7 @@ void main() {
 
     await client.ensureSession(
       accountId: _accountId,
-      signLoginPayload: (_, __) async => '0xLOGIN',
+      signLoginPayload: (_, _) async => '0xLOGIN',
     );
     await expectLater(
       client.deleteAccount(
@@ -194,7 +194,7 @@ void main() {
     );
     await cachedClient.ensureSession(
       accountId: _accountId,
-      signLoginPayload: (_, __) async => '0xLOGIN',
+      signLoginPayload: (_, _) async => '0xLOGIN',
     );
 
     final sessionRequested = Completer<void>();
@@ -221,7 +221,7 @@ void main() {
     );
     final late = lateClient.ensureSession(
       accountId: _accountId,
-      signLoginPayload: (_, __) async => '0xLOGIN',
+      signLoginPayload: (_, _) async => '0xLOGIN',
     );
     await sessionRequested.future;
 

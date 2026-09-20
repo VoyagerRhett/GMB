@@ -683,10 +683,8 @@ class MultisigTransferService {
           if (transferDetail != null)
             MultisigTransferProposalDetailKeys.transfer:
                 transferDetail.copyWithStatus(meta.status),
-          if (safetyFundDetail != null)
-            MultisigTransferProposalDetailKeys.safetyFund: safetyFundDetail,
-          if (sweepDetail != null)
-            MultisigTransferProposalDetailKeys.sweep: sweepDetail,
+          MultisigTransferProposalDetailKeys.safetyFund: ?safetyFundDetail,
+          MultisigTransferProposalDetailKeys.sweep: ?sweepDetail,
         },
         resolutionIssuanceSummary: resIssuanceSummary,
         resolutionDestroySummary: resDestroySummary,
@@ -873,7 +871,7 @@ class MultisigTransferService {
     return _decodeProposalMeta(proposalId, raw);
   }
 
-  /// 从原始 SCALE 字节解码 ProposalData（BoundedVec<u8> → TransferAction）。
+  /// 从原始 SCALE 字节解码 ProposalData（`BoundedVec<u8>` → TransferAction）。
   TransferProposalInfo? _decodeProposalData(int proposalId, Uint8List raw) {
     try {
       int offset = 0;
@@ -932,11 +930,11 @@ class MultisigTransferService {
 
   /// 查询单个转账提案详情。返回 null 表示不存在。
   ///
-  /// ProposalData 是 BoundedVec<u8>，SCALE 编码为 Compact 长度前缀 + 原始字节。
+  /// ProposalData 是 `BoundedVec<u8>`，SCALE 编码为 Compact 长度前缀 + 原始字节。
   /// 原始字节为 TransferAction SCALE 布局：
-  ///   actor_cid_number:Option<CidNumber> + funding_account_id:AccountId32
+  ///   `actor_cid_number:Option<CidNumber> + funding_account_id:AccountId32`
   ///   + beneficiary: AccountId32(32) + amount: u128(16)
-  ///   + remark: Vec<u8>(Compact len + bytes) + proposer: AccountId32(32)
+  ///   + `remark: Vec<u8>`(Compact len + bytes) + proposer: AccountId32(32)
   Future<TransferProposalInfo?> fetchProposalAction(int proposalId) async {
     final key = _buildStorageKey(
       'VotingEngine',
@@ -1018,7 +1016,7 @@ class MultisigTransferService {
     }
   }
 
-  /// 解码 SCALE Compact<u32>，返回 (value, bytesConsumed)。
+  /// 解码 SCALE `Compact<u32>`，返回 (value, bytesConsumed)。
   (int, int) _decodeCompact(Uint8List data, int offset) {
     final first = data[offset];
     final mode = first & 0x03;
@@ -1073,9 +1071,9 @@ class MultisigTransferService {
 
   /// 构造 propose_transfer call data。
   ///
-  /// 格式：[0x11][0x00][actor_cid_number:Option<CidNumber>]
-  /// [proposer_role_code:Option<RoleCode>][funding_account_id:AccountId32]
-  /// [beneficiary:AccountId32][amount:u128][remark:Vec<u8>]。
+  /// 格式：`[0x11][0x00][actor_cid_number:Option<CidNumber>]`
+  /// `[proposer_role_code:Option<RoleCode>][funding_account_id:AccountId32]`
+  /// `[beneficiary:AccountId32][amount:u128][remark:Vec<u8>]`。
   Uint8List _buildProposeTransferCall({
     required String? actorCidNumber,
     required String? proposerRoleCode,
@@ -1151,7 +1149,7 @@ class MultisigTransferService {
   /// 构造 propose_safety_fund_transfer call data。
   ///
   /// 格式：[0x11][0x01][actor_cid_number:CidNumber][proposer_role_code:RoleCode]
-  /// [institution_account_id:AccountId32][beneficiary:32][amount:u128][remark:Vec<u8>]。
+  /// `[institution_account_id:AccountId32][beneficiary:32][amount:u128][remark:Vec<u8>]`。
   Uint8List _buildProposeSafetyFundCall({
     required String actorCidNumber,
     required String proposerRoleCode,

@@ -325,8 +325,7 @@ class _FakeBindingReader extends CitizenIdentityChainReader {
   ) async {
     batchReads++;
     return <String, CitizenBindingChainSnapshot>{
-      for (final cidNumber in cidNumbers)
-        if (bindings[cidNumber] case final binding?) cidNumber: binding,
+      for (final cidNumber in cidNumbers) cidNumber: ?bindings[cidNumber],
     };
   }
 

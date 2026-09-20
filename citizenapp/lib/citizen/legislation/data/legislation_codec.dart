@@ -43,7 +43,7 @@ class _Scale {
     return v;
   }
 
-  /// SCALE Compact<u32>(长度/小整数用)。
+  /// SCALE `Compact<u32>`(长度/小整数用)。
   int compact() {
     final b0 = data[_i];
     final mode = b0 & 0x03;
@@ -85,7 +85,7 @@ class _Scale {
   /// Compact(len)+len 字节 → UTF-8 字符串。
   String boundedString() => utf8.decode(bytes(compact()));
 
-  /// 链端统一 CidNumber：BoundedVec<u8, 32>。
+  /// 链端统一 CidNumber：`BoundedVec<u8, 32>`。
   String cidNumber() {
     final length = compact();
     if (length <= 0 || length > 32) {

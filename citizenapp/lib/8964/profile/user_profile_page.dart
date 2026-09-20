@@ -587,7 +587,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
           syncLoaded || frame != null
           ? child
           : const ColoredBox(color: AppTheme.surfaceMuted),
-      errorBuilder: (_, __, ___) =>
+      errorBuilder: (_, _, _) =>
           const ColoredBox(color: AppTheme.surfaceMuted),
     );
   }

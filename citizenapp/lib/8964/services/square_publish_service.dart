@@ -190,8 +190,8 @@ class SquarePublishService {
         replacePostId: replacePostId,
       );
       final completionWarning = <String>[
-        if (localCopyWarning != null) localCopyWarning,
-        if (cleanupWarning != null) cleanupWarning,
+        ?localCopyWarning,
+        ?cleanupWarning,
       ].join('\n');
       onStage?.call(SquarePublishStage.completed);
       return SquarePublishResult(

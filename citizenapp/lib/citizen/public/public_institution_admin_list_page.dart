@@ -95,7 +95,7 @@ class _PublicInstitutionAdminListPageState
           : ListView.separated(
               padding: EdgeInsets.all(AppLayout.scaled(context, 16)),
               itemCount: widget.admins.length,
-              separatorBuilder: (_, __) =>
+              separatorBuilder: (_, _) =>
                   SizedBox(height: AppLayout.scaled(context, 10)),
               itemBuilder: (context, i) {
                 final adminView = widget.admins[i];

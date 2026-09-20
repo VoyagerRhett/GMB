@@ -249,7 +249,7 @@ class SquareComposeDraftStore implements SquareComposeDraftRepository {
         if (entity.title != null) 'title': entity.title,
         'text': entity.text,
         'media': media,
-        if (sections != null) 'content_sections': sections,
+        'content_sections': ?sections,
         'updated_at': entity.updatedAtMillis,
       });
     } on Object catch (error) {

@@ -127,7 +127,7 @@ class _DraftsPageState extends State<DraftsPage> {
             content = ListView.separated(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
               itemCount: drafts.length,
-              separatorBuilder: (_, __) =>
+              separatorBuilder: (_, _) =>
                   SizedBox(height: AppLayout.scaled(context, 10)),
               itemBuilder: (context, index) {
                 final draft = drafts[index];

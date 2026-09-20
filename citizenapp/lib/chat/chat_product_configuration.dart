@@ -33,7 +33,7 @@ class ChatPushToken implements sdk.ChatPushToken {
 
   @override
   String get registrationCacheValue =>
-      provider + '|' + (apnsEnvironment ?? '') + '|' + token;
+      '$provider|${apnsEnvironment ?? ''}|$token';
 }
 
 /// 只把CitizenApp通用平台推送映射为TataChatSDK聊天唤醒桥；不拥有Firebase配置或非聊天通知。

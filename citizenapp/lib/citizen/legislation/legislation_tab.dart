@@ -416,7 +416,7 @@ class _LegislationTabState extends State<LegislationTab> {
     return ListView.separated(
       padding: const EdgeInsets.fromLTRB(4, 0, 12, 12),
       itemCount: _provinceContent.length,
-      separatorBuilder: (_, __) =>
+      separatorBuilder: (_, _) =>
           const Divider(height: 1, color: AppTheme.divider),
       itemBuilder: (context, i) {
         final inst = _provinceContent[i];

@@ -82,7 +82,7 @@ void main() {
           body: SquareVideoComposeBody(
             key: key,
             imagePicker: _VideoPickerFake(),
-            mediaDraftBuilder: (_, __) async => _video,
+            mediaDraftBuilder: (_, _) async => _video,
             onVideoChanged: changes.add,
           ),
         ),

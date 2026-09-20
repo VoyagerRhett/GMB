@@ -622,7 +622,7 @@ class _FeedBody extends StatelessWidget {
           avatarHeaders: avatarHeaders,
         );
       },
-      separatorBuilder: (_, __) =>
+      separatorBuilder: (_, _) =>
           SizedBox(height: AppLayout.scaled(context, 10)),
       itemCount: posts.length + (errorMessage == null ? 0 : 1),
     );

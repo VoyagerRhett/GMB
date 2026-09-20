@@ -27,7 +27,19 @@ void main() {
     expect(runner, contains('flutter build ios --no-pub --release'));
     expect(
       runner,
-      contains(r'android/gradlew" ${gradle_network_arg:+"$gradle_network_arg"}'),
+      contains(
+        r'GRADLE_EXECUTABLE="${CITIZENAPP_GRADLE:-$APP_ROOT/android/gradlew}"',
+      ),
+    );
+    expect(
+      runner,
+      contains(r'[[ "$GRADLE_EXECUTABLE" == /* && -f "$GRADLE_EXECUTABLE"'),
+    );
+    expect(
+      runner,
+      contains(
+        r'"$GRADLE_EXECUTABLE" ${gradle_network_arg:+"$gradle_network_arg"}',
+      ),
     );
     expect(runner, isNot(contains('GRADLE_NETWORK_ARGS')));
     expect(runner, contains('gradle.beforeSettings { settings ->'));

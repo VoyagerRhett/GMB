@@ -80,10 +80,10 @@ class RuntimeUpgradeService {
 
   /// 查询协议升级提案详情。返回 null 表示不存在。
   ///
-  /// ProposalData 是 BoundedVec<u8>，SCALE 编码为 Compact 长度前缀 + 原始字节。
+  /// ProposalData 是 `BoundedVec<u8>`，SCALE 编码为 Compact 长度前缀 + 原始字节。
   /// 原始字节布局：
   ///   actor_cid_number: CidNumber + proposer: AccountId32(32)
-  ///   + reason: Vec<u8>(Compact len + bytes)
+  ///   + reason: `Vec<u8>`(Compact len + bytes)
   ///   + code_hash: [u8;32] + expected_pow_params_hash: [u8;32]
   ///   + PowDifficultyParams 固定字段。真实状态只读取 VotingEngine::Proposals.status。
   Future<RuntimeUpgradeProposalInfo?> fetchRuntimeUpgradeProposal(
@@ -136,7 +136,7 @@ class RuntimeUpgradeService {
   /// 查询联合投票中某机构的投票记录。
   ///
   /// 双 map：blake2_128_concat(u64_le) + blake2_128_concat(CidNumber)。
-  /// Value: Option<bool> — null=未投票，true=赞成，false=反对。
+  /// Value: `Option<bool>` — null=未投票，true=赞成，false=反对。
   Future<bool?> fetchJointVoteByInstitution(
       int proposalId, String actorCidNumber) async {
     final fullKey = _buildDoubleStorageKey(
@@ -625,7 +625,7 @@ class RuntimeUpgradeService {
     return Uint8List.fromList([...prefix, ...roleBytes]);
   }
 
-  /// 解码 SCALE Compact<u32>，返回 (value, bytesConsumed)。
+  /// 解码 SCALE `Compact<u32>`，返回 (value, bytesConsumed)。
   (int, int) _decodeCompact(Uint8List data, int offset) {
     final first = data[offset];
     final mode = first & 0x03;

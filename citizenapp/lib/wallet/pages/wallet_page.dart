@@ -539,7 +539,7 @@ class _WalletTabState extends State<WalletTab> {
           padding: EdgeInsets.all(AppLayout.scaled(context, 16)),
           child: ListSkeleton(
             itemCount: 3,
-            itemBuilder: (_, __) => const WalletCardSkeleton(),
+            itemBuilder: (_, _) => const WalletCardSkeleton(),
           ),
         ),
         _WalletLoadState.initialFailure => _buildInitialLoadFailure(),

@@ -1103,7 +1103,7 @@ class _HeaderBackground extends StatelessWidget {
             syncLoaded || frame != null
             ? child
             : const ColoredBox(color: AppTheme.surfaceMuted),
-        errorBuilder: (_, __, ___) =>
+        errorBuilder: (_, _, _) =>
             const ColoredBox(color: AppTheme.surfaceMuted),
       );
     } else if (userImageSet) {

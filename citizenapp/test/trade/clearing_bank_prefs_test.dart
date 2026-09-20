@@ -80,7 +80,7 @@ void main() {
         _accountA,
         _snapshot(cidNumber: 'REMOVE-FALSE'),
       );
-      ClearingBankPrefs.debugRemoveForTest = (_, __) async => false;
+      ClearingBankPrefs.debugRemoveForTest = (_, _) async => false;
 
       await expectLater(
         ClearingBankPrefs.clear(_accountA),

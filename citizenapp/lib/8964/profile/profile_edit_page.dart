@@ -378,7 +378,7 @@ class _AssetRow extends StatelessWidget {
         url,
         headers: networkHeaders,
         fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => _fallback(),
+        errorBuilder: (_, _, _) => _fallback(),
       );
     }
     return _fallback();

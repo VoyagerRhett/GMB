@@ -175,7 +175,7 @@ class SquareDocumentComposeBodyState extends State<SquareDocumentComposeBody>
                   Image.file(
                     File(_media[index].path),
                     fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => const ColoredBox(
+                    errorBuilder: (_, _, _) => const ColoredBox(
                       color: AppTheme.surfaceElevated,
                       child: Center(
                         child: Icon(

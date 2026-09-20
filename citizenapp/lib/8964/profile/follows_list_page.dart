@@ -226,7 +226,7 @@ class _FollowsListPageState extends State<FollowsListPage> {
       onNotification: _onScroll,
       child: ListView.separated(
         itemCount: _entries.length + (_loading ? 1 : 0),
-        separatorBuilder: (_, __) => const Divider(height: 1),
+        separatorBuilder: (_, _) => const Divider(height: 1),
         itemBuilder: (context, index) {
           if (index >= _entries.length) {
             return Padding(

@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -95,6 +97,4 @@ void main() {
     expect(source, isNot(contains('QrRouteType.userContact')));
     expect(source, isNot(contains('QrRouteType.userTransfer')));
   });
-
 }
-import 'dart:io';

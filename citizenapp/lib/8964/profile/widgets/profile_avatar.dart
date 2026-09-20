@@ -97,7 +97,7 @@ class ProfileAvatar extends StatelessWidget {
                             syncLoaded || frame != null
                                 ? child
                                 : const _UserImagePlaceholder(),
-                        errorBuilder: (_, __, ___) =>
+                        errorBuilder: (_, _, _) =>
                             const _UserImagePlaceholder(),
                       )
                     : hasUserImage
