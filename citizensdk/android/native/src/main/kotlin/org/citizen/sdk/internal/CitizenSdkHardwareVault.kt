@@ -76,6 +76,7 @@ internal class CitizenSdkHardwareVault(
     fun whenActivityReady(callback: () -> Unit): AutoCloseable = activities.whenResumed(callback)
 
     fun setReadinessListener(listener: (() -> Unit)?) = activities.setReadinessListener(listener)
+    fun currentActivity(): FragmentActivity? = activities.currentResumed()
 
     fun availability(): Int {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return VAULT_UNSUPPORTED
@@ -176,6 +177,7 @@ internal class CitizenSdkHardwareVault(
     fun unwrapDek(
         hostOperationId: Long,
         privateKeyView: Boolean,
+        boundActivity: FragmentActivity?,
         walletIndex: Int,
         generation: ByteArray,
         wrappedDek: ByteArray,
@@ -189,7 +191,7 @@ internal class CitizenSdkHardwareVault(
             if (!hasWalletKek(walletIndex, generation)) {
                 throw VaultFailure(CitizenSdkErrorCode.KEY_INVALIDATED, "wallet KEK is unavailable")
             }
-            val host = activities.currentResumed()
+            val host = (if (privateKeyView) boundActivity else activities.currentResumed())
                 ?: throw VaultFailure(CitizenSdkErrorCode.AUTHENTICATION_REQUIRED, "no foreground wallet activity")
             val alias = CitizenSdkRecordKey.hardwareAlias(walletIndex, generation)
             val privateKey = keyStore().getKey(alias, null) as? PrivateKey
@@ -215,6 +217,10 @@ internal class CitizenSdkHardwareVault(
                     completion(code)
                 }
                 try {
+                    if (host.isDestroyed || host.isFinishing || !host.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                        accepted.finish { CitizenSdkErrorCode.AUTHENTICATION_CANCELLED }
+                        return@dispatchAuthentication
+                    }
                     if (privateKeyView && cancelledAuthentications.contains(hostOperationId)) {
                         accepted.finish { CitizenSdkErrorCode.AUTHENTICATION_CANCELLED }
                         return@dispatchAuthentication
@@ -351,7 +357,8 @@ internal class CitizenSdkHardwareVault(
         if (!hardware || !info.isUserAuthenticationRequired ||
             !info.isUserAuthenticationRequirementEnforcedBySecureHardware || !perUseStrong
         ) {
-            keyStore.deleteEntry(alias)
+            // 查询/校验不能删除已存在的密钥；失败只报告设备事实。
+            // 物理删除仅允许走带持久退休记录的retireWalletKek路径。
             throw VaultFailure(CitizenSdkErrorCode.UNAVAILABLE, "wallet KEK is not hardware enforced")
         }
     }

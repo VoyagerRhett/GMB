@@ -236,7 +236,7 @@ class _ProfilePageState extends State<MyTab> {
   Future<void> _onWalletsChanged() async {
     // revision 同时覆盖钱包列表与 finalized CID 绑定。注册前后默认账户可能完全相同，
     // 不能只比钱包 account_id；必须重读并比较 cid_number + 身份账户。
-    final wallet = (await _wallet.getState()).defaultAccount;
+    final wallet = (await _wallet.getState().result).defaultAccount;
     final identity = await _currentUserContext.resolve();
     if (!mounted) return;
     final identityAccountId = identity?.accountId ?? wallet?.accountId ?? '';
@@ -251,7 +251,7 @@ class _ProfilePageState extends State<MyTab> {
 
   Future<void> _loadState() async {
     final generation = ++_loadGeneration;
-    final defaultWallet = (await _wallet.getState()).defaultAccount;
+    final defaultWallet = (await _wallet.getState().result).defaultAccount;
     // CID 是快照归属主键；当前绑定账户只负责链读和签名。
     final identity = await _currentUserContext.resolve();
     final identityAccountId =
@@ -528,9 +528,14 @@ class _ProfilePageState extends State<MyTab> {
   Future<void> _openMyUserCode() async {
     final identity = await _resolveOwnedIdentity();
     if (!mounted || identity == null) return;
+    final document = await context.read<CitizenSdk>().qr.encodeDocument(
+      CitizenQrContent.userContact(cidNumber: identity.cidNumber.trim(), accountId: identity.accountId),
+    );
+    if (!mounted) return;
     await Navigator.of(context).push<void>(
       MaterialPageRoute(
         builder: (_) => UserQrPage(
+          qrData: document.canonicalText,
           cidNumber: identity.cidNumber.trim(),
           displayName: _nickname,
           accountId: identity.accountId,

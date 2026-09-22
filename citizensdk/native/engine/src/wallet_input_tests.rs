@@ -6,6 +6,37 @@ use bip39::{Language, Mnemonic};
 use crate::{validate_wallet_mnemonic, wallet_word_suggestions, WalletWordCount};
 
 #[test]
+fn headless_input_results_share_the_real_parser_without_secret_echo() {
+    use crate::{wallet_mnemonic_validation, wallet_password_validation, WalletInputReason};
+
+    for (bytes, count) in [(16, WalletWordCount::Words12), (24, WalletWordCount::Words18), (32, WalletWordCount::Words24)] {
+        let sentence = Mnemonic::from_entropy_in(Language::English, &vec![0; bytes])
+            .unwrap().to_string();
+        let result = wallet_mnemonic_validation(&sentence, count);
+        assert_eq!(result.reason, WalletInputReason::Valid);
+        assert_eq!(result.position, None);
+        assert!(validate_wallet_mnemonic(&sentence, count).is_ok());
+    }
+    let mut words = ["abandon"; 12];
+    words[4] = "notawalletword";
+    let result = wallet_mnemonic_validation(&words.join(" "), WalletWordCount::Words12);
+    assert_eq!(result.reason, WalletInputReason::UnknownWord);
+    assert_eq!(result.position, Some(4));
+    assert!(!format!("{result:?}").contains("notawalletword"));
+    assert_eq!(wallet_mnemonic_validation(&"a".repeat(1025), WalletWordCount::Words12).reason, WalletInputReason::InputTooLong);
+    assert_eq!(wallet_mnemonic_validation("", WalletWordCount::Words12).reason, WalletInputReason::WordCount);
+    assert_eq!(wallet_mnemonic_validation(&["abandon"; 12].join(" "), WalletWordCount::Words12).reason, WalletInputReason::Checksum);
+    for password in ["", "public-test", "公开合成测试汉字"] {
+        assert_eq!(wallet_password_validation(password).reason, WalletInputReason::Valid);
+    }
+    assert_eq!(wallet_password_validation("short").reason, WalletInputReason::PasswordLength);
+    for password in ["public test", "public\nsecret"] {
+        assert_eq!(wallet_password_validation(password).reason, WalletInputReason::PasswordFormat);
+    }
+    assert_eq!(wallet_password_validation(&"a".repeat(1025)).reason, WalletInputReason::InputTooLong);
+}
+
+#[test]
 fn selected_word_count_and_checksum_share_the_derivation_contract() {
     for (bytes, count) in [
         (16, WalletWordCount::Words12),

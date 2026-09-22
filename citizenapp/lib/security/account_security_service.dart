@@ -389,7 +389,7 @@ interface class AccountSecurityService {
           final signature = await _signing.sign(
             accountId: binding.accountId,
             payload: signingMessage,
-          );
+          ).result;
           return '0x${_hex(signature.bytes)}';
         }
         return _coldDeviceBindingSigner(
@@ -484,7 +484,7 @@ interface class AccountSecurityService {
       throw const AccountSecurityException('账户安全清理意图字段损坏');
     }
     final accountIds = ids.cast<String>().toSet();
-    final state = await _wallet.getState();
+    final state = await _wallet.getState().result;
     if (state.accounts.any((account) => accountIds.contains(account.accountId))) {
       await _blobStore.delete(_pendingCleanupKey);
       return;
@@ -536,7 +536,7 @@ interface class AccountSecurityService {
   }
 
   Future<CitizenWalletStateAccount?> _account(String accountId) async {
-    final state = await _wallet.getState();
+    final state = await _wallet.getState().result;
     for (final account in state.accounts) {
       if (account.accountId == accountId) return account;
     }

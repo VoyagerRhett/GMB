@@ -32,7 +32,6 @@ import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
 import 'package:citizenapp/my/membership/membership_revision.dart';
 import 'package:citizenapp/my/membership/subscription_service.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/security/device_subkey.dart' show bytesToHex;
 
@@ -432,7 +431,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
       return;
     }
     final sdk = context.read<CitizenSdk>();
-    final walletState = await sdk.wallet.getState();
+    final walletState = await sdk.wallet.getState().result;
     if (!mounted) return;
     if (!walletState.accounts.any(
       (account) => account.accountId == selfAccountId,
@@ -470,7 +469,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
         // 账户注销签名统一交给 CitizenSDK，冷热模式不在页面分支。
         // 设备子钥仍按 cid_number 精确删除，不进入钱包签名模式。
         signAction: (message) async =>
-            '0x${bytesToHex(await signCitizenPayload(signing: sdk.signing, context: context, accountId: selfAccountId, payload: message, action: QrActions.squareAccountAction))}',
+            '0x${bytesToHex(await signCitizenPayload(signing: sdk.signing, context: context, accountId: selfAccountId, payload: message, action: CitizenQrActions.squareAccountAction))}',
       );
     } on SquareAccountLocalCleanupException catch (e) {
       // Worker 已经完成不可逆注销；此时不能误报“注销失败”诱导用户重复提交。
@@ -496,16 +495,21 @@ class _UserProfilePageState extends State<UserProfilePage> {
     Navigator.of(context).popUntil((route) => route.isFirst);
   }
 
-  void _openUserCode() {
+  Future<void> _openUserCode() async {
     // 用户码载荷取该永久公民号当前绑定的 account_id，供加联系人和转账使用。
     final accountId = _profile?.accountId.trim() ?? '';
     if (accountId.isEmpty) {
       _snack('资料尚未加载，请稍后再试');
       return;
     }
+    final document = await context.read<CitizenSdk>().qr.encodeDocument(
+      CitizenQrContent.userContact(cidNumber: widget.cidNumber, accountId: accountId),
+    );
+    if (!mounted) return;
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => UserQrPage(
+          qrData: document.canonicalText,
           cidNumber: widget.cidNumber,
           displayName: _displayName,
           accountId: accountId,

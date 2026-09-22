@@ -112,6 +112,8 @@ typedef uint32_t citizensdk_event_type_t;
 #define CITIZENSDK_EVENT_HISTORY_CHANGED 5U
 /* Verified finalized block change; result is a BLOCK_REF owned by the receiver. */
 #define CITIZENSDK_EVENT_FINALIZED_BLOCK_CHANGED 6U
+/* 无payload钱包失效通知；sequence以外的请求/result/revision/reserved均为零。 */
+#define CITIZENSDK_EVENT_WALLET_CHANGED 7U
 
 typedef uint32_t citizensdk_result_kind_t;
 #define CITIZENSDK_RESULT_EMPTY 0U
@@ -684,6 +686,40 @@ typedef struct citizensdk_wallet_account_info {
   uint64_t ss58_address_len;
   uint64_t name_len;
 } citizensdk_wallet_account_info_t;
+
+/* 无UI输入原因；位置仅用于词表外单词，不返回任何原始敏感输入。 */
+#define CITIZENSDK_WALLET_INPUT_PASSWORD 1U
+#define CITIZENSDK_WALLET_INPUT_MNEMONIC 2U
+#define CITIZENSDK_WALLET_INPUT_VALID 0U
+#define CITIZENSDK_WALLET_INPUT_TOO_LONG 1U
+#define CITIZENSDK_WALLET_INPUT_WORD_COUNT 2U
+#define CITIZENSDK_WALLET_INPUT_UNKNOWN_WORD 3U
+#define CITIZENSDK_WALLET_INPUT_CHECKSUM 4U
+#define CITIZENSDK_WALLET_INPUT_PASSWORD_FORMAT 5U
+#define CITIZENSDK_WALLET_INPUT_MNEMONIC_FORMAT 6U
+#define CITIZENSDK_WALLET_INPUT_PASSWORD_LENGTH 7U
+#define CITIZENSDK_WALLET_INPUT_PASSWORD_NORMALIZATION 8U
+#define CITIZENSDK_WALLET_INITIALIZATION_EMPTY 0U
+#define CITIZENSDK_WALLET_INITIALIZATION_READY 1U
+#define CITIZENSDK_WALLET_INITIALIZATION_RECOVERING 2U
+typedef struct citizensdk_wallet_input_validation_v1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t reason;
+  uint32_t position;
+} citizensdk_wallet_input_validation_v1_t;
+
+/* 显式私钥查看的无UI接收者；receive仅同步借用32字节，context存续到request真实终态。
+ * settled是阶段通知而非生命周期结束；回调不能等待UI线程或反调Core。
+ * authorizing只关联真实设备操作，不代替设备授权或直接交付私钥。 */
+typedef struct citizensdk_private_key_receiver_v1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  void *context;
+  int32_t (*receive)(void *context, uint64_t secret_id, citizensdk_bytes_view_t private_key);
+  void (*settled)(void *context, uint64_t secret_id, int32_t error_code);
+  int32_t (*authorizing)(void *context, uint64_t secret_id, uint64_t host_operation_id);
+} citizensdk_private_key_receiver_v1_t;
 
 /* Unified secret-free account catalog. Its first account is the default; this
  * ABI intentionally has no unauthorised default-account setter. */

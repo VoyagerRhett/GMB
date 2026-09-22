@@ -156,6 +156,59 @@ impl SigningCompletion {
     }
 }
 
+/// 由原宿主移入的有界载荷原语；只有数据转换，没有账户选择、认证或签名副作用。
+pub enum SigningPayload<'a> {
+    Message { op_tag: u8, scale_payload: &'a [u8] },
+    BinaryPrefix { op_tag: u8 },
+    ActivateAdmin { cid_number: &'a str, institution_code: [u8; 4], kind: u8,
+        signer_public_key: [u8; 32], timestamp: u64, nonce: [u8; 16] },
+    DecryptAdmin { cid_number: &'a str, signer_public_key: [u8; 32], timestamp: u64, nonce: [u8; 16] },
+    ScaleString(&'a str),
+    U64Le(u64),
+}
+
+/// 六种原语共用现有Rust哈希/SCALE实现，绑定层不保留第二份算法。
+pub fn encode_signing_payload(input: SigningPayload<'_>) -> ContractResult<Vec<u8>> {
+    fn prefix(tag: u8) -> Vec<u8> { vec![b'G', b'M', b'B', tag] }
+    fn admin(tag: u8, cid: &str, fields: &[u8], timestamp: u64, nonce: [u8; 16]) -> ContractResult<Vec<u8>> {
+        let cid = cid.as_bytes();
+        if cid.is_empty() || cid.len() > 32 { return Err(invalid("CID字段长度必须为1..32字节")); }
+        let mut bytes = prefix(tag);
+        bytes.extend_from_slice(cid);
+        bytes.resize(4 + 32, 0);
+        bytes.extend_from_slice(fields);
+        bytes.extend_from_slice(&timestamp.to_le_bytes());
+        bytes.extend_from_slice(&nonce);
+        Ok(bytes)
+    }
+    match input {
+        SigningPayload::Message { op_tag, scale_payload } => {
+            if scale_payload.len() > MAX_SIGNING_PAYLOAD_BYTES { return Err(invalid("签名消息超过16MiB")); }
+            let mut bytes = prefix(op_tag);
+            bytes.extend_from_slice(scale_payload);
+            // 与普通SigningTransform共用唯一blake2_256；空SCALE载荷仍是有效的原语输入。
+            Ok(blake2_256(&bytes)?.to_vec())
+        }
+        SigningPayload::BinaryPrefix { op_tag } => Ok(prefix(op_tag)),
+        SigningPayload::ActivateAdmin { cid_number, institution_code, kind, signer_public_key, timestamp, nonce } => {
+            let mut fields = Vec::with_capacity(37);
+            fields.extend_from_slice(&institution_code); fields.push(kind);
+            fields.extend_from_slice(&signer_public_key);
+            admin(0x18, cid_number, &fields, timestamp, nonce)
+        }
+        SigningPayload::DecryptAdmin { cid_number, signer_public_key, timestamp, nonce } =>
+            admin(0x19, cid_number, &signer_public_key, timestamp, nonce),
+        SigningPayload::ScaleString(value) => {
+            if value.len() > MAX_SIGNING_PAYLOAD_BYTES - 5 { return Err(invalid("SCALE字符串超过载荷上限")); }
+            let mut bytes = Vec::with_capacity(value.len() + 5);
+            encode_scale_compact_len(value.len(), &mut bytes)?;
+            bytes.extend_from_slice(value.as_bytes());
+            Ok(bytes)
+        }
+        SigningPayload::U64Le(value) => Ok(value.to_le_bytes().to_vec()),
+    }
+}
+
 /// Immutable authorization snapshot for the SDK-owned default-account list mutation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DefaultAccountChangeAuthorization {
@@ -284,13 +337,15 @@ fn validate_default_account_change(
 }
 
 fn encode_scale_compact_len(length: usize, output: &mut Vec<u8>) -> ContractResult<()> {
-    let length = u32::try_from(length).map_err(|_| invalid("账户数量超出 u32"))?;
+    let length = u32::try_from(length).map_err(|_| invalid("SCALE长度超出u32"))?;
     if length < 1 << 6 {
         output.push((length << 2) as u8);
     } else if length < 1 << 14 {
         output.extend_from_slice(&(((length << 2) | 1) as u16).to_le_bytes());
+    } else if length < 1 << 30 {
+        output.extend_from_slice(&((length << 2) | 2).to_le_bytes());
     } else {
-        return Err(invalid("账户数量超出两字节 SCALE compact 范围"));
+        return Err(invalid("SCALE长度超出已登记compact范围"));
     }
     Ok(())
 }
@@ -306,6 +361,45 @@ fn internal(message: &'static str) -> ContractError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payload_primitives_keep_original_domains_layouts_and_compact_boundaries() {
+        assert_eq!(encode_signing_payload(SigningPayload::BinaryPrefix { op_tag: 0x18 }).unwrap(), b"GMB\x18");
+        assert_eq!(encode_signing_payload(SigningPayload::Message { op_tag: 0x10, scale_payload: &[] }).unwrap(),
+            blake2_256(b"GMB\x10").unwrap());
+        assert_eq!(encode_signing_payload(SigningPayload::U64Le(u64::MAX)).unwrap(), vec![255; 8]);
+        assert_eq!(encode_signing_payload(SigningPayload::ScaleString("公民")).unwrap(),
+            [vec![24], "公民".as_bytes().to_vec()].concat());
+        for (length, prefix) in [(63, vec![252]), (64, vec![1, 1]),
+            (16383, vec![253, 255]), (16384, vec![2, 0, 1, 0])] {
+            let text = "x".repeat(length);
+            let encoded = encode_signing_payload(SigningPayload::ScaleString(&text)).unwrap();
+            assert_eq!(&encoded[..prefix.len()], prefix.as_slice());
+            assert_eq!(&encoded[prefix.len()..], text.as_bytes());
+        }
+        let activate = encode_signing_payload(SigningPayload::ActivateAdmin {
+            cid_number: "CID-7", institution_code: [1, 2, 3, 4], kind: 9,
+            signer_public_key: [7; 32], timestamp: 0x0807060504030201, nonce: [8; 16],
+        }).unwrap();
+        assert_eq!(activate.len(), 97);
+        assert_eq!(&activate[..9], b"GMB\x18CID-7");
+        assert_eq!(&activate[9..36], &[0; 27]);
+        assert_eq!(&activate[36..41], &[1, 2, 3, 4, 9]);
+        assert_eq!(&activate[41..73], &[7; 32]);
+        assert_eq!(&activate[73..81], &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(&activate[81..], &[8; 16]);
+        let decrypt = encode_signing_payload(SigningPayload::DecryptAdmin {
+            cid_number: "C", signer_public_key: [7; 32], timestamp: 1, nonce: [8; 16],
+        }).unwrap();
+        assert_eq!(decrypt.len(), 92);
+        assert_eq!(&decrypt[..5], b"GMB\x19C");
+        assert!(encode_signing_payload(SigningPayload::DecryptAdmin {
+            cid_number: "", signer_public_key: [7; 32], timestamp: 1, nonce: [8; 16],
+        }).is_err());
+        assert!(encode_signing_payload(SigningPayload::DecryptAdmin {
+            cid_number: &"x".repeat(33), signer_public_key: [7; 32], timestamp: 1, nonce: [8; 16],
+        }).is_err());
+    }
 
     fn account(byte: u8) -> AccountId32 {
         AccountId32::from_bytes([byte; 32])

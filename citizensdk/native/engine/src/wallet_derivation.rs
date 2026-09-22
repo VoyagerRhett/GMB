@@ -166,20 +166,39 @@ pub async fn derive_wallet_accounts(
 /// 行为与 Dart `WalletPassword.parse` 一致：空值允许；非空原文和 NFKD 后都必须为
 /// 6–30 个 grapheme，且每个 grapheme 只能是单个 ASCII graphic 或 Han 字符。
 pub fn validate_wallet_password(password: &str) -> Result<Zeroizing<String>, EngineError> {
+    normalize_wallet_password_checked(password).map_err(|reason| {
+        use crate::wallet_input::WalletInputReason;
+        let message = match reason {
+            WalletInputReason::PasswordLength => "密码长度必须为 6–30 位",
+            WalletInputReason::PasswordNormalization => "密码包含规范化后无法安全恢复的字符",
+            _ => "密码只能使用大写字母、小写字母、数字、指定符号或汉字",
+        };
+        EngineError::contract(ContractErrorCode::InvalidArgument, message)
+    })
+}
+
+/// 校验、规范化及错误原因共用此实现，供实际派生与无UI输入事实共同调用。
+pub(crate) fn normalize_wallet_password_checked(
+    password: &str,
+) -> Result<Zeroizing<String>, crate::wallet_input::WalletInputReason> {
     if password.is_empty() {
         return Ok(Zeroizing::new(String::new()));
     }
     validate_password_form(password)?;
     // 先进入可清零容器再做第二次校验；NFKD 后失败也不能遗留普通 String。
     let normalized = Zeroizing::new(password.nfkd().collect::<String>());
-    validate_password_form(normalized.as_str())?;
+    validate_password_form(normalized.as_str())
+        .map_err(|_| crate::wallet_input::WalletInputReason::PasswordNormalization)?;
     Ok(normalized)
 }
 
-fn validate_password_form(value: &str) -> Result<(), EngineError> {
+fn validate_password_form(value: &str) -> Result<(), crate::wallet_input::WalletInputReason> {
+    use crate::wallet_input::WalletInputReason;
     let graphemes: Vec<_> = UnicodeSegmentation::graphemes(value, true).collect();
-    if !(6..=30).contains(&graphemes.len())
-        || graphemes.iter().any(|grapheme| {
+    if !(6..=30).contains(&graphemes.len()) {
+        return Err(WalletInputReason::PasswordLength);
+    }
+    if graphemes.iter().any(|grapheme| {
             let mut chars = grapheme.chars();
             let Some(character) = chars.next() else {
                 return true;
@@ -187,10 +206,7 @@ fn validate_password_form(value: &str) -> Result<(), EngineError> {
             chars.next().is_some() || !(character.is_ascii_graphic() || is_han_character(character))
         })
     {
-        return Err(EngineError::contract(
-            ContractErrorCode::InvalidArgument,
-            "钱包 password 必须为 6–30 位 ASCII 可见字符或汉字",
-        ));
+        return Err(WalletInputReason::PasswordFormat);
     }
     Ok(())
 }

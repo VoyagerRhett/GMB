@@ -6,12 +6,15 @@ import android.os.Looper
 import androidx.fragment.app.FragmentActivity
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.view.TextureRegistry
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import java.util.UUID
+import org.citizen.sdk.internal.CitizenSdkSensitiveBytes
 
 /** Owns public Flutter session identities without exposing Core ownership IDs. */
 internal class CitizenSdkFlutterSequenceGate {
@@ -211,13 +214,18 @@ internal class CitizenSdkFlutterSubscriptionGate<T : Any> {
         current?.generation == token.generation && current?.value === token.value
 }
 
-internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.StreamHandler {
+internal class CitizenSdkFlutterSessions(context: Context, private val textures: TextureRegistry? = null) : EventChannel.StreamHandler {
 
     private inner class Session(val sdk: CitizenSdk) {
         val requests = CitizenSdkFlutterSequenceGate()
         val nextEvent = AtomicLong(1)
         private val stateLock = Any()
         private val inFlight = linkedMapOf<CompletableFuture<*>, CitizenSdkFlutterOutstanding>()
+        private val cancellations = linkedMapOf<Long, () -> Boolean>()
+        val prepared = ConcurrentHashMap<String, CitizenSdkPreparedWallet>()
+        val privateKeys = ConcurrentHashMap<String, CitizenSdkPrivateKey>()
+        val reviews = ConcurrentHashMap<String, CitizenQrReview>()
+        val captures = ConcurrentHashMap<String, CitizenSdkQrCapture>()
         private var closing = false
         private var closeCompletion: CompletableFuture<Void>? = null
 
@@ -233,6 +241,34 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
             val outstanding = CitizenSdkFlutterOutstanding(future, cancel)
             synchronized(stateLock) { inFlight[future] = outstanding }
             future.whenComplete { _, _ -> synchronized(stateLock) { inFlight -= future } }
+        }
+
+        fun registerCancel(sequence: Long, future: CompletableFuture<*>, cancel: () -> Boolean) {
+            synchronized(stateLock) { cancellations[sequence] = cancel }
+            future.whenComplete { _, _ -> synchronized(stateLock) { cancellations.remove(sequence) } }
+        }
+        fun cancel(sequence: Long): Boolean = synchronized(stateLock) { cancellations[sequence]?.invoke() ?: false }
+
+        fun <T : AutoCloseable> adopt(map: ConcurrentHashMap<String, T>, resource: T): String = synchronized(stateLock) {
+            if (closing) {
+                resource.close()
+                throw CitizenSdkException(CitizenSdkErrorCode.CANCELLED, "session is closing")
+            }
+            UUID.randomUUID().toString().also { map[it] = resource }
+        }
+        fun adoptPrivate(resource: CitizenSdkPrivateKey): CompletableFuture<String> = synchronized(stateLock) {
+            if (closing) resource.close().thenApply<String> {
+                throw CitizenSdkException(CitizenSdkErrorCode.CANCELLED, "session is closing")
+            }
+            else CompletableFuture.completedFuture(UUID.randomUUID().toString().also { id ->
+                privateKeys[id] = resource
+                resource.closed.whenComplete { _, _ -> emit(this, "privateKeyClosed", listOf(id)) }
+            })
+        }
+
+        fun adoptCapture(id: String, resource: CitizenSdkQrCapture): CompletableFuture<CitizenSdkQrCapture> = synchronized(stateLock) {
+            if (closing) resource.close().thenApply { throw CitizenSdkException(CitizenSdkErrorCode.CANCELLED, "session is closing") }
+            else CompletableFuture.completedFuture(resource.also { captures[id] = it })
         }
 
         fun beginClose(): CitizenSdkFlutterClosePlan = synchronized(stateLock) {
@@ -253,7 +289,6 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
     private val main = Handler(Looper.getMainLooper())
     private val lock = Any()
     private val sessions = linkedMapOf<String, Session>()
-    private val walletFlow = CitizenSdkFlutterWalletFlow()
 
     @Volatile private var activity: FragmentActivity? = null
     private val subscriptions = CitizenSdkFlutterSubscriptionGate<EventChannel.EventSink>()
@@ -270,6 +305,12 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
     }
 
     fun dispatch(request: CitizenSdkFlutterCodec.Request, result: MethodChannel.Result) {
+        if (request is CitizenSdkFlutterCodec.Request.EncodePayload) {
+            try { result.success(listOf(CitizenSdkFlutterCodec.PROTOCOL_VERSION,
+                CitizenSigning.encodePayload(CitizenSigningPayload(request.kind, request.fieldsJson, request.payload)))) }
+            catch (error: Throwable) { fail(result, error, request) }
+            return
+        }
         if (request is CitizenSdkFlutterCodec.Request.VerifySignature) {
             // 公开验签先于会话、序号和资源装配处理，不要求事件订阅或 Activity。
             try { result.success(verifySignature(request)) }
@@ -439,20 +480,11 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
                 "getFeeSnapshot" -> complete(session, request, result, sdk.getFeeSnapshot()) {
                     listOf(CitizenSdkFlutterCodec.fee(it))
                 }
-                "getWalletProfile" -> complete(session, request, result, sdk.getWalletProfile()) {
-                    listOf(CitizenSdkFlutterCodec.profile(it))
-                }
                 "getWalletState" -> complete(session, request, result, sdk.getWalletState()) {
                     listOf(CitizenSdkFlutterCodec.walletState(it))
                 }
-                "initializeWallet" -> throw CitizenSdkException(
-                    CitizenSdkErrorCode.INVALID_ARGUMENT,
-                    "initializeWallet requires its typed request",
-                )
-                "importWallet" -> walletFlow(session, request, result)
-                "deleteWallet" -> complete(session, request, result, sdk.deleteWallet()) {
-                    listOf(CitizenSdkFlutterCodec.profile(it))
-                }
+                "deleteWallet" -> complete(session, request, result, sdk.deleteWallet()) { emptyList() }
+                "signAndDeleteWallet" -> complete(session, request, result, sdk.signAndDeleteWallet()) { emptyList() }
                 "reconcileWalletCleanup" -> complete(
                     session,
                     request,
@@ -461,23 +493,16 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
                 ) { listOf(CitizenSdkFlutterCodec.profile(it)) }
                 else -> throw CitizenSdkException(CitizenSdkErrorCode.UNSUPPORTED, "Unsupported method")
             }
-            is CitizenSdkFlutterCodec.Request.InitializeWallet -> complete(
-                session,
-                request,
-                result,
-                walletFlow.launch(session.sdk, activity, request).thenCompose { session.sdk.getWalletState() },
-            ) { listOf(CitizenSdkFlutterCodec.walletState(it)) }
-            is CitizenSdkFlutterCodec.Request.ImportColdAccountWithUi -> complete(
-                session,
-                request,
-                result,
-                walletFlow.launch(session.sdk, activity, request).thenCompose { session.sdk.getWalletState() },
+            is CitizenSdkFlutterCodec.Request.WalletInput -> routeWalletInput(session, request, result)
+            is CitizenSdkFlutterCodec.Request.Resource -> routeResource(session, request, result)
+            is CitizenSdkFlutterCodec.Request.ColdCode -> complete(
+                session, request, result, sdk.importColdAccountCode(request.code, request.name),
             ) { listOf(CitizenSdkFlutterCodec.walletState(it)) }
             is CitizenSdkFlutterCodec.Request.Account -> when (request.method) {
-                "viewAccountPrivateKey" -> complete(
-                    session, request, result,
-                    walletFlow.viewAccountPrivateKey(sdk, activity, request),
-                ) { emptyList() }
+                "openPrivateKey" -> {
+                    val opened = sdk.openPrivateKey(request.accountId).thenCompose(session::adoptPrivate)
+                    complete(session, request, result, opened) { listOf(it) }
+                }
                 "getAccountBalance" -> complete(
                     session,
                     request,
@@ -497,12 +522,6 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
                     request,
                     result,
                     sdk.setActiveWalletAccount(request.accountId),
-                ) { listOf(CitizenSdkFlutterCodec.profile(it)) }
-                "deleteWalletAccount" -> complete(
-                    session,
-                    request,
-                    result,
-                    sdk.deleteWalletAccount(request.accountId),
                 ) { listOf(CitizenSdkFlutterCodec.profile(it)) }
                 "deleteAccount" -> complete(
                     session, request, result, sdk.deleteAccount(request.accountId),
@@ -557,21 +576,10 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
             is CitizenSdkFlutterCodec.Request.ImportState -> complete(
                 session, request, result, sdk.importState(request.state),
             ) { emptyList() }
-            is CitizenSdkFlutterCodec.Request.CreateWallet -> walletFlow(session, request, result)
-            is CitizenSdkFlutterCodec.Request.AddWalletAccounts -> walletFlow(session, request, result)
-            // 与 setActiveWalletAccount 相同，直接投影 Core 返回的原子 profile。
             is CitizenSdkFlutterCodec.Request.RenameWalletAccount -> {
-                val future = when (request.method) {
-                    "renameWalletAccount" -> sdk.renameWalletAccount(request.accountId, request.name)
-                        .thenApply<Any> { it }
-                    "importColdAccountId" -> sdk.importColdAccount(request.accountId, request.name)
-                        .thenApply<Any> { it }
-                    else -> sdk.renameAccount(request.accountId, request.name).thenApply<Any> { it }
-                }
-                complete(session, request, result, future) { value ->
-                    listOf(if (value is CitizenWalletProfile) CitizenSdkFlutterCodec.profile(value)
-                    else CitizenSdkFlutterCodec.walletState(value as CitizenWalletState))
-                }
+                val operation = if (request.method == "importColdAccountId") sdk.importColdAccount(request.accountId, request.name)
+                    else sdk.renameAccount(request.accountId, request.name)
+                complete(session, request, result, operation) { listOf(CitizenSdkFlutterCodec.walletState(it)) }
             }
             is CitizenSdkFlutterCodec.Request.ColdSs58 -> complete(
                 session, request, result, sdk.importColdAccount(request.address, request.name),
@@ -658,8 +666,17 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
                 }
             }
             is CitizenSdkFlutterCodec.Request.Qr -> {
-                if (request.method == "qrScan" || request.method == "signQrRequest") {
-                    complete(session, request, result, walletFlow.qr(sdk, activity, request)) { listOf(it.coreJson) }
+                if (request.method == "openQrCapture") {
+                    openCapture(session, request, result)
+                } else if (request.method == "setQrCaptureTorch") {
+                    val capture = session.captures[request.fields[0] as String]
+                        ?: throw CitizenSdkException(CitizenSdkErrorCode.NOT_FOUND, "capture belongs to another session or is closed")
+                    complete(session, request, result, capture.setTorch(request.fields[1] as Boolean)) { emptyList() }
+                } else if (request.method == "reviewQrRequest") {
+                    val operation = sdk.signing.reviewQrRequest(request.fields[0] as String)
+                    complete(session, request, result, mapOperation(operation) { review ->
+                        listOf(session.adopt(session.reviews, review), review.coreJson)
+                    }) { it }
                 } else complete(session, request, result,
                     CompletableFuture.supplyAsync { routeQr(sdk, request) },
                 ) { it }
@@ -667,15 +684,161 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
         }
     }
 
+    /** 受控输入只在同步JNI接纳内转成可清零字节；不在异步续体保留字节副本。 */
+    private fun routeWalletInput(session: Session, request: CitizenSdkFlutterCodec.Request.WalletInput, result: MethodChannel.Result) {
+        val sdk = session.sdk
+        CitizenSdkSensitiveBytes.utf8(request.text).use { text ->
+            CitizenSdkSensitiveBytes.utf8(request.password).use { password ->
+                when (request.method) {
+                    "validateWalletPassword", "validateWalletMnemonic" -> {
+                        val validation = if (request.method == "validateWalletPassword") sdk.validateWalletPassword(text)
+                            else sdk.validateWalletMnemonic(text, request.wordCount)
+                        success(result, request.sessionId, request.requestSequence, listOf(validation.reason.ordinal, validation.position))
+                    }
+                    "walletWordSuggestions" -> success(result, request.sessionId, request.requestSequence, listOf(sdk.walletWordSuggestions(text)))
+                    "prepareWalletCreation" -> complete(session, request, result,
+                        mapOperation(sdk.prepareWalletCreation(request.wordCount, password)) { session.adopt(session.prepared, it) },
+                    ) { listOf(it) }
+                    "importWallet", "addNextWalletAccount", "addWalletAccounts" -> {
+                        val operation = when (request.method) {
+                            "importWallet" -> sdk.importWallet(text, password)
+                            "addNextWalletAccount" -> sdk.addNextWalletAccount(text, password)
+                            else -> sdk.addWalletAccounts(text, password, request.indices)
+                        }
+                        complete(session, request, result, operation) { listOf(CitizenSdkFlutterCodec.profile(it)) }
+                    }
+                    else -> throw CitizenSdkException(CitizenSdkErrorCode.UNSUPPORTED, "unsupported wallet input")
+                }
+            }
+        }
+    }
+
+    private fun routeResource(session: Session, request: CitizenSdkFlutterCodec.Request.Resource, result: MethodChannel.Result) {
+        if (request.method == "respondCredential" || request.method == "cancelCredential") {
+            throw CitizenSdkException(CitizenSdkErrorCode.INVALID_STATE, "No active credential challenge")
+        }
+        val id = request.resourceId
+        fun missing(): Nothing = throw CitizenSdkException(CitizenSdkErrorCode.NOT_FOUND, "resource is closed or belongs to another session")
+        when (request.method) {
+            "closeQrCapture", "pauseQrCapture", "resumeQrCapture" -> {
+                val resource = session.captures[id] ?: missing()
+                val future = when (request.method) {
+                    "closeQrCapture" -> resource.close().thenApply { session.captures.remove(id, resource); null }
+                    "pauseQrCapture" -> resource.pause()
+                    else -> resource.resume()
+                }
+                complete(session, request, result, future) { emptyList() }
+            }
+            "cancelOperation" -> success(result, request.sessionId, request.requestSequence, listOf(session.cancel(id.toLong())))
+            "copyRecoveryPhrase" -> {
+                val phrase = (session.prepared[id] ?: missing()).openRecoveryPhrase()
+                try {
+                    val bytes = phrase.copyBytes()
+                    try { success(result, request.sessionId, request.requestSequence, listOf(bytes)) }
+                    finally { bytes.fill(0) }
+                } finally { phrase.close() }
+            }
+            "commitWalletCreation" -> {
+                val resource = session.prepared[id] ?: missing()
+                val operation = resource.commit()
+                // 保留终态资源到显式release；即使Core接纳后提交失败，也能准确释放而不重交。
+                complete(session, request, result, operation) { listOf(CitizenSdkFlutterCodec.profile(it)) }
+            }
+            "releasePreparedWallet" -> {
+                val resource = session.prepared[id] ?: missing()
+                resource.close()
+                session.prepared.remove(id, resource)
+                success(result, request.sessionId, request.requestSequence, emptyList())
+            }
+            "revealPrivateKey" -> complete(session, request, result, (session.privateKeys[id] ?: missing()).reveal()) { listOf(it) }
+            "closePrivateKey" -> {
+                val resource = session.privateKeys[id] ?: missing()
+                complete(session, request, result, resource.close().thenApply {
+                    session.privateKeys.remove(id, resource)
+                    Unit
+                }) { emptyList() }
+            }
+            "releaseQrReview" -> {
+                val review = session.reviews[id] ?: missing()
+                review.close()
+                session.reviews.remove(id, review)
+                success(result, request.sessionId, request.requestSequence, emptyList())
+            }
+            "signQrRequest" -> {
+                val review = session.reviews[id] ?: missing()
+                val operation = session.sdk.signing.signQrRequest(review)
+                // 保留资源登记直到显式release，即使签名接纳后失败也不遗失终态所有权。
+                complete(session, request, result, operation) {
+                    listOf(it.document.coreJson, it.qrImage.width, it.qrImage.height, it.qrImage.luminance())
+                }
+            }
+            else -> throw CitizenSdkException(CitizenSdkErrorCode.UNSUPPORTED, "unsupported resource method")
+        }
+    }
+
+    private fun <T, R> mapOperation(operation: CitizenSdkOperation<T>, map: (T) -> R): CitizenSdkOperation<R> =
+        CitizenSdkOperation(operation.operationId, operation.future.thenApply(map), operation::cancel)
+
+    /** 纹理由Flutter引擎提供，必须等SDK自己的帧/Surface排空后才能归还。 */
+    private fun openCapture(session: Session, request: CitizenSdkFlutterCodec.Request.Qr, result: MethodChannel.Result) {
+        val host = activity ?: throw CitizenSdkException(CitizenSdkErrorCode.UNAVAILABLE, "camera host is unavailable")
+        val registry = textures ?: throw CitizenSdkException(CitizenSdkErrorCode.UNAVAILABLE, "texture registry is unavailable")
+        val purpose = CitizenQrScanPurpose.entries.single { it.value == request.fields[0] as Int }
+        val entry = registry.createSurfaceTexture()
+        val id = UUID.randomUUID().toString()
+        val released = java.util.concurrent.atomic.AtomicBoolean(false)
+        var published = false
+        var owned: CitizenSdkQrCapture? = null
+        val listener = object : CitizenSdkQrCapture.Listener {
+            override fun onResult(value: CitizenQrScanResult) {
+                if (published) emit(session, "qrCaptureResult", listOf(id, value.purpose.value, value.document.coreJson))
+            }
+            override fun onError(error: CitizenSdkException) {
+                if (published) emit(session, "qrCaptureError", listOf(id, error.code.value, CitizenSdkFlutterCodec.errorName(error.code), error.stage.value))
+            }
+            override fun onPreview(width: Int, height: Int, rotationDegrees: Int) {
+                if (published) emit(session, "qrCapturePreview", listOf(id, width, height, rotationDegrees))
+            }
+            override fun onClosed() {
+                if (released.compareAndSet(false, true)) entry.release()
+                if (published) emit(session, "qrCaptureClosed", listOf(id))
+            }
+        }
+        val opening = try {
+            session.sdk.openCapture(host, entry.surfaceTexture(), purpose, listener)
+        } catch (error: Throwable) {
+            if (released.compareAndSet(false, true)) entry.release()
+            throw error
+        }
+        val ready = opening.thenCompose { capture ->
+            owned = capture
+            capture.pause().thenCompose { session.adoptCapture(id, capture) }
+        }.thenApply { capture ->
+            published = true
+            listOf<Any?>(id, entry.id(), capture.previewWidth, capture.previewHeight, capture.rotationDegrees)
+        }
+        ready.whenComplete { _, error -> if (error != null) owned?.close() }
+        complete(session, request, result, ready, { owned?.close(); Unit }) { it }
+    }
+
     private fun routeQr(
         sdk: CitizenSdk,
         request: CitizenSdkFlutterCodec.Request.Qr,
     ): List<Any?> = when (request.method) {
+        "qrEncodeDocument" -> listOf(sdk.qrEncodeDocument(CitizenQrContent(request.fields[0] as String)).coreJson)
+        "qrPrepareAccountAuthorization" -> listOf(sdk.qrPrepareAccountAuthorization(
+            request.fields[0] as Int, request.fields[1] as ByteArray, request.fields[2] as String).coreJson)
+        "qrDecodeImage" -> listOf(sdk.decodeImage(request.fields[0] as ByteArray,
+            CitizenQrScanPurpose.entries.single { it.value == request.fields[1] as Int }).map { it.document.coreJson })
         "qrParse" -> listOf(sdk.qrParse(request.fields[0] as String).coreJson)
         "qrCreateSignRequest" -> listOf(sdk.qrCreateSignRequest(
             request.fields[0] as Int, request.fields[1] as ByteArray,
             request.fields[2] as ByteArray, request.fields[3] as Long,
         ))
+        "qrValidateSignResponse" -> {
+            sdk.qrValidateSignResponse(request.fields[0] as String, request.fields[1] as String)
+            emptyList()
+        }
         "qrConsumeSignResponse" -> listOf(sdk.qrConsumeSignResponse(request.fields[0] as String))
         "qrCancelSignRequest" -> listOf(sdk.qrCancelSignRequest(request.fields[0] as String))
         "qrEncodeAccountId" -> listOf(sdk.qrEncodeAccountId(request.fields[0] as ByteArray))
@@ -687,14 +850,6 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
             request.fields[0] as String, request.fields[1] as Int,
         ).let { listOf(it.width, it.height, it.luminance()) }
         else -> throw CitizenSdkException(CitizenSdkErrorCode.UNSUPPORTED, "Unsupported QR method")
-    }
-
-    private fun walletFlow(
-        session: Session,
-        request: CitizenSdkFlutterCodec.Request.SessionRequest,
-        result: MethodChannel.Result,
-    ) = complete(session, request, result, walletFlow.launch(session.sdk, activity, request)) {
-        listOf(CitizenSdkFlutterCodec.profile(it))
     }
 
     private fun close(
@@ -717,7 +872,7 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
     private fun supervisedClose(session: Session): CompletableFuture<Void> {
         val plan = session.beginClose()
         if (!plan.owner) return plan.completion
-        walletFlow.cancelSession(session.sdk.sessionId)
+        val resourceClosures = session.privateKeys.values.map { resource -> resource.close() } + session.sdk.closeQrCaptures()
         var cancellationError: Throwable? = null
         plan.outstanding.forEach { outstanding ->
             try {
@@ -729,7 +884,7 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
         val cancelFailure = cancellationError
         val settled = if (cancelFailure == null) {
             citizenSdkFlutterSettleWithin(
-                plan.outstanding.map { it.future },
+                plan.outstanding.map { it.future } + resourceClosures,
                 CLOSE_SETTLEMENT_TIMEOUT_MILLIS,
                 CitizenSdkFlutterProcessOrphans,
             )
@@ -737,12 +892,18 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
             CompletableFuture<Void>().also { it.completeExceptionally(cancelFailure) }
         }
         settled.thenCompose {
+            session.prepared.values.forEach { it.close() }
+            session.reviews.values.forEach { it.close() }
             citizenSdkFlutterCloseLifecycle(
                 session.sdk.lifecycle,
                 session.sdk::stop,
                 session.sdk::close,
             )
         }.thenRun {
+            session.prepared.clear()
+            session.privateKeys.clear()
+            session.reviews.clear()
+            session.captures.clear()
             synchronized(lock) { sessions.remove(session.sdk.sessionId, session) }
         }.whenComplete { _, error ->
             if (error == null) {
@@ -758,6 +919,7 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
     private fun onNativeEvent(session: Session, event: CitizenSdkEvents.Event) {
         when (event) {
             is CitizenSdkEvents.Event.HistoryChanged -> emit(session, "historyChanged", emptyList())
+            is CitizenSdkEvents.Event.WalletChanged -> emit(session, "walletChanged", emptyList())
             is CitizenSdkEvents.Event.FinalizedBlockChanged -> emit(
                 session,
                 "finalizedBlockChanged",
@@ -795,21 +957,42 @@ internal class CitizenSdkFlutterSessions(context: Context) : EventChannel.Stream
         session: Session,
         request: CitizenSdkFlutterCodec.Request.SessionRequest,
         result: MethodChannel.Result,
+        operation: CitizenSdkOperation<T>,
+        encode: (T) -> List<Any?>,
+    ) {
+        session.registerCancel(request.requestSequence, operation.future, operation::cancel)
+        complete(session, request, result, operation.future, { operation.cancel(); Unit }, encode)
+    }
+
+    private fun <T> complete(
+        session: Session,
+        request: CitizenSdkFlutterCodec.Request.SessionRequest,
+        result: MethodChannel.Result,
         future: CompletableFuture<T>,
         cancel: (() -> Unit)? = null,
         encode: (T) -> List<Any?>,
     ) {
+        // 异步完成仅保留公开上下文，不让续体一直引用WalletInput中的宿主String。
+        val context = CitizenSdkFlutterCodec.Request.Empty(
+            CitizenSdkFlutterCodec.requestMethod(request), request.sessionId, request.requestSequence,
+        )
         session.track(future, cancel)
         future.whenComplete { value, error ->
             main.post {
                 if (error == null) {
                     try {
-                        success(result, request.sessionId, request.requestSequence, encode(value))
+                        val payload = encode(value)
+                        try { success(result, context.sessionId, context.requestSequence, payload) }
+                        finally {
+                            if (context.method in setOf("revealPrivateKey", "deriveApplicationKey")) {
+                                payload.filterIsInstance<ByteArray>().forEach { it.fill(0) }
+                            }
+                        }
                     } catch (encodingError: Throwable) {
-                        fail(result, encodingError, request)
+                        fail(result, encodingError, context)
                     }
                 } else {
-                    fail(result, error, request)
+                    fail(result, error, context)
                 }
             }
         }

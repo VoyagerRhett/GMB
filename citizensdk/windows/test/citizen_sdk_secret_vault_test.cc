@@ -2,6 +2,10 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include <algorithm>
+#include <chrono>
+#include <future>
+#include <stdexcept>
+#include <vector>
 #include <array>
 #include <cassert>
 #include <cstring>
@@ -65,7 +69,8 @@ struct FakeSystem final {
     return {
       [this] { return available; },
       [this] { return authentication_available; },
-      [this] {
+      [this](uint64_t host_operation_id) {
+        assert(host_operation_id != 0);
         ++prompted;
         return cancel ? AuthenticationResult{CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED, {}}
                       : authenticated();
@@ -194,7 +199,7 @@ void cross_process_retirement(SecureStore &store, const std::filesystem::path &d
   std::array<uint8_t, 16> operation{};
   operation[0] = 9;
   try {
-    vault.ensure_wallet_kek(wallet, operation);
+    vault.ensure_wallet_kek(101, wallet, operation);
     expect(store.load_vault_object(wallet).has_value());
     expect(::SetEvent(proceed.get()));
     expect(::WaitForSingleObject(process.get(), 30000) == WAIT_OBJECT_0);
@@ -213,8 +218,120 @@ void cross_process_retirement(SecureStore &store, const std::filesystem::path &d
 
 }  // namespace
 
+
+namespace {
+// 仅使用合成凭据；不访问真实钱包和设备认证界面。
+void headless_credential_contract() {
+  using namespace citizen_sdk::windows;
+  UserAuth auth;
+  assert(!auth.available());
+  assert(auth.create_vault_password(41).code == CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED);
+  assert(auth.unlock_vault_password(0).code == CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  struct Provider final {
+    UserAuth *auth{};
+    std::vector<uint8_t> bytes = std::vector<uint8_t>(12, 'a');
+    uint64_t id{};
+    uint32_t purpose{};
+    unsigned cancellations{}, references{};
+    bool provider_idle{true};
+    bool hold{}, revoke{}, cancelled{}, throws{};
+    std::promise<void> accepted;
+    citizensdk_error_code_t response{};
+  } provider;
+  provider.auth = &auth;
+  citizensdk_credential_provider_v1_t binding{
+      sizeof(citizensdk_credential_provider_v1_t), 1, &provider,
+      +[](void *context, const citizensdk_credential_challenge_v1_t *challenge) {
+        auto &p = *static_cast<Provider *>(context);
+        assert(challenge->struct_size == sizeof(*challenge) && challenge->abi_version == 1);
+        assert(challenge->reserved == 0 && challenge->host_operation_id != 0);
+        p.id = challenge->host_operation_id; p.purpose = challenge->key_purpose;
+        if (p.throws) throw std::runtime_error("synthetic provider failure");
+        if (p.hold) { p.accepted.set_value(); return; }
+        const uint8_t nonnull_empty = 0;
+        p.response = p.auth->respond(p.id, p.cancelled ? citizensdk_bytes_view_t{nullptr, 0}
+            : citizensdk_bytes_view_t{p.bytes.empty() ? &nonnull_empty : p.bytes.data(),
+                                     static_cast<uint64_t>(p.bytes.size())});
+        if (p.revoke) assert(p.auth->cancel(p.id) == CITIZENSDK_OK);
+      },
+      +[](void *context, uint64_t id) {
+        auto &p = *static_cast<Provider *>(context);
+        assert(id == p.id); ++p.cancellations;
+      },
+      +[](void *context) { ++static_cast<Provider *>(context)->references; },
+      +[](void *context) { --static_cast<Provider *>(context)->references; },
+      +[](void *context) -> uint8_t {
+        return static_cast<Provider *>(context)->provider_idle ? 1 : 0;
+      }};
+  auto malformed = binding;
+  malformed.cancel = nullptr;
+  assert(auth.configure(&malformed) == CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  assert(!auth.available());
+  assert(auth.configure(&binding) == CITIZENSDK_OK && auth.available());
+  assert(provider.references == 1);
+  auto created = auth.create_vault_password(41);
+  assert(provider.id == 41 && provider.purpose == 1);
+  assert(created.code == CITIZENSDK_OK && created.password.size() == 12);
+  provider.bytes[0] = 'b';
+  assert(created.password.data()[0] == 'a'); // 回调返回后独立持有可擦除副本。
+  created.password.clear();
+  assert(auth.respond(41, {provider.bytes.data(), 12}) == CITIZENSDK_ERROR_INVALID_STATE);
+  provider.bytes.assign(1024, 'a');
+  auto unlocked = auth.unlock_vault_password(42);
+  assert(provider.id == 42 && provider.purpose == 2);
+  assert(unlocked.code == CITIZENSDK_OK && unlocked.password.size() == 1024);
+  unlocked.password.clear();
+  for (const auto length : {0, 11, 1025}) {
+    provider.bytes.assign(static_cast<std::size_t>(length), 'a');
+    provider.bytes.reserve(1); // 非NULL空输入不能冒充null取消。
+    const auto invalid = auth.unlock_vault_password(43);
+    assert(invalid.code == CITIZENSDK_ERROR_INVALID_ARGUMENT);
+    assert(provider.response == CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  }
+  provider.bytes.assign(12, 'a');
+  provider.bytes[2] = 0xc0;
+  assert(auth.unlock_vault_password(44).code == CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  provider.bytes[2] = 0;
+  assert(auth.unlock_vault_password(45).code == CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  provider.bytes[2] = 'a';
+  provider.cancelled = true;
+  assert(auth.unlock_vault_password(46).code == CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED);
+  provider.cancelled = false;
+  provider.revoke = true;
+  auto revoked = auth.unlock_vault_password(47);
+  assert(revoked.code == CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED && revoked.password.empty());
+  provider.revoke = false;
+  provider.throws = true;
+  assert(auth.unlock_vault_password(48).code == CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED);
+  provider.throws = false;
+  // Host隔离、真实请求号、取消和迟到回包不以UI是否显示为判断依据。
+  provider.hold = true;
+  auto accepted = provider.accepted.get_future();
+  auto pending = std::async(std::launch::async, [&] { return auth.unlock_vault_password(49); });
+  assert(accepted.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  assert(!auth.idle());
+  assert(auth.configure(nullptr) == CITIZENSDK_ERROR_BUSY);
+  assert(auth.unlock_vault_password(49).code == CITIZENSDK_ERROR_CONFLICT);
+  UserAuth other;
+  assert(other.respond(49, {provider.bytes.data(), 12}) == CITIZENSDK_ERROR_INVALID_STATE);
+  auth.cancel_all();
+  assert(pending.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  auto stopped = pending.get();
+  assert(stopped.code == CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED && stopped.password.empty());
+  assert(auth.respond(49, {provider.bytes.data(), 12}) == CITIZENSDK_ERROR_INVALID_STATE);
+  assert(auth.idle() && provider.cancellations == 3);
+  provider.provider_idle = false;
+  assert(!auth.idle()); // 已取消Core等待，不等于提供者异步资源排空。
+  assert(auth.configure(nullptr) == CITIZENSDK_ERROR_BUSY);
+  provider.provider_idle = true;
+  assert(auth.configure(nullptr) == CITIZENSDK_OK && !auth.available());
+  assert(provider.references == 0);
+}
+}  // namespace
+
 int wmain(int count, wchar_t **arguments) {
   if (count > 1 && std::wstring(arguments[1]) == L"--retire") return retire_child(count, arguments);
+  headless_credential_contract();
   using namespace citizen_sdk::windows;
   citizen_sdk::windows::test::TempDirectory temporary("secret-vault");
   SecureStore store(temporary.path() / "state");
@@ -236,7 +353,7 @@ int wmain(int count, wchar_t **arguments) {
   assert(vault.availability() == CITIZENSDK_HOST_VAULT_AVAILABLE);
   system.authentication_available = false;
   assert(vault.availability() == CITIZENSDK_HOST_VAULT_NO_STRONG_USER_AUTHENTICATION);
-  fails(CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED, [&] { vault.ensure_wallet_kek(wallet, operation); });
+  fails(CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED, [&] { vault.ensure_wallet_kek(101, wallet, operation); });
   assert(system.created == 0);
   system.authentication_available = true;
   system.available = CngAvailability::kUnsupported;
@@ -250,18 +367,18 @@ int wmain(int count, wchar_t **arguments) {
   assert(zero() && vault.idle());
 
   system.cancel = true;
-  fails(CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED, [&] { vault.ensure_wallet_kek(wallet, operation); });
+  fails(CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED, [&] { vault.ensure_wallet_kek(101, wallet, operation); });
   assert(system.created == 0 && !store.load_vault_object(wallet));
   system.cancel = false;
-  vault.ensure_wallet_kek(wallet, operation);
+  vault.ensure_wallet_kek(101, wallet, operation);
   assert(vault.has_wallet_kek(wallet) && system.created == 1);
   const unsigned prompts = system.prompted;
-  fails(CITIZENSDK_ERROR_KEY_INVALIDATED, [&] { other.ensure_wallet_kek(wallet, competing); });
+  fails(CITIZENSDK_ERROR_KEY_INVALIDATED, [&] { other.ensure_wallet_kek(101, wallet, competing); });
   assert(system.created == 1 && system.deleted == 0 && system.prompted == prompts);
-  vault.ensure_wallet_kek(wallet, operation);
+  vault.ensure_wallet_kek(101, wallet, operation);
   assert(system.created == 1);
 
-  const Bytes wrapped = vault.wrap_dek(wallet, operation, output.data());
+  const Bytes wrapped = vault.wrap_dek(102, wallet, operation, output.data());
   assert(wrapped.size() == 256);
   vault.unwrap_dek(2, wallet, wrapped, output.data());
   assert(output[0] == 0x3c && vault.idle());
@@ -292,17 +409,17 @@ int wmain(int count, wchar_t **arguments) {
   fails(CITIZENSDK_ERROR_KEY_INVALIDATED, [&] { vault.unwrap_dek(6, wallet, wrapped, output.data()); });
   system.on_unlock = {};
   assert(zero() && system.decrypted == decryptions && vault.idle() && !vault.has_wallet_kek(wallet));
-  fails(CITIZENSDK_ERROR_KEY_INVALIDATED, [&] { vault.ensure_wallet_kek(wallet, operation); });
+  fails(CITIZENSDK_ERROR_KEY_INVALIDATED, [&] { vault.ensure_wallet_kek(101, wallet, operation); });
 
   wallet.generation[0] = 2;
-  vault.ensure_wallet_kek(wallet, operation);
+  vault.ensure_wallet_kek(101, wallet, operation);
   system.on_decrypt = [&] { other.retire_wallet_kek(wallet, competing); };
   fails(CITIZENSDK_ERROR_KEY_INVALIDATED, [&] { vault.unwrap_dek(7, wallet, wrapped, output.data()); });
   system.on_decrypt = {};
   assert(zero() && vault.idle());
 
   wallet.generation[0] = 3;
-  vault.ensure_wallet_kek(wallet, operation);
+  vault.ensure_wallet_kek(101, wallet, operation);
   system.delete_fails = true;
   fails(CITIZENSDK_ERROR_UNAVAILABLE, [&] { vault.retire_wallet_kek(wallet, operation); });
   assert(!store.is_generation_active(wallet) && store.load_vault_object(wallet) &&
@@ -324,7 +441,7 @@ int wmain(int count, wchar_t **arguments) {
   wallet.generation[0] = 5;
   const unsigned deletions = system.deleted;
   system.on_create = [&] { other_store.store_vault_object_if_owned(wallet, operation, synthetic_object(wallet)); };
-  vault.ensure_wallet_kek(wallet, operation);
+  vault.ensure_wallet_kek(101, wallet, operation);
   system.on_create = {};
   assert(vault.has_wallet_kek(wallet) && system.deleted == deletions);
   vault.retire_wallet_kek(wallet, operation);
@@ -333,7 +450,7 @@ int wmain(int count, wchar_t **arguments) {
   wallet.generation[0] = 6;
   system.on_create = [&] { other_store.retire_generation(wallet, competing); };
   const unsigned before_failure = system.deleted;
-  fails(CITIZENSDK_ERROR_KEY_INVALIDATED, [&] { vault.ensure_wallet_kek(wallet, operation); });
+  fails(CITIZENSDK_ERROR_KEY_INVALIDATED, [&] { vault.ensure_wallet_kek(101, wallet, operation); });
   system.on_create = {};
   assert(system.deleted == before_failure && system.keys.count(cng_key_name(wallet)) == 1);
   vault.retire_wallet_kek(wallet, operation);

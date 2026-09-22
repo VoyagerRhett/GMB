@@ -321,7 +321,7 @@ class _InstitutionDetailPageState extends State<InstitutionDetailPage> {
     if (wallet == null) return const {};
     final coldAccountIds = <String>{};
     try {
-      final allWallets = (await wallet.getState()).accounts;
+      final allWallets = (await wallet.getState().result).accounts;
       for (final w in allWallets) {
         if (w.signMode == CitizenWalletSignMode.cold) {
           if (adminAccountIds.contains(w.accountId)) {

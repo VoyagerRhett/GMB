@@ -1,7 +1,7 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'dart:math';
 import 'dart:typed_data';
 
-import 'package:citizenapp/signer/signing.dart';
 
 /// 扫码支付 Step 2c-i:**L3 扫码支付意图**(`NodePaymentIntent`)。
 ///
@@ -101,10 +101,12 @@ class NodePaymentIntent {
 
   /// 待签名哈希:`blake2_256(GMB || OP_SIGN_L3_PAY(0x15) || scaleEncode())`。
   ///
-  /// 经全仓签名唯一原语 [signingMessage] 构造,逐字节对齐链端
+  /// 经全仓签名唯一原语 [CitizenSigning.encodePayload] 构造,逐字节对齐链端
   /// `primitives::sign::signing_message(OP_SIGN_L3_PAY, SCALE(intent))`。
-  Uint8List signingHash() =>
-      signingMessage(opTag: kOpSignL3Pay, scalePayload: scaleEncode());
+  Future<Uint8List> signingHash() =>
+      CitizenSigning.encodePayload(CitizenSigningPayload.message(
+        opTag: kOpSignL3Pay, scalePayload: scaleEncode(),
+      ));
 
   /// 生成一个加密随机的 32 字节 `tx_id`,用作本笔支付的唯一标识 + 防重放键。
   ///

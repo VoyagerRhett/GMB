@@ -250,7 +250,22 @@ impl EventDispatcher {
     /// with the next callback-observed sequence number.
     pub fn send_reserved_completion(
         &self,
+        reservation: CompletionEventReservation,
+        request_id: CitizenSdkRequestId,
+        result: CitizenSdkResultHandle,
+    ) -> FfiResult<()> {
+        self.send_reserved(reservation, CitizenSdkEventType::RequestCompleted, request_id, result)
+    }
+
+    /// 钱包操作接纳前预留真实队列槽，避免写后因队列满丢失目录通知。
+    pub fn send_reserved_wallet_changed(&self, reservation: CompletionEventReservation) -> FfiResult<()> {
+        self.send_reserved(reservation, CitizenSdkEventType::WalletChanged, 0, 0)
+    }
+
+    fn send_reserved(
+        &self,
         mut reservation: CompletionEventReservation,
+        event_type: CitizenSdkEventType,
         request_id: CitizenSdkRequestId,
         result: CitizenSdkResultHandle,
     ) -> FfiResult<()> {
@@ -275,7 +290,7 @@ impl EventDispatcher {
                 event: CitizenSdkEvent {
                     struct_size: std::mem::size_of::<CitizenSdkEvent>() as u32,
                     abi_version: CITIZENSDK_ABI_VERSION,
-                    event_type: CitizenSdkEventType::RequestCompleted as u32,
+                    event_type: event_type as u32,
                     reserved: 0,
                     sequence,
                     request_id,
@@ -498,6 +513,55 @@ mod tests {
         let sender = unsafe { &*(context.cast::<mpsc::Sender<u64>>()) };
         let event = unsafe { &*event };
         let _ = sender.send(event.sequence);
+    }
+
+    #[test]
+    fn wallet_invalidation_and_completion_keep_reserved_slots_when_queue_is_full() {
+        struct Context {
+            first: AtomicBool,
+            events: mpsc::Sender<CitizenSdkEvent>,
+            release: Mutex<mpsc::Receiver<()>>,
+        }
+        unsafe extern "C" fn callback(raw: *mut c_void, event: *const CitizenSdkEvent) {
+            // SAFETY: 下方DrainGuard在Context析构前释放阻塞并join分发线程。
+            let context = unsafe { &*raw.cast::<Context>() };
+            let first = context.first.swap(false, Ordering::SeqCst);
+            let _ = context.events.send(unsafe { *event });
+            if first { let _ = context.release.lock().unwrap().recv(); }
+        }
+        struct DrainGuard<'a>(&'a EventDispatcher, mpsc::Sender<()>);
+        impl Drop for DrainGuard<'_> {
+            fn drop(&mut self) { let _ = self.1.send(()); let _ = self.0.shutdown(); }
+        }
+        let dispatcher = EventDispatcher::new().unwrap();
+        let (events_tx, events_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let context = Box::new(Context {
+            first: AtomicBool::new(true), events: events_tx, release: Mutex::new(release_rx),
+        });
+        let _drain = DrainGuard(&dispatcher, release_tx.clone());
+        dispatcher.set_callback(Some(callback), (&*context as *const Context).cast_mut().cast()).unwrap();
+        dispatcher.send(CitizenSdkEventType::WatchUpdate, 0, 0, 0).unwrap();
+        let first = events_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let wallet = dispatcher.reserve_completion().unwrap();
+        let completion = dispatcher.reserve_completion().unwrap();
+        for _ in 0..EVENT_QUEUE_CAPACITY - 2 {
+            dispatcher.send(CitizenSdkEventType::WatchUpdate, 0, 0, 0).unwrap();
+        }
+        assert_eq!(dispatcher.send(CitizenSdkEventType::WatchUpdate, 0, 0, 0).unwrap_err().code, CitizenSdkErrorCode::QueueFull);
+        dispatcher.send_reserved_wallet_changed(wallet).unwrap();
+        dispatcher.send_reserved_completion(completion, 91, 92).unwrap();
+        release_tx.send(()).unwrap();
+        let delivered: Vec<_> = (0..EVENT_QUEUE_CAPACITY)
+            .map(|_| events_rx.recv_timeout(Duration::from_secs(2)).unwrap()).collect();
+        for (index, event) in delivered.iter().enumerate() {
+            assert_eq!(event.sequence, first.sequence + index as u64 + 1);
+        }
+        let wallet = &delivered[EVENT_QUEUE_CAPACITY - 2];
+        assert_eq!(wallet.event_type, CitizenSdkEventType::WalletChanged as u32);
+        assert_eq!((wallet.request_id, wallet.result, wallet.capability_revision, wallet.reserved), (0, 0, 0, 0));
+        let completion = &delivered[EVENT_QUEUE_CAPACITY - 1];
+        assert_eq!((completion.event_type, completion.request_id, completion.result), (CitizenSdkEventType::RequestCompleted as u32, 91, 92));
     }
 
     #[test]

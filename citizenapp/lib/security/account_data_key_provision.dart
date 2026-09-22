@@ -5,9 +5,7 @@ import 'dart:typed_data';
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:polkadart/polkadart.dart' show Hasher;
-import 'package:citizenapp/qr/bodies/account_data_key_response_body.dart';
 import 'package:citizenapp/security/local_data_key.dart';
-import 'package:citizenapp/signer/signing.dart';
 
 typedef DataKeyRequest = ({LocalKeyPurpose purpose, String? context});
 
@@ -53,7 +51,7 @@ class AccountDataKeyProvisionSession {
     final recipientPublicKey = Uint8List.fromList(
       (await keyPair.extractPublicKey()).bytes,
     );
-    final payload = encodeAccountDataKeyProvisionRequest(
+    final payload = await encodeAccountDataKeyProvisionRequest(
       binding: binding,
       recipientPublicKey: recipientPublicKey,
       requests: requests,
@@ -70,23 +68,23 @@ class AccountDataKeyProvisionSession {
   }
 
   /// 验签后解封 `k=6`，并逐项核对用途编号、context 和32字节密钥。
-  Future<List<Uint8List>> open(AccountDataKeyResponseBody body) async {
-    if (body.signerPublicKeyHex != binding.accountId) {
+  Future<List<Uint8List>> open(CitizenQrDocument body) async {
+    if (body.signerAccountId != binding.accountId) {
       throw const AccountDataKeyException('用途钥响应签名账户不一致');
     }
     final authorization = accountDataKeyProvisionAuthorization(
       requestPayload: payload,
-      senderPublicKey: body.keyExchangePublicKeyBytes,
-      nonce: body.encryptionNonceBytes,
-      ciphertext: body.ciphertextBytes,
+      senderPublicKey: body.keyExchangePublicKey!,
+      nonce: body.encryptionNonce!,
+      ciphertext: body.ciphertext!,
     );
     if (!await CitizenSigning.verify(
       accountId: binding.accountId,
-      signature: _hexBytes(body.signatureHex),
-      payload: signingMessage(
+      signature: body.signature!,
+      payload: await CitizenSigning.encodePayload(CitizenSigningPayload.message(
         opTag: kOpSignAccountDataKeyProvision,
         scalePayload: authorization,
-      ),
+      )),
     )) {
       throw const AccountDataKeyException('用途钥响应签名无效');
     }
@@ -94,7 +92,7 @@ class AccountDataKeyProvisionSession {
     final shared = await _x25519.sharedSecretKey(
       keyPair: recipientKeyPair,
       remotePublicKey: SimplePublicKey(
-        body.keyExchangePublicKeyBytes,
+        body.keyExchangePublicKey!,
         type: KeyPairType.x25519,
       ),
     );
@@ -114,7 +112,7 @@ class AccountDataKeyProvisionSession {
     } finally {
       sharedBytes.fillRange(0, sharedBytes.length, 0);
     }
-    final ciphertext = body.ciphertextBytes;
+    final ciphertext = body.ciphertext!;
     if (ciphertext.length <= 16) {
       throw const AccountDataKeyException('用途钥密文长度无效');
     }
@@ -124,7 +122,7 @@ class AccountDataKeyProvisionSession {
         await _aesGcm.decrypt(
           SecretBox(
             ciphertext.sublist(0, ciphertext.length - 16),
-            nonce: body.encryptionNonceBytes,
+            nonce: body.encryptionNonce!,
             mac: Mac(ciphertext.sublist(ciphertext.length - 16)),
           ),
           secretKey: sessionKey,
@@ -143,27 +141,16 @@ class AccountDataKeyProvisionSession {
 
   void dispose() => _recipientSecret.fillRange(0, _recipientSecret.length, 0);
 
-  static Uint8List _hexBytes(String value) {
-    final text = value.startsWith('0x') ? value.substring(2) : value;
-    if (text.length.isOdd) throw const AccountDataKeyException('签名格式无效');
-    final output = Uint8List(text.length ~/ 2);
-    for (var index = 0; index < output.length; index++) {
-      output[index] = int.parse(
-        text.substring(index * 2, index * 2 + 2),
-        radix: 16,
-      );
-    }
-    return output;
-  }
+
 }
 
-Uint8List encodeAccountDataKeyProvisionRequest({
+Future<Uint8List> encodeAccountDataKeyProvisionRequest({
   required AccountDataBinding binding,
   required List<int> recipientPublicKey,
   required List<DataKeyRequest> requests,
   required int expiresAt,
   required List<int> requestNonce,
-}) {
+}) async {
   _validateRequests(requests);
   if (recipientPublicKey.length != 32 ||
       requestNonce.length != 16 ||
@@ -181,12 +168,12 @@ Uint8List encodeAccountDataKeyProvisionRequest({
     ..._hex32(binding.genesisHash),
     ..._compact(cid.length),
     ...cid,
-    ...u64Le(binding.bindingRevision),
+    ...await CitizenSigning.encodePayload(CitizenSigningPayload.u64Le(BigInt.from(binding.bindingRevision))),
     ..._hex32(binding.accountId),
     ...recipientPublicKey,
     ..._compact(requests.length),
     ...purposeEntries,
-    ...u64Le(expiresAt),
+    ...await CitizenSigning.encodePayload(CitizenSigningPayload.u64Le(BigInt.from(expiresAt))),
     ...requestNonce,
   ]);
 }

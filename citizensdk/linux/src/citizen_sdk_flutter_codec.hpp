@@ -36,9 +36,9 @@ inline citizensdk_failure_stage_t flutter_default_failure_stage(
   }
 }
 
-inline constexpr const char *kMethodChannel = "citizen/sdk/core/v1";
-inline constexpr const char *kEventChannel = "citizen/sdk/events/v1";
-inline constexpr int64_t kProtocolVersion = 1;
+inline constexpr const char *kMethodChannel = "citizen/sdk/core/v2";
+inline constexpr const char *kEventChannel = "citizen/sdk/events/v2";
+inline constexpr int64_t kProtocolVersion = 2;
 
 // Flutter 只接收固定 tuple 的公开值；禁止把秘密、裸句柄或指针混入该值树。
 // Only these explicitly contracted values may cross the Flutter boundary. No
@@ -50,6 +50,47 @@ struct Value final {
   using Bytes = std::vector<uint8_t>;
   using List = std::vector<Value>;
   std::variant<std::monostate, bool, int64_t, std::string, Bytes, List> data;
+  mutable bool sensitive{false};
+
+  Value() = default;
+  template <typename T> explicit Value(T value) : data(std::move(value)) {}
+  Value(const Value &) = default;
+  Value(Value &&) noexcept = default;
+  Value &operator=(const Value &other) {
+    if (this != &other) { clear_sensitive(); data = other.data; sensitive = other.sensitive; }
+    return *this;
+  }
+  Value &operator=(Value &&other) noexcept {
+    if (this != &other) {
+      clear_sensitive(); data = std::move(other.data); sensitive = other.sensitive;
+      other.sensitive = false;
+    }
+    return *this;
+  }
+  ~Value() { clear_sensitive(); }
+  // 此标记只属于本机内存所有权，不进入Flutter tuple或事件。
+  void mark_sensitive() const noexcept { sensitive = true; }
+  void clear_sensitive() noexcept {
+    if (!sensitive) return;
+    if (auto *bytes = std::get_if<Bytes>(&data)) {
+      volatile uint8_t *target = bytes->data();
+      for (std::size_t i = 0; i < bytes->size(); ++i) target[i] = 0;
+    }
+    if (auto *text = std::get_if<std::string>(&data)) {
+      volatile char *target = text->data();
+      for (std::size_t i = 0; i < text->size(); ++i) target[i] = 0;
+    }
+    if (auto *items = std::get_if<List>(&data)) {
+      for (auto &item : *items) { item.mark_sensitive(); item.clear_sensitive(); }
+    }
+    sensitive = false;
+  }
+  static Value sensitive_bytes(Bytes bytes) {
+    Value value = Value::bytes(std::move(bytes));
+    value.mark_sensitive();
+    return value;
+  }
+
 
   static Value null() { return {}; }
   static Value boolean(bool value) { return Value{value}; }
@@ -80,6 +121,9 @@ enum class Method {
   qr_parse, qr_create_sign_request,
   qr_consume_sign_response, qr_cancel_sign_request, qr_encode_account_id,
   qr_decode_luminance, qr_encode, qr_scan, sign_qr_request,
+  respond_credential, cancel_credential,
+  qr_encode_document, qr_prepare_account_authorization, encode_signing_payload,
+  qr_validate_sign_response,
 };
 
 const char *method_name(Method method) noexcept;
@@ -87,7 +131,35 @@ const char *method_name(Method method) noexcept;
 // Fields are copied from a validated fixed-position tuple. Signing payload and
 // payload bytes are public messages, never secret material. Unused fields
 // remain empty; method is the closed discriminant used by sessions.
+// 仅此字段拥有设备凭据；复制/移动赋值也先擦除旧值，不依赖请求如何被路由。
+struct CredentialBytes final {
+  std::vector<uint8_t> value;
+  explicit CredentialBytes(const std::vector<uint8_t> &source) : value(source) {}
+  CredentialBytes(const CredentialBytes &other) : value(other.value) {}
+  CredentialBytes(CredentialBytes &&other) noexcept : value(std::move(other.value)) {}
+  CredentialBytes &operator=(const CredentialBytes &other) {
+    if (this != &other) { clear(); value = other.value; }
+    return *this;
+  }
+  CredentialBytes &operator=(CredentialBytes &&other) noexcept {
+    if (this != &other) { clear(); value = std::move(other.value); }
+    return *this;
+  }
+  ~CredentialBytes() { clear(); }
+  void clear() noexcept {
+    volatile uint8_t *data = value.data();
+    for (std::size_t i = 0; i < value.size(); ++i) data[i] = 0;
+    value.clear();
+  }
+};
+
 struct DecodedRequest final {
+  uint32_t payload_kind{};
+  std::string input_json;
+  std::string account_id_text;
+  bool has_credential_provider{false};
+  uint64_t host_operation_id{};
+  std::optional<CredentialBytes> credential;
   Method method{Method::open};
   std::string session;
   int64_t sequence{};
@@ -122,7 +194,7 @@ struct DecodedRequest final {
   uint32_t history_limit{100};
   std::vector<citizensdk_account_id_t> account_ids;
   uint64_t wallet_revision{};
-  uint16_t qr_action{};
+  uint32_t qr_action{};
   uint64_t qr_ttl{};
   std::string qr_text;
   std::string qr_request_id;

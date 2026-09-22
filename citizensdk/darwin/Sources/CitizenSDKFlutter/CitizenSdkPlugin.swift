@@ -6,7 +6,7 @@ import AppKit
 @preconcurrency import FlutterMacOS
 #endif
 
-/// Flutter registration for the shared, secret-free CitizenSDK protocol v1.
+/// v2仅注册数据通道与宿主纹理，不提供SDK业务界面。
 @MainActor
 public final class CitizenSdkPlugin: NSObject, @preconcurrency FlutterPlugin {
     private let sessions = CitizenSdkFlutterSessions()
@@ -33,6 +33,11 @@ public final class CitizenSdkPlugin: NSObject, @preconcurrency FlutterPlugin {
         let messenger = registrar.messenger
         #endif
         let instance = CitizenSdkPlugin()
+        #if os(iOS)
+        instance.sessions.setTextureRegistry(registrar.textures())
+        #elseif os(macOS)
+        instance.sessions.setTextureRegistry(registrar.textures)
+        #endif
         let method = FlutterMethodChannel(name: CitizenSdkFlutterCodec.methodChannel, binaryMessenger: messenger)
         let events = FlutterEventChannel(name: CitizenSdkFlutterCodec.eventChannel, binaryMessenger: messenger)
         instance.methodChannel = method

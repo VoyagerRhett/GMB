@@ -297,7 +297,7 @@ struct PluginState final : std::enable_shared_from_this<PluginState> {
       const auto request = decode_request(call->method_name(), call->arguments());
       response->method = method_name(request.method);
       if (!request.session.empty()) response->session = request.session;
-      if (request.method != Method::open && request.method != Method::verify_signature)
+      if (request.method != Method::open && request.method != Method::verify_signature && request.method != Method::encode_signing_payload)
         response->sequence = request.sequence;
       pending.push_back(response);
       const std::weak_ptr<PluginState> weak = shared_from_this();

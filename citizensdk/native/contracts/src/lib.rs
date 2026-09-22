@@ -50,6 +50,7 @@ pub use secret_vault::{
     SecretVault, VaultAvailability, VaultGeneration,
 };
 pub use signing::{
+    encode_signing_payload, SigningPayload,
     apply_signing_transform, blake2_256, DefaultAccountChangeAuthorization, SigningCompletion,
     SigningIntent, SigningTransform, DEFAULT_ACCOUNT_CHANGE_DOMAIN,
     DEFAULT_ACCOUNT_CHANGE_NONCE_BYTES, DEFAULT_ACCOUNT_CHANGE_QR_ACTION,

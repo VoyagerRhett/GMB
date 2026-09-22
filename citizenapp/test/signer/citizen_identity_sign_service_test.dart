@@ -1,3 +1,4 @@
+import '../support/fake_citizen_sdk.dart';
 import 'dart:typed_data';
 
 import 'package:citizen_sdk/citizen_sdk.dart';
@@ -13,11 +14,13 @@ class _FakeWallet implements CitizenSdkWallet {
   final CitizenWalletStateAccount? account;
 
   @override
-  Future<CitizenWalletState> getState() async => CitizenWalletState(
+  CitizenSdkOperation<CitizenWalletState> getState() => testCitizenOperation(() async => CitizenWalletState(
+        initializationState: account == null ? CitizenWalletInitializationState.empty : CitizenWalletInitializationState.ready,
+        cleanupPending: false,
         revision: BigInt.one,
         hotProfile: null,
         accounts: account == null ? const [] : [account!],
-      );
+      ));
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -27,14 +30,14 @@ class _FakeSigning implements CitizenSigning {
   String? signedAccountId;
 
   @override
-  Future<CitizenSigningOutcome> begin(CitizenSigningIntent intent) async {
+  CitizenSdkOperation<CitizenSigningOutcome> begin(CitizenSigningIntent intent) => testCitizenOperation(() async {
     signedAccountId = intent.accountId;
     return CitizenSigningCompleted(
       accountId: intent.accountId,
       payloadHash: '0x${'00' * 32}',
       signature: Uint8List(64),
     );
-  }
+  });
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

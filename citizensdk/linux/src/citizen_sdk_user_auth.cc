@@ -1,412 +1,161 @@
 #include "citizen_sdk_user_auth.hpp"
 
-#include <chrono>
-#include <condition_variable>
-#include <cstring>
-#include <exception>
-#include <memory>
-#include <new>
 #include <utility>
 #include "citizen_sdk_input_limits.hpp"
 
-#if CITIZENSDK_ENABLE_WALLET_UI
-#include <gtk/gtk.h>
-#endif
-
 namespace citizen_sdk::linux {
-
-#if CITIZENSDK_ENABLE_WALLET_UI
 namespace {
-
-struct PromptState final {
-  std::mutex lock;
-  std::condition_variable ready;
-  bool started{false};
-  bool done{false};
-  bool abandoned{false};
-  bool confirmation{false};
-  unsigned retirement_wrong_thread_dispatches{0};
-  std::thread::id ui_thread;
-  GMainContext *ui_context{};
-  GtkParentRef *parent{};
-  uint64_t host_operation_id{};
-  bool private_view_bound{};
-  GtkWidget *dialog{};
-  GtkWidget *password{};
-  GtkWidget *second{};
-  GtkWidget *error{};
-  AuthenticationResult result;
-  ~PromptState() {
-    if (ui_context != nullptr) g_main_context_unref(ui_context);
-  }
-};
-
-void clear_controls(const std::shared_ptr<PromptState> &state) noexcept {
-  if (state->password != nullptr) {
-    gtk_entry_set_text(GTK_ENTRY(state->password), "");
-  }
-  if (state->second != nullptr) {
-    gtk_entry_set_text(GTK_ENTRY(state->second), "");
-  }
-}
-
-void destroy_dialog(const std::shared_ptr<PromptState> &state) noexcept {
-  clear_controls(state);
-  if (state->dialog != nullptr) {
-    GtkWidget *dialog = state->dialog;
-    state->dialog = nullptr;
-    state->password = nullptr;
-    state->second = nullptr;
-    state->error = nullptr;
-    gtk_widget_destroy(dialog);
-  }
-}
-
-void complete_prompt(const std::shared_ptr<PromptState> &state,
-                     citizensdk_error_code_t code,
-                     SensitiveBuffer password = {}) noexcept {
-  try {
-    std::lock_guard<std::mutex> guard(state->lock);
-    if (state->done || state->abandoned) {
-      password.clear();
-      return;
+// 凭据是实际UTF-8字节，不是授权布尔值；拒绝截断、过长、代理项及非最短编码。
+// 此处只校验设备金库凭据边界，不复制Rust的BIP39派生密码规则。
+bool valid_credential(citizensdk_bytes_view_t value) noexcept {
+  if (value.data == nullptr || value.len < 12 ||
+      value.len > input_limits::kMaximumUnlockPasswordBytes) return false;
+  for (uint64_t i = 0; i < value.len;) {
+    const uint8_t first = value.data[i++];
+    if (first == 0) return false;
+    if (first < 0x80) continue;
+    uint32_t code = 0, minimum = 0;
+    unsigned count = 0;
+    if (first >= 0xc2 && first <= 0xdf) { code = first & 31; count = 1; minimum = 0x80; }
+    else if (first >= 0xe0 && first <= 0xef) { code = first & 15; count = 2; minimum = 0x800; }
+    else if (first >= 0xf0 && first <= 0xf4) { code = first & 7; count = 3; minimum = 0x10000; }
+    else return false;
+    if (value.len - i < count) return false;
+    while (count-- != 0) {
+      const uint8_t next = value.data[i++];
+      if ((next & 0xc0) != 0x80) return false;
+      code = (code << 6) | (next & 63);
     }
-    state->result = {code, std::move(password)};
-    state->done = true;
-  } catch (...) {
-    password.clear();
-    std::lock_guard<std::mutex> guard(state->lock);
-    state->result.password.clear();
-    state->result.code = CITIZENSDK_ERROR_INTERNAL;
-    state->done = true;
+    if (code < minimum || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return false;
   }
-  state->ready.notify_all();
-}
-
-void response_received(GtkDialog *, gint response, gpointer context) noexcept {
-  const auto state =
-      *static_cast<std::shared_ptr<PromptState> *>(context);
-  try {
-    bool retired = false;
-    {
-      std::lock_guard<std::mutex> guard(state->lock);
-      retired = state->abandoned || state->done;
-    }
-    if (retired) { destroy_dialog(state); return; }
-    if (response != GTK_RESPONSE_ACCEPT) {
-      clear_controls(state);
-      complete_prompt(state, CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED);
-      destroy_dialog(state);
-      return;
-    }
-    const char *first = gtk_entry_get_text(GTK_ENTRY(state->password));
-    const char *second = state->second == nullptr
-                             ? first
-                             : gtk_entry_get_text(GTK_ENTRY(state->second));
-    const std::size_t length = first == nullptr ? 0 : std::strlen(first);
-    const bool valid = first != nullptr && length >= 12 &&
-        length <= input_limits::kMaximumUnlockPasswordBytes;
-    const bool matches = first != nullptr && second != nullptr &&
-        std::strcmp(first, second) == 0;
-    if (!valid || !matches) {
-      gtk_label_set_text(
-          GTK_LABEL(state->error),
-          !valid ? "口令长度必须为 12...1024 个 UTF-8 字节。"
-                 : "两次输入的口令不一致。");
-      return;
-    }
-    SensitiveBuffer password(reinterpret_cast<const uint8_t *>(first), length);
-    clear_controls(state);
-    complete_prompt(state, CITIZENSDK_OK, std::move(password));
-    destroy_dialog(state);
-  } catch (...) {
-    clear_controls(state);
-    complete_prompt(state, CITIZENSDK_ERROR_INTERNAL);
-    destroy_dialog(state);
-  }
-}
-
-void dialog_destroyed(GtkWidget *widget, gpointer context) noexcept {
-  const auto state =
-      *static_cast<std::shared_ptr<PromptState> *>(context);
-  try {
-    if (state->dialog != widget) return;
-    clear_controls(state);
-    state->dialog = nullptr;
-    state->password = nullptr;
-    state->second = nullptr;
-    state->error = nullptr;
-    // A parent-window destroy is a real terminal cancellation, never a stale
-    // raw-parent dereference or an indefinitely blocked Core worker.
-    complete_prompt(state, CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED);
-  } catch (...) {
-    complete_prompt(state, CITIZENSDK_ERROR_INTERNAL);
-  }
-}
-
-gboolean build_prompt(gpointer context) noexcept {
-  const auto state =
-      *static_cast<std::shared_ptr<PromptState> *>(context);
-  try {
-    {
-      std::lock_guard<std::mutex> guard(state->lock);
-      state->started = true;
-      if (state->abandoned || state->done ||
-          std::this_thread::get_id() != state->ui_thread) {
-        if (!state->done) {
-          state->result.code = CITIZENSDK_ERROR_UNAVAILABLE;
-          state->done = true;
-        }
-        state->ready.notify_all();
-        return G_SOURCE_REMOVE;
-      }
-    }
-    state->ready.notify_all();
-
-    GtkParentLease parent = state->parent == nullptr
-                                ? GtkParentLease()
-                                : state->parent->acquire();
-    state->dialog = gtk_dialog_new_with_buttons(
-        state->confirmation ? "创建 CitizenSDK 设备金库口令"
-                            : "解锁 CitizenSDK 设备金库",
-        static_cast<GtkWindow *>(parent.get()),
-        static_cast<GtkDialogFlags>(GTK_DIALOG_MODAL |
-                                    GTK_DIALOG_DESTROY_WITH_PARENT),
-        "取消", GTK_RESPONSE_CANCEL, "继续", GTK_RESPONSE_ACCEPT, nullptr);
-    if (state->dialog == nullptr) {
-      complete_prompt(state, CITIZENSDK_ERROR_UNAVAILABLE);
-      return G_SOURCE_REMOVE;
-    }
-    // 标记只存在本 SDK 原生对象，操作号来自 Core 真实 unwrap 调用。
-    g_object_set_data(G_OBJECT(state->dialog), "citizensdk-authentication", state.get());
-    gtk_window_set_resizable(GTK_WINDOW(state->dialog), FALSE);
-    GtkWidget *area =
-        gtk_dialog_get_content_area(GTK_DIALOG(state->dialog));
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-    gtk_container_set_border_width(GTK_CONTAINER(box), 18);
-    gtk_container_add(GTK_CONTAINER(area), box);
-    GtkWidget *description = gtk_label_new(
-        state->confirmation
-            ? "此口令只用于本设备 TPM 金库，不是助记词派生密码。请至少输入 12 个 UTF-8 字节。"
-            : "输入本设备 CitizenSDK 金库口令以在 TPM 内解包钱包密钥。");
-    gtk_label_set_line_wrap(GTK_LABEL(description), TRUE);
-    gtk_label_set_xalign(GTK_LABEL(description), 0.0F);
-    gtk_box_pack_start(GTK_BOX(box), description, FALSE, FALSE, 0);
-    state->password = gtk_entry_new();
-    gtk_entry_set_visibility(GTK_ENTRY(state->password), FALSE);
-    gtk_entry_set_input_purpose(GTK_ENTRY(state->password),
-                                GTK_INPUT_PURPOSE_PASSWORD);
-    gtk_entry_set_placeholder_text(GTK_ENTRY(state->password),
-                                   "设备金库口令");
-    gtk_box_pack_start(GTK_BOX(box), state->password, FALSE, FALSE, 0);
-    if (state->confirmation) {
-      state->second = gtk_entry_new();
-      gtk_entry_set_visibility(GTK_ENTRY(state->second), FALSE);
-      gtk_entry_set_input_purpose(GTK_ENTRY(state->second),
-                                  GTK_INPUT_PURPOSE_PASSWORD);
-      gtk_entry_set_placeholder_text(GTK_ENTRY(state->second),
-                                     "再次输入设备金库口令");
-      gtk_box_pack_start(GTK_BOX(box), state->second, FALSE, FALSE, 0);
-    }
-    state->error = gtk_label_new("");
-    gtk_label_set_xalign(GTK_LABEL(state->error), 0.0F);
-    gtk_box_pack_start(GTK_BOX(box), state->error, FALSE, FALSE, 0);
-
-    auto *signal_owner = new std::shared_ptr<PromptState>(state);
-    const gulong signal = g_signal_connect_data(
-        state->dialog, "response", G_CALLBACK(response_received), signal_owner,
-        +[](gpointer owner, GClosure *) noexcept {
-          delete static_cast<std::shared_ptr<PromptState> *>(owner);
-        }, static_cast<GConnectFlags>(0));
-    if (signal == 0) {
-      delete signal_owner;
-      throw std::bad_alloc();
-    }
-    auto *destroy_owner = new std::shared_ptr<PromptState>(state);
-    const gulong destroy_signal = g_signal_connect_data(
-        state->dialog, "destroy", G_CALLBACK(dialog_destroyed), destroy_owner,
-        +[](gpointer owner, GClosure *) noexcept {
-          delete static_cast<std::shared_ptr<PromptState> *>(owner);
-        }, static_cast<GConnectFlags>(0));
-    if (destroy_signal == 0) {
-      delete destroy_owner;
-      throw std::bad_alloc();
-    }
-    auto *focus_owner = new std::shared_ptr<PromptState>(state);
-    const gulong focus_signal = g_signal_connect_data(
-        state->dialog, "focus-out-event", G_CALLBACK((+[](GtkWidget *, GdkEventFocus *,
-                                                          gpointer context) -> gboolean {
-          const auto prompt = *static_cast<std::shared_ptr<PromptState> *>(context);
-          if (prompt->private_view_bound && prompt->dialog != nullptr) {
-            clear_controls(prompt);
-            complete_prompt(prompt, CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED);
-            destroy_dialog(prompt);
-          }
-          return FALSE;
-        })), focus_owner, +[](gpointer owner, GClosure *) noexcept {
-          delete static_cast<std::shared_ptr<PromptState> *>(owner);
-        }, static_cast<GConnectFlags>(0));
-    if (focus_signal == 0) { delete focus_owner; throw std::bad_alloc(); }
-    gtk_widget_show_all(state->dialog);
-  } catch (...) {
-    destroy_dialog(state);
-    complete_prompt(state, CITIZENSDK_ERROR_INTERNAL);
-  }
-  return G_SOURCE_REMOVE;
-}
-
-gboolean retire_prompt(gpointer context) noexcept {
-  const auto state =
-      *static_cast<std::shared_ptr<PromptState> *>(context);
-  if (std::this_thread::get_id() == state->ui_thread) {
-    destroy_dialog(state);
-    return G_SOURCE_REMOVE;
-  }
-  // Do not discard the only UI-thread destruction request if another thread
-  // temporarily acquires the context. The abandoned state prevents a late
-  // response from copying the password while this source waits for its owner.
-  if (++state->retirement_wrong_thread_dispatches >= 8) std::terminate();
-  GSource *current = g_main_current_source();
-  if (current != nullptr) {
-    g_source_set_ready_time(
-        current, g_get_monotonic_time() + G_TIME_SPAN_MILLISECOND * 100);
-  }
-  return G_SOURCE_CONTINUE;
-}
-
-bool attach_idle(const std::shared_ptr<PromptState> &state,
-                 GSourceFunc callback) noexcept {
-  GSource *source = g_idle_source_new();
-  if (source == nullptr) return false;
-  try {
-    auto *owner = new std::shared_ptr<PromptState>(state);
-    g_source_set_callback(
-        source, callback, owner,
-        +[](gpointer context) noexcept {
-          delete static_cast<std::shared_ptr<PromptState> *>(context);
-        });
-    const guint identity = g_source_attach(source, state->ui_context);
-    if (identity == 0) g_source_destroy(source);
-    g_source_unref(source);
-    return identity != 0;
-  } catch (...) {
-    g_source_destroy(source);
-    g_source_unref(source);
-    return false;
-  }
-}
-
-void retire_or_fail_closed(
-    const std::shared_ptr<PromptState> &state) noexcept {
-  auto delay = std::chrono::milliseconds(1);
-  for (unsigned attempt = 0; attempt < 8; ++attempt) {
-    if (attach_idle(state, retire_prompt)) return;
-    try { std::this_thread::sleep_for(delay); } catch (...) {}
-    if (delay < std::chrono::milliseconds(100)) delay *= 2;
-  }
-  // Returning would leave a password-bearing GTK entry alive with no owner
-  // capable of clearing it. Process termination is the deterministic
-  // fail-closed boundary for an exhausted UI source allocator/context.
-  std::terminate();
-}
-
-}  // namespace
-#endif
-
-UserAuth::UserAuth(GtkParentRef &parent)
-    : parent_(parent), ui_thread_(std::this_thread::get_id()) {
-#if CITIZENSDK_ENABLE_WALLET_UI
-  // Host construction is the one GTK-thread admission point. Worker-side
-  // capability queries only read this frozen result and never call GTK.
-  ui_available_ = gtk_init_check(nullptr, nullptr) != FALSE &&
-                  gdk_display_get_default() != nullptr;
-  if (ui_available_) {
-    ui_context_ = g_main_context_ref_thread_default();
-    ui_available_ = ui_context_ != nullptr;
-  }
-#endif
-}
-
-UserAuth::~UserAuth() {
-#if CITIZENSDK_ENABLE_WALLET_UI
-  if (ui_context_ != nullptr) {
-    g_main_context_unref(static_cast<GMainContext *>(ui_context_));
-    ui_context_ = nullptr;
-  }
-#endif
-}
-
-bool accept_private_key_authentication_window(
-    void *window, void *view_window, const void *owner, uint64_t host_operation_id) noexcept {
-#if CITIZENSDK_ENABLE_WALLET_UI
-  if (window == nullptr || view_window == nullptr || owner == nullptr ||
-      host_operation_id == 0) return false;
-  auto *state = static_cast<PromptState *>(g_object_get_data(
-      G_OBJECT(window), "citizensdk-authentication"));
-  if (state == nullptr || state->parent != owner ||
-      state->host_operation_id != host_operation_id || state->dialog != window)
-    return false;
-  gtk_window_set_transient_for(GTK_WINDOW(window), GTK_WINDOW(view_window));
-  state->private_view_bound = true;
   return true;
-#else
-  (void)window; (void)view_window; (void)owner; (void)host_operation_id;
-  return false;
-#endif
+}
+}  // namespace
+
+citizensdk_error_code_t UserAuth::configure(const citizensdk_credential_provider_v1_t *provider) {
+  if (provider != nullptr && (provider->struct_size != sizeof(*provider) ||
+      provider->abi_version != 1 || provider->request == nullptr || provider->cancel == nullptr ||
+      provider->retain == nullptr || provider->release == nullptr || provider->idle == nullptr))
+    return CITIZENSDK_ERROR_INVALID_ARGUMENT;
+  std::shared_ptr<Provider> previous;
+  {
+    std::lock_guard<std::recursive_mutex> callbacks(callback_lock_);
+    std::lock_guard<std::mutex> guard(lock_);
+    if (!pending_.empty() || (provider_ && provider_->value.idle(provider_->value.context) != 1))
+      return CITIZENSDK_ERROR_BUSY;
+    auto next = provider == nullptr ? std::shared_ptr<Provider>() : std::make_shared<Provider>(*provider);
+    previous = std::move(provider_);
+    provider_ = std::move(next);
+  }
+  // context的释放不在凭据锁下，且所有快照共同持有它至最后一个回调退出。
+  previous.reset();
+  return CITIZENSDK_OK;
 }
 
-bool UserAuth::available() const noexcept { return ui_available_; }
+bool UserAuth::available() const noexcept {
+  try { std::lock_guard<std::mutex> guard(lock_); return provider_ != nullptr; }
+  catch (...) { return false; }
+}
+bool UserAuth::idle() const noexcept {
+  try {
+    std::shared_ptr<Provider> provider;
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      if (!pending_.empty()) return false;
+      provider = provider_;
+    }
+    // 不能持有callback_lock_：request可能同步回Host回包，
+    // 而关闭线程正持Host锁查询idle；反向取锁会相互等待。
+    return !provider || provider->value.idle(provider->value.context) == 1;
+  } catch (...) { return false; }
+}
 
-AuthenticationResult UserAuth::create_vault_password() { return prompt(true, 0); }
+AuthenticationResult UserAuth::create_vault_password(uint64_t host_operation_id) {
+  return request(1, host_operation_id);
+}
 AuthenticationResult UserAuth::unlock_vault_password(uint64_t host_operation_id) {
-  return prompt(false, host_operation_id);
+  return request(2, host_operation_id);
 }
 
-AuthenticationResult UserAuth::prompt(bool confirmation, uint64_t host_operation_id) {
-#if !CITIZENSDK_ENABLE_WALLET_UI
-  (void)confirmation;
-  (void)host_operation_id;
-  return {CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED, SensitiveBuffer()};
-#else
-  if (!ui_available_) {
-    return {CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED, SensitiveBuffer()};
+AuthenticationResult UserAuth::request(uint32_t key_purpose, uint64_t host_operation_id) {
+  if (host_operation_id == 0) return {CITIZENSDK_ERROR_INVALID_ARGUMENT, {}};
+  auto pending = std::make_shared<Pending>();
+  {
+    std::lock_guard<std::recursive_mutex> callbacks(callback_lock_);
+    std::shared_ptr<Provider> provider;
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      if (!provider_) return {CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED, {}};
+      if (!pending_.emplace(host_operation_id, pending).second)
+        return {CITIZENSDK_ERROR_CONFLICT, {}};
+      provider = provider_;
+    }
+    const citizensdk_credential_challenge_v1_t challenge{
+        sizeof(citizensdk_credential_challenge_v1_t), 1, host_operation_id, key_purpose, 0};
+    try { provider->value.request(provider->value.context, &challenge); }
+    catch (...) {
+      // 异常不能留下等待者或已经同步交付的凭据。
+      cancel(host_operation_id);
+    }
   }
-  // Waiting on the GTK owner would deadlock. Core vault operations must run on
-  // a worker and never expose the password through a language binding.
-  if (std::this_thread::get_id() == ui_thread_) {
-    return {CITIZENSDK_ERROR_BUSY, SensitiveBuffer()};
-  }
-  std::lock_guard<std::mutex> prompt_admission(prompt_lock_);
-  const auto state = std::make_shared<PromptState>();
-  state->confirmation = confirmation;
-  state->ui_thread = ui_thread_;
-  state->ui_context =
-      g_main_context_ref(static_cast<GMainContext *>(ui_context_));
-  state->parent = &parent_;
-  state->host_operation_id = host_operation_id;
-  if (!attach_idle(state, build_prompt)) {
-    return {CITIZENSDK_ERROR_UNAVAILABLE, SensitiveBuffer()};
-  }
+  std::unique_lock<std::mutex> guard(lock_);
+  pending->ready.wait(guard, [&] { return pending->done; });
+  AuthenticationResult result = std::move(pending->result);
+  pending_.erase(host_operation_id);
+  return result;
+}
 
-  std::unique_lock<std::mutex> guard(state->lock);
-  if (!state->ready.wait_for(guard, std::chrono::seconds(5),
-                             [&] { return state->started; })) {
-    state->abandoned = true;
-    state->done = true;
-    guard.unlock();
-    retire_or_fail_closed(state);
-    return {CITIZENSDK_ERROR_UNAVAILABLE, SensitiveBuffer()};
+citizensdk_error_code_t UserAuth::respond(
+    uint64_t host_operation_id, citizensdk_bytes_view_t credential) {
+  std::lock_guard<std::mutex> guard(lock_);
+  const auto found = pending_.find(host_operation_id);
+  if (found == pending_.end() || found->second->done) return CITIZENSDK_ERROR_INVALID_STATE;
+  auto &pending = *found->second;
+  const bool cancelled = credential.data == nullptr && credential.len == 0;
+  if (!cancelled && !valid_credential(credential)) {
+    pending.result.code = CITIZENSDK_ERROR_INVALID_ARGUMENT;
+  } else if (cancelled) {
+    pending.result.code = CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED;
+  } else {
+    try {
+      pending.result.password = SensitiveBuffer(credential.data, static_cast<std::size_t>(credential.len));
+      pending.result.code = CITIZENSDK_OK;
+    } catch (...) { pending.result.code = CITIZENSDK_ERROR_INTERNAL; }
   }
-  if (!state->ready.wait_for(guard, std::chrono::minutes(5),
-                             [&] { return state->done; })) {
-    state->abandoned = true;
-    state->done = true;
-    guard.unlock();
-    retire_or_fail_closed(state);
-    return {CITIZENSDK_ERROR_TIMEOUT, SensitiveBuffer()};
+  pending.done = true;
+  pending.ready.notify_all();
+  return pending.result.code == CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED
+      ? CITIZENSDK_OK : pending.result.code;
+}
+
+citizensdk_error_code_t UserAuth::cancel(uint64_t host_operation_id) {
+  std::lock_guard<std::recursive_mutex> callbacks(callback_lock_);
+  std::shared_ptr<Provider> provider;
+  {
+    std::lock_guard<std::mutex> guard(lock_);
+    const auto found = pending_.find(host_operation_id);
+    if (found == pending_.end()) return CITIZENSDK_ERROR_INVALID_STATE;
+    // 撤销优先于尚未被工作线程领取的成功回包；迟到/重复回包不能恢复它。
+    found->second->result.password.clear();
+    found->second->result.code = CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED;
+    found->second->done = true;
+    found->second->ready.notify_all();
+    provider = provider_;
   }
-  return std::move(state->result);
-#endif
+  try { if (provider) provider->value.cancel(provider->value.context, host_operation_id); }
+  catch (...) {}  // 宿主UI取消异常不得重新开放凭据交付。
+  return CITIZENSDK_OK;
+}
+
+void UserAuth::cancel_all() {
+  std::lock_guard<std::recursive_mutex> callbacks(callback_lock_);
+  std::vector<uint64_t> ids;
+  {
+    std::lock_guard<std::mutex> guard(lock_);
+    ids.reserve(pending_.size());
+    for (const auto &entry : pending_) ids.push_back(entry.first);
+  }
+  for (const auto id : ids) (void)cancel(id);
 }
 
 }  // namespace citizen_sdk::linux

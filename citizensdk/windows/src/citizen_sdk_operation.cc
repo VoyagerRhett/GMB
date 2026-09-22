@@ -2,6 +2,7 @@
 
 #include <exception>
 #include <utility>
+#include <vector>
 #include "citizen_sdk_host_record.hpp"
 
 namespace citizen_sdk::windows {
@@ -22,60 +23,71 @@ bool OperationTracker::empty() const noexcept {
   return pending_.empty();
 }
 
-void RequestRouter::prime(Handler handler) {
-  require(static_cast<bool>(handler),
-          CITIZENSDK_ERROR_INVALID_ARGUMENT,
+void RequestRouter::prime(Handler handler, Cancellation cancel) {
+  require(static_cast<bool>(handler), CITIZENSDK_ERROR_INVALID_ARGUMENT,
           "CitizenSDK private request route is invalid");
   std::lock_guard<std::mutex> guard(lock_);
-  if (primed_ || request_ != 0 || static_cast<bool>(handler_)) {
-    throw HostError(CITIZENSDK_ERROR_CONFLICT,
-                    "CitizenSDK private request route is already occupied");
-  }
-  handler_ = std::move(handler);
-  primed_ = true;
+  require(routes_.find(0) == routes_.end(), CITIZENSDK_ERROR_CONFLICT,
+          "CitizenSDK private admission is already occupied");
+  // 唯一可能分配的节点在调用Core前建立；已有资源继续保有各自回调。
+  routes_.emplace(0, Callbacks{std::move(handler), std::move(cancel)});
 }
 
 void RequestRouter::bind(citizensdk_request_id_t request) noexcept {
   try {
     std::lock_guard<std::mutex> guard(lock_);
-    if (!primed_ || !handler_ || request_ != 0 || request == 0) {
-      std::terminate();
-    }
-    request_ = request;
-    primed_ = false;
-  } catch (...) {
-    std::terminate();
-  }
+    auto reserved = routes_.extract(0);
+    if (request == 0 || reserved.empty() || !reserved.mapped().handler ||
+        routes_.find(request) != routes_.end()) std::terminate();
+    reserved.key() = request;
+    if (!routes_.insert(std::move(reserved)).inserted) std::terminate();
+  } catch (...) { std::terminate(); }
 }
 
 void RequestRouter::cancel_primed() noexcept {
   try {
+    // 捕获对象析构可能回到Host；必须在释放路由锁后销毁预约。
+    decltype(routes_)::node_type reserved;
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      reserved = routes_.extract(0);
+      if (reserved.empty()) std::terminate();
+    }
+  } catch (...) { std::terminate(); }
+}
+
+void RequestRouter::cancel_all() {
+  std::vector<Cancellation> cancellations;
+  {
     std::lock_guard<std::mutex> guard(lock_);
-    if (!primed_ || request_ != 0) std::terminate();
-    handler_ = {};
-    primed_ = false;
-  } catch (...) {
-    std::terminate();
+    cancellations.reserve(routes_.size());
+    for (const auto &entry : routes_) {
+      if (entry.second.cancel) cancellations.push_back(entry.second.cancel);
+    }
   }
+  std::exception_ptr first;
+  for (const auto &cancel : cancellations) {
+    try { cancel(); } catch (...) { if (!first) first = std::current_exception(); }
+  }
+  if (first) std::rethrow_exception(first);
 }
 
 RequestRouter::Handler RequestRouter::take(const citizensdk_event_t &event) {
-  if (event.event_type != CITIZENSDK_EVENT_REQUEST_COMPLETED) return {};
-  Handler handler;
+  if (event.event_type != CITIZENSDK_EVENT_REQUEST_COMPLETED || event.request_id == 0) return {};
+  decltype(routes_)::node_type completed;
   {
     std::lock_guard<std::mutex> guard(lock_);
-    if (primed_ || request_ == 0 || request_ != event.request_id) return {};
-    // std::function 移动后的源对象只保证有效，未保证变为空。
-    // 与已空的本地 handler 交换，确保路由被消费后可关闭或接纳下一请求。
-    handler.swap(handler_);
-    request_ = 0;
+    completed = routes_.extract(event.request_id);
   }
+  Handler handler;
+  if (!completed.empty()) handler.swap(completed.mapped().handler);
+  // handler与取消闭包的析构都在锁外；回调重入不会释放别的请求。
   return handler;
 }
 
 bool RequestRouter::empty() const noexcept {
   std::lock_guard<std::mutex> guard(lock_);
-  return !primed_ && request_ == 0 && !handler_;
+  return routes_.empty();
 }
 
 void CompletionAdmission::begin() {

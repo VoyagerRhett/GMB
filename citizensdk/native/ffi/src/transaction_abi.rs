@@ -57,6 +57,7 @@ static PREPARED_TRANSACTIONS: OnceLock<
 struct ExternalExecutionEntry {
     owner: CitizenSdkHandle,
     session_id: String,
+    attempt: u64,
     state: ExternalExecutionState,
 }
 
@@ -72,6 +73,28 @@ enum ExternalExecutionState {
         request_id: CitizenSdkRequestId,
         cancellation: citizen_sdk_engine::TransactionExecutionCancellation,
     },
+}
+
+#[cfg(all(feature = "transactions", feature = "qr"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExternalAttemptFinish { Retry, Terminal, Stale }
+
+/// 只收口当前轮次；取消已移除条目时不能恢复，旧轮迟到时不能清掉新轮。
+#[cfg(all(feature = "transactions", feature = "qr"))]
+fn finish_external_execution_attempt(id: TransactionExecutionId, owner: CitizenSdkHandle,
+    session_id: &str, attempt: u64, retry: bool) -> ExternalAttemptFinish {
+    let Ok(mut entries) = lock_external_executions() else { return ExternalAttemptFinish::Stale; };
+    let Some(entry) = entries.get_mut(&id) else { return ExternalAttemptFinish::Terminal; };
+    if entry.owner != owner || entry.session_id != session_id || entry.attempt != attempt {
+        return ExternalAttemptFinish::Stale;
+    }
+    if retry {
+        entry.state = ExternalExecutionState::AwaitingResponse;
+        ExternalAttemptFinish::Retry
+    } else {
+        entries.remove(&id);
+        ExternalAttemptFinish::Terminal
+    }
 }
 
 #[cfg(all(feature = "transactions", feature = "qr"))]
@@ -382,6 +405,7 @@ pub unsafe extern "C" fn citizensdk_execute_prepared_transaction(
                             let registry_entry = ExternalExecutionEntry {
                                 owner: runtime.handle(),
                                 session_id: external.session_id.clone(),
+                                attempt: 0,
                                 state: ExternalExecutionState::AwaitingResponse,
                             };
                             if lock_external_executions()?
@@ -448,7 +472,7 @@ pub unsafe extern "C" fn citizensdk_transaction_execution_consume_qr_response(
             )?)
             .map_err(|_| FfiError::invalid("QR_V1 response 必须是 UTF-8"))?;
             let runtime = handles::get(handle)?;
-            let session_id = {
+            let (session_id, attempt) = {
                 let mut entries = lock_external_executions()?;
                 let entry = entries.get_mut(&id).ok_or_else(|| {
                     FfiError::new(
@@ -468,8 +492,9 @@ pub unsafe extern "C" fn citizensdk_transaction_execution_consume_qr_response(
                         "transaction execution 已在消费或观察",
                     ));
                 }
+                entry.attempt = entry.attempt.checked_add(1).ok_or_else(|| FfiError::internal("回扫尝试编号已耗尽"))?;
                 entry.state = ExternalExecutionState::AdmissionPending;
-                entry.session_id.clone()
+                (entry.session_id.clone(), entry.attempt)
             };
 
             let execution_cancellation =
@@ -483,20 +508,24 @@ pub unsafe extern "C" fn citizensdk_transaction_execution_consume_qr_response(
                 runtime.clone(),
                 &mut request_id,
                 move |runtime, _, request_cancellation| {
+                    let mut cancellation = request_cancellation;
+                    let mut signature_accepted = false;
                     let outcome = (|| {
+                        if worker_cancellation.is_cancelled() {
+                            return Err(FfiError::new(CitizenSdkErrorCode::Cancelled, "交易回扫已取消"));
+                        }
+                        let receiver = cancellation.as_mut().ok_or_else(|| FfiError::internal("交易取消通道缺失"))?;
+                        if !matches!(receiver.try_recv(), Ok(None)) {
+                            worker_cancellation.cancel();
+                            return Err(FfiError::new(CitizenSdkErrorCode::Cancelled, "交易回扫已取消"));
+                        }
                         let completion = crate::qr_abi::consume_external_qr_session(
                             runtime.handle(),
                             &worker_session_id,
                             &response,
-                        )
-                        .inspect_err(|_| {
-                            let _ = crate::qr_abi::cancel_unified_signing_session(
-                                runtime.handle(),
-                                &worker_session_id,
-                            );
-                            let _ = runtime.engine().cancel_transaction_execution(id);
-                        })?;
-                        let request_cancellation = request_cancellation.ok_or_else(|| {
+                        )?;
+                        signature_accepted = true;
+                        let request_cancellation = cancellation.take().ok_or_else(|| {
                             FfiError::internal(
                                 "transaction execution cancellation channel is missing",
                             )
@@ -514,14 +543,17 @@ pub unsafe extern "C" fn citizensdk_transaction_execution_consume_qr_response(
                             TransactionExecutionPayload::Completed(completed),
                         ))
                     })();
-                    // The response is one-shot on every admitted outcome. Invalid, expired,
-                    // cancelled and completed executions cannot be replayed through this handle.
-                    if let Ok(mut entries) = lock_external_executions() {
-                        if entries.get(&id).is_some_and(|entry| {
-                            entry.owner == runtime.handle() && entry.session_id == worker_session_id
-                        }) {
-                            entries.remove(&id);
-                        }
+                    if cancellation.as_mut().is_some_and(|receiver| !matches!(receiver.try_recv(), Ok(None))) {
+                        worker_cancellation.cancel();
+                    }
+                    // 错码/错签名只结束本次请求，原请求仍有效时允许重扫；实际过期、取消和
+                    // 正确签名是终态。时钟暂不可用不等于过期，不擅自删除仍未消费的请求。
+                    let retry = !signature_accepted && !worker_cancellation.is_cancelled()
+                        && crate::qr_abi::external_qr_session_pending(runtime.handle(), &worker_session_id).unwrap_or(true);
+                    let finish = finish_external_execution_attempt(id, runtime.handle(), &worker_session_id, attempt, retry);
+                    if finish == ExternalAttemptFinish::Terminal && (!signature_accepted || outcome.is_err()) {
+                        let _ = crate::qr_abi::cancel_unified_signing_session(runtime.handle(), &worker_session_id);
+                        let _ = runtime.engine().cancel_transaction_execution(id);
                     }
                     outcome
                 },
@@ -530,6 +562,7 @@ pub unsafe extern "C" fn citizensdk_transaction_execution_consume_qr_response(
                 if let Some(entry) = lock_external_executions()?.get_mut(&id) {
                     if entry.owner == handle
                         && entry.session_id == session_id
+                        && entry.attempt == attempt
                         && matches!(entry.state, ExternalExecutionState::AdmissionPending)
                     {
                         entry.state = ExternalExecutionState::AwaitingResponse;
@@ -538,24 +571,15 @@ pub unsafe extern "C" fn citizensdk_transaction_execution_consume_qr_response(
                 return Err(error);
             }
 
-            // The worker may have completed before this accepting thread reacquires the lock. If
-            // its entry remains, bind executionId cancellation to the admitted request exactly.
-            if let Some(entry) = lock_external_executions()?.get_mut(&id) {
-                if entry.owner != handle
-                    || entry.session_id != session_id
-                    || !matches!(entry.state, ExternalExecutionState::AdmissionPending)
-                {
-                    execution_cancellation.cancel();
-                    let _ = runtime.request_cancel(request_id);
-                    return Err(FfiError::new(
-                        CitizenSdkErrorCode::Integrity,
-                        "transaction execution registry changed during admission",
-                    ));
+            // 工作线程可能已经返回可重扫结果，甚至新一轮已接纳；旧轮绝不能覆盖新轮状态。
+            // 接纳已成功时必须交付原request_id，不能因后置登记变化而藏掉真实请求。
+            if let Ok(mut entries) = lock_external_executions() {
+                if let Some(entry) = entries.get_mut(&id) {
+                    if entry.owner == handle && entry.session_id == session_id && entry.attempt == attempt
+                        && matches!(entry.state, ExternalExecutionState::AdmissionPending) {
+                        entry.state = ExternalExecutionState::Active { request_id, cancellation: execution_cancellation };
+                    }
                 }
-                entry.state = ExternalExecutionState::Active {
-                    request_id,
-                    cancellation: execution_cancellation,
-                };
             }
             ptr::write(out_request_id, request_id);
             Ok(())
@@ -1180,6 +1204,24 @@ mod tests {
             11,
         )
         .expect("summary")
+    }
+
+    #[cfg(all(feature = "transactions", feature = "qr"))]
+    #[test]
+    fn response_retry_is_owner_and_attempt_scoped_and_cancel_cannot_be_resurrected() {
+        let id = TransactionExecutionId::try_new([0xe7; 16]).unwrap();
+        let owner = u64::MAX - 111;
+        lock_external_executions().unwrap().insert(id, ExternalExecutionEntry {
+            owner, session_id: "synthetic-session".into(), attempt: 2,
+            state: ExternalExecutionState::AdmissionPending,
+        });
+        assert_eq!(finish_external_execution_attempt(id, owner, "synthetic-session", 1, false), ExternalAttemptFinish::Stale);
+        assert_eq!(finish_external_execution_attempt(id, owner + 1, "synthetic-session", 2, true), ExternalAttemptFinish::Stale);
+        assert_eq!(finish_external_execution_attempt(id, owner, "synthetic-session", 2, true), ExternalAttemptFinish::Retry);
+        assert!(matches!(lock_external_executions().unwrap().get(&id).unwrap().state, ExternalExecutionState::AwaitingResponse));
+        lock_external_executions().unwrap().remove(&id);
+        assert_eq!(finish_external_execution_attempt(id, owner, "synthetic-session", 2, true), ExternalAttemptFinish::Terminal);
+        assert!(!lock_external_executions().unwrap().contains_key(&id));
     }
 
     #[test]

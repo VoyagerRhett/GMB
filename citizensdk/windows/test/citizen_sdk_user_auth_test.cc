@@ -1,14 +1,14 @@
-// 真实 Win32 消息/父窗口/取消合同；不把此测试当作真实 TPM 认证证明。
+// 非UI凭据与真实Win32隐藏消息派发合同；合成凭据不冒充真实TPM验收。
 #include <windows.h>
-#include <bcrypt.h>
 #include <array>
 #include <atomic>
 #include <cassert>
 #include <chrono>
-#include <cwchar>
 #include <functional>
+#include <future>
 #include <thread>
 #include "citizen_sdk_user_auth.hpp"
+#include "citizen_sdk_window.hpp"
 
 #ifdef NDEBUG
 #error "CitizenSDK Windows contract assertions must remain enabled"
@@ -27,20 +27,6 @@ void pump_until(const std::function<bool()> &complete) {
     MsgWaitForMultipleObjects(0, nullptr, FALSE, 5, QS_ALLINPUT);
   }
 }
-HWND authentication_window() {
-  HWND found{};
-  EnumThreadWindows(GetCurrentThreadId(), +[](HWND hwnd, LPARAM value) -> BOOL {
-    wchar_t type[128]{};
-    const int count = GetClassNameW(hwnd, type, 128);
-    constexpr wchar_t prefix[] = L"CitizenSDK.Authentication.";
-    if (count > 0 && std::wcsncmp(type, prefix, (sizeof(prefix) / sizeof(wchar_t)) - 1) == 0) {
-      *reinterpret_cast<HWND *>(value) = hwnd;
-      return FALSE;
-    }
-    return TRUE;
-  }, reinterpret_cast<LPARAM>(&found));
-  return found;
-}
 HWND parent_window() {
   HWND parent = CreateWindowExW(0, L"STATIC", L"CitizenSDK contract owner",
       WS_OVERLAPPEDWINDOW, 0, 0, 700, 700, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
@@ -53,7 +39,7 @@ int main() {
   const auto ui = std::this_thread::get_id();
   {
     csw::WindowRef inert(nullptr, ui, false);
-    csw::UserAuth auth(inert);
+    csw::UserAuth auth;
     assert(!auth.available());
     assert(auth.unlock_vault_password(71).code == CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED);
     std::thread worker([&] { assert(inert.retire() == CITIZENSDK_OK); });
@@ -74,79 +60,69 @@ int main() {
     assert(!reference.acquire().valid());
   });
   wrong_thread.join();
-  csw::UserAuth auth(reference);
-  // 原生 UI 用例要求 runner 提供交互桌面；不能将未执行的交互算作通过。
-  assert(auth.available());
-  assert(auth.unlock_vault_password(71).code == CITIZENSDK_ERROR_BUSY);
-  csw::AuthenticationResult cancelled;
-  std::atomic<bool> finished{false};
-  std::thread unlock([&] {
-    cancelled = auth.unlock_vault_password(71);
-    finished.store(true);
-  });
-  HWND dialog{};
-  pump_until([&] { dialog = authentication_window(); return dialog != nullptr; });
-  assert(!csw::accept_private_key_authentication_window(dialog, parent, &reference, 72));
-  assert(!csw::accept_private_key_authentication_window(dialog, parent, &auth, 71));
-  assert(csw::accept_private_key_authentication_window(dialog, parent, &reference, 71));
-  // 本次认证已归属安全查看；真实失焦即撤销，晚到确认不能重显。
-  SendMessageW(dialog, WM_ACTIVATE, WA_INACTIVE, 0);
-  SendMessageW(dialog, WM_COMMAND, IDCANCEL, 0);
-  SendMessageW(dialog, WM_COMMAND, IDOK, 0);  // 晚到确认不能推翻已接纳的取消。
-  // 完成一定在退出窗口消息栈、清除窗口和缓冲后发生。
-  assert(!finished.load());
-  pump_until([&] { return finished.load(); });
-  unlock.join();
+  // SDK认证不再依赖父窗口；窗口仍只验证下面的线程派发/销毁归属。
+  csw::UserAuth auth;
+  struct Provider final {
+    csw::UserAuth *auth;
+    uint64_t operation{};
+    uint32_t purpose{};
+    unsigned references{}, cancellations{};
+    bool busy{false};
+    std::promise<void> requested;
+  } provider{&auth};
+  citizensdk_credential_provider_v1_t callbacks{
+      sizeof(citizensdk_credential_provider_v1_t), 1, &provider,
+      +[](void *context, const citizensdk_credential_challenge_v1_t *request) {
+        auto &provider = *static_cast<Provider *>(context);
+        provider.operation = request->host_operation_id;
+        provider.purpose = request->key_purpose;
+        provider.requested.set_value();
+      },
+      +[](void *context, uint64_t id) {
+        auto &provider = *static_cast<Provider *>(context);
+        assert(id == provider.operation);
+        ++provider.cancellations;
+      },
+      +[](void *context) { ++static_cast<Provider *>(context)->references; },
+      +[](void *context) { --static_cast<Provider *>(context)->references; },
+      +[](void *context) -> uint8_t { return static_cast<Provider *>(context)->busy ? 0 : 1; }};
+  assert(auth.configure(&callbacks) == CITIZENSDK_OK && provider.references == 1);
+  const auto receive = [&](bool create, uint64_t id) {
+    provider.requested = std::promise<void>();
+    auto requested = provider.requested.get_future();
+    auto result = std::async(std::launch::async, [&auth, create, id] {
+      return create ? auth.create_vault_password(id) : auth.unlock_vault_password(id);
+    });
+    assert(requested.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    assert(provider.operation == id && provider.purpose == (create ? 1U : 2U));
+    return result;
+  };
+  auto unlock = receive(false, 71);
+  assert(!auth.idle());
+  assert(auth.cancel(72) == CITIZENSDK_ERROR_INVALID_STATE);
+  assert(auth.cancel(71) == CITIZENSDK_OK);
+  std::array<uint8_t, 12> synthetic{};
+  synthetic.fill('a');
+  assert(auth.respond(71, {synthetic.data(), synthetic.size()}) == CITIZENSDK_ERROR_INVALID_STATE);
+  auto cancelled = unlock.get();
   assert(cancelled.code == CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED && cancelled.password.empty());
-  assert(authentication_window() == nullptr);
+  assert(provider.cancellations == 1);
 
-  // 动态生成一次性输入，只存在进程内存；没有固定口令夹具、不调用 TPM、不输出内容。
-  finished.store(false);
-  std::thread successful_create([&] {
-    cancelled = auth.create_vault_password();
-    finished.store(true);
-  });
-  pump_until([&] { dialog = authentication_window(); return dialog != nullptr; });
-  std::array<unsigned char, 32> random{};
-  assert(BCryptGenRandom(nullptr, random.data(), static_cast<ULONG>(random.size()),
-                         BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0);
-  HWND first = GetDlgItem(dialog, 101);
-  HWND second = GetDlgItem(dialog, 102);
-  assert(first != nullptr && second != nullptr);
-  SendMessageW(dialog, WM_COMMAND, IDOK, 0);  // 空口令仍留在原生重试界面。
-  assert(!finished.load() && authentication_window() == dialog);
-  for (const auto value : random) {
-    SendMessageW(first, WM_CHAR, static_cast<WPARAM>(0x21U + value % 90U), 0);
-  }
-  SendMessageW(dialog, WM_COMMAND, IDOK, 0);  // 确认不一致必须清理本次输入并拒绝。
-  assert(!finished.load() && authentication_window() == dialog);
-  for (const auto value : random) {
-    const WPARAM character = static_cast<WPARAM>(0x21U + value % 90U);
-    SendMessageW(first, WM_CHAR, character, 0);
-    SendMessageW(second, WM_CHAR, character, 0);
-  }
-  SecureZeroMemory(random.data(), random.size());
-  SendMessageW(dialog, WM_COMMAND, IDOK, 0);
-  assert(!finished.load());
-  pump_until([&] { return finished.load(); });
-  successful_create.join();
-  assert(cancelled.code == CITIZENSDK_OK && cancelled.password.size() == random.size());
-  cancelled.password.clear();
-  assert(authentication_window() == nullptr);
-
-  finished.store(false);
-  std::thread create([&] {
-    cancelled = auth.create_vault_password();
-    finished.store(true);
-  });
-  pump_until([&] { dialog = authentication_window(); return dialog != nullptr; });
+  auto create = receive(true, 72);
+  assert(auth.respond(72, {synthetic.data(), synthetic.size()}) == CITIZENSDK_OK);
+  auto created = create.get();
+  assert(created.code == CITIZENSDK_OK && created.password.size() == synthetic.size());
+  synthetic.fill(0);
+  assert(created.password.data()[0] == 'a');
+  created.password.clear();
+  provider.busy = true;
+  assert(!auth.idle()); // 原生等待已返回，提供者资源未排空时仍不能释放context。
+  assert(auth.configure(nullptr) == CITIZENSDK_ERROR_BUSY);
+  provider.busy = false;
+  assert(auth.configure(nullptr) == CITIZENSDK_OK && provider.references == 0);
   assert(DestroyWindow(parent));
   parent = nullptr;
-  pump_until([&] { return finished.load(); });
-  create.join();
-  assert(cancelled.code == CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED && cancelled.password.empty());
   assert(!reference.acquire().valid());
-  assert(authentication_window() == nullptr);
   // 只有显式 set(nullptr) 才允许重新开启 rootless，而不是把销毁的 owner 偷换为空。
   assert(reference.set(nullptr) == CITIZENSDK_OK);
   {

@@ -1,6 +1,22 @@
 import Foundation
 
-/// One accepted operation with a facade-owned correlation identity.
+/// 原生公开操作的非秘密编号；与Core request_id独立，全进程单调且不回绕。
+internal final class CitizenSDKOperationIdentifiers: @unchecked Sendable {
+    static let shared = CitizenSDKOperationIdentifiers()
+    private let lock = NSLock()
+    private var next: UInt64
+    internal init(next: UInt64 = 1) { self.next = next }
+    internal func allocate() throws -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        guard next != 0 else { throw CitizenSDKError(.unavailable, "operation identity space exhausted") }
+        let value = next
+        next = value == UInt64.max ? 0 : value + 1
+        return String(value)
+    }
+}
+
+/// 一个真实接纳操作的结果与取消关联；内部就绪锁存器的ID不进入公开通道。
 public final class CitizenSDKOperation<Value: Sendable>: @unchecked Sendable {
     public let operationID: String
     private let lock = NSLock()
@@ -26,6 +42,13 @@ public final class CitizenSDKOperation<Value: Sendable>: @unchecked Sendable {
 
     @discardableResult
     public func cancel() throws -> Bool { try cancelAction() }
+
+    /// 只变换完成值，关联标识和取消仍属于同一真实Core操作。
+    internal func map<Output: Sendable>(_ transform: @escaping (Value) throws -> Output) -> CitizenSDKOperation<Output> {
+        let output = CitizenSDKOperation<Output>(operationID: operationID, cancel: cancel)
+        observe { result in output.complete(result.flatMap { value in Result { try transform(value) } }) }
+        return output
+    }
 
     internal func observe(_ observer: @escaping (Result<Value, Error>) -> Void) {
         lock.lock()

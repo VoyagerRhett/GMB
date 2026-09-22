@@ -614,16 +614,16 @@ class AppLockService {
     CitizenSdkWallet wallet,
     AccountSecurityService accountSecurity,
   ) async {
-    final before = await wallet.getState();
+    final before = await wallet.getState().result;
     final walletIndexes = before.accounts.map((account) => account.walletIndex);
     for (final account in before.accounts.where(
       (account) => account.signMode == CitizenWalletSignMode.cold,
     )) {
-      await wallet.deleteAccount(account.accountId);
+      await wallet.deleteAccount(account.accountId).result;
     }
-    await wallet.delete();
-    await wallet.reconcileCleanup();
-    final after = await wallet.getState();
+    await wallet.delete().result;
+    await wallet.reconcileCleanup().result;
+    final after = await wallet.getState().result;
     if (after.accounts.isNotEmpty || after.hotProfile != null) {
       throw StateError('CitizenSDK 钱包擦除后仍存在账户');
     }

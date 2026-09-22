@@ -1,6 +1,8 @@
 import 'dart:convert';
 
 import 'package:citizen_sdk/src/api/citizen_sdk_error.dart';
+import 'package:citizen_sdk/src/api/citizen_qr.dart';
+import 'package:citizen_sdk/src/models/citizen_signing.dart';
 import 'package:citizen_sdk/src/api/citizen_sdk_events.dart';
 import 'package:citizen_sdk/src/crypto/account_codec.dart';
 import 'package:citizen_sdk/src/models/citizen_capability.dart';
@@ -13,6 +15,59 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   const codec = CitizenSdkFlutterCodec();
+
+  test('非消费验签只传会话与响应，不接受宿主时间或transform', () {
+    expect(codec.encodeRequest(method: 'qrValidateSignResponse', sessionId: 'sdk', requestSequence: 1,
+      fields: ['request', '{}']), [2, 'sdk', 1, 'request', '{}']);
+    for (final fields in <List<Object?>>[[], ['request'], ['', '{}'], ['x' * 129, '{}'], ['request', '{}', 1]]) {
+      expect(() => codec.encodeRequest(method: 'qrValidateSignResponse', sessionId: 'sdk',
+        requestSequence: 2, fields: fields), throwsA(isA<CitizenSdkException>()));
+    }
+  });
+
+  test('编码输入只是规范字段，纯载荷编码不建立session或复制算法', () {
+    final contact = CitizenQrContent.userContact(cidNumber: 'CID-7', accountId: _account(7));
+    expect(jsonDecode(contact.inputJson), {'kind': 3, 'cid_number': 'CID-7', 'account_id': _account(7)});
+    expect(codec.encodeRequest(method: 'qrEncodeDocument', sessionId: 's', requestSequence: 1,
+      fields: [contact.inputJson]), [2, 's', 1, contact.inputJson]);
+    final payload = CitizenSigningPayload.message(opTag: 16, scalePayload: Uint8List(0));
+    final fields = codec.encodeSigningPayload(payload);
+    expect(fields[0], 2); expect(fields[1], 1);
+    expect(jsonDecode(fields[2]! as String), {'op_tag': 16});
+    expect(fields[3], isEmpty);
+    expect(codec.decodeSigningPayload([2, Uint8List(32)], 1), hasLength(32));
+    expect(() => codec.decodeSigningPayload([2, Uint8List(31)], 1), throwsA(isA<CitizenSdkException>()));
+    expect(() => codec.decodeSigningPayload([1, Uint8List(32)], 1), throwsA(isA<CitizenSdkException>()));
+    expect(() => codec.encodeRequest(method: 'encodeSigningPayload', sessionId: 's', requestSequence: 1),
+      throwsA(isA<CitizenSdkException>()));
+  });
+
+  test('授权准备只读事实支持完整u64，拒绝无效原因和假成功字段', () {
+    final value = <String, Object?>{'reason': 0, 'genesis_hash': _account(7), 'cid_number': 'CID',
+      'current_account_id': null, 'expected_binding_revision': '18446744073709551615',
+      'expires_at': '100', 'materialized_payload': '0x0102'};
+    final result = codec.decodeQrAuthorization(jsonEncode(value));
+    expect(result.expectedBindingRevision, BigInt.parse('18446744073709551615'));
+    expect(result.materializedPayload, [1, 2]);
+    expect(() => result.materializedPayload![0] = 7, throwsUnsupportedError);
+    expect(() => codec.decodeQrAuthorization(jsonEncode({...value, 'reason': 2})), throwsA(isA<CitizenSdkException>()));
+    expect(() => codec.decodeQrAuthorization(jsonEncode({...value, 'reason': 4})), throwsA(isA<CitizenSdkException>()));
+    final rejected = codec.decodeQrAuthorization(jsonEncode({for (final key in value.keys) key: key == 'reason' ? 2 : null}));
+    expect(rejected.reason, CitizenQrAuthorizationReason.invalidAccountId);
+  });
+
+  test('匿名请求不伪造账户，附加当前账户证明必须成对', () {
+    final request = <String, Object?>{'kind': 1, 'canonical_text': 'core-request', 'scan_purpose_mask': 80,
+      'request_id': '0123456789abcdef', 'expires_at': 100, 'action': 10,
+      'signer_account_id': null, 'review_payload': '0x01'};
+    expect(codec.decodeQrDocument(jsonEncode(request)).signerAccountId, isNull);
+    final response = <String, Object?>{'kind': 2, 'canonical_text': 'core-response', 'scan_purpose_mask': 8,
+      'request_id': '0123456789abcdef', 'expires_at': 100, 'signer_account_id': _account(7),
+      'signature': '0x${'08' * 64}', 'current_account_id': _account(9), 'current_account_signature': '0x${'0a' * 64}'};
+    expect(codec.decodeQrDocument(jsonEncode(response)).currentAccountId, _account(9));
+    expect(() => codec.decodeQrDocument(jsonEncode({...response, 'current_account_signature': null})),
+      throwsA(isA<CitizenSdkException>()));
+  });
 
   test('QR公开文档严格闭集，拒绝旧now tuple、外部签名拼装和非法结果', () {
     final json = <String, Object?>{

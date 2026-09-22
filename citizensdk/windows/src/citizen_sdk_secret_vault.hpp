@@ -9,6 +9,7 @@
 #include "citizen_sdk_operation.hpp"
 #include "citizen_sdk_secure_store.hpp"
 #include "citizen_sdk_user_auth.hpp"
+#include "citizen_sdk_window.hpp"
 
 namespace citizen_sdk::windows {
 
@@ -26,11 +27,11 @@ class GenerationLock final {
 };
 
 // 私有依赖接缝：测试只替换 OS 交互，仍执行生产 generation/墓碑状态机。
-// 不导出、不接受业务侧凭据或自定义 signer，不构成第二套金库实现。
+// 不导出，不接受自定义 signer；凭据仍经UserAuth交给真实CNG操作。
 struct SecretVaultServices final {
   std::function<CngAvailability()> availability;
   std::function<bool()> authentication_available;
-  std::function<AuthenticationResult()> create_password;
+  std::function<AuthenticationResult(uint64_t)> create_password;
   std::function<AuthenticationResult(uint64_t)> unlock_password;
   std::function<VaultObject(const WalletKey &, const SensitiveBuffer &)> create_key;
   std::function<bool(const VaultObject &)> validate_key;
@@ -44,10 +45,10 @@ class SecretVault final {
   SecretVault(SecureStore &secure_store, WindowRef &parent);
   SecretVault(SecureStore &secure_store, SecretVaultServices services);
   citizensdk_host_vault_availability_t availability() const noexcept;
-  void ensure_wallet_kek(const WalletKey &key,
+  void ensure_wallet_kek(uint64_t host_operation_id, const WalletKey &key,
                          const std::array<uint8_t, 16> &operation_id);
   bool has_wallet_kek(const WalletKey &key);
-  Bytes wrap_dek(const WalletKey &key,
+  Bytes wrap_dek(uint64_t host_operation_id, const WalletKey &key,
                  const std::array<uint8_t, 16> &operation_id,
                  const uint8_t plaintext_dek[32]);
   void unwrap_dek(uint64_t host_operation_id, const WalletKey &key,
@@ -55,6 +56,10 @@ class SecretVault final {
   void retire_wallet_kek(const WalletKey &key,
                          const std::array<uint8_t, 16> &operation_id);
   bool idle() const noexcept;
+  citizensdk_error_code_t set_credential_provider(const citizensdk_credential_provider_v1_t *provider);
+  citizensdk_error_code_t respond_credential(uint64_t host_operation_id, citizensdk_bytes_view_t credential);
+  citizensdk_error_code_t cancel_credential(uint64_t host_operation_id);
+  void cancel_credentials();
 
  private:
   SecureStore &secure_store_;

@@ -2,7 +2,6 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
-import 'package:citizenapp/qr/generated/qr_action_registry.g.dart';
 
 /// 广场账户动作签名 payload（两色内容核对用）。
 ///
@@ -110,7 +109,15 @@ SquareActionPayload? decodeSquareActionPayload(String payloadHex) {
 }
 
 bool _appendField(List<SquareReviewField> fields, String key, String value) {
-  final label = GeneratedQrActionRegistry.fieldLabelForKey(key);
+  // 原确认页中文标签逐字保留；这是App展示资源，不属于SDK协议能力。
+  final label = switch (key) {
+    'action_type' => '操作类型',
+    'account_id' => '账户',
+    'challenge_id' => '挑战编号',
+    'membership_level' => '会员等级',
+    'expires_at' => '过期时间',
+    _ => null,
+  };
   if (label == null || label.isEmpty) return false;
   fields.add(SquareReviewField(key: key, label: label, value: value));
   return true;

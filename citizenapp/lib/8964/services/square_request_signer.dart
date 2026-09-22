@@ -1,10 +1,10 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 
-import 'package:citizenapp/signer/signing.dart';
 
 typedef SquareDeviceSigner = Future<String> Function(Uint8List message);
 
@@ -52,10 +52,10 @@ Future<Map<String, String>> squareRequestHeadersForBytes({
     sha256.convert(utf8.encode(sessionToken)).toString(),
   ].join('\n');
   // 请求证明属于现有广场 BFF 会话认证域，不新增链上签名类型。
-  final message = signingMessage(
+  final message = await CitizenSigning.encodePayload(CitizenSigningPayload.message(
     opTag: kOpSignSquareLogin,
-    scalePayload: scaleString(canonical),
-  );
+    scalePayload: await CitizenSigning.encodePayload(CitizenSigningPayload.scaleString(canonical)),
+  ));
   return {
     'x-device-time': '$time',
     'x-device-nonce': requestNonce,

@@ -1,3 +1,4 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
@@ -6,7 +7,6 @@ import 'package:citizenapp/citizen/proposal/admins-change/models/admin_account.d
 import 'package:citizenapp/citizen/proposal/admins-change/services/institution_admin_service.dart';
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/citizen/shared/institution_code_label.dart';
-import 'package:citizenapp/signer/signing.dart';
 import 'package:citizenapp/isar/wallet_isar.dart';
 
 /// 管理员激活记录。
@@ -130,8 +130,8 @@ class ActivationService {
     );
   }
 
-  /// 构建管理员激活业务 payload；账户签名与冷热分流由 CitizenSDK 完成。
-  Uint8List buildActivationPayload({
+  /// 提交原管理员激活字段给SDK编码；账户签名与冷热分流同样由SDK完成。
+  Future<Uint8List> buildActivationPayload({
     required String accountId,
     required AdminAccountIdentity identity,
   }) {
@@ -195,25 +195,25 @@ class ActivationService {
   }
 
   // 内部方法
-  Uint8List _buildActivatePayload(
+  Future<Uint8List> _buildActivatePayload(
     AdminAccountIdentity identity,
     String accountId,
   ) {
     final signerPublicKey = _hexToBytes(accountId);
     final timestamp = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final random = Random.secure();
-    return activateAdminPayload(
+    return CitizenSigning.encodePayload(CitizenSigningPayload.activateAdmin(
       cidNumber: _requireInstitutionCid(identity),
-      institutionCode: InstitutionCodeLabel.codeBytes(identity.institutionCode),
+      institutionCode: Uint8List.fromList(InstitutionCodeLabel.codeBytes(identity.institutionCode)),
       kind: identity.kind,
       signerPublicKey: signerPublicKey,
-      timestamp: timestamp,
-      nonce: List<int>.generate(
+      timestamp: BigInt.from(timestamp),
+      nonce: Uint8List.fromList(List<int>.generate(
         kAdminNonceLength,
         (_) => random.nextInt(256),
         growable: false,
-      ),
-    );
+      )),
+    ));
   }
 
   static String _requireInstitutionCid(AdminAccountIdentity identity) {

@@ -1036,7 +1036,7 @@ class _ChatTabState extends State<ChatTab> {
       setState(() => _error = '请先在「我的 → 我的钱包」添加钱包账户');
       return;
     }
-    final wallet = (await walletPort.getState()).defaultAccount;
+    final wallet = (await walletPort.getState().result).defaultAccount;
     if (!mounted) return;
     await openScanDispatchFlow(context: context, paymentWallet: wallet);
   }
@@ -1057,7 +1057,7 @@ class _ChatTabState extends State<ChatTab> {
       setState(() => _error = '请先在「我的 → 我的钱包」添加钱包账户');
       return;
     }
-    final wallet = (await walletPort.getState()).defaultAccount;
+    final wallet = (await walletPort.getState().result).defaultAccount;
     if (!mounted) return;
     if (wallet == null) {
       setState(() => _error = '请先在「我的 → 我的钱包」添加钱包账户');

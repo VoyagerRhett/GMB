@@ -78,7 +78,6 @@ set(CITIZENSDK_FLUTTER_ADAPTER_SOURCES
   "${_citizensdk_linux_root}/src/citizen_sdk_plugin.cc"
   "${_citizensdk_linux_root}/src/citizen_sdk_flutter_codec.cc"
   "${_citizensdk_linux_root}/src/citizen_sdk_flutter_sessions.cc"
-  "${_citizensdk_linux_root}/src/citizen_sdk_flutter_wallet_flow.cc"
   "${_citizensdk_linux_root}/src/citizen_sdk_flutter_environment.cc"
 )
 add_library(citizen_sdk_plugin SHARED ${CITIZENSDK_FLUTTER_ADAPTER_SOURCES})

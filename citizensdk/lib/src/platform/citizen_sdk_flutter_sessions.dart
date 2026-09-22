@@ -1,27 +1,33 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 
 import '../api/citizen_sdk_error.dart';
 import '../api/citizen_sdk_events.dart';
 import '../models/citizen_capability.dart';
 import '../models/citizen_chain_state.dart';
+import '../models/citizen_wallet.dart';
 import 'citizen_sdk_flutter_codec.dart';
 import 'citizen_sdk_platform.dart';
 
 /// 一个隔离 Flutter session 的并发接纳、序列、事件和关闭状态机。
-final class CitizenSdkFlutterSession {
+final class CitizenSdkFlutterSession with WidgetsBindingObserver {
   CitizenSdkFlutterSession._({
     required CitizenSdkPlatform platform,
     required CitizenSdkFlutterCodec codec,
+    Future<Uint8List?> Function(CitizenCredentialChallenge)? credentialProvider,
   }) : _platform = platform,
-       _codec = codec;
+       _codec = codec,
+       _credentialProvider = credentialProvider;
 
   static Future<CitizenSdkFlutterSession> open({
     CitizenSdkPlatform? platform,
     CitizenSdkFlutterCodec codec = const CitizenSdkFlutterCodec(),
     int modules = CitizenSdkModules.full,
+    Future<Uint8List?> Function(CitizenCredentialChallenge)? credentialProvider,
   }) async {
     final selectedPlatform =
         platform ??
@@ -38,11 +44,12 @@ final class CitizenSdkFlutterSession {
     final session = CitizenSdkFlutterSession._(
       platform: selectedPlatform,
       codec: codec,
+      credentialProvider: credentialProvider,
     );
     try {
       final raw = await session._platform.invoke(
         'open',
-        codec.encodeOpen(modules),
+        codec.encodeOpen(modules, credentialProvider != null),
       );
       // 先记录外壳中的原生 sessionId，再验证 open value。若 value 损坏，
       // catch 路径仍有足够身份关闭已经创建的原生实例。
@@ -55,6 +62,12 @@ final class CitizenSdkFlutterSession {
       codec.validateResponseValue('open', response.value);
       session._lifecycle = codec.decodeLifecycle(response.value[0]);
       session._nextEventSequence = response.value[1]! as int;
+      if (credentialProvider != null) {
+        session._foreground = WidgetsBinding.instance.lifecycleState == null ||
+            WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+        WidgetsBinding.instance.addObserver(session);
+        session._observingLifecycle = true;
+      }
       session._eventRegistration = eventRouter.register(
         response.sessionId,
         session._receiveRawEvent,
@@ -64,6 +77,8 @@ final class CitizenSdkFlutterSession {
       if (pendingError != null) throw pendingError;
       return session;
     } on Object {
+      session._closing = true;
+      try { await session._cancelCredentials(); } on Object { /* 保留原open错误。 */ }
       session._detachEventRouter();
       await session._closeAfterOpenFailure();
       await session._closeEventControllerBestEffort();
@@ -75,6 +90,10 @@ final class CitizenSdkFlutterSession {
 
   final CitizenSdkPlatform _platform;
   final CitizenSdkFlutterCodec _codec;
+  final Future<Uint8List?> Function(CitizenCredentialChallenge)? _credentialProvider;
+  final Map<BigInt, _CitizenSdkPendingCredential> _credentials = {};
+  bool _foreground = true;
+  bool _observingLifecycle = false;
   final StreamController<CitizenSdkEvent> _events =
       StreamController<CitizenSdkEvent>.broadcast(sync: true);
 
@@ -90,9 +109,79 @@ final class CitizenSdkFlutterSession {
   bool _exclusiveLifecycle = false;
   bool _closing = false;
   bool _closed = false;
+  final Set<Future<void> Function()> _ownedResources = <Future<void> Function()>{};
+  final Set<String> _closedResourceEvents = <String>{};
+  final Set<String> _closedResourceAcks = <String>{};
+  bool hasResourceClosed(String id) => _closedResourceEvents.contains(id);
+  void acknowledgeResourceClosed(String id) {
+    // 方法回包和关闭事件可能先后互换；两边都到达才删除关联，不遗留256个假未接管事件。
+    if (!_closedResourceEvents.remove(id)) _closedResourceAcks.add(id);
+  }
+  static const _teardownMethods = <String>{
+    'releasePreparedWallet', 'closePrivateKey', 'releaseQrReview', 'closeQrCapture', 'cancelOperation',
+    'respondCredential', 'cancelCredential',
+  };
+
+  /// SDK资源不依赖页面存续；关闭期间拒绝迟到接管，原生session负责回收未交付资源。
+  void registerResource(Future<void> Function() close) {
+    if (_closing || _closed) throw const CitizenSdkException(
+      code: CitizenSdkErrorCode.cancelled, message: 'SDK已关闭资源接纳',
+    );
+    _ownedResources.add(close);
+  }
+  void unregisterResource(Future<void> Function() close) => _ownedResources.remove(close);
+
+  Future<void> _closeOwnedResources() async {
+    Object? first;
+    StackTrace? trace;
+    for (final close in List<Future<void> Function()>.of(_ownedResources)) {
+      try { await close(); } on Object catch (error, stack) { first ??= error; trace ??= stack; }
+    }
+    if (first != null) Error.throwWithStackTrace(first, trace!);
+  }
 
   Stream<CitizenSdkEvent> get events => _events.stream;
   CitizenSdkLifecycle get lifecycle => _lifecycle;
+
+  /// 操作关联号使用同一session的精确requestSequence；编码预检失败不发布操作对象。
+  /// 原生按此序列找到自己的真实Operation，不能用Future.cancel伪造已取消。
+  CitizenSdkOperation<T> operation<T>(
+    String method, {
+    List<Object?> fields = const <Object?>[],
+    required T Function(List<Object?> value) decode,
+  }) {
+    final sessionId = _sessionId;
+    if (sessionId == null || _closing || _closed || _exclusiveLifecycle) {
+      throw const CitizenSdkException(
+        code: CitizenSdkErrorCode.invalidState,
+        message: 'CitizenSDK当前状态不接纳新操作',
+      );
+    }
+    final sequence = _nextRequestSequence;
+    final protocolError = _eventProtocolError;
+    if (protocolError != null) throw protocolError;
+    // 先完成精确tuple预检；无操作对象和无接纳时不占用关联序列。
+    _codec.encodeRequest(method: method, sessionId: sessionId,
+        requestSequence: sequence, fields: fields);
+    var settled = false;
+    Future<T> run() async {
+      try {
+        return decode(await invoke(method, fields: fields));
+      } finally {
+        settled = true;
+      }
+    }
+    final result = run();
+    return CitizenSdkOperation<T>(
+      operationId: sequence.toString(),
+      result: result,
+      cancel: () async {
+        if (settled) return false;
+        final value = await invoke('cancelOperation', fields: <Object?>[sequence.toString()]);
+        return value[0]! as bool;
+      },
+    );
+  }
 
   Future<List<Object?>> invoke(
     String method, {
@@ -106,7 +195,7 @@ final class CitizenSdkFlutterSession {
         ),
       );
     }
-    if (_closing || _closed) {
+    if (_closed || (_closing && !_teardownMethods.contains(method))) {
       return Future<List<Object?>>.error(
         CitizenSdkException(
           code: CitizenSdkErrorCode.invalidState,
@@ -140,6 +229,8 @@ final class CitizenSdkFlutterSession {
   Future<void> _performClose() async {
     _closing = true;
     try {
+      await _cancelCredentials();
+      await _closeOwnedResources();
       final value = await _invokeTransport('close', const <Object?>[]);
       await _waitUntilIdle();
       final lifecycle = _codec.decodeLifecycle(value[0]);
@@ -151,6 +242,8 @@ final class CitizenSdkFlutterSession {
       }
       _lifecycle = lifecycle;
       _closed = true;
+      _closedResourceEvents.clear();
+      _closedResourceAcks.clear();
       _detachEventRouter();
       // 原生 disposed 是不可逆事实。公共 stream 可能有暂停的订阅，不能让它
       // 反向阻塞 close；清理异步且吞掉 transport/controller 的迟到错误。
@@ -314,6 +407,25 @@ final class CitizenSdkFlutterSession {
     }
     _nextEventSequence += 1;
     final event = decoded.event;
+    if (event is CitizenSdkCredentialRequest) {
+      _receiveCredential(event);
+      return;
+    }
+    if (event is CitizenSdkCredentialCancelled) {
+      _credentials[event.hostOperationId]?.revoke();
+      return;
+    }
+    final closedId = switch (event) {
+      CitizenSdkPrivateKeyClosed() => event.resourceId,
+      CitizenSdkQrCaptureEvent(closed: true) => event.resourceId,
+      _ => null,
+    };
+    if (closedId != null && !_closedResourceAcks.remove(closedId)) {
+      if (_closedResourceEvents.length >= 256) throw const CitizenSdkException(
+        code: CitizenSdkErrorCode.queueFull, message: '未接管的资源关闭事件超过上限',
+      );
+      _closedResourceEvents.add(closedId);
+    }
     if (event is CitizenSdkLifecycleChanged) {
       _lifecycle = event.lifecycle;
     }
@@ -344,10 +456,16 @@ final class CitizenSdkFlutterSession {
   void _failEventProtocol(CitizenSdkException error, StackTrace stackTrace) {
     if (_closed) return;
     _eventProtocolError ??= error;
+    // 事件顺序失效后不再交付凭据；清理仍通过精确原生关联号执行。
+    unawaited(_cancelCredentials().catchError((Object _) {}));
     if (!_events.isClosed) _events.addError(error, stackTrace);
   }
 
   void _detachEventRouter() {
+    if (_observingLifecycle) {
+      WidgetsBinding.instance.removeObserver(this);
+      _observingLifecycle = false;
+    }
     _eventRegistration?.close();
     _eventRegistration = null;
   }
@@ -359,6 +477,96 @@ final class CitizenSdkFlutterSession {
     } on Object {
       // public listener 的清理失败不覆盖原始 open/close 结果。
     }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _foreground = state == AppLifecycleState.resumed;
+    if (!_foreground) unawaited(_cancelCredentials().catchError((Object _) {}));
+  }
+
+  void _receiveCredential(CitizenSdkCredentialRequest event) {
+    if (_credentials.containsKey(event.hostOperationId) || _credentials.length >= 64) {
+      throw const CitizenSdkException(code: CitizenSdkErrorCode.conflict,
+        message: '凭据挑战重复或超过并发上限');
+    }
+    final pending = _CitizenSdkPendingCredential(event.hostOperationId);
+    _credentials[event.hostOperationId] = pending;
+    // Future.sync使同步throw和异步throw走同一无秘密错误路径。
+    pending.finished = Future<void>.sync(() => _provideCredential(event, pending));
+    unawaited(pending.finished.catchError((Object _) {}));
+  }
+
+  Future<void> _provideCredential(CitizenSdkCredentialRequest event,
+      _CitizenSdkPendingCredential pending) async {
+    Uint8List? supplied;
+    Uint8List? owned;
+    try {
+      if (_closing || _closed || !_foreground || _eventProtocolError != null ||
+          _credentialProvider == null) {
+        await _cancelCredential(pending);
+        return;
+      }
+      try {
+        supplied = await _credentialProvider(CitizenCredentialChallenge(
+          hostOperationId: event.hostOperationId, keyPurpose: event.keyPurpose,
+          accountId: event.accountId, cancelled: pending.cancelled.future));
+      } on Object {
+        // 宿主异常可能含输入，既不记录、也不作为SDK异常文案或事件转发。
+        supplied = null;
+      }
+      if (pending.revoked || _closing || _closed || !_foreground || _eventProtocolError != null) {
+        await _cancelCredential(pending);
+        return;
+      }
+      if (supplied != null && supplied.length > CitizenSdkFlutterCodec.maximumWalletInputBytes) {
+        await _cancelCredential(pending);
+        return;
+      }
+      owned = supplied == null ? null : Uint8List.fromList(supplied);
+      // 必须等方法通道完成编码和回包再擦除，不能在返回给codec之前清零。
+      await _invokeTransport('respondCredential', <Object?>[pending.id.toString(), owned]);
+    } finally {
+      owned?.fillRange(0, owned.length, 0);
+      // 只能保证SDK自己的副本；不承诺擦除宿主的只读视图或任意额外副本。
+      try { supplied?.fillRange(0, supplied.length, 0); } on UnsupportedError { /* 宿主只读副本。 */ }
+      if (identical(_credentials[pending.id], pending)) _credentials.remove(pending.id);
+    }
+  }
+
+  Future<void> _cancelCredential(_CitizenSdkPendingCredential pending) async {
+    pending.revoke();
+    if (_closed) return;
+    try {
+      await _invokeTransport('cancelCredential', <Object?>[pending.id.toString()]);
+    } on CitizenSdkException catch (error) {
+      // 精确请求已终结时的取消无副作用；其他失败不能伪装成原生排空成功。
+      if (error.code != CitizenSdkErrorCode.invalidState &&
+          error.code != CitizenSdkErrorCode.notFound) rethrow;
+    }
+  }
+
+  Future<void> _cancelCredentials() async {
+    final pending = List<_CitizenSdkPendingCredential>.of(_credentials.values);
+    for (final request in pending) request.revoke();
+    for (final request in pending) await _cancelCredential(request);
+    // 取消通知不代替提供者实际返回；关闭等待秘密副本的finally真正完成。
+    for (final request in pending) {
+      try { await request.finished; } on Object { /* 原始操作通过自己的结果报告失败。 */ }
+    }
+  }
+}
+
+final class _CitizenSdkPendingCredential {
+  _CitizenSdkPendingCredential(this.id);
+  final BigInt id;
+  final Completer<void> cancelled = Completer<void>();
+  Future<void> finished = Future<void>.value();
+  bool revoked = false;
+  void revoke() {
+    if (revoked) return;
+    revoked = true;
+    cancelled.complete();
   }
 }
 

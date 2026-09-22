@@ -1,22 +1,28 @@
 import Foundation
+import CoreGraphics
+import ImageIO
 
 /// Native Swift facade for one CitizenSDK Core instance.
 ///
-/// C handles, result handles, prepared-wallet handles, mnemonics and passwords
-/// are absent from this public surface. Wallet creation/import/add-account
-/// secrets are accepted only by the SDK-owned Apple UI.
+/// 不暴露Core裸句柄，不提供页面或窗口。显式钱包输入和受控备份资源可短时
+/// 携带敏感内容；普通签名只引用SDK金库，界面与展示文案由宿主负责。
 public final class CitizenSdk: @unchecked Sendable {
     public let sessionID = UUID().uuidString
     private let stateLock = NSLock()
     private let native: CitizenSDKNative
     private var lifecycleValue: CitizenSDKLifecycle
     private var closed = false
+    private var resourcesClosing = false
+    private var preparedWallets: [ObjectIdentifier: CitizenSDKPreparedWallet] = [:]
+    private var privateKeys: [ObjectIdentifier: CitizenSDKPrivateKey] = [:]
+    private var qrReviews: [ObjectIdentifier: CitizenQRReview] = [:]
+    private var qrCaptures: [ObjectIdentifier: CitizenSDKQrCapture] = [:]
     private var eventHandler: ((CitizenSDKEvent) -> Void)?
 
     private init(native: CitizenSDKNative, lifecycle: CitizenSDKLifecycle) {
         self.native = native
         lifecycleValue = lifecycle
-        CitizenSDKWalletFlowRegistry.shared.registerOpen(self)
+        CitizenSDKCloseGate.shared.registerOpen(self)
     }
 
     /// 未选择链时不读取链资产；钱包、签名和链均由同一核心按模块装配。
@@ -60,9 +66,13 @@ public final class CitizenSdk: @unchecked Sendable {
     deinit {
         stateLock.lock()
         let needsRecovery = !closed
+        let keys = Array(privateKeys.values)
+        let captures = Array(qrCaptures.values)
         stateLock.unlock()
+        keys.forEach { $0.requestClose() }
+        captures.forEach { $0.requestClose() }
         if needsRecovery { native.enqueueForSupervisedClose() }
-        CitizenSDKWalletFlowRegistry.shared.forget(self)
+        CitizenSDKCloseGate.shared.forget(self)
     }
 
     /// One cleanup gate shared by the production constructor and source-level
@@ -172,146 +182,130 @@ public final class CitizenSdk: @unchecked Sendable {
     }
 
     public func feeSnapshot() async throws -> CitizenFeeSnapshot { try await native.feeSnapshot().value() }
-    public func walletProfile() async throws -> CitizenWalletProfile? { try await native.walletProfile().value() }
-    public func walletState() async throws -> CitizenWalletState { try await native.walletState().value() }
+    public func walletState() throws -> CitizenSDKOperation<CitizenWalletState> { try native.walletState() }
 
-    /// Derives one app-scoped 32-byte key from an SDK hot account without
-    /// exposing the account private key. Cold accounts remain external signers.
-    public func deriveApplicationKey(accountID: Data, salt: Data, info: Data) async throws -> Data {
-        let checkedAccountID = try CitizenSDKInputLimits.accountID(accountID)
+    public func deriveApplicationKey(accountID: Data, salt: Data, info: Data) throws -> CitizenSDKOperation<Data> {
+        let account = try CitizenSDKInputLimits.accountID(accountID)
         guard salt.count == 32, (1...256).contains(info.count) else {
             throw CitizenSDKError(.invalidArgument, "application key salt/info is invalid")
         }
-        return try await native.deriveApplicationKey(
-            accountID: checkedAccountID, salt: salt, info: info).value()
+        return try native.deriveApplicationKey(accountID: account, salt: salt, info: info)
     }
 
-    public func importColdAccount(accountID: Data, name: String) async throws -> CitizenWalletState {
-        let checkedID = try CitizenSDKInputLimits.accountID(accountID)
-        let checkedName = try CitizenSDKInputLimits.accountName(name)
-        return try await CitizenSDKWalletMutationGate.shared.perform {
-            try await native.importColdAccountID(checkedID, name: checkedName).value()
-        }
+    public func importColdAccount(accountID: Data, name: String = "") throws -> CitizenSDKOperation<CitizenWalletState> {
+        let account = try CitizenSDKInputLimits.accountID(accountID)
+        let checkedName = name.isEmpty ? "" : try CitizenSDKInputLimits.accountName(name)
+        return try native.importColdAccountID(account, name: checkedName)
     }
 
-    public func importColdAccount(ss58Address: String, name: String) async throws -> CitizenWalletState {
+    public func importColdAccount(ss58Address: String, name: String = "") throws -> CitizenSDKOperation<CitizenWalletState> {
         guard !ss58Address.isEmpty, ss58Address.utf8.count <= 64 else {
             throw CitizenSDKError(.invalidArgument, "cold account SS58 is invalid")
         }
-        let checkedName = try CitizenSDKInputLimits.accountName(name)
-        return try await CitizenSDKWalletMutationGate.shared.perform {
-            try await native.importColdAccountSS58(ss58Address, name: checkedName).value()
-        }
+        let checkedName = name.isEmpty ? "" : try CitizenSDKInputLimits.accountName(name)
+        return try native.importColdAccountSS58(ss58Address, name: checkedName)
     }
 
-    public func reorderWalletAccountsWithoutDefaultChange(expectedRevision: UInt64,
-                                                           accountIDs: [Data]) async throws
-        -> CitizenWalletState {
-        guard (1...3_980).contains(accountIDs.count) else {
-            throw CitizenSDKError(.invalidArgument, "wallet catalog must contain 1...3980 accounts")
+    public func importColdAccountCode(_ code: String, name: String = "") throws -> CitizenSDKOperation<CitizenWalletState> {
+        let parsed = try parseForPurpose(code, purpose: .coldAccountImport)
+        guard case let .accountID(text) = parsed.document.content else { throw CitizenSDKError(.integrity, "account code has no account ID") }
+        var bytes = Data(capacity: 32)
+        var index = text.index(text.startIndex, offsetBy: 2)
+        for _ in 0..<32 {
+            let end = text.index(index, offsetBy: 2)
+            guard let byte = UInt8(text[index..<end], radix: 16) else { throw CitizenSDKError(.integrity, "Core account ID is invalid") }
+            bytes.append(byte); index = end
         }
-        let checkedIDs = try accountIDs.map { try CitizenSDKInputLimits.accountID($0) }
-        return try await CitizenSDKWalletMutationGate.shared.perform {
-            try await native.reorderWalletAccounts(expectedRevision: expectedRevision,
-                                                   accountIDs: checkedIDs).value()
-        }
+        return try importColdAccount(accountID: bytes, name: name)
     }
 
-    /// Changes the SDK wallet default only after the old default authorizes the
-    /// exact revision and full account permutation. CitizenWallet stays an
-    /// independent external signer when the old default is cold.
-    public func beginDefaultAccountChange(expectedRevision: UInt64,
-                                          accountIDs: [Data],
-                                          ttlSeconds: UInt64 = 120) async throws
-        -> CitizenDefaultAccountChangeOutcome {
+    public func reorderWalletAccountsWithoutDefaultChange(expectedRevision: UInt64, accountIDs: [Data]) throws -> CitizenSDKOperation<CitizenWalletState> {
+        guard (1...3_980).contains(accountIDs.count) else { throw CitizenSDKError(.invalidArgument, "wallet catalog size is invalid") }
+        return try native.reorderWalletAccounts(expectedRevision: expectedRevision,
+            accountIDs: accountIDs.map { try CitizenSDKInputLimits.accountID($0) })
+    }
+
+    /// 默认顺序只经原默认账户授权的同一Core CAS提交，不在绑定层另建变更门。
+    public func beginDefaultAccountChange(expectedRevision: UInt64, accountIDs: [Data], ttlSeconds: UInt64 = 90) throws -> CitizenSDKOperation<CitizenDefaultAccountChangeOutcome> {
         guard (1...256).contains(accountIDs.count), (1...300).contains(ttlSeconds) else {
             throw CitizenSDKError(.invalidArgument, "default-account change input is invalid")
         }
-        let checked = try accountIDs.map { try CitizenSDKInputLimits.accountID($0) }
-        return try await CitizenSDKWalletMutationGate.shared.perform {
-            try await native.beginDefaultAccountChange(
-                expectedRevision: expectedRevision, accountIDs: checked,
-                ttlSeconds: ttlSeconds).value()
-        }
+        return try native.beginDefaultAccountChange(expectedRevision: expectedRevision,
+            accountIDs: accountIDs.map { try CitizenSDKInputLimits.accountID($0) }, ttlSeconds: ttlSeconds)
     }
 
-    public func consumeDefaultAccountChange(sessionID: String,
-                                            response: String) async throws
-        -> CitizenDefaultAccountChangeOutcome {
+    public func consumeDefaultAccountChange(sessionID: String, response: String) throws -> CitizenSDKOperation<CitizenDefaultAccountChangeOutcome> {
         try CitizenSigning.validateExternal(sessionID: sessionID, response: response)
-        return try await CitizenSDKWalletMutationGate.shared.perform {
-            try await native.consumeDefaultAccountChange(
-                sessionID: sessionID, response: response).value()
+        return try native.consumeDefaultAccountChange(sessionID: sessionID, response: response)
+    }
+
+    public func renameAccount(accountID: Data, name: String) throws -> CitizenSDKOperation<CitizenWalletState> {
+        try native.renameAnyAccount(CitizenSDKInputLimits.accountID(accountID), name: CitizenSDKInputLimits.accountName(name))
+    }
+
+    public func deleteAccount(accountID: Data) throws -> CitizenSDKOperation<CitizenWalletState> {
+        try native.deleteAnyAccount(CitizenSDKInputLimits.accountID(accountID))
+    }
+
+    public func setActiveWalletAccount(accountID: Data) throws -> CitizenSDKOperation<CitizenWalletProfile> {
+        try native.setActiveAccount(CitizenSDKInputLimits.accountID(accountID)).map {
+            guard let value = $0 else { throw CitizenSDKError(.integrity, "set active account returned no profile") }
+            return value
         }
     }
 
-    public func renameAccount(accountID: Data, name: String) async throws -> CitizenWalletState {
-        let checkedID = try CitizenSDKInputLimits.accountID(accountID)
-        let checkedName = try CitizenSDKInputLimits.accountName(name)
-        return try await CitizenSDKWalletMutationGate.shared.perform {
-            try await native.renameAnyAccount(checkedID, name: checkedName).value()
-        }
-    }
+    /// 普通清除不追加授权；“签名并删除”在Core内先完成真实授权签名。
+    public func deleteWallet() throws -> CitizenSDKOperation<Void> { try native.deleteWallet() }
+    public func signAndDeleteWallet() throws -> CitizenSDKOperation<Void> { try native.signAndDeleteWallet() }
 
-    public func deleteAccount(accountID: Data) async throws -> CitizenWalletState {
-        let checkedID = try CitizenSDKInputLimits.accountID(accountID)
-        return try await CitizenSDKWalletMutationGate.shared.perform {
-            try await native.deleteAnyAccount(checkedID).value()
-        }
-    }
-
-    public func setActiveWalletAccount(accountID: Data) async throws -> CitizenWalletProfile {
-        try await CitizenSDKWalletMutationGate.shared.perform {
-            guard let profile = try await native.setActiveAccount(CitizenSDKInputLimits.accountID(accountID)).value() else {
-                throw CitizenSDKError(.integrity, "set active account returned no wallet profile")
+    public func reconcileWalletCleanup() throws -> CitizenSDKOperation<CitizenWalletProfile?> {
+        let cleanup = try native.reconcileWalletCleanup()
+        let result = CitizenSDKOperation<CitizenWalletProfile?>(operationID: cleanup.operationID, cancel: cleanup.cancel)
+        cleanup.observe { [native] outcome in
+            switch outcome {
+            case .success:
+                do { try native.walletProfile().observe { result.complete($0) } }
+                catch { result.complete(.failure(error)) }
+            case let .failure(error): result.complete(.failure(error))
             }
-            return profile
         }
-    }
-
-    public func renameWalletAccount(accountID: Data, name: String) async throws -> CitizenWalletProfile {
-        let checkedName = try CitizenSDKInputLimits.accountName(name)
-        return try await CitizenSDKWalletMutationGate.shared.perform {
-            guard let profile = try await native.renameAccount(CitizenSDKInputLimits.accountID(accountID), name: checkedName).value() else {
-                throw CitizenSDKError(.integrity, "rename account returned no wallet profile")
-            }
-            return profile
-        }
-    }
-
-    /// Returns the post-delete profile under the same process mutation gate.
-    public func deleteWalletAccount(accountID: Data) async throws -> CitizenWalletProfile? {
-        try await CitizenSDKWalletMutationGate.shared.perform {
-            try await native.deleteAccount(CitizenSDKInputLimits.accountID(accountID)).value()
-            return try await native.walletProfile().value()
-        }
-    }
-
-    public func deleteWallet() async throws -> CitizenWalletProfile? {
-        try await CitizenSDKWalletMutationGate.shared.perform {
-            try await native.deleteWallet().value()
-            return try await native.walletProfile().value()
-        }
-    }
-
-    public func reconcileWalletCleanup() async throws -> CitizenWalletProfile? {
-        try await CitizenSDKWalletMutationGate.shared.perform {
-            try await native.reconcileWalletCleanup().value()
-            return try await native.walletProfile().value()
-        }
+        return result
     }
 
     /// 签名是独立公开模块，不要求开启钱包管理或轻节点。
-    public var signing: CitizenSigning { CitizenSigning(native: native) }
+    public var signing: CitizenSigning {
+        CitizenSigning(native: native, review: { [weak self] text in
+            guard let self else { throw CitizenSDKError(.cancelled, "SDK is closed") }
+            return try self.reviewQrRequest(text)
+        }, signQr: { [native] review in
+            try native.signQrRequest(review).map { document in
+                CitizenQRSigned(document: document, qrImage: try native.qrEncode(document.canonicalText, scale: 4))
+            }
+        })
+    }
 
     public func qrParse(_ text: String) throws -> CitizenQRDocument {
         try native.qrParse(text)
+    }
+    public func qrEncodeDocument(_ content: CitizenQRContent) throws -> CitizenQRDocument {
+        try native.qrEncodeDocument(content.inputJSON)
+    }
+    @_spi(CitizenSDKFlutter) public func qrEncodeDocument(inputJSON: String) throws -> CitizenQRDocument {
+        try native.qrEncodeDocument(inputJSON)
+    }
+    public func qrPrepareAccountAuthorization(action: UInt32, payload: Data, accountID: String) throws -> CitizenQRAuthorization {
+        try native.qrPrepareAccountAuthorization(action: action, payload: payload, accountID: accountID)
     }
 
     public func qrCreateSignRequest(action: UInt16, signerAccountID: Data,
                                     reviewPayload: Data, ttlSeconds: UInt64 = 120) throws -> String {
         try native.qrCreateSignRequest(action: action, accountID: signerAccountID,
                                        payload: reviewPayload, ttl: ttlSeconds)
+    }
+
+    /// 同实例非消费验签；不会提交交易或改变目录。
+    public func qrValidateSignResponse(sessionID: String, response: String) throws {
+        try native.qrValidateSignResponse(sessionID: sessionID, response: response)
     }
 
     public func qrConsumeSignResponse(_ text: String) throws -> Data {
@@ -335,24 +329,95 @@ public final class CitizenSdk: @unchecked Sendable {
         try native.qrEncode(text, scale: scale)
     }
 
-    internal func requireQRUI() throws { try native.requireQRModule() }
-    internal func reviewQrSignRequest(_ text: String) throws -> CitizenSDKOperation<CitizenSDKQrReview> {
-        try native.reviewQrSignRequest(text)
-    }
-    internal func signQrReview(_ review: CitizenSDKQrReview) throws -> CitizenSDKOperation<CitizenQRDocument> {
-        try native.signQrRequest(review)
+    /// ImageIO仅解编码图片像素，所有码识别、协议与用途判断复用SDK唯一链路。
+    public func decodeImage(_ encodedImage: Data, purpose: CitizenQRScanPurpose) throws -> [CitizenQRScanResult] {
+        guard !encodedImage.isEmpty, encodedImage.count <= 16 * 1024 * 1024 else { throw CitizenSDKError(.invalidArgument, "encoded image size is invalid") }
+        try native.requireQRModule()
+        guard let source = CGImageSourceCreateWithData(encodedImage as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let rawWidth = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+              let rawHeight = properties[kCGImagePropertyPixelHeight] as? NSNumber,
+              (1...4096).contains(rawWidth.intValue), (1...4096).contains(rawHeight.intValue),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCache: false] as CFDictionary),
+              (1...4096).contains(image.width), (1...4096).contains(image.height) else {
+            throw CitizenSDKError(.decode, "encoded image dimensions are invalid")
+        }
+        var pixels = Data(count: image.width * image.height * 4)
+        var luminance = Data(count: image.width * image.height)
+        defer { pixels.resetBytes(in: 0..<pixels.count); luminance.resetBytes(in: 0..<luminance.count) }
+        try pixels.withUnsafeMutableBytes { bytes in
+            guard let context = CGContext(data: bytes.baseAddress, width: image.width, height: image.height,
+                bitsPerComponent: 8, bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else {
+                throw CitizenSDKError(.unavailable, "image pixel buffer is unavailable")
+            }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(image.width), height: CGFloat(image.height)))
+        }
+        luminance.withUnsafeMutableBytes { output in
+            let output = output.bindMemory(to: UInt8.self)
+            pixels.withUnsafeBytes { input in
+                let input = input.bindMemory(to: UInt8.self)
+                for index in 0..<output.count {
+                    output[index] = UInt8((Int(input[index * 4]) * 77 + Int(input[index * 4 + 1]) * 150 + Int(input[index * 4 + 2]) * 29) >> 8)
+                }
+            }
+        }
+        do {
+            return try native.qrDecodeLuminanceAll(luminance, width: UInt32(image.width), height: UInt32(image.height), rowStride: UInt32(image.width))
+                .map { try CitizenQRScanResult(document: $0, purpose: purpose) }
+        } catch let error as CitizenSDKError where error.code == .notFound { return [] }
     }
 
-    // 这些内部接线不进入公开 Swift 接口，私钥内容只由 SDK 自有显示所有者接收。
-    internal func openPrivateKeyView(accountID: Data, buffer: CitizenSDKPrivateKeyDisplayBuffer)
-        throws -> (UInt64, CitizenSDKOperation<Void>) {
-        try native.openPrivateKeyView(accountID: accountID, buffer: buffer)
+    private func reviewQrRequest(_ text: String) throws -> CitizenSDKOperation<CitizenQRReview> {
+        try resourceOperation {
+        try native.reviewQrSignRequest(text).map { [self] review in
+            review.onRelease { [weak self] value in
+                guard let self else { return }
+                self.stateLock.lock(); defer { self.stateLock.unlock() }
+                self.qrReviews.removeValue(forKey: ObjectIdentifier(value))
+            }
+            self.stateLock.lock()
+            let accepting = !self.closed && !self.resourcesClosing
+            if accepting { self.qrReviews[ObjectIdentifier(review)] = review }
+            self.stateLock.unlock()
+            guard accepting else { try review.release(); throw CitizenSDKError(.cancelled, "SDK is closed") }
+            return review
+        }
+        }
     }
-    internal func revealPrivateKeyView(_ viewID: UInt64) throws { try native.revealPrivateKeyView(viewID) }
-    internal func cancelPrivateKeyView(_ viewID: UInt64) throws { try native.cancelPrivateKeyView(viewID) }
-    internal func finishPrivateKeyView(_ viewID: UInt64) throws { try native.finishPrivateKeyView(viewID) }
-    internal func isPrivateKeyAuthenticationActive(_ operationID: UInt64) -> Bool { native.isPrivateKeyAuthenticationActive(operationID) }
-    internal func cancelPrivateKeyAuthentication(_ operationID: UInt64) { native.cancelPrivateKeyAuthentication(operationID) }
+
+    /// 显式私钥查看只返回资源；警告、确认、显示与清屏仍由宿主原UI负责。
+    @MainActor
+    public func openPrivateKey(accountID: Data) async throws -> CitizenSDKPrivateKey {
+        let ticket = try CitizenSDKCloseGate.shared.reserve(self)
+        defer { CitizenSDKCloseGate.shared.finish(self, token: ticket) }
+        let resource = try CitizenSDKPrivateKey(native: native,
+            accountID: CitizenSDKInputLimits.accountID(accountID)) { [weak self] resource in
+                self?.removePrivateKey(resource)
+            }
+        guard registerPrivateKey(resource) else {
+            resource.requestClose()
+            throw CitizenSDKError(.cancelled, "SDK is closing resources")
+        }
+        CitizenSDKCloseGate.shared.finish(self, token: ticket)
+        do { try await resource.waitUntilReady(); return resource }
+        catch { try? await resource.close(); throw error }
+    }
+
+    private func registerPrivateKey(_ resource: CitizenSDKPrivateKey) -> Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        guard !closed && !resourcesClosing else { return false }
+        privateKeys[ObjectIdentifier(resource)] = resource
+        return true
+    }
+    private func removePrivateKey(_ resource: CitizenSDKPrivateKey) {
+        stateLock.lock(); defer { stateLock.unlock() }
+        privateKeys.removeValue(forKey: ObjectIdentifier(resource))
+    }
+    private func ownedPrivateKeys() -> [CitizenSDKPrivateKey] {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return Array(privateKeys.values)
+    }
 
     /// Binds one application-encoded opaque RuntimeCall to exact chain state without signing.
     public func prepareTransaction(sourceAccountID: Data,
@@ -434,12 +499,18 @@ public final class CitizenSdk: @unchecked Sendable {
     }
 
     private func finishClose() throws {
-        let registry = CitizenSDKWalletFlowRegistry.shared
+        let registry = CitizenSDKCloseGate.shared
         guard let reservation = try registry.beginClose(self) else {
             commitClosedFacade(reservation: nil)
             return
         }
         do {
+            let keys = ownedPrivateKeys()
+            let captures = ownedCaptures()
+            keys.forEach { $0.requestClose() }
+            captures.forEach { $0.requestClose() }
+            guard keys.isEmpty && captures.isEmpty else { throw CitizenSDKError(.busy, "private key resources are still draining") }
+            try releasePreparedResources()
             try native.close()
         } catch {
             let requiresSupervisor = registry.failClose(
@@ -459,12 +530,15 @@ public final class CitizenSdk: @unchecked Sendable {
         // Recovery must not consult `lifecycleValue`: the Core can complete a
         // stop before its lifecycle event reaches this facade. Native queries
         // the authoritative C lifecycle and resumes any partial ABI teardown.
-        let registry = CitizenSDKWalletFlowRegistry.shared
+        let registry = CitizenSDKCloseGate.shared
         guard let reservation = try registry.beginClose(self, origin: .supervised) else {
             commitClosedFacade(reservation: nil)
             return
         }
         do {
+            for resource in ownedPrivateKeys() { try await resource.close() }
+            for resource in ownedCaptures() { try await resource.close() }
+            try releasePreparedResources()
             try await native.supervisedClose()
         } catch {
             // This method already runs under the lifecycle supervisor, so even
@@ -487,11 +561,11 @@ public final class CitizenSdk: @unchecked Sendable {
     /// idempotent gate also makes concurrent explicit/reaper completion commit
     /// the registry tombstone exactly once.
     private func commitClosedFacade(
-        reservation: CitizenSDKWalletFlowRegistry.CloseReservation?
+        reservation: CitizenSDKCloseGate.CloseReservation?
     ) {
         // Publish the destroyed tombstone first, without holding `stateLock`,
         // so no wallet UI can enter while facade disposal is being committed.
-        CitizenSDKWalletFlowRegistry.shared.commitClosed(self, reservation: reservation)
+        CitizenSDKCloseGate.shared.commitClosed(self, reservation: reservation)
         stateLock.lock()
         let didCommit = !closed
         if didCommit {
@@ -502,54 +576,141 @@ public final class CitizenSdk: @unchecked Sendable {
         stateLock.unlock()
     }
 
-    /// Secret-bearing wallet mutation entry points are main-actor isolated:
-    /// only the SDK-owned Apple UI may construct their buffers, and the native
-    /// admission call borrows them synchronously before the returned operation
-    /// is awaited.
-    @MainActor
-    internal func prepareWallet(wordCount: UInt32, password: CitizenSDKSensitiveBuffer) async throws -> CitizenSDKPreparedWallet {
-        guard [12, 18, 24].contains(wordCount) else { throw CitizenSDKError(.invalidArgument, "word count must be 12, 18 or 24") }
-        let operation = try native.prepareWallet(wordCount: wordCount, password: password)
-        password.clear()
-        return CitizenSDKPreparedWallet(native: native, handle: try await operation.value())
+    public func validatePassword(_ password: String) throws -> CitizenWalletInputValidation {
+        try CitizenSDKNative.validateWalletInput(password, kind: 1, wordCount: 0)
     }
-
-    @MainActor
-    internal func importWallet(mnemonic: CitizenSDKSensitiveBuffer,
-                               password: CitizenSDKSensitiveBuffer) async throws -> CitizenWalletProfile? {
-        try CitizenSDKWalletMutationGate.shared.enterWalletUI()
-        defer { CitizenSDKWalletMutationGate.shared.leaveWalletUI() }
-        // Admission borrows both buffers synchronously on MainActor. Only the
-        // Sendable operation result crosses the suspension point.
-        let operation = try native.importWallet(mnemonic: mnemonic, password: password)
-        mnemonic.clear(); password.clear()
-        return try await operation.value()
+    public func validateMnemonic(_ mnemonic: String, wordCount: UInt32) throws -> CitizenWalletInputValidation {
+        try CitizenSDKNative.validateWalletInput(mnemonic, kind: 2, wordCount: wordCount)
     }
+    public func wordSuggestions(_ prefix: String) throws -> [String] { try CitizenSDKNative.walletWordSuggestions(prefix) }
 
-    @MainActor
-    internal func addWalletAccounts(mnemonic: CitizenSDKSensitiveBuffer, password: CitizenSDKSensitiveBuffer,
-                                    indices: [UInt32]) async throws -> CitizenWalletProfile {
-        let checked = try CitizenSDKInputLimits.additionalIndices(indices)
-        try CitizenSDKWalletMutationGate.shared.enterWalletUI()
-        defer { CitizenSDKWalletMutationGate.shared.leaveWalletUI() }
-        let operation = try native.addAccounts(mnemonic: mnemonic, password: password, indices: checked)
-        mnemonic.clear(); password.clear()
-        let added = try await operation.value()
-        guard added.count == checked.count, Set(added.map(\.index)) == Set(checked) else {
-            throw CitizenSDKError(.integrity, "add accounts result does not match requested indices")
+    public func prepareCreation(wordCount: UInt32, password: String = "") throws -> CitizenSDKOperation<CitizenSDKPreparedWallet> {
+        try resourceOperation {
+        try withWalletInputs(mnemonic: "", password: password) { _, password in
+            try native.prepareWallet(wordCount: wordCount, password: password).map { [self, native] handle in
+                let resource = CitizenSDKPreparedWallet(native: native, handle: handle) { [weak self] value in
+                    guard let self else { return }
+                    self.stateLock.lock(); defer { self.stateLock.unlock() }
+                    self.preparedWallets.removeValue(forKey: ObjectIdentifier(value))
+                }
+                self.stateLock.lock()
+                let accepting = !self.closed && !self.resourcesClosing
+                if accepting { self.preparedWallets[ObjectIdentifier(resource)] = resource }
+                self.stateLock.unlock()
+                guard accepting else { try resource.release(); throw CitizenSDKError(.cancelled, "SDK is closed") }
+                return resource
+            }
         }
-        guard let profile = try await native.walletProfile().value(),
-              added.allSatisfy({ account in profile.accounts.contains(where: { $0.accountID == account.accountID }) }) else {
-            throw CitizenSDKError(.integrity, "updated wallet profile is missing an added account")
         }
-        return profile
     }
 
-    @MainActor
-    internal func commit(_ prepared: CitizenSDKPreparedWallet) async throws -> CitizenWalletProfile? {
-        try CitizenSDKWalletMutationGate.shared.enterWalletUI()
-        defer { CitizenSDKWalletMutationGate.shared.leaveWalletUI() }
-        return try await prepared.commit()
+    public func importWallet(mnemonic: String, password: String = "") throws -> CitizenSDKOperation<CitizenWalletProfile> {
+        try withWalletInputs(mnemonic: mnemonic, password: password) { mnemonic, password in
+            try native.importWallet(mnemonic: mnemonic, password: password).map {
+                guard let value = $0 else { throw CitizenSDKError(.integrity, "wallet import returned no profile") }
+                return value
+            }
+        }
+    }
+
+    public func addAccounts(mnemonic: String, password: String = "", indices: [UInt32]) throws -> CitizenSDKOperation<CitizenWalletProfile> {
+        let indices = try CitizenSDKInputLimits.additionalIndices(indices)
+        return try withWalletInputs(mnemonic: mnemonic, password: password) { mnemonic, password in
+            try native.addAccounts(mnemonic: mnemonic, password: password, indices: indices)
+        }
+    }
+
+    /// 下一编号由Core同一次身份校验和提交决定，宿主不能先读max+1再提交。
+    public func addNextAccount(mnemonic: String, password: String = "") throws -> CitizenSDKOperation<CitizenWalletProfile> {
+        try withWalletInputs(mnemonic: mnemonic, password: password) { mnemonic, password in
+            try native.addNextAccount(mnemonic: mnemonic, password: password)
+        }
+    }
+
+    private func withWalletInputs<T>(mnemonic: String, password: String,
+        _ body: (CitizenSDKSensitiveBuffer, CitizenSDKSensitiveBuffer) throws -> T) throws -> T {
+        func buffer(_ value: String) throws -> CitizenSDKSensitiveBuffer {
+            guard value.utf8.count <= 1_024 else { throw CitizenSDKError(.invalidArgument, "wallet input exceeds 1024 bytes") }
+            var copy = Data(value.utf8)
+            defer { copy.resetBytes(in: 0..<copy.count) }
+            return CitizenSDKSensitiveBuffer(data: copy)
+        }
+        let phrase = try buffer(mnemonic)
+        defer { phrase.clear() }
+        let password = try buffer(password)
+        defer { password.clear() }
+        return try body(phrase, password)
+    }
+
+    private func releasePreparedResources() throws {
+        stateLock.lock()
+        let owned = Array(preparedWallets.values)
+        let reviews = Array(qrReviews.values)
+        stateLock.unlock()
+        try owned.forEach { try $0.release() }
+        try reviews.forEach { try $0.release() }
+    }
+
+    /// 接纳至资源登记之间持有短生命周期票据；不是UI窗口所有权，不禁止同实例其它资源。
+    private func resourceOperation<T: Sendable>(_ create: () throws -> CitizenSDKOperation<T>) throws -> CitizenSDKOperation<T> {
+        try requireResourceAdmission()
+        let ticket = try CitizenSDKCloseGate.shared.reserve(self)
+        do {
+            let operation = try create()
+            operation.observe { [self] _ in CitizenSDKCloseGate.shared.finish(self, token: ticket) }
+            return operation
+        } catch {
+            CitizenSDKCloseGate.shared.finish(self, token: ticket)
+            throw error
+        }
+    }
+
+    public func parseForPurpose(_ text: String, purpose: CitizenQRScanPurpose) throws -> CitizenQRScanResult {
+        try CitizenQRScanResult(document: native.qrParse(text), purpose: purpose)
+    }
+
+    public func openCapture(purpose: CitizenQRScanPurpose, listener: CitizenSDKQrCapture.Listener) async throws -> CitizenSDKQrCapture {
+        let resource = try createCapture(purpose: purpose, listener: listener)
+        do { try await resource.start(); return resource }
+        catch { try? await resource.close(); throw error }
+    }
+
+    private func createCapture(purpose: CitizenQRScanPurpose, listener: CitizenSDKQrCapture.Listener) throws -> CitizenSDKQrCapture {
+        try requireResourceAdmission()
+        let ticket = try CitizenSDKCloseGate.shared.reserve(self)
+        defer { CitizenSDKCloseGate.shared.finish(self, token: ticket) }
+        try native.requireQRModule()
+        let resource = CitizenSDKQrCapture(native: native, purpose: purpose, listener: listener) { [weak self] value in
+            guard let self else { return }
+            self.stateLock.lock(); defer { self.stateLock.unlock() }
+            self.qrCaptures.removeValue(forKey: ObjectIdentifier(value))
+        }
+        stateLock.lock()
+        let accepting = !closed && !resourcesClosing
+        if accepting { qrCaptures[ObjectIdentifier(resource)] = resource }
+        stateLock.unlock()
+        guard accepting else { resource.requestClose(); throw CitizenSDKError(.cancelled, "SDK is closing resources") }
+        return resource
+    }
+    private func ownedCaptures() -> [CitizenSDKQrCapture] {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return Array(qrCaptures.values)
+    }
+
+    private func requireResourceAdmission() throws {
+        stateLock.lock(); defer { stateLock.unlock() }
+        guard !closed && !resourcesClosing else { throw CitizenSDKError(.cancelled, "SDK is closing resources") }
+    }
+
+    /// Flutter关闭先撤销已交付和仍在打开的资源，再等待其真实任务，避免权限等待死锁。
+    @_spi(CitizenSDKFlutter)
+    public func requestResourceClose() {
+        stateLock.lock()
+        resourcesClosing = true
+        let keys = Array(privateKeys.values), captures = Array(qrCaptures.values)
+        stateLock.unlock()
+        keys.forEach { $0.requestClose() }
+        captures.forEach { $0.requestClose() }
     }
 
     private func receive(_ event: CitizenSDKEvent) {
@@ -557,6 +718,7 @@ public final class CitizenSdk: @unchecked Sendable {
         if case let .lifecycleChanged(_, lifecycle) = event { lifecycleValue = lifecycle }
         let handler = eventHandler
         stateLock.unlock()
+        if case .walletChanged = event { ownedPrivateKeys().forEach { $0.requestClose() } }
         handler?(event)
     }
 }
@@ -564,22 +726,30 @@ public final class CitizenSdk: @unchecked Sendable {
 /// 本地签名始终经核心账户归属检查与设备金库授权；公开验签不创建钱包或访问金库。
 public struct CitizenSigning: Sendable {
     private let native: CitizenSDKNative
-    internal init(native: CitizenSDKNative) { self.native = native }
+    private let reviewOperation: @Sendable (String) throws -> CitizenSDKOperation<CitizenQRReview>
+    private let signQrOperation: @Sendable (CitizenQRReview) throws -> CitizenSDKOperation<CitizenQRSigned>
+    internal init(native: CitizenSDKNative,
+                  review: @escaping @Sendable (String) throws -> CitizenSDKOperation<CitizenQRReview>,
+                  signQr: @escaping @Sendable (CitizenQRReview) throws -> CitizenSDKOperation<CitizenQRSigned>) {
+        self.native = native; reviewOperation = review; signQrOperation = signQr
+    }
+    public func reviewQrRequest(_ text: String) throws -> CitizenSDKOperation<CitizenQRReview> { try reviewOperation(text) }
+    public func signQrRequest(_ review: CitizenQRReview) throws -> CitizenSDKOperation<CitizenQRSigned> { try signQrOperation(review) }
 
-    public func sign(accountID: Data, message: Data) async throws -> CitizenSignature {
-        try await native.sign(accountID: CitizenSDKInputLimits.accountID(accountID),
-                              message: CitizenSDKInputLimits.signingPayload(message)).value()
+    public func sign(accountID: Data, message: Data) throws -> CitizenSDKOperation<CitizenSignature> {
+        try native.sign(accountID: CitizenSDKInputLimits.accountID(accountID),
+                              message: CitizenSDKInputLimits.signingPayload(message))
     }
 
-    public func begin(_ intent: CitizenSigningIntent) async throws -> CitizenSigningOutcome {
-        try await native.beginSigning(intent).value()
+    public func begin(_ intent: CitizenSigningIntent) throws -> CitizenSDKOperation<CitizenSigningOutcome> {
+        try native.beginSigning(intent)
     }
 
     public func consumeExternalSignature(sessionID: String,
-                                         response: String) async throws -> CitizenSigningOutcome {
+                                         response: String) throws -> CitizenSDKOperation<CitizenSigningOutcome> {
         try Self.validateExternal(sessionID: sessionID, response: response)
-        return try await native.consumeExternalSignature(
-            sessionID: sessionID, response: response).value()
+        return try native.consumeExternalSignature(
+            sessionID: sessionID, response: response)
     }
 
     public func cancel(sessionID: String) throws -> Bool {
@@ -601,35 +771,87 @@ public struct CitizenSigning: Sendable {
                                     signature: signature,
                                     message: CitizenSDKInputLimits.signingPayload(message))
     }
+    public static func encodePayload(_ payload: CitizenSigningPayload) throws -> Data {
+        try CitizenSDKNative.encodePayload(kind: payload.kind, fieldsJSON: payload.fieldsJSON, payload: payload.payloadBytes)
+    }
+    @_spi(CitizenSDKFlutter) public static func encodePayload(kind: UInt32, fieldsJSON: String, payload: Data) throws -> Data {
+        try CitizenSDKNative.encodePayload(kind: kind, fieldsJSON: fieldsJSON, payload: payload)
+    }
 }
 
-/// Process-wide mutation serialization. Every mutable field is reached only
-/// through the synchronous `enter`/`leave` helpers while `lock` is held, so
-/// async callers never directly share unprotected state across executors.
-private final class CitizenSDKWalletMutationGate: @unchecked Sendable {
-    static let shared = CitizenSDKWalletMutationGate()
+/** 原关闭预约状态机的非UI部分：允许多个资源接纳票据，部分teardown失败保持只准关闭重试。 */
+internal final class CitizenSDKCloseGate: @unchecked Sendable {
+    enum Status { case open, owned, closing, closed }
+    struct CloseReservation: Equatable, Sendable {
+        let token: UUID
+        let retryCommitted: Bool
+    }
+    enum CloseOrigin { case explicit, supervised }
+    private enum State { case open(Set<UUID>), closing(CloseReservation?), closed }
+    static let shared = CitizenSDKCloseGate()
     private let lock = NSLock()
-    private var active = false
+    private var states: [ObjectIdentifier: State] = [:]
 
-    func perform<T>(_ operation: () async throws -> T) async throws -> T {
-        try enter()
-        defer { leave() }
-        return try await operation()
+    func registerOpen(_ sdk: AnyObject) {
+        lock.lock(); defer { lock.unlock() }
+        precondition(states[ObjectIdentifier(sdk)] == nil)
+        states[ObjectIdentifier(sdk)] = .open([])
     }
-
-    private func enter() throws {
-        lock.lock()
-        guard !active else { lock.unlock(); throw CitizenSDKError(.busy, "another wallet mutation is active") }
-        active = true
-        lock.unlock()
+    func reserve(_ sdk: AnyObject) throws -> UUID {
+        lock.lock(); defer { lock.unlock() }
+        let key = ObjectIdentifier(sdk)
+        guard case var .open(tickets) = states[key] else { throw CitizenSDKError(.busy, "SDK is closing or closed") }
+        let token = UUID(); tickets.insert(token); states[key] = .open(tickets)
+        return token
     }
-
-    private func leave() {
-        lock.lock(); active = false; lock.unlock()
+    func finish(_ sdk: AnyObject, token: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        let key = ObjectIdentifier(sdk)
+        if case var .open(tickets) = states[key] { tickets.remove(token); states[key] = .open(tickets) }
     }
-
-    /// SDK-owned Apple wallet UI uses an explicit synchronous gate so secret
-    /// buffers are admitted on MainActor before any async suspension.
-    func enterWalletUI() throws { try enter() }
-    func leaveWalletUI() { leave() }
+    func beginClose(_ sdk: AnyObject, origin: CloseOrigin = .explicit) throws -> CloseReservation? {
+        lock.lock(); defer { lock.unlock() }
+        let key = ObjectIdentifier(sdk)
+        switch states[key] {
+        case let .open(tickets):
+            guard tickets.isEmpty else { throw CitizenSDKError(.busy, "resource admission has not settled") }
+            let reservation = CloseReservation(token: UUID(), retryCommitted: origin == .supervised)
+            states[key] = .closing(reservation)
+            return reservation
+        case .closing(nil):
+            let reservation = CloseReservation(token: UUID(), retryCommitted: true)
+            states[key] = .closing(reservation)
+            return reservation
+        case .closing: throw CitizenSDKError(.busy, "another close attempt is active")
+        case .closed: return nil
+        case nil: throw CitizenSDKError(.invalidState, "SDK is not registered")
+        }
+    }
+    @discardableResult
+    func failClose(_ sdk: AnyObject, reservation: CloseReservation, teardownStarted: Bool) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let key = ObjectIdentifier(sdk)
+        guard case let .closing(current?) = states[key], current == reservation else { return false }
+        states[key] = teardownStarted || reservation.retryCommitted ? .closing(nil) : .open([])
+        return teardownStarted && !reservation.retryCommitted
+    }
+    func commitClosed(_ sdk: AnyObject, reservation: CloseReservation?) {
+        lock.lock(); defer { lock.unlock() }
+        let key = ObjectIdentifier(sdk)
+        if case .closed = states[key] { return }
+        guard let reservation, case let .closing(current?) = states[key], current == reservation else {
+            preconditionFailure("close reservation changed before Core destruction")
+        }
+        states[key] = .closed
+    }
+    func forget(_ sdk: AnyObject) { lock.lock(); states.removeValue(forKey: ObjectIdentifier(sdk)); lock.unlock() }
+    func status(_ sdk: AnyObject) -> Status? {
+        lock.lock(); defer { lock.unlock() }
+        switch states[ObjectIdentifier(sdk)] {
+        case let .open(tickets): return tickets.isEmpty ? .open : .owned
+        case .closing: return .closing
+        case .closed: return .closed
+        case nil: return nil
+        }
+    }
 }

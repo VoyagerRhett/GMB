@@ -105,8 +105,7 @@ set(CITIZENSDK_FLUTTER_ADAPTER_SOURCES
   "${_citizensdk_windows_root}/src/citizen_sdk_plugin.cc"
   "${_citizensdk_windows_root}/src/citizen_sdk_flutter_codec.cc"
   "${_citizensdk_windows_root}/src/citizen_sdk_flutter_environment.cc"
-  "${_citizensdk_windows_root}/src/citizen_sdk_flutter_sessions.cc"
-  "${_citizensdk_windows_root}/src/citizen_sdk_flutter_wallet_flow.cc")
+  "${_citizensdk_windows_root}/src/citizen_sdk_flutter_sessions.cc")
 
 # 自有目标统一异常模式，不调用会设置 _HAS_EXCEPTIONS=0 的宿主 helper，
 # 也不改 Flutter wrapper 或宿主全局编译选项。测试复用同一配置函数。

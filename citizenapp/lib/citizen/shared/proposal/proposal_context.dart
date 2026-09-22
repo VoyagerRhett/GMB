@@ -285,7 +285,7 @@ class ProposalContextResolver {
   // 内部方法
   Future<List<CitizenWalletStateAccount>> _getWallets() async {
     try {
-      _wallets ??= (await _wallet.getState()).accounts;
+      _wallets ??= (await _wallet.getState().result).accounts;
     } catch (e, st) {
       // 治理页的链上内容不能因为钱包公开目录短暂不可用而整体加载失败。
       AppLog.d('[ProposalContext] SDK wallet load failed: $e\n$st');

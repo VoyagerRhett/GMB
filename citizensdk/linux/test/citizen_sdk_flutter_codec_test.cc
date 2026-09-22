@@ -469,6 +469,64 @@ void test_balance_nonce_fee_semantics() {
 }  // namespace
 
 int main() {
+  {
+    // SDK自己的敏感值副本显式清零；普通公开值不被误擦，标记不增加tuple字段。
+    auto secret = Value::sensitive_bytes({1, 2, 3});
+    auto copy = secret;
+    secret.clear_sensitive();
+    assert(std::get<Value::Bytes>(secret.data) == Value::Bytes({0, 0, 0}));
+    assert(std::get<Value::Bytes>(copy.data) == Value::Bytes({1, 2, 3}));
+    copy.clear_sensitive();
+    assert(std::get<Value::Bytes>(copy.data) == Value::Bytes({0, 0, 0}));
+    auto nested = Value::list({Value::string("synthetic"), Value::bytes({4, 5})});
+    nested.mark_sensitive(); nested.clear_sensitive();
+    const auto &items = std::get<Value::List>(nested.data);
+    assert(std::get<std::string>(items[0].data) == std::string(9, '\0'));
+    assert(std::get<Value::Bytes>(items[1].data) == Value::Bytes({0, 0}));
+    auto public_value = Value::bytes({7}); public_value.clear_sensitive();
+    assert(std::get<Value::Bytes>(public_value.data) == Value::Bytes({7}));
+  }
+  {
+    const auto request = decode("qrValidateSignResponse", list({Value::integer(2), Value::string("sdk"),
+        Value::integer(1), Value::string("request"), Value::string("{}")}));
+    assert(request.method == Method::qr_validate_sign_response);
+    assert(request.qr_request_id == "request" && request.qr_text == "{}");
+    expect_failure([] {
+      (void)decode("qrValidateSignResponse", list({Value::integer(2), Value::string("sdk"),
+          Value::integer(2), Value::string(""), Value::string("{}")}));
+    }, CITIZENSDK_ERROR_INVALID_ARGUMENT);
+    expect_failure([] {
+      (void)decode("qrValidateSignResponse", list({Value::integer(2), Value::string("sdk"),
+          Value::integer(2), Value::string("request"), Value::string("{}"), Value::integer(100)}));
+    }, CITIZENSDK_ERROR_INVALID_ARGUMENT);
+    citizen_sdk::flutter::validate_public_value(Method::qr_validate_sign_response, list({}));
+  }
+  {
+    // 新入口只投影结构；实际编码由Core完成，静态载荷不需要session。
+    const auto payload = decode("encodeSigningPayload", list({
+        Value::integer(2), Value::integer(1), Value::string("{\"op_tag\":16}"), Value::bytes({})}));
+    assert(payload.method == Method::encode_signing_payload && payload.session.empty());
+    assert(payload.payload_kind == 1 && payload.payload.empty());
+    const auto document = decode("qrEncodeDocument", list({
+        Value::integer(2), Value::string("s"), Value::integer(1), Value::string("{}")}));
+    assert(document.method == Method::qr_encode_document && document.input_json == "{}");
+    const auto authorization = decode("qrPrepareAccountAuthorization", list({
+        Value::integer(2), Value::string("s"), Value::integer(2), Value::integer(10),
+        Value::bytes({}), Value::string("")}));
+    assert(authorization.qr_action == 10 && authorization.account_id_text.empty());
+    expect_failure([] {
+      (void)decode("encodeSigningPayload", list({Value::integer(2), Value::integer(7),
+          Value::string("{}"), Value::bytes({})}));
+    }, CITIZENSDK_ERROR_INVALID_ARGUMENT);
+    expect_failure([] {
+      (void)decode("encodeSigningPayload", list({Value::integer(1), Value::integer(1),
+          Value::string("{}"), Value::bytes({})}));
+    }, CITIZENSDK_ERROR_UNSUPPORTED);
+    expect_failure([] {
+      (void)decode("qrPrepareAccountAuthorization", list({Value::integer(2), Value::string("s"),
+          Value::integer(3), Value::integer(10), Value::bytes(std::vector<uint8_t>(1921)), Value::string("")}));
+    }, CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  }
   (void)citizen_sdk::flutter::event("s", 1, "historyChanged", Value::list({}));
   (void)citizen_sdk::flutter::event(
       "s", 2, "finalizedBlockChanged", Value::list({block_fixture('3', "7", true)}));

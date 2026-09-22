@@ -270,6 +270,7 @@ internal actor CitizenSDKLifecycleSupervisor {
 internal final class CitizenSDKNative: @unchecked Sendable {
     private enum DeferredStateEvent: Sendable {
         case history(sequence: UInt64)
+        case wallet(sequence: UInt64)
         case finalized(sequence: UInt64, block: CitizenBlockRef)
         case capabilities(sequence: UInt64)
         case lifecycle(sequence: UInt64)
@@ -621,7 +622,7 @@ internal final class CitizenSDKNative: @unchecked Sendable {
     }
 
     /// 私有回调只借用受控显示缓冲；普通请求只解码 Empty，并持有 context 到真实终态。
-    func openPrivateKeyView(accountID: Data, buffer: CitizenSDKPrivateKeyDisplayBuffer)
+    func openPrivateKeyView(accountID: Data, buffer: CitizenSDKPrivateKeyReceiver)
         throws -> (UInt64, CitizenSDKOperation<Void>) {
         var account = try cAccount(accountID)
         guard let host = callLock.withLock({ abiResources?.hostSnapshot }) else {
@@ -629,30 +630,30 @@ internal final class CitizenSDKNative: @unchecked Sendable {
         }
         buffer.bindAuthenticationRegistry(host.registerPrivateKeyAuthentication)
         let context = Unmanaged.passRetained(buffer)
-        var view = citizensdk_internal_private_key_view_v1_t()
-        view.struct_size = UInt32(MemoryLayout<citizensdk_internal_private_key_view_v1_t>.size)
+        var view = citizensdk_private_key_receiver_v1_t()
+        view.struct_size = UInt32(MemoryLayout<citizensdk_private_key_receiver_v1_t>.size)
         view.abi_version = 1
         view.context = context.toOpaque()
-        view.display = { context, viewID, bytes in
+        view.receive = { context, viewID, bytes in
             guard let context else { return CitizenSDKErrorCode.invalidArgument.rawValue }
-            return Unmanaged<CitizenSDKPrivateKeyDisplayBuffer>.fromOpaque(context)
-                .takeUnretainedValue().display(viewID: viewID, bytes: bytes)
+            return Unmanaged<CitizenSDKPrivateKeyReceiver>.fromOpaque(context)
+                .takeUnretainedValue().receive(viewID: viewID, bytes: bytes)
         }
         view.settled = { context, viewID, code in
             guard let context else { return }
-            Unmanaged<CitizenSDKPrivateKeyDisplayBuffer>.fromOpaque(context)
+            Unmanaged<CitizenSDKPrivateKeyReceiver>.fromOpaque(context)
                 .takeUnretainedValue().settled(viewID: viewID, code: code)
         }
         view.authorizing = { context, viewID, operationID in
             guard let context else { return CitizenSDKErrorCode.invalidArgument.rawValue }
-            return Unmanaged<CitizenSDKPrivateKeyDisplayBuffer>.fromOpaque(context)
+            return Unmanaged<CitizenSDKPrivateKeyReceiver>.fromOpaque(context)
                 .takeUnretainedValue().authorizing(viewID: viewID, hostOperationID: operationID)
         }
         do {
             var viewID: UInt64 = 0
             let operation = try withUnsafePointer(to: &account) { account in
                 try begin(accept: {
-                    citizensdk_internal_private_key_view_open(handle, account, &view, &viewID, $0)
+                    citizensdk_private_key_open(handle, account, &view, &viewID, $0)
                 }, decode: CitizenSDKNativeCodec.empty)
             }
             operation.observe { _ in
@@ -669,21 +670,21 @@ internal final class CitizenSDKNative: @unchecked Sendable {
     func revealPrivateKeyView(_ viewID: UInt64) throws {
         try callLock.withLock {
             try requireOpen()
-            try CitizenSDKChecks.requireOK(citizensdk_internal_private_key_view_reveal(handle, viewID), "private key view reveal failed")
+            try CitizenSDKChecks.requireOK(citizensdk_private_key_reveal(handle, viewID), "private key view reveal failed")
         }
     }
 
     func cancelPrivateKeyView(_ viewID: UInt64) throws {
         try callLock.withLock {
             try requireOpen()
-            try CitizenSDKChecks.requireOK(citizensdk_internal_private_key_view_cancel(handle, viewID), "private key view cancellation failed")
+            try CitizenSDKChecks.requireOK(citizensdk_private_key_cancel(handle, viewID), "private key view cancellation failed")
         }
     }
 
     func finishPrivateKeyView(_ viewID: UInt64) throws {
         try callLock.withLock {
             try requireOpen()
-            try CitizenSDKChecks.requireOK(citizensdk_internal_private_key_view_finish(handle, viewID), "private key view finish failed")
+            try CitizenSDKChecks.requireOK(citizensdk_private_key_finish(handle, viewID), "private key view finish failed")
         }
     }
 
@@ -745,6 +746,57 @@ internal final class CitizenSDKNative: @unchecked Sendable {
         try begin(accept: { citizensdk_delete_wallet(handle, $0) }, decode: CitizenSDKNativeCodec.empty)
     }
 
+    func signAndDeleteWallet() throws -> CitizenSDKOperation<Void> {
+        try begin(accept: { citizensdk_sign_and_delete_wallet(handle, $0) }, decode: CitizenSDKNativeCodec.empty)
+    }
+
+    /// 同步借用受控输入，只返回Core校验事实，不带UI文案或规范化后的秘密。
+    static func validateWalletInput(_ value: String, kind: UInt32, wordCount: UInt32) throws -> CitizenWalletInputValidation {
+        guard (kind == 1 && wordCount == 0) || (kind == 2 && [12, 18, 24].contains(wordCount)) else {
+            throw CitizenSDKError(.invalidArgument, "wallet input kind or word count is invalid")
+        }
+        guard value.utf8.count <= 1_024 else { return CitizenWalletInputValidation(reason: .inputTooLong, position: nil) }
+        return try withWalletInput(value) { view in
+            var result = citizensdk_wallet_input_validation_v1_t()
+            result.struct_size = UInt32(MemoryLayout.size(ofValue: result))
+            result.abi_version = 1
+            try CitizenSDKChecks.requireOK(citizensdk_validate_wallet_input(kind, view, wordCount, &result), "wallet validation failed")
+            guard let reason = CitizenWalletInputReason(rawValue: result.reason),
+                  (reason == .unknownWord ? result.position < 24 : result.position == UInt32.max) else {
+                throw CitizenSDKError(.integrity, "wallet validation result is invalid")
+            }
+            return CitizenWalletInputValidation(reason: reason, position: result.position == UInt32.max ? nil : result.position)
+        }
+    }
+
+    static func walletWordSuggestions(_ prefix: String) throws -> [String] {
+        try withWalletInput(prefix) { input in
+            var required: UInt64 = 0
+            try CitizenSDKChecks.requireOK(citizensdk_wallet_word_suggestions(input, nil, 0, &required), "word suggestions failed")
+            guard required <= 128 else { throw CitizenSDKError(.integrity, "word suggestions exceed limit") }
+            var output = Data(count: Int(required))
+            defer { output.resetBytes(in: 0..<output.count) }
+            let code = output.withUnsafeMutableBytes {
+                citizensdk_wallet_word_suggestions(input, $0.bindMemory(to: UInt8.self).baseAddress, UInt64($0.count), &required)
+            }
+            try CitizenSDKChecks.requireOK(code, "word suggestions failed")
+            guard let words = String(data: output, encoding: .utf8) else { throw CitizenSDKError(.integrity, "word suggestions are not UTF-8") }
+            return words.split(separator: "\n").map(String.init)
+        }
+    }
+
+    private static func withWalletInput<T>(_ value: String, _ body: (citizensdk_bytes_view_t) throws -> T) throws -> T {
+        guard value.utf8.count <= 1_024 else { throw CitizenSDKError(.invalidArgument, "wallet input exceeds 1024 bytes") }
+        var input = Data(value.utf8)
+        defer { input.resetBytes(in: 0..<input.count) }
+        return try input.withUnsafeBytes { bytes in
+            var view = citizensdk_bytes_view_t()
+            view.data = bytes.bindMemory(to: UInt8.self).baseAddress
+            view.len = UInt64(bytes.count)
+            return try body(view)
+        }
+    }
+
     func reconcileWalletCleanup() throws -> CitizenSDKOperation<Void> {
         try begin(accept: { citizensdk_reconcile_wallet_cleanup(handle, $0) }, decode: CitizenSDKNativeCodec.empty)
     }
@@ -755,6 +807,18 @@ internal final class CitizenSDKNative: @unchecked Sendable {
     }
 
     /// 无实例、无宿主资源的公开验签，只借用公开输入并调用同一 Rust 实现。
+    static func encodePayload(kind: UInt32, fieldsJSON: String, payload: Data) throws -> Data {
+        let fields = Data(fieldsJSON.utf8)
+        guard (1...6).contains(kind), fields.count <= 4096, payload.count <= 16 * 1024 * 1024 else {
+            throw CitizenSDKError(.invalidArgument, "Payload input exceeds boundary")
+        }
+        return try withViews([fields, payload]) { views in
+            try coreOutput(maximum: 16 * 1024 * 1024) { output, capacity, required in
+                citizensdk_encode_signing_payload(kind, views[0], views[1], output, capacity, required)
+            }
+        }
+    }
+
     static func verify(accountID: Data, signature: Data, message: Data) throws -> Bool {
         guard accountID.count == 32, signature.count == 64 else {
             throw CitizenSDKError(.invalidArgument, "accountId/signature length is invalid")
@@ -852,6 +916,27 @@ internal final class CitizenSDKNative: @unchecked Sendable {
         }
     }
 
+    func qrEncodeDocument(_ inputJSON: String) throws -> CitizenQRDocument {
+        let input = Data(inputJSON.utf8)
+        guard input.count <= 65_536 else { throw CitizenSDKError(.invalidArgument, "QR content exceeds boundary") }
+        let output = try withView(input) { view in
+            try qrOutput(maximum: 65_536) { output, capacity, required in
+                citizensdk_qr_encode_document(handle, view, output, capacity, required)
+            }
+        }
+        return try CitizenQRDocument(coreJSON: qrString(output))
+    }
+    func qrPrepareAccountAuthorization(action: UInt32, payload: Data, accountID: String) throws -> CitizenQRAuthorization {
+        let account = Data(accountID.utf8)
+        guard payload.count <= 1920, account.count <= 1024 else { throw CitizenSDKError(.invalidArgument, "Authorization input exceeds boundary") }
+        let output = try Self.withViews([payload, account]) { views in
+            try qrOutput(maximum: 65_536) { output, capacity, required in
+                citizensdk_qr_prepare_account_authorization(handle, action, views[0], views[1], output, capacity, required)
+            }
+        }
+        return try CitizenQRAuthorization(coreJSON: qrString(output))
+    }
+
     func qrParse(_ text: String) throws -> CitizenQRDocument {
         let input = Data(text.utf8)
         let canonical = try withView(input) { view in
@@ -876,16 +961,16 @@ internal final class CitizenSDKNative: @unchecked Sendable {
         return try qrString(output)
     }
 
-    func reviewQrSignRequest(_ text: String) throws -> CitizenSDKOperation<CitizenSDKQrReview> {
+    func reviewQrSignRequest(_ text: String) throws -> CitizenSDKOperation<CitizenQRReview> {
         try withView(Data(text.utf8)) { view in
             try begin(accept: { citizensdk_review_qr_sign_request(handle, view, $0) }, decode: {
-                try CitizenSDKQrReview(result: $0, json: CitizenSDKNativeCodec.qr($0, kind: 19))
+                try CitizenQRReview(owner: self, result: $0, json: CitizenSDKNativeCodec.qr($0, kind: 19))
             }, retainsResult: true)
         }
     }
 
-    func signQrRequest(_ review: CitizenSDKQrReview) throws -> CitizenSDKOperation<CitizenQRDocument> {
-        let operation = try review.withResult { result in
+    func signQrRequest(_ review: CitizenQRReview) throws -> CitizenSDKOperation<CitizenQRDocument> {
+        let operation = try review.withResult(owner: self) { result in
             try begin(accept: { citizensdk_sign_qr_request(handle, result, $0) }, decode: {
                 let value = try CitizenQRDocument(coreJSON: CitizenSDKNativeCodec.qr($0, kind: 20))
                 guard value.kind == 2, let request = value.signRequest, !request.isEmpty, request.utf8.count <= 2331 else {
@@ -894,9 +979,21 @@ internal final class CitizenSDKNative: @unchecked Sendable {
                 return value
             })
         }
-        // 接纳成功后 Core 已取得不可变审阅的独立所有权；平台不再保留第二份可领取凭证。
-        review.release()
+        // Core已原子标记领取；显式release单独归还原引用，释放失败不能掩盖已接纳的签名操作。
         return operation
+    }
+
+    func qrValidateSignResponse(sessionID: String, response: String) throws {
+        try callLock.withLock {
+            try requireOpen()
+            try withView(Data(sessionID.utf8)) { session in
+                try withView(Data(response.utf8)) { text in
+                    try CitizenSDKChecks.requireOK(
+                        citizensdk_qr_validate_sign_response(handle, session, text),
+                        "QR response preflight failed")
+                }
+            }
+        }
     }
 
     func qrConsumeSignResponse(_ text: String) throws -> Data {
@@ -942,33 +1039,55 @@ internal final class CitizenSDKNative: @unchecked Sendable {
 
     func qrDecodeLuminance(_ data: Data, width: UInt32, height: UInt32,
                            rowStride: UInt32) throws -> CitizenQRDocument {
+        guard let first = try qrDecodeLuminanceAll(data, width: width, height: height, rowStride: rowStride, firstOnly: true).first else {
+            throw CitizenSDKError(.notFound, "image contains no QR code")
+        }
+        return first
+    }
+
+    func qrDecodeLuminanceAll(_ data: Data, width: UInt32, height: UInt32,
+                              rowStride: UInt32, firstOnly: Bool = false) throws -> [CitizenQRDocument] {
         try callLock.withLock {
             try requireQRModule()
             var required = 0
             let first = data.withUnsafeBytes { bytes in
-                citizensdk_qr_image_decode_luminance(
-                    bytes.bindMemory(to: UInt8.self).baseAddress, data.count, width, height,
-                    rowStride, nil, 0, &required
-                )
+                citizensdk_qr_image_decode_luminance_all(bytes.bindMemory(to: UInt8.self).baseAddress,
+                    data.count, width, height, rowStride, nil, 0, &required)
             }
-            guard first == CITIZENSDK_QR_IMAGE_BUFFER_TOO_SMALL, required > 0, required <= 2_331 else {
+            guard first == CITIZENSDK_QR_IMAGE_BUFFER_TOO_SMALL, required >= 4, required <= 4 + 64 * (4 + 2_331) else {
                 throw qrImageError(first, "ZXing-C++ QR decode failed")
             }
             var output = Data(count: required)
+            defer { output.resetBytes(in: 0..<output.count) }
             let capacity = output.count
             let second = data.withUnsafeBytes { bytes in
                 output.withUnsafeMutableBytes { destination in
-                    citizensdk_qr_image_decode_luminance(
-                        bytes.bindMemory(to: UInt8.self).baseAddress, data.count, width, height,
-                        rowStride, destination.bindMemory(to: UInt8.self).baseAddress,
-                        capacity, &required
-                    )
+                    citizensdk_qr_image_decode_luminance_all(bytes.bindMemory(to: UInt8.self).baseAddress,
+                        data.count, width, height, rowStride, destination.bindMemory(to: UInt8.self).baseAddress,
+                        capacity, &required)
                 }
             }
-            guard second == CITIZENSDK_QR_IMAGE_OK, required == capacity else {
-                throw qrImageError(second, "ZXing-C++ QR decode failed")
+            guard second == CITIZENSDK_QR_IMAGE_OK, required == capacity else { throw qrImageError(second, "ZXing-C++ QR decode failed") }
+            var offset = 0
+            func integer() throws -> Int {
+                guard offset + 4 <= output.count else { throw CitizenSDKError(.integrity, "QR image tuple is truncated") }
+                let value = (0..<4).reduce(0) { $0 | Int(output[offset + $1]) << ($1 * 8) }
+                offset += 4
+                return value
             }
-            return try qrParse(qrString(output))
+            let count = try integer()
+            guard (1...64).contains(count) else { throw CitizenSDKError(.integrity, "QR image count is invalid") }
+            var documents: [CitizenQRDocument] = []
+            for index in 0..<count {
+                let length = try integer()
+                guard (1...2_331).contains(length), offset + length <= output.count else { throw CitizenSDKError(.integrity, "QR image text length is invalid") }
+                if !firstOnly || index == 0 {
+                    documents.append(try qrParse(qrString(Data(output[offset..<offset + length]))))
+                }
+                offset += length
+            }
+            guard offset == output.count else { throw CitizenSDKError(.integrity, "QR image tuple has trailing bytes") }
+            return documents
         }
     }
 
@@ -1009,6 +1128,14 @@ internal final class CitizenSDKNative: @unchecked Sendable {
                                    UnsafeMutablePointer<UInt64>) -> Int32) throws -> Data {
         try callLock.withLock {
             try requireOpen()
+            return try Self.coreOutput(maximum: maximum, call)
+        }
+    }
+
+    /// 同一结果复制实现同时服务QR与无实例载荷编码，不复制算法或改变输出上限。
+    private static func coreOutput(maximum: UInt64,
+                          _ call: (UnsafeMutablePointer<UInt8>?, UInt64,
+                                   UnsafeMutablePointer<UInt64>) -> Int32) throws -> Data {
             var required: UInt64 = 0
             try CitizenSDKChecks.requireOK(call(nil, 0, &required), "QR output query failed")
             guard required > 0, required <= maximum, required <= UInt64(Int.max) else {
@@ -1021,7 +1148,6 @@ internal final class CitizenSDKNative: @unchecked Sendable {
             try CitizenSDKChecks.requireOK(code, "QR output copy failed")
             guard required == UInt64(output.count) else { throw CitizenSDKError(.integrity, "QR output length changed") }
             return output
-        }
     }
 
     private func qrString(_ data: Data) throws -> String {
@@ -1202,14 +1328,28 @@ internal final class CitizenSDKNative: @unchecked Sendable {
     }
 
     func addAccounts(mnemonic: CitizenSDKSensitiveBuffer, password: CitizenSDKSensitiveBuffer,
-                     indices: [UInt32]) throws -> CitizenSDKOperation<[CitizenWalletAccount]> {
+                     indices: [UInt32]) throws -> CitizenSDKOperation<CitizenWalletProfile> {
         try withSensitiveViews(mnemonic, password) { mnemonicView, passwordView in
             try indices.withUnsafeBufferPointer { values in
                 try begin(accept: {
                     citizensdk_add_wallet_accounts(handle, mnemonicView, passwordView,
                                                    values.baseAddress, UInt32(values.count), $0)
-                }, decode: CitizenSDKNativeCodec.accounts)
+                }, decode: { result in
+                    guard let profile = try CitizenSDKNativeCodec.profile(result) else {
+                        throw CitizenSDKError(.integrity, "add accounts returned no profile")
+                    }
+                    return profile
+                })
             }
+        }
+    }
+
+    func addNextAccount(mnemonic: CitizenSDKSensitiveBuffer, password: CitizenSDKSensitiveBuffer) throws -> CitizenSDKOperation<CitizenWalletProfile> {
+        try withSensitiveViews(mnemonic, password) { mnemonicView, passwordView in
+            try begin(accept: { citizensdk_add_next_wallet_account(handle, mnemonicView, passwordView, $0) }, decode: { result in
+                guard let profile = try CitizenSDKNativeCodec.profile(result) else { throw CitizenSDKError(.integrity, "add next account returned no profile") }
+                return profile
+            })
         }
     }
 
@@ -1428,7 +1568,7 @@ internal final class CitizenSDKNative: @unchecked Sendable {
         try callLock.withLock {
             try requireOpen()
             let cancellation = Cancellation()
-            let operationID = UUID().uuidString
+            let operationID = try CitizenSDKOperationIdentifiers.shared.allocate()
             let operation = CitizenSDKOperation<T>(operationID: operationID) { [weak self, cancellation] in
                 guard let self, let request = cancellation.value() else { return false }
                 return try self.cancel(request)
@@ -1528,6 +1668,10 @@ internal final class CitizenSDKNative: @unchecked Sendable {
             guard event.request_id == 0, event.result == 0,
                   event.capability_revision == 0, event.reserved == 0 else { return }
             enqueueDeferredStateEvent(.history(sequence: event.sequence))
+        case 7:
+            guard event.request_id == 0, event.result == 0,
+                  event.capability_revision == 0, event.reserved == 0 else { return }
+            enqueueDeferredStateEvent(.wallet(sequence: event.sequence))
         case 6:
             guard event.request_id == 0, event.result != 0,
                   event.capability_revision == 0, event.reserved == 0 else {
@@ -1575,6 +1719,8 @@ internal final class CitizenSDKNative: @unchecked Sendable {
                 switch event {
                 case let .history(sequence):
                     publish(.historyChanged(sequence: sequence))
+                case let .wallet(sequence):
+                    publish(.walletChanged(sequence: sequence))
                 case let .finalized(sequence, block):
                     publish(.finalizedBlockChanged(sequence: sequence, finalized: block))
                 case let .capabilities(sequence):

@@ -393,6 +393,12 @@ class FakeTransport final : public csf::NativeTransport {
     if (close_attempted) throw citizen_sdk::Error(CITIZENSDK_ERROR_INVALID_STATE, "injected closed Core");
     return csf::Value::list({csf::Value::integer(10)});
   }
+  std::function<void(uint64_t)> credential_cancel;
+  std::vector<uint64_t> credential_cancellations;
+  void cancel_credential(uint64_t id) override {
+    credential_cancellations.push_back(id);
+    if (credential_cancel) credential_cancel(id);
+  }
   void cancel(citizensdk_request_id_t request) override {
     ++cancelled;
     if (fail_cancel) throw citizen_sdk::Error(CITIZENSDK_ERROR_BUSY, "injected cancel failure");

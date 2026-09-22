@@ -3,17 +3,5 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
-    <application>
-        <activity android:name="org.citizen.sdk.ui.CitizenSdkQrActivity"
-            android:exported="false" android:excludeFromRecents="true"
-            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
-        <!-- Secrets are entered and shown only in this SDK-owned surface. -->
-        <activity
-            android:name="org.citizen.sdk.ui.CitizenSdkWalletFlowActivity"
-            android:excludeFromRecents="true"
-            android:exported="false"
-            android:noHistory="true"
-            android:screenOrientation="portrait"
-            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
-    </application>
+    <!-- SDK仅声明系统底层权限，不声明钱包或扫码Activity。 -->
 </manifest>

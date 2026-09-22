@@ -147,7 +147,7 @@ final class WalletTransactionHistoryService {
       metadata: metadata,
       eventsStorageKeyHex: '0x${_hex(_systemEventsStorageKey)}',
     );
-    final wallet = await _wallet.getState();
+    final wallet = await _wallet.getState().result;
     final ss58ByAccountId = <String, String>{
       for (final account in wallet.accounts)
         account.accountId: account.ss58Address,

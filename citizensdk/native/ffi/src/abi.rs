@@ -152,6 +152,8 @@ pub enum CitizenSdkEventType {
     HistoryChanged = 5,
     /// provider 已验证的 finalized block 变化；result 是一个 BlockRef。
     FinalizedBlockChanged = 6,
+    /// 钱包可能变更后的无payload失效通知；宿主回读同实例目录，不推断操作成功。
+    WalletChanged = 7,
 }
 
 #[repr(u32)]
@@ -676,6 +678,27 @@ impl Default for CitizenSdkWalletAccountInfo {
             created_at_millis: 0,
             ss58_address_len: 0,
             name_len: 0,
+        }
+    }
+}
+
+/// 无UI输入校验的固定事实；未知词位置为零起始，其它原因用u32::MAX。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CitizenSdkWalletInputValidationV1 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub reason: u32,
+    pub position: u32,
+}
+
+impl Default for CitizenSdkWalletInputValidationV1 {
+    fn default() -> Self {
+        Self {
+            struct_size: std::mem::size_of::<Self>() as u32,
+            abi_version: CITIZENSDK_ABI_VERSION,
+            reason: 6,
+            position: u32::MAX,
         }
     }
 }

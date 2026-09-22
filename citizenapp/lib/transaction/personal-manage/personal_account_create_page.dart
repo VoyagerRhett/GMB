@@ -9,12 +9,9 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:polkadart_keyring/polkadart_keyring.dart' show Keyring;
 import 'package:citizenapp/isar/wallet_isar.dart';
 import 'package:citizenapp/citizen/shared/multisig_create_amount_rules.dart';
-import 'package:citizenapp/qr/bodies/user_contact_body.dart';
-import 'package:citizenapp/qr/envelope.dart';
 import 'package:citizenapp/qr/pages/qr_scan_page.dart'
     show QrScanMode, QrScanPage;
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/my/util/amount_format.dart';
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
@@ -77,7 +74,7 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
       return;
     }
     final sdk = context.read<CitizenSdk>();
-    _walletStateLoader = sdk.wallet.getState;
+    _walletStateLoader = () => sdk.wallet.getState().result;
     _manageService =
         widget.manageService ??
         PersonalManageService(chain: sdk.chain, transactions: sdk.transactions);
@@ -154,26 +151,18 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
     );
     if (result == null || !mounted) return;
 
-    // 只接受用户码(k=3):管理员必须是有 CID 的真人,账户码只声明账户、不含身份。
-    //
-    // 曾经这里写 `(env.body as dynamic).address` —— `UserContactBody` 从来没有
-    // `address` 字段(旧版是 `ss58Address`,现在是 `accountId`),`as dynamic`
-    // 绕过了类型检查,于是合法用户码必抛 NoSuchMethodError,被下方 catch 吞成
-    // “请扫描有效的用户码”，功能 100% 失效且用户看不到真因。
-    // 现改为与全仓其它扫码点同一条路径:强类型 body + 直接取 `accountId`
-    // (它本身就是 0x + 64hex 的账户标识,无需再从 SS58 解码)。
+    // 原管理员入口只接受用户码；直接使用SDK事实，不再解析body或使用动态字段。
     try {
-      final env = QrEnvelope.parse(result.trim());
-      if (env.kind != QrKind.userContact) {
+      final document = await context.read<CitizenSdk>().qr.parse(result.trim());
+      if (document.kind != CitizenQrKind.userContact) {
         if (!mounted) return;
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(const SnackBar(content: Text('请扫描用户主页中的用户码')));
         return;
       }
-      final body = env.body as UserContactBody;
-      await _promptAdminNamesAndAdd(body.accountId);
-    } on FormatException catch (e) {
+      await _promptAdminNamesAndAdd(document.accountId!);
+    } on CitizenSdkException catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,

@@ -8,7 +8,6 @@ import 'package:provider/provider.dart';
 
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/votingengine/internal-vote/proposal_vote_widgets.dart';
 import 'package:citizenapp/votingengine/legislation-vote/legislation_vote_query_service.dart';
@@ -247,10 +246,10 @@ class _LegislationVotePageState extends State<LegislationVotePage> {
   }
 
   int _qrAction(int stage) => switch (stage) {
-    LegStage.representative => QrActions.legislationRepresentativeVote,
-    LegStage.sign => QrActions.legislationExecutiveSign,
-    LegStage.override_ => QrActions.legislationOverrideSign,
-    LegStage.guard => QrActions.legislationGuardVote,
+    LegStage.representative => CitizenQrActions.legislationRepresentativeVote,
+    LegStage.sign => CitizenQrActions.legislationExecutiveSign,
+    LegStage.override_ => CitizenQrActions.legislationOverrideSign,
+    LegStage.guard => CitizenQrActions.legislationGuardVote,
     _ => 0,
   };
 

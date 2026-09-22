@@ -12,13 +12,13 @@ namespace citizen_sdk::linux {
 
 class SecretVault final {
  public:
-  SecretVault(SecureStore &secure_store, GtkParentRef &parent);
+  explicit SecretVault(SecureStore &secure_store);
 
   citizensdk_host_vault_availability_t availability() const noexcept;
-  void ensure_wallet_kek(const WalletKey &key,
+  void ensure_wallet_kek(uint64_t host_operation_id, const WalletKey &key,
                          const std::array<uint8_t, 16> &operation_id);
   bool has_wallet_kek(const WalletKey &key);
-  Bytes wrap_dek(const WalletKey &key,
+  Bytes wrap_dek(uint64_t host_operation_id, const WalletKey &key,
                  const std::array<uint8_t, 16> &operation_id,
                  const uint8_t plaintext_dek[32]);
   void unwrap_dek(uint64_t host_operation_id, const WalletKey &key,
@@ -26,6 +26,10 @@ class SecretVault final {
   void retire_wallet_kek(const WalletKey &key,
                          const std::array<uint8_t, 16> &operation_id);
   bool idle() const noexcept;
+  citizensdk_error_code_t set_credential_provider(const citizensdk_credential_provider_v1_t *provider);
+  citizensdk_error_code_t respond_credential(uint64_t host_operation_id, citizensdk_bytes_view_t credential);
+  citizensdk_error_code_t cancel_credential(uint64_t host_operation_id);
+  void cancel_credentials();
 
  private:
   SecureStore &secure_store_;

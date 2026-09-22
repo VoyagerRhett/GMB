@@ -63,7 +63,7 @@ interface class CurrentUserContext {
   Future<AccountDataBinding?> binding() async => (await resolve())?.binding;
 
   Future<CurrentUser?> _resolveFresh(int revision, int generation) async {
-    final account = (await _wallet.getState()).defaultAccount;
+    final account = (await _wallet.getState().result).defaultAccount;
     if (account == null) return null;
     final binding = await (_bindingReader?.call(account.accountId) ??
         _accountSecurity.readAccountDataBindingForAccountId(account.accountId));

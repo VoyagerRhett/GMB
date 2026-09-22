@@ -1,3 +1,4 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -8,7 +9,6 @@ import 'package:http/http.dart' as http;
 import 'package:citizenapp/8964/models/square_models.dart';
 import 'package:citizenapp/8964/profile/models/citizen_profile.dart';
 import 'package:citizenapp/8964/services/square_post_store.dart';
-import 'package:citizenapp/signer/signing.dart';
 import 'package:citizenapp/security/device_subkey.dart' show hexToBytes;
 import 'package:citizenapp/8964/services/square_request_signer.dart';
 import 'package:citizenapp/notifications/app_push_token.dart';
@@ -738,10 +738,10 @@ class SquareApiClient
 
     // 客户端钉死 op_tag（登录 = OP_SIGN_SQUARE_LOGIN），只对 worker 下发的 SCALE
     // payload 重算 signing_message 摘要后签名，杜绝服务端诱导跨域签名。
-    final loginMessage = signingMessage(
+    final loginMessage = await CitizenSigning.encodePayload(CitizenSigningPayload.message(
       opTag: kOpSignSquareLogin,
       scalePayload: hexToBytes(signingPayloadHex),
-    );
+    ));
     final signature = await signLoginPayload(loginContext, loginMessage);
     final session = await _postJson('/square/auth/session', {
       'challenge_id': challengeId,
@@ -821,10 +821,10 @@ class SquareApiClient
     if (signingPayloadHex is! String || challengeId is! String) {
       throw const SquareApiException('动作挑战响应不完整');
     }
-    final message = signingMessage(
+    final message = await CitizenSigning.encodePayload(CitizenSigningPayload.message(
       opTag: kOpSignSquareAction,
       scalePayload: hexToBytes(signingPayloadHex),
-    );
+    ));
     final signature = await signAction(message);
     await _postJson(confirmPath, {
       'account_id': accountId,

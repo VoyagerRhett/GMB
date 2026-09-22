@@ -1,76 +1,64 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:citizenapp/qr/scanner/scanner.dart';
+import '../../support/fake_citizen_sdk.dart';
+
+Widget _view(TestCitizenQr qr, {ValueChanged<String>? result, ValueChanged<ScannerFailure>? failure}) =>
+    Directionality(textDirection: TextDirection.ltr, child: ScannerView(
+      qr: qr, purpose: CitizenQrScanPurpose.generalScan,
+      onRawValue: result ?? (_) {}, onFailure: failure,
+    ));
 
 void main() {
-  testWidgets('预览启动后只回调一次原始字符串', (tester) async {
-    final backend = ViewScannerBackend();
-    final controller = ScannerController(backend: backend);
+  testWidgets('SDK纹理原样交给预览，结果只转发SDK规范文本', (tester) async {
+    final capture = TestCitizenQrCapture();
+    final qr = TestCitizenQr()..captureFactory = (purpose) async {
+      expect(purpose, CitizenQrScanPurpose.generalScan);
+      return capture;
+    };
     final values = <String>[];
-
-    await tester.pumpWidget(
-      Directionality(
-        textDirection: TextDirection.ltr,
-        child: ScannerView(controller: controller, onRawValue: values.add),
-      ),
-    );
+    await tester.pumpWidget(_view(qr, result: values.add));
     await tester.pump();
-    expect(backend.startCount, 1);
-
-    backend.emit(['QR_V1 raw', 'ignored']);
-    backend.emit(['repeated']);
+    expect(tester.widget<Texture>(find.byType(Texture)).textureId, capture.textureId);
+    capture.resultEvents.add(CitizenQrScanResult(
+      purpose: CitizenQrScanPurpose.generalScan,
+      document: CitizenQrDocument(kind: CitizenQrKind.accountId,
+        canonicalText: 'sdk-canonical-code', scanPurposeMask: 195,
+        accountId: testCitizenAccountId),
+    ));
     await tester.pump();
-    expect(values, ['QR_V1 raw']);
+    expect(values, ['sdk-canonical-code']);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+    expect(capture.closed, isTrue);
   });
 
-  testWidgets('启动错误通过统一 failure 回调', (tester) async {
-    final backend = ViewScannerBackend()
-      ..startError = StateError('camera unavailable');
+  testWidgets('SDK权限/设备错误按稳定类别投影，不读取异常字符串猜测', (tester) async {
     final failures = <ScannerFailure>[];
-
-    await tester.pumpWidget(
-      Directionality(
-        textDirection: TextDirection.ltr,
-        child: ScannerView(
-          controller: ScannerController(backend: backend),
-          onRawValue: (_) {},
-          onFailure: failures.add,
-        ),
-      ),
-    );
+    final qr = TestCitizenQr()..captureFactory = (_) async =>
+        throw const CitizenSdkException(code: CitizenSdkErrorCode.permissionDenied, message: '合成拒绝');
+    await tester.pumpWidget(_view(qr, failure: failures.add));
     await tester.pump();
-    expect(failures.single.kind, ScannerFailureKind.cameraUnavailable);
+    expect(failures.single.kind, ScannerFailureKind.permissionDenied);
+    expect(find.byType(Texture), findsNothing);
+    await tester.pumpWidget(const SizedBox());
   });
-}
 
-final class ViewScannerBackend implements ScannerDeviceBackend {
-  ScannerCandidatesCallback? _onCandidates;
-  Object? startError;
-  int startCount = 0;
-
-  void emit(Iterable<String?> values) => _onCandidates?.call(values);
-
-  @override
-  Future<Iterable<String?>> analyzeImage(String imagePath) async => const [];
-
-  @override
-  Widget buildPreview({required ScannerCandidatesCallback onCandidates}) {
-    _onCandidates = onCandidates;
-    return const SizedBox.expand();
-  }
-
-  @override
-  Future<void> dispose() async {}
-
-  @override
-  Future<void> start() async {
-    startCount += 1;
-    if (startError case final Object error) throw error;
-  }
-
-  @override
-  Future<void> stop() async {}
-
-  @override
-  Future<void> toggleTorch() async {}
+  testWidgets('前后台只转发SDK暂停恢复，退出等待真实资源close', (tester) async {
+    final capture = TestCitizenQrCapture();
+    final qr = TestCitizenQr()..captureFactory = (_) async => capture;
+    await tester.pumpWidget(_view(qr));
+    await tester.pump();
+    final before = capture.pauseCalls;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    expect(capture.pauseCalls, greaterThan(before));
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(capture.resumeCalls, greaterThan(0));
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+    expect(capture.closeCalls, 1);
+  });
 }

@@ -15,6 +15,8 @@ void main() {
       MaterialApp(
         home: PersonalAccountCreatePage(
           walletStateLoader: () async => CitizenWalletState(
+            initializationState: CitizenWalletInitializationState.empty,
+            cleanupPending: false,
             revision: BigInt.zero,
             hotProfile: null,
             accounts: const [],

@@ -133,6 +133,44 @@ int main() {
   router.cancel_primed();
   assert(router.empty());
 
+  // 无UI资源不能共用一个旧窗口槽：多请求乱序结束仍逐个移交，失败预约不清旧请求。
+  int resource_completions = 0;
+  for (uint64_t id = 100; id < 196; ++id) {
+    router.prime([&, id](citizensdk_result_handle_t result) {
+      assert(result == id + 1000);
+      ++resource_completions;
+    });
+    router.bind(id);
+  }
+  router.prime([](citizensdk_result_handle_t) {});
+  router.cancel_primed();
+  assert(!router.empty());
+  for (uint64_t id = 196; id-- > 100;) {
+    citizensdk_event_t event{};
+    event.event_type = CITIZENSDK_EVENT_REQUEST_COMPLETED;
+    event.request_id = id;
+    event.result = id + 1000;
+    auto owned = router.take(event);
+    assert(static_cast<bool>(owned));
+    assert(!router.take(event));
+    owned(event.result);
+  }
+  assert(resource_completions == 96 && router.empty());
+
+  // 关闭发取消但不能伪造完成；取消回调允许重入只读状态，证明不持有路由锁。
+  int cancellations = 0;
+  router.prime([](citizensdk_result_handle_t) {}, [&] { ++cancellations; assert(!router.empty()); });
+  router.bind(300);
+  router.cancel_all();
+  assert(cancellations == 1 && !router.empty());
+  citizensdk_event_t cancelled{};
+  cancelled.event_type = CITIZENSDK_EVENT_REQUEST_COMPLETED;
+  cancelled.request_id = 300;
+  auto cancellation_terminal = router.take(cancelled);
+  assert(static_cast<bool>(cancellation_terminal) && router.empty());
+  router.cancel_all();
+  assert(cancellations == 1);
+
   // 96 个并发等待者明确超过旧固定 64 槽边界。准入门不缓存 result，
   // route 发布后每个 completion 都继续，且门可回到完整 idle 状态。
   CompletionAdmission admission;

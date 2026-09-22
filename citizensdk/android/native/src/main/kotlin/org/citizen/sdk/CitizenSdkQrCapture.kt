@@ -1,0 +1,247 @@
+package org.citizen.sdk
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.graphics.ImageFormat
+import android.graphics.SurfaceTexture
+import android.os.Handler
+import android.os.Looper
+import android.view.Surface
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.Camera
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import java.util.UUID
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+
+/** 相机只提供采集和Surface租约，不创建Activity、View、文字或确认按钮。 */
+class CitizenSdkQrCapture internal constructor(
+    private val sdk: CitizenSdk,
+    private val activity: FragmentActivity,
+    private val texture: SurfaceTexture,
+    val purpose: CitizenQrScanPurpose,
+    private val listener: Listener,
+) : DefaultLifecycleObserver {
+    interface Listener {
+        fun onResult(result: CitizenQrScanResult)
+        fun onError(error: CitizenSdkException)
+        fun onPreview(width: Int, height: Int, rotationDegrees: Int)
+        fun onClosed() = Unit
+    }
+
+    private val main = Handler(Looper.getMainLooper())
+    private val executor = Executors.newSingleThreadExecutor { task -> Thread(task, "citizensdk-qr-frame") }
+    private val revoked = AtomicBoolean(false)
+    private val paused = AtomicBoolean(false)
+    private val generation = java.util.concurrent.atomic.AtomicLong(0)
+    private val opened = CompletableFuture<CitizenSdkQrCapture>()
+    private val ended = CompletableFuture<Void>()
+    val closed: CompletableFuture<Void> get() = ended
+    private var provider: ProcessCameraProvider? = null
+    private var preview: Preview? = null
+    private var analysis: ImageAnalysis? = null
+    private var camera: Camera? = null
+    private var starting = false
+    private var framesReturned = false
+    private var surfaces = 0
+    private var lastFrame = 0L
+    var previewWidth: Int = 0
+        private set
+    var previewHeight: Int = 0
+        private set
+    var rotationDegrees: Int = 0
+        private set
+    private var permission = activity.activityResultRegistry.register(
+        "citizensdk-camera-${UUID.randomUUID()}", ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (!revoked.get()) {
+            if (granted) startCamera()
+            else fail(CitizenSdkException(CitizenSdkErrorCode.PERMISSION_DENIED, "camera permission was denied"))
+        }
+    }
+
+    internal fun open(): CompletableFuture<CitizenSdkQrCapture> {
+        checkMain()
+        activity.lifecycle.addObserver(this)
+        if (ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) startCamera()
+        else permission.launch(Manifest.permission.CAMERA)
+        return opened
+    }
+
+    fun pause(): CompletableFuture<Void> = onMain {
+        generation.incrementAndGet()
+        paused.set(true)
+        analysis?.clearAnalyzer()
+        val owned = listOfNotNull(preview, analysis)
+        if (owned.isNotEmpty()) provider?.unbind(*owned.toTypedArray())
+        camera = null
+    }
+    fun resume(): CompletableFuture<Void> = onMain {
+        generation.incrementAndGet()
+        paused.set(false)
+        startCamera()
+    }
+    fun setTorch(enabled: Boolean): CompletableFuture<Void> {
+        val result = CompletableFuture<Void>()
+        main.post {
+            if (revoked.get()) { result.completeExceptionally(closedError()); return@post }
+            val current = camera
+            if (current == null || !current.cameraInfo.hasFlashUnit()) {
+                result.completeExceptionally(CitizenSdkException(CitizenSdkErrorCode.UNAVAILABLE, "camera torch is unavailable"))
+                return@post
+            }
+            val operation = current.cameraControl.enableTorch(enabled)
+            operation.addListener({
+                try { operation.get(); result.complete(null) }
+                catch (_: Throwable) { result.completeExceptionally(CitizenSdkException(CitizenSdkErrorCode.UNAVAILABLE, "camera torch operation failed")) }
+            }, ContextCompat.getMainExecutor(activity))
+        }
+        return result
+    }
+
+    /** 关闭等待本资源的帧和Surface归还，不关闭共享CameraProvider或其它消费者的用例。 */
+    fun close(): CompletableFuture<Void> {
+        if (revoked.compareAndSet(false, true)) {
+            main.post {
+                permission.unregister()
+                activity.lifecycle.removeObserver(this)
+                opened.completeExceptionally(closedError())
+                analysis?.clearAnalyzer()
+                preview?.setSurfaceProvider(null)
+                val owned = listOfNotNull(preview, analysis)
+                if (owned.isNotEmpty()) provider?.unbind(*owned.toTypedArray())
+                camera = null; preview = null; analysis = null
+                executor.shutdown()
+                Thread({
+                    while (!executor.awaitTermination(1, TimeUnit.SECONDS)) { /* 等待有界ZXing帧调用真实归还。 */ }
+                    main.post { framesReturned = true; settle() }
+                }, "citizensdk-qr-drain").start()
+                settle()
+            }
+        }
+        return ended
+    }
+
+    override fun onStop(owner: LifecycleOwner) {
+        if (!opened.isDone) close() else pause()
+    }
+    override fun onDestroy(owner: LifecycleOwner) { close() }
+
+    private fun startCamera() {
+        checkMain()
+        if (revoked.get() || paused.get() || starting || camera != null) return
+        starting = true
+        val pending = try { ProcessCameraProvider.getInstance(activity) }
+        catch (error: Throwable) { starting = false; fail(cameraError(error)); return }
+        pending.addListener({
+            starting = false
+            if (revoked.get()) { settle(); return@addListener }
+            if (paused.get()) return@addListener
+            try {
+                val current = pending.get()
+                val selector = when {
+                    current.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA) -> CameraSelector.DEFAULT_BACK_CAMERA
+                    current.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) -> CameraSelector.DEFAULT_FRONT_CAMERA
+                    else -> throw CitizenSdkException(CitizenSdkErrorCode.UNAVAILABLE, "camera is unavailable")
+                }
+                val output = Preview.Builder().build()
+                output.setSurfaceProvider(ContextCompat.getMainExecutor(activity)) { request ->
+                    if (revoked.get()) request.willNotProvideSurface()
+                    else {
+                        val size = request.resolution
+                        texture.setDefaultBufferSize(size.width, size.height)
+                        request.setTransformationInfoListener(ContextCompat.getMainExecutor(activity)) { info ->
+                            if (!revoked.get()) {
+                                previewWidth = size.width; previewHeight = size.height; rotationDegrees = info.rotationDegrees
+                                listener.onPreview(size.width, size.height, info.rotationDegrees)
+                                opened.complete(this)
+                            }
+                        }
+                        val surface = Surface(texture)
+                        surfaces += 1
+                        request.provideSurface(surface, ContextCompat.getMainExecutor(activity)) {
+                            surface.release()
+                            surfaces -= 1
+                            settle()
+                        }
+                    }
+                }
+                val input = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888).build()
+                provider = current; preview = output; analysis = input
+                input.setAnalyzer(executor, ::analyze)
+                camera = current.bindToLifecycle(activity, selector, output, input)
+                camera!!.cameraInfo.cameraState.observe(activity) { state ->
+                    if (state.error != null && !revoked.get()) fail(CitizenSdkException(CitizenSdkErrorCode.UNAVAILABLE, "camera was disconnected"))
+                }
+            } catch (error: Throwable) { fail(cameraError(error)) }
+        }, ContextCompat.getMainExecutor(activity))
+    }
+
+    private fun analyze(image: ImageProxy) {
+        try {
+            if (revoked.get() || paused.get()) return
+            val capturedGeneration = generation.get()
+            val now = System.nanoTime()
+            if (now >= lastFrame && now - lastFrame < 100_000_000) return
+            lastFrame = now
+            check(image.format == ImageFormat.YUV_420_888)
+            val width = image.width; val height = image.height
+            check(width in 1..4096 && height in 1..4096)
+            val plane = image.planes[0]; val input = plane.buffer.duplicate()
+            val row = plane.rowStride; val pixel = plane.pixelStride
+            check(pixel > 0 && row >= (width - 1) * pixel + 1)
+            val base = input.position()
+            check((height - 1L) * row + (width - 1L) * pixel + 1 <= input.remaining())
+            val luminance = ByteArray(width * height)
+            try {
+                for (y in 0 until height) for (x in 0 until width) luminance[y * width + x] = input.get(base + y * row + x * pixel)
+                val document = sdk.qrDecodeLuminance(luminance, width, height, width)
+                val result = CitizenQrScanResult.forPurpose(document, purpose)
+                main.post {
+                    if (!revoked.get() && !paused.get() && generation.get() == capturedGeneration) listener.onResult(result)
+                }
+            } finally { luminance.fill(0) }
+        } catch (error: CitizenSdkException) {
+            // 未识别到码不是错误；码型不符或无效内容报告后继续采集，不能提前结束资源。
+            if (error.code != CitizenSdkErrorCode.NOT_FOUND) main.post { if (!revoked.get()) listener.onError(error) }
+        } catch (error: Throwable) {
+            main.post { if (!revoked.get()) listener.onError(cameraError(error)) }
+        } finally { image.close() }
+    }
+
+    private fun onMain(action: () -> Unit): CompletableFuture<Void> {
+        val result = CompletableFuture<Void>()
+        main.post {
+            try {
+                if (revoked.get()) throw closedError()
+                action(); result.complete(null)
+            } catch (error: Throwable) { result.completeExceptionally(error) }
+        }
+        return result
+    }
+    private fun fail(error: CitizenSdkException) {
+        opened.completeExceptionally(error)
+        if (!revoked.get()) listener.onError(error)
+        close()
+    }
+    private fun settle() {
+        checkMain()
+        if (revoked.get() && !starting && framesReturned && surfaces == 0 && ended.complete(null)) listener.onClosed()
+    }
+    private fun checkMain() = check(Looper.myLooper() == Looper.getMainLooper())
+    private fun closedError() = CitizenSdkException(CitizenSdkErrorCode.CANCELLED, "camera capture is closed")
+    private fun cameraError(error: Throwable) = error as? CitizenSdkException
+        ?: CitizenSdkException(CitizenSdkErrorCode.UNAVAILABLE, "camera capture failed")
+}

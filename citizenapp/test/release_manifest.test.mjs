@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
-  lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync,
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -42,8 +42,30 @@ test('CitizenApp locks the shared Dart protocol generator exactly', () => {
   assert.doesNotMatch(pubspec, /^  protoc_plugin: [\^~><=]/mu);
 });
 
+// 只约束CitizenApp自己的扫码所有权；SDK原生功能由SDK测试与真实验收覆盖。
+test('CitizenApp二维码非UI能力只由SDK提供', () => {
+  assert.match(pubspec, /^  citizen_sdk:/mu);
+  for (const source of [pubspec, pubLock]) {
+    assert.doesNotMatch(source, /^  (?:qr|qr_flutter|mobile_scanner):/mu);
+  }
+  assert.doesNotMatch(podLock, /mobile_scanner/u);
+  const preview = readFileSync(new URL('../lib/qr/scanner/scanner_view.dart', import.meta.url), 'utf8');
+  const display = readFileSync(new URL('../lib/qr/widgets/qr_display_scaffold.dart', import.meta.url), 'utf8');
+  assert.match(preview, /qr[.]openCapture\(purpose\)/u);
+  assert.match(preview, /Texture\(textureId: capture[.]textureId\)/u);
+  assert.match(display, /qr[.]encode\(widget[.]data, scale: 1\)/u);
+  for (const path of [
+    'lib/qr/envelope.dart', 'lib/qr/qr_protocols.dart',
+    'lib/qr/generated/qr_action_registry.g.dart', 'lib/qr/generated/qr_bodies.g.dart',
+    'lib/qr/scanner/scanner_controller.dart', 'lib/qr/scanner/scanner_backend.dart',
+    'lib/qr/scanner/mobile_scanner_backend.dart',
+    'lib/signer/app_business_qr_codec.dart', 'lib/signer/signing.dart',
+  ]) {
+    assert.equal(existsSync(new URL('../' + path, import.meta.url)), false, path + '必须移除');
+  }
+});
+
 test('CitizenApp与TataChatSDK只装配AGP9内置Kotlin兼容的移动插件闭包', () => {
-  assert.match(pubspec, /^  mobile_scanner: 7[.]4[.]2$/mu);
   assert.match(pubspec, /^  saver_gallery: 5[.]1[.]0$/mu);
   assert.doesNotMatch(pubspec, /^  (?:file_picker|video_compress):/mu);
   assert.match(tataChatPubspec, /^  emoji_picker_flutter: 4[.]5[.]4$/mu);
@@ -54,7 +76,6 @@ test('CitizenApp与TataChatSDK只装配AGP9内置Kotlin兼容的移动插件闭�
   for (const [name, version] of [
     ['emoji_picker_flutter', '4.5.4'],
     ['flutter_image_compress_common', '1.1.1'],
-    ['mobile_scanner', '7.4.2'],
     ['quill_native_bridge', '11.2.0'],
     ['quill_native_bridge_android', '0.0.2'],
     ['saver_gallery', '5.1.0'],

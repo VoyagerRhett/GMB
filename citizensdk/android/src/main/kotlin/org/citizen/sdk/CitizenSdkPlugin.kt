@@ -8,7 +8,7 @@ import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 
-/** Flutter registration for the fixed CitizenSDK v1 tuple projection. */
+/** Flutter仅注册v2数据通道及纹理，不注册SDK页面或窗口。 */
 class CitizenSdkPlugin :
     FlutterPlugin,
     MethodChannel.MethodCallHandler,
@@ -20,7 +20,7 @@ class CitizenSdkPlugin :
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         check(sessions == null) { "CitizenSDK Flutter plugin is already attached" }
-        val registry = CitizenSdkFlutterSessions(binding.applicationContext)
+        val registry = CitizenSdkFlutterSessions(binding.applicationContext, binding.textureRegistry)
         sessions = registry
         methodChannel = MethodChannel(
             binding.binaryMessenger,

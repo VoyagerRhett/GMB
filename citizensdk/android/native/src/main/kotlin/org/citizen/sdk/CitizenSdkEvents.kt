@@ -5,6 +5,8 @@ object CitizenSdkEvents {
     sealed class Event(open val sequence: String) {
         /** Invalidation only; query the existing history API for the current state. */
         class HistoryChanged(override val sequence: String) : Event(sequence)
+        /** 钱包失效通知；只按后续真实目录修订更新UI，不推断提交成功。 */
+        class WalletChanged(override val sequence: String) : Event(sequence)
         class FinalizedBlockChanged(
             override val sequence: String,
             val finalized: CitizenBlockRef,

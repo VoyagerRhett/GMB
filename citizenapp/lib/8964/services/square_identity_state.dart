@@ -75,7 +75,7 @@ class SquareIdentityService {
   /// 只从 CID 资料缓存读取。[readLiveChain] 仅允许发布等主动链流程传 true;广场浏览必须传 false,
   /// 只读 CID 级徽章快照，不能因此发起 CitizenSDK 链读。
   Future<SquareIdentityState> loadCurrent({bool readLiveChain = true}) async {
-    final defaultAccount = (await _wallet.getState()).defaultAccount;
+    final defaultAccount = (await _wallet.getState().result).defaultAccount;
     if (defaultAccount == null) {
       return const SquareIdentityState(accountId: '');
     }

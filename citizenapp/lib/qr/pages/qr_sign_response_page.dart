@@ -1,5 +1,5 @@
+import 'package:citizenapp/qr/widgets/qr_display_scaffold.dart' show AppQrImage;
 import 'package:flutter/material.dart';
-import 'package:qr_flutter/qr_flutter.dart';
 
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/app_layout.dart';
@@ -40,9 +40,8 @@ class QrSignResponsePage extends StatelessWidget {
               ),
               SizedBox(height: AppLayout.scaled(context, 24)),
               Center(
-                child: QrImageView(
+                child: AppQrImage(
                   data: responseJson,
-                  version: QrVersions.auto,
                   size: AppLayout.scaled(context, 240),
                   errorStateBuilder: (context, error) {
                     return Container(

@@ -20,7 +20,6 @@ import 'package:citizenapp/my/myid/citizen_identity_chain_reader.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
 import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/security/local_data_key.dart';
-import 'package:citizenapp/signer/signing.dart' show kOpSignCidRebind;
 
 import 'current_user_context.dart';
 import 'finalized_identity_resolver.dart';
@@ -516,7 +515,7 @@ class MyIdService {
     required String institution,
     String? bindAccountId,
   }) async {
-    final state = await _wallet.getState();
+    final state = await _wallet.getState().result;
     final defaultAccount = state.defaultAccount;
     if (defaultAccount == null) {
       throw const AccountSecurityException('无钱包账户,请先创建钱包');
@@ -588,7 +587,7 @@ class MyIdService {
     if (resolvedCidNumber == null || resolvedCidNumber != cidNumber) {
       throw const AccountSecurityException('当前链上身份与待换绑 CID 不一致');
     }
-    final newAccount = _findAccount(await _wallet.getState(), newAccountId);
+    final newAccount = _findAccount(await _wallet.getState().result, newAccountId);
     if (newAccount == null) {
       throw const AccountSecurityException('目标账户不存在');
     }
@@ -613,7 +612,7 @@ class MyIdService {
       accountId: newAccount.accountId,
     );
     final currentAccountDigest =
-        CitizenIdentityTransaction.buildRebindSigningDigest(
+        await CitizenIdentityTransaction.buildRebindSigningDigest(
           genesisHash: context.genesisHash,
           cidNumber: cidNumber,
           currentAccountId: currentAccountId,
@@ -756,7 +755,7 @@ class MyIdService {
 
   /// 列出可作换绑目标的本地账户(当前身份账户以外的全部账户)。
   Future<List<CitizenWalletStateAccount>> listRebindTargets() async {
-    final state = await _wallet.getState();
+    final state = await _wallet.getState().result;
     final defaultAccount = state.defaultAccount;
     if (defaultAccount == null) return const <CitizenWalletStateAccount>[];
     final resolved = await _identityResolver.resolve();
@@ -769,7 +768,7 @@ class MyIdService {
 
   /// 列出注册 CID 时可选的绑定账户(当前热钱包下全部本地账户,含账户0)。
   Future<List<CitizenWalletStateAccount>> listBindableAccounts() async {
-    return (await _wallet.getState()).accounts;
+    return (await _wallet.getState().result).accounts;
   }
 
   static CitizenWalletStateAccount? _findAccount(

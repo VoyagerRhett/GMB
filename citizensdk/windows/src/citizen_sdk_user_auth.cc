@@ -1,289 +1,161 @@
 #include "citizen_sdk_user_auth.hpp"
 
-#include <windows.h>
-#include <chrono>
-#include <condition_variable>
-#include <cstring>
-#include <exception>
-#include <memory>
-#include <string>
-#include <thread>
 #include <utility>
-#include "citizen_sdk_host_record.hpp"
 #include "citizen_sdk_input_limits.hpp"
-#include "citizen_sdk_wallet_window.hpp"
 
 namespace citizen_sdk::windows {
 namespace {
-struct PromptState final {
-  std::mutex lock;
-  std::condition_variable ready;
-  WindowRef *parent{};
-  uint64_t host_operation_id{};
-  bool private_view_bound{};
-  HWND private_view_window{};
-  WindowLease lease;
-  bool confirmation{};
-  bool started{};
-  bool done{};
-  bool abandoned{};
-  bool completion_queued{};
-  bool destroying{};
-  bool registered{};
-  bool owner_disabled{};
-  HWND hwnd{};
-  HWND error{};
-  HINSTANCE module{};
-  std::wstring class_name;  // 非秘密 Win32 类标识。
-  std::unique_ptr<SensitiveInput> password;
-  std::unique_ptr<SensitiveInput> second;
-  AuthenticationResult result;
-  std::shared_ptr<PromptState> *window_owner{};
-  ~PromptState() {
-    if (hwnd != nullptr || password || second || registered || window_owner != nullptr) std::terminate();
+// 凭据是实际UTF-8字节，不是授权布尔值；拒绝截断、过长、代理项及非最短编码。
+// 此处只校验设备金库凭据边界，不复制Rust的BIP39派生密码规则。
+bool valid_credential(citizensdk_bytes_view_t value) noexcept {
+  if (value.data == nullptr || value.len < 12 ||
+      value.len > input_limits::kMaximumUnlockPasswordBytes) return false;
+  for (uint64_t i = 0; i < value.len;) {
+    const uint8_t first = value.data[i++];
+    if (first == 0) return false;
+    if (first < 0x80) continue;
+    uint32_t code = 0, minimum = 0;
+    unsigned count = 0;
+    if (first >= 0xc2 && first <= 0xdf) { code = first & 31; count = 1; minimum = 0x80; }
+    else if (first >= 0xe0 && first <= 0xef) { code = first & 15; count = 2; minimum = 0x800; }
+    else if (first >= 0xf0 && first <= 0xf4) { code = first & 7; count = 3; minimum = 0x10000; }
+    else return false;
+    if (value.len - i < count) return false;
+    while (count-- != 0) {
+      const uint8_t next = value.data[i++];
+      if ((next & 0xc0) != 0x80) return false;
+      code = (code << 6) | (next & 63);
+    }
+    if (code < minimum || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return false;
   }
-};
-
-void clear_controls(const std::shared_ptr<PromptState> &state) noexcept {
-  if (state->password) state->password->clear();
-  if (state->second) state->second->clear();
-}
-
-void finish_on_ui(const std::shared_ptr<PromptState> &state) noexcept {
-  if (!state->parent->on_ui_thread()) std::terminate();
-  clear_controls(state);
-  const bool restore_view_focus = state->private_view_bound &&
-      GetForegroundWindow() == state->hwnd;
-  state->destroying = true;
-  if (state->hwnd != nullptr && !DestroyWindow(state->hwnd)) std::terminate();
-  state->password.reset(); state->second.reset();
-  if (state->registered && !UnregisterClassW(state->class_name.c_str(), state->module)) std::terminate();
-  state->registered = false;
-  delete state->window_owner;
-  state->window_owner = nullptr;
-  if (state->owner_disabled && state->lease.valid() && state->lease.get() != nullptr) {
-    EnableWindow(static_cast<HWND>(state->lease.get()), TRUE);
-  }
-  state->owner_disabled = false;
-  if (state->private_view_window != nullptr && IsWindow(state->private_view_window)) {
-    EnableWindow(state->private_view_window, TRUE);
-    if (restore_view_focus) SetForegroundWindow(state->private_view_window);
-  }
-  state->private_view_window = nullptr;
-  const bool parent_lost = !state->lease.valid();
-  state->lease = {};
-  {
-    std::lock_guard<std::mutex> guard(state->lock);
-    if (state->abandoned || parent_lost) {
-      state->result.password.clear();
-      state->result.code = CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED;
-    }
-    state->done = true;
-  }
-  state->ready.notify_all();
-}
-
-void queue_finish(const std::shared_ptr<PromptState> &state,
-                  citizensdk_error_code_t code, SensitiveBuffer password = {}) noexcept {
-  try {
-    {
-      std::lock_guard<std::mutex> guard(state->lock);
-      if (state->done || state->completion_queued) return;
-      state->completion_queued = true;
-      if (state->abandoned) password.clear();
-      state->result = {code, std::move(password)};
-    }
-    // 即使源是 WM_COMMAND/WM_DESTROY，也必须退出当前 WndProc 栈后再注销类。
-    auto delay = std::chrono::milliseconds(1);
-    for (unsigned attempt = 0; attempt < 8; ++attempt) {
-      if (state->parent->invoke([state] { finish_on_ui(state); })) return;
-      std::this_thread::sleep_for(delay);
-      delay *= 2;
-    }
-  } catch (...) {}
-  // 无法安排唯一清理动作时，不能让含秘密窗口无主存活或在 worker 销毁。
-  std::terminate();
-}
-
-LRESULT CALLBACK prompt_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) noexcept {
-  auto *raw = reinterpret_cast<PromptState *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-  if (message == WM_NCCREATE) {
-    raw = static_cast<PromptState *>(reinterpret_cast<CREATESTRUCTW *>(lp)->lpCreateParams);
-    raw->hwnd = hwnd;
-    SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(raw));
-  }
-  if (raw == nullptr) return DefWindowProcW(hwnd, message, wp, lp);
-  const auto state = *raw->window_owner;
-  try {
-    if (message == WM_DESTROY) {
-      RemovePropW(hwnd, L"CitizenSDK.Authentication");
-      clear_controls(state);
-      state->hwnd = nullptr; state->error = nullptr;
-      SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-      if (!state->destroying) queue_finish(state, CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED);
-      return 0;
-    }
-    if ((message == WM_ACTIVATE && LOWORD(wp) == WA_INACTIVE &&
-         state->private_view_bound && !state->destroying) ||
-        message == WM_CLOSE || (message == WM_COMMAND && LOWORD(wp) == IDCANCEL)) {
-      clear_controls(state);
-      if (message == WM_ACTIVATE) {
-        std::lock_guard<std::mutex> guard(state->lock);
-        // 已排队确认也不能在真实后台后继续返回成功。
-        state->abandoned = true;
-        state->result.password.clear();
-      }
-      queue_finish(state, CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED);
-      return 0;
-    }
-    if (message == WM_COMMAND && LOWORD(wp) == IDOK) {
-      {
-        std::lock_guard<std::mutex> guard(state->lock);
-        if (state->done || state->abandoned || state->completion_queued) return 0;
-      }
-      SensitiveBuffer first = state->password->take_utf8();
-      SensitiveBuffer second = state->second ? state->second->take_utf8() : SensitiveBuffer();
-      const bool valid = first.size() >= 12 && first.size() <= input_limits::kMaximumUnlockPasswordBytes;
-      const bool matches = !state->confirmation || (first.size() == second.size() &&
-          (first.empty() || std::memcmp(first.data(), second.data(), first.size()) == 0));
-      if (!valid || !matches) {
-        SetWindowTextW(state->error, !valid ? L"口令长度必须为 12...1024 个 UTF-8 字节，请重新输入。"
-            : L"两次口令不一致，请重新输入。");
-        return 0;
-      }
-      queue_finish(state, CITIZENSDK_OK, std::move(first));
-      return 0;
-    }
-  } catch (...) {
-    clear_controls(state);
-    queue_finish(state, CITIZENSDK_ERROR_INTERNAL);
-    return 0;
-  }
-  return DefWindowProcW(hwnd, message, wp, lp);
-}
-
-HWND prompt_control(const std::shared_ptr<PromptState> &state, const wchar_t *type,
-                    const wchar_t *text, DWORD style, int identity,
-                    int x, int y, int width, int height) {
-  HWND value = CreateWindowExW(0, type, text, WS_CHILD | WS_VISIBLE | style,
-      x, y, width, height, state->hwnd,
-      reinterpret_cast<HMENU>(static_cast<INT_PTR>(identity)), state->module, nullptr);
-  require(value != nullptr, CITIZENSDK_ERROR_UNAVAILABLE, "CitizenSDK authentication control is unavailable");
-  SendMessageW(value, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
-  return value;
-}
-
-void build_prompt(const std::shared_ptr<PromptState> &state) noexcept {
-  try {
-    {
-      std::lock_guard<std::mutex> guard(state->lock);
-      state->started = true;
-      if (state->abandoned || state->completion_queued) {
-        state->ready.notify_all();
-        return;
-      }
-    }
-    state->ready.notify_all();
-    state->lease = state->parent->acquire();
-    require(state->lease.valid(), CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED,
-            "CitizenSDK authentication parent window was destroyed");
-    require(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                  GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                              reinterpret_cast<LPCWSTR>(&prompt_proc), &state->module) != FALSE,
-            CITIZENSDK_ERROR_UNAVAILABLE, "CitizenSDK authentication module is unavailable");
-    state->class_name = L"CitizenSDK.Authentication." + std::to_wstring(reinterpret_cast<UINT_PTR>(state.get()));
-    WNDCLASSEXW type{};
-    type.cbSize = sizeof(type); type.hInstance = state->module;
-    type.lpfnWndProc = prompt_proc; type.lpszClassName = state->class_name.c_str();
-    type.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    type.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-    require(RegisterClassExW(&type) != 0, CITIZENSDK_ERROR_UNAVAILABLE,
-            "CitizenSDK authentication class is unavailable");
-    state->registered = true;
-    state->window_owner = new std::shared_ptr<PromptState>(state);
-    state->hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, state->class_name.c_str(),
-        state->confirmation ? L"创建 CitizenSDK 设备金库口令" : L"解锁 CitizenSDK 设备金库",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 580, 360,
-        static_cast<HWND>(state->lease.get()), nullptr, state->module, state.get());
-    require(state->hwnd != nullptr, CITIZENSDK_ERROR_UNAVAILABLE, "CitizenSDK authentication window is unavailable");
-    require(SetPropW(state->hwnd, L"CitizenSDK.Authentication", state.get()) != FALSE,
-            CITIZENSDK_ERROR_UNAVAILABLE, "CitizenSDK authentication identity is unavailable");
-    require(SetWindowDisplayAffinity(state->hwnd, WDA_EXCLUDEFROMCAPTURE) != FALSE,
-            CITIZENSDK_ERROR_UNAVAILABLE, "CitizenSDK sensitive display protection is unavailable");
-    prompt_control(state, L"STATIC", L"此口令只用于本设备 TPM 金库，不是助记词派生密码。\n口令不会返回应用业务层。", SS_LEFT, 0, 20, 15, 530, 60);
-    state->password = std::make_unique<SensitiveInput>(state->hwnd, 101, 20, 85, 530, 45, true, false);
-    if (state->confirmation) {
-      state->second = std::make_unique<SensitiveInput>(state->hwnd, 102, 20, 145, 530, 45, true, false);
-    }
-    state->error = prompt_control(state, L"STATIC", L"", SS_LEFT, 0, 20, 202, 530, 35);
-    prompt_control(state, L"BUTTON", L"取消", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL, 20, 258, 150, 40);
-    prompt_control(state, L"BUTTON", L"继续", BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK, 370, 258, 180, 40);
-    HWND owner = static_cast<HWND>(state->lease.get());
-    if (owner != nullptr && IsWindowEnabled(owner)) {
-      EnableWindow(owner, FALSE); state->owner_disabled = true;
-    }
-    ShowWindow(state->hwnd, SW_SHOW);
-    SetFocus(static_cast<HWND>(state->password->native_handle()));
-  } catch (const HostError &error) { queue_finish(state, error.code()); }
-  catch (...) { queue_finish(state, CITIZENSDK_ERROR_INTERNAL); }
+  return true;
 }
 }  // namespace
 
-bool accept_private_key_authentication_window(
-    void *window, void *view_window, const void *owner, uint64_t host_operation_id) noexcept {
-  if (window == nullptr || view_window == nullptr || owner == nullptr ||
-      host_operation_id == 0) return false;
-  const HWND hwnd = static_cast<HWND>(window);
-  DWORD process = 0;
-  if (GetWindowThreadProcessId(hwnd, &process) != GetCurrentThreadId() ||
-      process != GetCurrentProcessId()) return false;
-  auto *state = static_cast<PromptState *>(GetPropW(hwnd, L"CitizenSDK.Authentication"));
-  if (state == nullptr || state->parent != owner || state->hwnd != hwnd ||
-      state->host_operation_id != host_operation_id) return false;
-  const HWND view = static_cast<HWND>(view_window);
-  if (GetWindowThreadProcessId(view, nullptr) != GetCurrentThreadId()) return false;
-  SetLastError(ERROR_SUCCESS);
-  if (SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(view)) == 0 &&
-      GetLastError() != ERROR_SUCCESS) return false;
-  state->private_view_window = view;
-  state->private_view_bound = true;
-  EnableWindow(view, FALSE);
-  return true;
+citizensdk_error_code_t UserAuth::configure(const citizensdk_credential_provider_v1_t *provider) {
+  if (provider != nullptr && (provider->struct_size != sizeof(*provider) ||
+      provider->abi_version != 1 || provider->request == nullptr || provider->cancel == nullptr ||
+      provider->retain == nullptr || provider->release == nullptr || provider->idle == nullptr))
+    return CITIZENSDK_ERROR_INVALID_ARGUMENT;
+  std::shared_ptr<Provider> previous;
+  {
+    std::lock_guard<std::recursive_mutex> callbacks(callback_lock_);
+    std::lock_guard<std::mutex> guard(lock_);
+    if (!pending_.empty() || (provider_ && provider_->value.idle(provider_->value.context) != 1))
+      return CITIZENSDK_ERROR_BUSY;
+    auto next = provider == nullptr ? std::shared_ptr<Provider>() : std::make_shared<Provider>(*provider);
+    previous = std::move(provider_);
+    provider_ = std::move(next);
+  }
+  // context的释放不在凭据锁下，且所有快照共同持有它至最后一个回调退出。
+  previous.reset();
+  return CITIZENSDK_OK;
 }
 
-UserAuth::UserAuth(WindowRef &parent) : parent_(parent) {}
-UserAuth::~UserAuth() = default;
-bool UserAuth::available() const noexcept { return parent_.available(); }
-AuthenticationResult UserAuth::create_vault_password() { return prompt(true, 0); }
+bool UserAuth::available() const noexcept {
+  try { std::lock_guard<std::mutex> guard(lock_); return provider_ != nullptr; }
+  catch (...) { return false; }
+}
+bool UserAuth::idle() const noexcept {
+  try {
+    std::shared_ptr<Provider> provider;
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      if (!pending_.empty()) return false;
+      provider = provider_;
+    }
+    // 不能持有callback_lock_：request可能同步回Host回包，
+    // 而关闭线程正持Host锁查询idle；反向取锁会相互等待。
+    return !provider || provider->value.idle(provider->value.context) == 1;
+  } catch (...) { return false; }
+}
+
+AuthenticationResult UserAuth::create_vault_password(uint64_t host_operation_id) {
+  return request(1, host_operation_id);
+}
 AuthenticationResult UserAuth::unlock_vault_password(uint64_t host_operation_id) {
-  return prompt(false, host_operation_id);
+  return request(2, host_operation_id);
 }
 
-AuthenticationResult UserAuth::prompt(bool confirmation, uint64_t host_operation_id) {
-  if (!available()) return {CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED, {}};
-  if (parent_.on_ui_thread()) return {CITIZENSDK_ERROR_BUSY, {}};
-  // 沿用 Linux 接纳与等待语义；只能阻塞 Core worker，不能阻塞窗口消息线程。
-  std::lock_guard<std::mutex> admission(prompt_lock_);
-  auto state = std::make_shared<PromptState>();
-  state->parent = &parent_;
-  state->host_operation_id = host_operation_id;
-  state->confirmation = confirmation;
-  if (!parent_.invoke([state] { build_prompt(state); })) {
-    return {CITIZENSDK_ERROR_UNAVAILABLE, {}};
+AuthenticationResult UserAuth::request(uint32_t key_purpose, uint64_t host_operation_id) {
+  if (host_operation_id == 0) return {CITIZENSDK_ERROR_INVALID_ARGUMENT, {}};
+  auto pending = std::make_shared<Pending>();
+  {
+    std::lock_guard<std::recursive_mutex> callbacks(callback_lock_);
+    std::shared_ptr<Provider> provider;
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      if (!provider_) return {CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED, {}};
+      if (!pending_.emplace(host_operation_id, pending).second)
+        return {CITIZENSDK_ERROR_CONFLICT, {}};
+      provider = provider_;
+    }
+    const citizensdk_credential_challenge_v1_t challenge{
+        sizeof(citizensdk_credential_challenge_v1_t), 1, host_operation_id, key_purpose, 0};
+    try { provider->value.request(provider->value.context, &challenge); }
+    catch (...) {
+      // 异常不能留下等待者或已经同步交付的凭据。
+      cancel(host_operation_id);
+    }
   }
-  std::unique_lock<std::mutex> guard(state->lock);
-  if (!state->ready.wait_for(guard, std::chrono::seconds(5), [&] { return state->started; })) {
-    state->abandoned = true;
-    guard.unlock();
-    queue_finish(state, CITIZENSDK_ERROR_UNAVAILABLE);
-    return {CITIZENSDK_ERROR_UNAVAILABLE, {}};
-  }
-  if (!state->ready.wait_for(guard, std::chrono::minutes(5), [&] { return state->done; })) {
-    state->abandoned = true;
-    guard.unlock();
-    queue_finish(state, CITIZENSDK_ERROR_TIMEOUT);
-    return {CITIZENSDK_ERROR_TIMEOUT, {}};
-  }
-  return std::move(state->result);
+  std::unique_lock<std::mutex> guard(lock_);
+  pending->ready.wait(guard, [&] { return pending->done; });
+  AuthenticationResult result = std::move(pending->result);
+  pending_.erase(host_operation_id);
+  return result;
 }
+
+citizensdk_error_code_t UserAuth::respond(
+    uint64_t host_operation_id, citizensdk_bytes_view_t credential) {
+  std::lock_guard<std::mutex> guard(lock_);
+  const auto found = pending_.find(host_operation_id);
+  if (found == pending_.end() || found->second->done) return CITIZENSDK_ERROR_INVALID_STATE;
+  auto &pending = *found->second;
+  const bool cancelled = credential.data == nullptr && credential.len == 0;
+  if (!cancelled && !valid_credential(credential)) {
+    pending.result.code = CITIZENSDK_ERROR_INVALID_ARGUMENT;
+  } else if (cancelled) {
+    pending.result.code = CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED;
+  } else {
+    try {
+      pending.result.password = SensitiveBuffer(credential.data, static_cast<std::size_t>(credential.len));
+      pending.result.code = CITIZENSDK_OK;
+    } catch (...) { pending.result.code = CITIZENSDK_ERROR_INTERNAL; }
+  }
+  pending.done = true;
+  pending.ready.notify_all();
+  return pending.result.code == CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED
+      ? CITIZENSDK_OK : pending.result.code;
+}
+
+citizensdk_error_code_t UserAuth::cancel(uint64_t host_operation_id) {
+  std::lock_guard<std::recursive_mutex> callbacks(callback_lock_);
+  std::shared_ptr<Provider> provider;
+  {
+    std::lock_guard<std::mutex> guard(lock_);
+    const auto found = pending_.find(host_operation_id);
+    if (found == pending_.end()) return CITIZENSDK_ERROR_INVALID_STATE;
+    // 撤销优先于尚未被工作线程领取的成功回包；迟到/重复回包不能恢复它。
+    found->second->result.password.clear();
+    found->second->result.code = CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED;
+    found->second->done = true;
+    found->second->ready.notify_all();
+    provider = provider_;
+  }
+  try { if (provider) provider->value.cancel(provider->value.context, host_operation_id); }
+  catch (...) {}  // 宿主UI取消异常不得重新开放凭据交付。
+  return CITIZENSDK_OK;
+}
+
+void UserAuth::cancel_all() {
+  std::lock_guard<std::recursive_mutex> callbacks(callback_lock_);
+  std::vector<uint64_t> ids;
+  {
+    std::lock_guard<std::mutex> guard(lock_);
+    ids.reserve(pending_.size());
+    for (const auto &entry : pending_) ids.push_back(entry.first);
+  }
+  for (const auto id : ids) (void)cancel(id);
+}
+
 }  // namespace citizen_sdk::windows

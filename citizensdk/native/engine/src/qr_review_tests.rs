@@ -39,10 +39,10 @@ fn fixture() -> (SignRequest, RuntimeContext, usize) {
         request_id: "0123456789abcdef".to_owned(),
         expires_at: i64::MAX as u64,
         action: 0x0400,
-        signer_public_key: Sr25519PublicKey::from_bytes(
+        signer_public_key: Some(Sr25519PublicKey::from_bytes(
             bytes(vector["transfer"]["source_account_id"].as_str().unwrap())
                 .try_into()
-                .unwrap(),
+                .unwrap()),
         ),
         review_payload: bytes(vector["expected"]["signing_message"].as_str().unwrap()),
     };

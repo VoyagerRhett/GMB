@@ -20,6 +20,7 @@ mod enabled {
     use citizen_sdk_qr::{parse, QrCode, SignRequest, SignResponse};
     use citizensdk::{
         citizensdk_create_with_modules, citizensdk_destroy, citizensdk_qr_consume_sign_response,
+        citizensdk_qr_validate_sign_response,
         citizensdk_qr_create_sign_request, citizensdk_qr_encode_account_id, CitizenSdkAccountId,
         CitizenSdkCreateOptions, CITIZENSDK_ABI_VERSION,
     };
@@ -179,9 +180,10 @@ mod enabled {
         .try_into()
         .unwrap();
         let response = SignResponse {
-            request_id: request.request_id,
+                current_account: None,
+            request_id: request.request_id.clone(),
             expires_at: request.expires_at,
-            signer_public_key: request.signer_public_key,
+            signer_public_key: request.require_signer().unwrap(),
             signature: Sr25519Signature::from_bytes(signature),
         };
         let mut output = [0xa5; 64];
@@ -214,6 +216,17 @@ mod enabled {
             CitizenSdkErrorCode::Conflict.as_i32()
         );
         let encoded = response.encode().unwrap();
+        // 真实公开签名向量：多次预检不消费；错误实例/请求/签名不能放行。
+        let another = instance();
+        let session = view(response.request_id.as_bytes());
+        for _ in 0..2 {
+            assert_eq!(unsafe { citizensdk_qr_validate_sign_response(handle, session, view(encoded.as_bytes())) }, 0);
+        }
+        assert_eq!(unsafe { citizensdk_qr_validate_sign_response(another, session, view(encoded.as_bytes())) }, CitizenSdkErrorCode::Conflict.as_i32());
+        assert_eq!(unsafe { citizensdk_qr_validate_sign_response(handle, view(b"wrong-request"), view(encoded.as_bytes())) }, CitizenSdkErrorCode::Conflict.as_i32());
+        let invalid_text = invalid.encode().unwrap();
+        assert_eq!(unsafe { citizensdk_qr_validate_sign_response(handle, session, view(invalid_text.as_bytes())) }, CitizenSdkErrorCode::Integrity.as_i32());
+        assert_eq!(unsafe { citizensdk_destroy(another) }, 0);
         assert_eq!(
             unsafe {
                 citizensdk_qr_consume_sign_response(
@@ -235,6 +248,7 @@ mod enabled {
             CitizenSdkErrorCode::Ok.as_i32()
         );
         assert_eq!(output, signature);
+        assert_eq!(unsafe { citizensdk_qr_validate_sign_response(handle, session, view(encoded.as_bytes())) }, CitizenSdkErrorCode::Conflict.as_i32());
         output.fill(0xa5);
         assert_eq!(
             unsafe {

@@ -34,7 +34,7 @@ use crate::{
     wallet_derivation::{SystemWalletEntropy, WalletWordCount},
     wallet_service::{
         PreparedWalletCreation, SigningService, SystemWalletClock, WalletPrivateKeyView,
-        WalletService,
+        WalletService, WalletStateSnapshot,
     },
 };
 
@@ -1075,8 +1075,8 @@ impl CitizenEngine {
         Box::pin(async move { service?.profile().await })
     }
 
-    /// Rust 内部稳定目录入口；C ABI 与五端公开投影由后续步骤单独冻结。
-    pub fn wallet_state(&self) -> EngineFuture<'_, WalletState> {
+    /// 稳定冷热目录、初始化和待清理事实共享同一读取，不把读取失败合成为空钱包。
+    pub fn wallet_state(&self) -> EngineFuture<'_, WalletStateSnapshot> {
         let service = self.local_wallet_service(&[CapabilityName::WalletProfile]);
         Box::pin(async move { service?.state().await })
     }
@@ -1108,12 +1108,13 @@ impl CitizenEngine {
         &self,
         expected_revision: u64,
         ordered_account_ids: Vec<AccountId32>,
-    ) -> EngineFuture<'_, WalletState> {
+    ) -> EngineFuture<'_, WalletStateSnapshot> {
         let service = self.local_wallet_service(&[CapabilityName::WalletProfile]);
         Box::pin(async move {
-            service?
+            let state = service?
                 .reorder_accounts_without_default_change(expected_revision, ordered_account_ids)
-                .await
+                .await?;
+            WalletStateSnapshot::from_state(&state)
         })
     }
 
@@ -1136,7 +1137,7 @@ impl CitizenEngine {
         &self,
         account_id: AccountId32,
         name: String,
-    ) -> EngineFuture<'_, WalletState> {
+    ) -> EngineFuture<'_, WalletStateSnapshot> {
         Box::pin(async move {
             match self.wallet_account_sign_mode(account_id).await? {
                 Some(WalletSignMode::Hot) => {
@@ -1160,7 +1161,7 @@ impl CitizenEngine {
     pub fn delete_wallet_account_any(
         &self,
         account_id: AccountId32,
-    ) -> EngineFuture<'_, WalletState> {
+    ) -> EngineFuture<'_, WalletStateSnapshot> {
         Box::pin(async move {
             match self.wallet_account_sign_mode(account_id).await? {
                 Some(WalletSignMode::Hot) => self.delete_wallet_account(account_id).await?,
@@ -1245,7 +1246,7 @@ impl CitizenEngine {
         mnemonic: SecretBuffer,
         password: Zeroizing<String>,
         indices: Vec<u32>,
-    ) -> EngineFuture<'_, Vec<citizen_sdk_contracts::WalletAccount>> {
+    ) -> EngineFuture<'_, WalletProfile> {
         let service = self.local_wallet_service(&[
             CapabilityName::WalletProfile,
             CapabilityName::HardwareVault,
@@ -1254,6 +1255,21 @@ impl CitizenEngine {
         Box::pin(async move {
             self.with_wallet_monitor_paused(service?.add_accounts(&mnemonic, &password, &indices))
                 .await
+        })
+    }
+
+    /// 显式“下一个账户”，复用与指定追加相同的归属校验、金库和提交路径。
+    pub fn add_next_wallet_account(
+        &self,
+        mnemonic: SecretBuffer,
+        password: Zeroizing<String>,
+    ) -> EngineFuture<'_, WalletProfile> {
+        let service = self.local_wallet_service(&[
+            CapabilityName::WalletProfile, CapabilityName::HardwareVault,
+            CapabilityName::UserAuthentication,
+        ]);
+        Box::pin(async move {
+            self.with_wallet_monitor_paused(service?.add_next_account(&mnemonic, &password)).await
         })
     }
 
@@ -1567,9 +1583,12 @@ impl CitizenEngine {
             let message = review.request().signing_message().map_err(|_| {
                 EngineError::contract(ContractErrorCode::Decode, "二维码签名载荷无效")
             })?;
+            let public_key = review.request().require_signer().map_err(|_| {
+                EngineError::contract(ContractErrorCode::Decode, "二维码未绑定签名账户")
+            })?;
             let signature = service
                 .sign_guarded(
-                    AccountId32::from_bytes(*review.request().signer_public_key.as_bytes()),
+                    AccountId32::from_bytes(*public_key.as_bytes()),
                     message.clone(),
                     &guard,
                 )
@@ -1580,7 +1599,7 @@ impl CitizenEngine {
                 .signer()
                 .ok_or_else(|| component_missing("chain_signer"))?;
             if !signer
-                .verify(review.request().signer_public_key, message, signature)
+                .verify(public_key, message, signature)
                 .await?
             {
                 return Err(EngineError::contract(
@@ -1644,6 +1663,17 @@ impl CitizenEngine {
         Box::pin(async move {
             self.with_wallet_monitor_paused(service?.delete_wallet())
                 .await
+        })
+    }
+
+    /// 签名删除与无签名擦除分开接纳，共用WalletService的唯一清理路径。
+    pub fn sign_and_delete_wallet(&self) -> EngineFuture<'_, ()> {
+        let service = self.local_wallet_service(&[
+            CapabilityName::WalletProfile, CapabilityName::LocalSigning,
+            CapabilityName::HardwareVault, CapabilityName::UserAuthentication,
+        ]);
+        Box::pin(async move {
+            self.with_wallet_monitor_paused(service?.sign_and_delete_wallet()).await
         })
     }
 

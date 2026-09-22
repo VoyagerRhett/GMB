@@ -135,7 +135,7 @@ void WalletFlow::action() {
       window_->set_busy("正在进行设备认证，请勿离开安全查看窗口…");
       uint64_t view_id = 0;
       { std::lock_guard<std::mutex> guard(view_lock_); view_id = private_view_id_; }
-      const auto code = citizensdk_internal_private_key_view_reveal(host_->sdk(), view_id);
+      const auto code = citizensdk_private_key_reveal(host_->sdk(), view_id);
       if (code != CITIZENSDK_OK) end_private_key_view(true, code);
       return;
     }
@@ -165,10 +165,10 @@ void WalletFlow::action() {
 
 void WalletFlow::begin_private_key_view() {
   const auto self = shared_from_this();
-  citizensdk_internal_private_key_view_v1_t view{};
+  citizensdk_private_key_receiver_v1_t view{};
   view.struct_size = sizeof(view); view.abi_version = 1;
   view.context = this;
-  view.display = display_private_key;
+  view.receive = display_private_key;
   view.settled = private_key_settled;
   view.authorizing = private_key_authorizing;
   uint64_t view_id = 0;
@@ -176,7 +176,7 @@ void WalletFlow::begin_private_key_view() {
   operation_in_flight_.store(true);
   const auto code = host_->submit_private(
       [&](citizensdk_request_id_t *out) {
-        return citizensdk_internal_private_key_view_open(
+        return citizensdk_private_key_open(
             host_->sdk(), &*request_.account_id, &view, &view_id, out);
       },
       [self](citizensdk_result_handle_t result) noexcept {
@@ -306,8 +306,8 @@ void WalletFlow::end_private_key_view(
     return;
   }
   if (cancelled)
-    (void)citizensdk_internal_private_key_view_cancel(host_->sdk(), view_id);
-  const auto code = citizensdk_internal_private_key_view_finish(host_->sdk(), view_id);
+    (void)citizensdk_private_key_cancel(host_->sdk(), view_id);
+  const auto code = citizensdk_private_key_finish(host_->sdk(), view_id);
   if (code == CITIZENSDK_OK || code == CITIZENSDK_ERROR_INVALID_HANDLE) return;
   if (private_finish_supervised_.exchange(true)) return;
   // 不能丢弃尚未接受的清屏确认；只监督短控制重试，不伪造请求完成。
@@ -317,7 +317,7 @@ void WalletFlow::end_private_key_view(
       auto delay = std::chrono::milliseconds(10);
       for (;;) {
         if (!self->operation_in_flight_.load()) return;
-        const auto retry = citizensdk_internal_private_key_view_finish(self->host_->sdk(), view_id);
+        const auto retry = citizensdk_private_key_finish(self->host_->sdk(), view_id);
         if (retry == CITIZENSDK_OK || retry == CITIZENSDK_ERROR_INVALID_HANDLE) return;
         try { std::this_thread::sleep_for(delay); } catch (...) {}
         delay = std::min(delay * 2, std::chrono::milliseconds(5000));

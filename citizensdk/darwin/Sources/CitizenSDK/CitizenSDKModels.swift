@@ -1,5 +1,16 @@
 import Foundation
 
+/// 与Core同一原因闭集；界面文字由宿主按自己的原交互呈现。
+public enum CitizenWalletInputReason: UInt32, Sendable {
+    case valid = 0, inputTooLong = 1, wordCount = 2, unknownWord = 3, checksum = 4
+    case passwordFormat = 5, mnemonicFormat = 6, passwordLength = 7, passwordNormalization = 8
+}
+public struct CitizenWalletInputValidation: Sendable, Equatable {
+    public let reason: CitizenWalletInputReason
+    public let position: UInt32?
+    public var isValid: Bool { reason == .valid }
+}
+
 /// 同一 Rust 核心的模块集合；这里只投影位值，组合合法性由核心统一校验。
 public struct CitizenSDKModules: OptionSet, Sendable {
     public let rawValue: UInt32
@@ -255,6 +266,8 @@ public struct CitizenWalletState: Equatable, Sendable {
     public let revision: UInt64
     public let hotProfile: CitizenWalletProfile?
     public let accounts: [CitizenWalletStateAccount]
+    public let initializationState: UInt32
+    public let cleanupPending: Bool
 
     public var defaultAccount: CitizenWalletStateAccount? { accounts.first }
 }

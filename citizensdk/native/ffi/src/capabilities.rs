@@ -179,6 +179,7 @@ pub(crate) fn product_probes(
             }
             match name {
                 CapabilityName::ChainRead
+                | CapabilityName::TransactionBuild
                 | CapabilityName::TransactionSubmit
                 | CapabilityName::TransactionVerify => {
                     probe.runtime_ready = provider_is_usable;
@@ -210,15 +211,6 @@ pub(crate) fn product_probes(
                 _ if !facts.host_probe_completed => {
                     probe.available = false;
                     probe.not_ready_reason = Some(CapabilityReason::DependencyNotReady);
-                }
-                CapabilityName::TransactionBuild => {
-                    probe.available = vault_device_available;
-                    probe.runtime_ready = provider_is_usable && signing_ready;
-                    probe.not_ready_reason = if !provider_is_usable {
-                        Some(CapabilityReason::ChainUnsynced)
-                    } else {
-                        signing_reason
-                    };
                 }
                 CapabilityName::WalletProfile => {
                     probe.runtime_ready = facts.wallet_store_ready;
@@ -335,6 +327,26 @@ mod tests {
 
     fn selected(bits: u32) -> Modules {
         Modules::try_new(bits).expect("有效模块组合")
+    }
+
+    #[cfg(all(feature = "chain", feature = "transactions"))]
+    #[test]
+    fn cold_transaction_build_does_not_depend_on_local_vault_or_wallet_probe() {
+        // 构造仅绑定链状态/nonce；真正执行仍由冷热签名能力分别核验。
+        for vault in [VaultAvailability::Unsupported, VaultAvailability::Unavailable,
+                      VaultAvailability::NoStrongUserAuthentication] {
+            let mut facts = ProductCapabilityFacts::wallet_configured();
+            facts.vault_availability = vault;
+            for usable in [true, false] {
+                let snapshot = CapabilityTracker::new().update(product_probes(
+                    usable, facts, selected(Modules::CHAIN | Modules::TRANSACTIONS), false,
+                )).expect("只读构造能力快照");
+                let build = snapshot.status(CapabilityName::TransactionBuild).unwrap();
+                assert!(build.available());
+                assert_eq!(build.is_ready(), usable);
+                assert!(!snapshot.status(CapabilityName::LocalSigning).unwrap().enabled());
+            }
+        }
     }
 
     #[cfg(feature = "chain")]

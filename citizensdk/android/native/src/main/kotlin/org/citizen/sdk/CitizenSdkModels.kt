@@ -6,6 +6,14 @@ enum class CitizenSdkLifecycle { CREATED, IMPORTING_STATE, STARTING, RUNNING, ST
 enum class CitizenFinality { BEST, FINALIZED }
 enum class CitizenWalletOrigin { CREATED, IMPORTED }
 enum class CitizenWalletSignMode { HOT, COLD }
+/** 与Core闭集数值一一对应；文字展示由宿主决定。 */
+enum class CitizenWalletInputReason {
+    VALID, INPUT_TOO_LONG, WORD_COUNT, UNKNOWN_WORD, CHECKSUM,
+    PASSWORD_FORMAT, MNEMONIC_FORMAT, PASSWORD_LENGTH, PASSWORD_NORMALIZATION,
+}
+data class CitizenWalletInputValidation(val reason: CitizenWalletInputReason, val position: Int?) {
+    val isValid: Boolean get() = reason == CitizenWalletInputReason.VALID
+}
 enum class CitizenSigningTransform { RAW, SUBSTRATE_SIGNING_PAYLOAD, BLAKE2_DOMAIN }
 enum class CitizenExternalSignerTransport { QR_V1 }
 enum class CitizenTransactionResolution { FINALIZED_SUCCESS, FINALIZED_FAILED, POOL_REJECTED }
@@ -232,6 +240,8 @@ class CitizenWalletState(
     val revision: String,
     val hotProfile: CitizenWalletProfile?,
     accounts: List<CitizenWalletStateAccount>,
+    val initializationState: Int,
+    val cleanupPending: Boolean,
 ) {
     val accounts: List<CitizenWalletStateAccount> = accounts.toList()
     val defaultAccount: CitizenWalletStateAccount? get() = accounts.firstOrNull()

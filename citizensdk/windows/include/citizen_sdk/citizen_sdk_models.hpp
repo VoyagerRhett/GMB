@@ -10,6 +10,12 @@
 
 namespace citizen_sdk {
 
+// 纯图像数据，不包含预览控件或SDK窗口。
+struct QrImage {
+  uint32_t width{}, height{};
+  std::vector<uint8_t> luminance;
+};
+
 struct CapabilityStatus {
   citizensdk_capability_name_t name{};
   citizensdk_capability_reason_t reason{};

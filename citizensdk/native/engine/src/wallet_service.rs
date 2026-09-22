@@ -37,6 +37,48 @@ use crate::{
 const MAX_CAS_ATTEMPTS: usize = 32;
 const MAX_CLEANUP_QUEUE: usize = 64;
 
+/// 初始化只依据同一次持久目录读取，不由界面或设备热金库可用性推断。
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WalletInitializationState { Empty = 0, Ready = 1, Recovering = 2 }
+
+/// 稳定公开目录和恢复事实来自同一次读取；不包含内部创建/清理计划。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WalletStateSnapshot {
+    catalog: WalletState,
+    initialization_state: WalletInitializationState,
+    cleanup_pending: bool,
+}
+
+impl WalletStateSnapshot {
+    pub fn from_state(state: &WalletState) -> Result<Self, EngineError> {
+        let profile = stable_profile(state);
+        let ordered = order_after_hot_profile_change(state, profile.as_ref());
+        let cleanup_pending = state.cleanup().is_some() || !state.cleanup_queue().is_empty();
+        let initialization_state = if !ordered.is_empty() {
+            WalletInitializationState::Ready
+        } else if state.provisioning().is_some() || cleanup_pending {
+            WalletInitializationState::Recovering
+        } else {
+            WalletInitializationState::Empty
+        };
+        let catalog = WalletState::try_from_catalog_parts(
+            state.revision(), profile, state.cold_accounts().to_vec(), ordered,
+            state.next_cold_wallet_index(), None, None, Vec::new(),
+        )?;
+        Ok(Self { catalog, initialization_state, cleanup_pending })
+    }
+
+    pub const fn initialization_state(&self) -> WalletInitializationState { self.initialization_state }
+    pub const fn cleanup_pending(&self) -> bool { self.cleanup_pending }
+    pub fn revision(&self) -> u64 { self.catalog.revision() }
+    pub fn profile(&self) -> Option<&WalletProfile> { self.catalog.profile() }
+    pub fn cold_accounts(&self) -> &[ColdWalletAccount] { self.catalog.cold_accounts() }
+    pub fn cold_account_by_id(&self, account_id: AccountId32) -> Option<&ColdWalletAccount> { self.catalog.cold_account_by_id(account_id) }
+    pub fn ordered_account_ids(&self) -> &[AccountId32] { self.catalog.ordered_account_ids() }
+    pub fn default_account_id(&self) -> Option<AccountId32> { self.catalog.default_account_id() }
+}
+
 static WALLET_OPERATION_GATE: OnceLock<AsyncMutex<()>> = OnceLock::new();
 type PrivateKeyViewLeaseId = (u32, [u8; 16]);
 type PrivateKeyViewLeaseSet = Mutex<BTreeSet<PrivateKeyViewLeaseId>>;
@@ -271,6 +313,16 @@ impl SigningService {
         ensure_current: &(dyn Fn() -> Result<(), EngineError> + Send + Sync),
     ) -> Result<Sr25519Signature, EngineError> {
         let _guard = wallet_operation_gate().lock().await;
+        self.sign_locked(account_id, message, ensure_current).await
+    }
+
+    /// 调用者持有钱包操作门；复合动作复用实际签名路径，不重入锁或复制验权。
+    async fn sign_locked(
+        &self,
+        account_id: AccountId32,
+        message: Vec<u8>,
+        ensure_current: &(dyn Fn() -> Result<(), EngineError> + Send + Sync),
+    ) -> Result<Sr25519Signature, EngineError> {
         ensure_current()?;
         require_secure_device(self.vault.as_ref()).await?;
         let (profile, account) = current_account(self.profiles.as_ref(), account_id, None).await?;
@@ -468,10 +520,10 @@ impl WalletService {
     }
 
     /// 返回稳定可见的钱包目录；在途热账户目标和内部 lifecycle 计划均不会进入公开投影。
-    pub async fn state(&self) -> Result<WalletState, EngineError> {
+    pub async fn state(&self) -> Result<WalletStateSnapshot, EngineError> {
         let _guard = wallet_operation_gate().lock().await;
         let state = self.profiles.load().await?;
-        visible_wallet_state(&state)
+        WalletStateSnapshot::from_state(&state)
     }
 
     /// 导入一个仅公钥冷账户。该路径只读写公开状态，不查询或调用设备金库。
@@ -815,16 +867,43 @@ impl WalletService {
         mnemonic: &SecretBuffer,
         password: &str,
         indices: &[u32],
-    ) -> Result<Vec<WalletAccount>, EngineError> {
+    ) -> Result<WalletProfile, EngineError> {
         let _guard = wallet_operation_gate().lock().await;
+        require_secure_device(self.vault.as_ref()).await?;
+        let state = self.reconcile_locked().await?;
+        self.add_accounts_locked(mnemonic, password, indices, state).await
+    }
+
+    /// 读取最高编号、校验钱包归属及提交处于同一操作门；不接受App的max+1推算。
+    pub async fn add_next_account(
+        &self,
+        mnemonic: &SecretBuffer,
+        password: &str,
+    ) -> Result<WalletProfile, EngineError> {
+        let _guard = wallet_operation_gate().lock().await;
+        require_secure_device(self.vault.as_ref()).await?;
+        let state = self.reconcile_locked().await?;
+        let profile = state.profile().ok_or_else(|| error(ContractErrorCode::NotFound, "钱包不存在"))?;
+        let next = profile.accounts().iter().map(WalletAccount::index).max()
+            .and_then(|index| index.checked_add(1))
+            .filter(|index| *index <= MAX_WALLET_ACCOUNT_INDEX)
+            .ok_or_else(|| error(ContractErrorCode::InvalidArgument, "没有可追加的下一个账户编号"))?;
+        self.add_accounts_locked(mnemonic, password, &[next], state).await
+    }
+
+    async fn add_accounts_locked(
+        &self,
+        mnemonic: &SecretBuffer,
+        password: &str,
+        indices: &[u32],
+        state: WalletState,
+    ) -> Result<WalletProfile, EngineError> {
         if indices.is_empty() {
             return Err(error(
                 ContractErrorCode::InvalidArgument,
                 "追加账户 index 列表不能为空",
             ));
         }
-        require_secure_device(self.vault.as_ref()).await?;
-        let state = self.reconcile_locked().await?;
         let profile = state
             .profile()
             .cloned()
@@ -927,7 +1006,7 @@ impl WalletService {
         let claimed = self
             .commit_state(
                 &state,
-                Some(target),
+                Some(target.clone()),
                 Some(plan.clone()),
                 None,
                 state.cleanup_queue().to_vec(),
@@ -937,7 +1016,8 @@ impl WalletService {
             self.rollback_provisioning(&plan).await?;
             return Err(original);
         }
-        Ok(added)
+        // 返回本次真实提交的profile，不在解锁后额外查询并把后续读取失败误报为未追加。
+        Ok(target)
     }
 
     pub async fn set_active_account(
@@ -1045,6 +1125,36 @@ impl WalletService {
             .cloned()
             .ok_or_else(|| error(ContractErrorCode::NotFound, "钱包不存在"))?;
         self.delete_wallet_locked(&state, &profile).await
+    }
+
+    /// 原“签名并删除”的无UI原子动作；擦除继续使用delete_wallet，不新增认证。
+    pub async fn sign_and_delete_wallet(&self) -> Result<(), EngineError> {
+        let _guard = wallet_operation_gate().lock().await;
+        let state = self.reconcile_locked().await?;
+        require_no_private_key_view(&state)?;
+        let profile = state.profile().cloned()
+            .ok_or_else(|| error(ContractErrorCode::NotFound, "钱包不存在"))?;
+        // 仅本机使用的随机挑战，不构造链/QR协议，也不把签名或秘密交给宿主。
+        let mut nonce = [0_u8; 32];
+        self.entropy.fill(&mut nonce)?;
+        let mut challenge = Vec::with_capacity(80);
+        challenge.extend_from_slice(&nonce);
+        challenge.extend_from_slice(profile.master_account_id().as_bytes());
+        challenge.extend_from_slice(profile.generation().as_bytes());
+        let signing = SigningService::new(
+            self.signer.clone(), self.vault.clone(), self.profiles.clone(), self.encrypted_secrets.clone(),
+        );
+        let signature = signing.sign_locked(profile.master_account_id(), challenge.clone(), &|| Ok(())).await?;
+        let public_key = Sr25519PublicKey::from_bytes(*profile.master_account_id().as_bytes());
+        if !self.signer.verify(public_key, challenge, signature).await? {
+            return Err(error(ContractErrorCode::Integrity, "删除钱包授权签名验证失败"));
+        }
+        let current = self.profiles.load().await?;
+        if current != state {
+            return Err(conflict("钱包在签名删除授权期间发生变化"));
+        }
+        // 授权/删除共享操作门和代际，最终只调用既有CAS与清理恢复实现。
+        self.delete_wallet_locked(&current, &profile).await
     }
 
     pub async fn reconcile_cleanup(&self) -> Result<(), EngineError> {
@@ -1728,6 +1838,9 @@ impl WalletService {
                 "冷账户 wallet index 已耗尽",
             )
         })?;
+        // 原冷导入页没有名称输入；默认标签由真实分配编号生成，不让App预读推算。
+        let default_name = format!("钱包{wallet_index}");
+        let name = if name.is_empty() { default_name.as_str() } else { name };
         let account = ColdWalletAccount::try_new(
             wallet_index,
             account_id,
@@ -1847,23 +1960,6 @@ fn order_after_hot_profile_change(
         }
     }
     ordered
-}
-
-/// 把持久状态投影成稳定公开事实；revision 只用于观察，不能拿该副本执行 CAS。
-fn visible_wallet_state(state: &WalletState) -> Result<WalletState, EngineError> {
-    let profile = stable_profile(state);
-    let ordered_account_ids = order_after_hot_profile_change(state, profile.as_ref());
-    WalletState::try_from_catalog_parts(
-        state.revision(),
-        profile,
-        state.cold_accounts().to_vec(),
-        ordered_account_ids,
-        state.next_cold_wallet_index(),
-        None,
-        None,
-        Vec::new(),
-    )
-    .map_err(EngineError::from)
 }
 
 fn cleanup_from_provisioning(

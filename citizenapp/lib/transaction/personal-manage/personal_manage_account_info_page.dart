@@ -438,7 +438,7 @@ class _PersonalManageAccountInfoPageState
 
   Future<List<CitizenWalletStateAccount>> _getAdminWallets() async {
     final wallets =
-        (await context.read<CitizenSdk>().wallet.getState()).accounts;
+        (await context.read<CitizenSdk>().wallet.getState().result).accounts;
     final adminSet = _admins.map((admin) => admin.account_id).toSet();
     return wallets.where((w) {
       return adminSet.contains(w.accountId);

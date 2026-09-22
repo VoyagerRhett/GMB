@@ -3,6 +3,8 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include <array>
+#include <chrono>
+#include <future>
 #include <exception>
 #include <limits>
 #include <map>
@@ -44,11 +46,11 @@ citizensdk_bytes_view_t view(const std::string &text) noexcept {
 }
 
 template <typename Call>
-std::vector<uint8_t> qr_core_output(Call call) {
+std::vector<uint8_t> qr_core_output(Call call, uint64_t maximum = 65536) {
   uint64_t required = 0;
   auto code = call(nullptr, 0, &required);
   if (code != CITIZENSDK_OK) throw Error(code, "CitizenSDK QR output query failed");
-  if (required == 0 || required > 65536)
+  if (required == 0 || required > maximum)
     throw ContractFailure(CITIZENSDK_ERROR_INTEGRITY, "CitizenSDK QR output length is invalid");
   std::vector<uint8_t> output(static_cast<std::size_t>(required));
   code = call(output.data(), required, &required);
@@ -234,9 +236,11 @@ class HostTransport final : public NativeTransport {
       case Method::initialize_wallet: case Method::import_cold_account_with_ui: case Method::create_wallet: case Method::import_wallet: case Method::add_wallet_accounts:
       case Method::qr_parse: case Method::qr_create_sign_request:
       case Method::qr_scan: case Method::sign_qr_request:
-      case Method::qr_consume_sign_response: case Method::qr_cancel_sign_request:
+      case Method::qr_validate_sign_response: case Method::qr_consume_sign_response: case Method::qr_cancel_sign_request:
       case Method::qr_encode_account_id:
       case Method::qr_decode_luminance: case Method::qr_encode:
+      case Method::respond_credential: case Method::cancel_credential:
+      case Method::qr_encode_document: case Method::qr_prepare_account_authorization: case Method::encode_signing_payload:
         return CITIZENSDK_ERROR_UNSUPPORTED;
     }
     return CITIZENSDK_ERROR_UNSUPPORTED;
@@ -319,6 +323,19 @@ class HostTransport final : public NativeTransport {
       throw Error(CITIZENSDK_ERROR_UNSUPPORTED, "CitizenSDK QR module is not enabled");
     const auto sdk = host_->native_handle();
     switch (r.method) {
+      case Method::qr_encode_document: {
+        auto output = qr_core_output([&](uint8_t *target, uint64_t capacity, uint64_t *required) {
+          return citizensdk_qr_encode_document(sdk, view(r.input_json), target, capacity, required);
+        });
+        return Value::list({Value::string(qr_text(std::move(output)))});
+      }
+      case Method::qr_prepare_account_authorization: {
+        auto output = qr_core_output([&](uint8_t *target, uint64_t capacity, uint64_t *required) {
+          return citizensdk_qr_prepare_account_authorization(sdk, r.qr_action, view(r.payload),
+              view(r.account_id_text), target, capacity, required);
+        });
+        return Value::list({Value::string(qr_text(std::move(output)))});
+      }
       case Method::qr_parse: {
         auto output = qr_core_output([&](uint8_t *target, uint64_t capacity, uint64_t *required) {
           return citizensdk_qr_parse(sdk, view(r.qr_text), target, capacity, required);
@@ -327,10 +344,15 @@ class HostTransport final : public NativeTransport {
       }
       case Method::qr_create_sign_request: {
         auto output = qr_core_output([&](uint8_t *target, uint64_t capacity, uint64_t *required) {
-          return citizensdk_qr_create_sign_request(sdk, r.qr_action, &r.account_id,
+          return citizensdk_qr_create_sign_request(sdk, static_cast<uint16_t>(r.qr_action), &r.account_id,
               view(r.payload), r.qr_ttl, target, capacity, required);
         });
         return Value::list({Value::string(qr_text(std::move(output)))});
+      }
+      case Method::qr_validate_sign_response: {
+        const auto code = citizensdk_qr_validate_sign_response(sdk, view(r.qr_request_id), view(r.qr_text));
+        if (code != CITIZENSDK_OK) throw Error(code, "CitizenSDK QR response preflight failed");
+        return Value::list({});
       }
       case Method::qr_consume_sign_response: {
         std::vector<uint8_t> signature(64);
@@ -389,6 +411,12 @@ class HostTransport final : public NativeTransport {
       }
       default: throw ContractFailure(CITIZENSDK_ERROR_UNSUPPORTED, "Unsupported QR method");
     }
+  }
+  void cancel_credential(uint64_t id) override {
+    const auto code = citizensdk_host_cancel_credential(host_->host_handle(), id);
+    if (code != CITIZENSDK_OK && code != CITIZENSDK_ERROR_INVALID_STATE &&
+        code != CITIZENSDK_ERROR_NOT_FOUND)
+      throw Error(code, "CitizenSDK credential cancellation failed");
   }
   void cancel(citizensdk_request_id_t request) override {
     require_open();
@@ -465,7 +493,7 @@ std::string random_session_id() {
 
 Reply failure(citizensdk_error_code_t code, const std::string &message,
               const DecodedRequest &request, citizensdk_failure_stage_t stage = 0) {
-  const bool open = request.method == Method::open || request.method == Method::verify_signature;
+  const bool open = request.method == Method::open || request.method == Method::verify_signature || request.method == Method::encode_signing_payload;
   return {false, error_details(code, message,
           open ? std::optional<std::string>{} : request.session,
           open ? std::optional<int64_t>{} : request.sequence,
@@ -475,7 +503,8 @@ Reply failure(citizensdk_error_code_t code, const std::string &message,
 Reply success(const DecodedRequest &request, Value payload) {
   if (request.method == Method::get_account_balances)
     validate_account_balances(request, payload);
-  if (request.method == Method::get_genesis_hash ||
+  if (request.method == Method::qr_validate_sign_response ||
+      request.method == Method::get_genesis_hash ||
       request.method == Method::cancel_signing ||
       request.method == Method::cancel_prepared_transaction ||
       request.method == Method::cancel_prepared_transaction_execution ||
@@ -525,6 +554,7 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     bool fetch_profile_after_mutation{};
     std::shared_ptr<void> mutation_owner;
   };
+  struct CredentialReply;
   struct Session final {
     std::string id;
     std::shared_ptr<NativeTransport> transport;
@@ -532,6 +562,7 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     int64_t next_event{1};
     std::mutex lock;
     std::map<int64_t, std::shared_ptr<Route>> routes;
+    std::map<uint64_t, std::shared_ptr<CredentialReply>> credentials;
     std::shared_ptr<Route> admitting;
     bool closing{};
     bool retired{};
@@ -615,6 +646,8 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     if (!current(session) || is_detached() || expected != snapshot_epoch()) return;
     if (kind == CITIZENSDK_EVENT_HISTORY_CHANGED)
       emit(session, "historyChanged", Value::list({}), expected);
+    if (kind == CITIZENSDK_EVENT_WALLET_CHANGED)
+      emit(session, "walletChanged", Value::list({}), expected);
     // Core callbacks carry only a notification, not an owned snapshot. Query
     // on the UI thread after the callback returns, never re-enter Core while
     // its dispatch thread may hold lifecycle/provider locks.
@@ -665,8 +698,10 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     }
     if (event_value.event_type == CITIZENSDK_EVENT_LIFECYCLE_CHANGED ||
         event_value.event_type == CITIZENSDK_EVENT_CAPABILITIES_CHANGED ||
-        event_value.event_type == CITIZENSDK_EVENT_HISTORY_CHANGED) {
-      if (event_value.event_type == CITIZENSDK_EVENT_HISTORY_CHANGED &&
+        event_value.event_type == CITIZENSDK_EVENT_HISTORY_CHANGED ||
+        event_value.event_type == CITIZENSDK_EVENT_WALLET_CHANGED) {
+      if ((event_value.event_type == CITIZENSDK_EVENT_HISTORY_CHANGED ||
+           event_value.event_type == CITIZENSDK_EVENT_WALLET_CHANGED) &&
           (event_value.request_id != 0 || event_value.result != 0 ||
            event_value.capability_revision != 0 || event_value.reserved != 0)) return;
       try {
@@ -726,6 +761,102 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     post_drain(session);
   }
 
+
+  using CredentialValue = std::optional<std::vector<uint8_t>>;
+  struct CredentialReply final { std::promise<CredentialValue> result; };
+
+  static void wipe_credential(CredentialValue &value) noexcept {
+    if (!value) return;
+    volatile uint8_t *data = value->data();
+    for (std::size_t i = 0; i < value->size(); ++i) data[i] = 0;
+    value.reset();
+  }
+  static bool settle_credential(const std::shared_ptr<Session> &session,
+                                uint64_t id, CredentialValue value) {
+    std::shared_ptr<CredentialReply> reply;
+    {
+      std::lock_guard<std::mutex> guard(session->lock);
+      const auto found = session->credentials.find(id);
+      if (found == session->credentials.end()) { wipe_credential(value); return false; }
+      reply = found->second;
+      session->credentials.erase(found);
+    }
+    try { reply->result.set_value(std::move(value)); }
+    catch (...) { wipe_credential(value); throw; }
+    return true;
+  }
+
+  std::future<CredentialValue> credential(const std::shared_ptr<Session> &session,
+                                         const CredentialChallenge &challenge) {
+    auto reply = std::make_shared<CredentialReply>();
+    auto result = reply->result.get_future();
+    {
+      std::lock_guard<std::mutex> guard(session->lock);
+      if (session->credentials.size() >= 64 ||
+          !session->credentials.emplace(challenge.host_operation_id, reply).second)
+        throw ContractFailure(CITIZENSDK_ERROR_CONFLICT, "Credential challenge admission failed");
+    }
+    std::weak_ptr<State> weak = shared_from_this();
+    std::weak_ptr<Session> target = session;
+    const auto expected = snapshot_epoch();
+    try {
+      schedule([weak, target, expected, challenge] {
+        const auto state = weak.lock(); const auto session = target.lock();
+        if (!session) return;
+        if (!state || !state->current(session) || state->is_detached() ||
+            session->closing || !state->sink || expected != state->snapshot_epoch()) {
+          settle_credential(session, challenge.host_operation_id, std::nullopt);
+          return;
+        }
+        try {
+          state->emit(session, "credentialRequest", Value::list({
+              Value::string(std::to_string(challenge.host_operation_id)),
+              Value::string(challenge.key_purpose), Value::null()}), expected);
+        } catch (...) { settle_credential(session, challenge.host_operation_id, std::nullopt); }
+      });
+      // deferred复用C++凭据适配器的既有等待线程，不为Flutter另开一个等待线程。
+      return std::async(std::launch::deferred,
+          [weak, target, challenge, result = std::move(result)]() mutable -> CredentialValue {
+        for (;;) {
+          if (challenge.cancelled.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+            if (const auto session = target.lock())
+              settle_credential(session, challenge.host_operation_id, std::nullopt);
+            if (result.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+              try { auto late = result.get(); wipe_credential(late); } catch (...) {}
+            }
+            if (const auto state = weak.lock()) {
+              try {
+                state->schedule([weak, target, id = challenge.host_operation_id] {
+                  if (const auto state = weak.lock()) if (const auto session = target.lock())
+                    state->emit(session, "credentialCancelled",
+                        Value::list({Value::string(std::to_string(id))}), state->snapshot_epoch());
+                });
+              } catch (...) {}
+            }
+            return std::nullopt;
+          }
+          if (result.wait_for(std::chrono::milliseconds(20)) == std::future_status::ready)
+            return result.get();
+        }
+      });
+    } catch (...) {
+      settle_credential(session, challenge.host_operation_id, std::nullopt);
+      throw;
+    }
+  }
+
+  void cancel_credentials(const std::shared_ptr<Session> &session) {
+    std::vector<uint64_t> ids;
+    {
+      std::lock_guard<std::mutex> guard(session->lock);
+      for (const auto &entry : session->credentials) ids.push_back(entry.first);
+    }
+    for (const auto id : ids) {
+      session->transport->cancel_credential(id);
+      (void)settle_credential(session, id, std::nullopt);
+    }
+  }
+
   void open(DecodedRequest request, ReplyCallback reply) {
     std::shared_ptr<Session> session;
     std::optional<Reply> outcome;
@@ -737,6 +868,19 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
       session = std::make_shared<Session>();
       session->id = random_session_id();
       source.config.modules = request.modules;
+      if (request.has_credential_provider) {
+        std::weak_ptr<State> weak = shared_from_this();
+        std::weak_ptr<Session> target = session;
+        source.config.credentialProvider = [weak, target](const CredentialChallenge &challenge) {
+          const auto state = weak.lock(); const auto session = target.lock();
+          if (!state || !session) {
+            std::promise<CredentialValue> cancelled;
+            cancelled.set_value(std::nullopt);
+            return cancelled.get_future();
+          }
+          return state->credential(session, challenge);
+        };
+      }
       session->transport = factory(source.config);
       if (!session->transport) throw ContractFailure(CITIZENSDK_ERROR_UNAVAILABLE,
                                                      "CitizenSDK native Host is unavailable");
@@ -1096,6 +1240,11 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
 
   void progress_close(const std::shared_ptr<Session> &session) {
     if (!current(session) || !session->closing || !session->close_request) return;
+    try { cancel_credentials(session); }
+    catch (const Error &error) { close_failed(session, error.code(), error.what()); return; }
+    catch (const ContractFailure &error) { close_failed(session, error.code, error.what()); return; }
+    catch (...) { close_failed(session, CITIZENSDK_ERROR_INTERNAL, "Credential cancellation failed"); return; }
+
     {
       std::lock_guard<std::mutex> guard(session->lock);
       if (!session->routes.empty()) return;
@@ -1131,6 +1280,11 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
 
   void begin_close(const std::shared_ptr<Session> &session,
                    const DecodedRequest &request, ReplyCallback reply) {
+    try { cancel_credentials(session); }
+    catch (const Error &error) { reply(failure(error.code(), error.what(), request, error.stage())); return; }
+    catch (const ContractFailure &error) { reply(failure(error.code, error.what(), request, error.stage)); return; }
+    catch (...) { reply(failure(CITIZENSDK_ERROR_INTERNAL, "Credential cancellation failed", request)); return; }
+
     session->closing = true;
     session->close_request = request;
     session->close_reply = std::move(reply);
@@ -1151,6 +1305,20 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     if (!reply) throw ContractFailure(CITIZENSDK_ERROR_INVALID_ARGUMENT, "CitizenSDK reply is required");
     if (is_detached()) { reply(failure(CITIZENSDK_ERROR_UNAVAILABLE, "CitizenSDK Flutter engine is detached", request)); return; }
     // 不创建或查找 session，不调用环境/Host 工厂，不打开钱包、金库或链。
+    if (request.method == Method::encode_signing_payload) {
+      std::optional<Reply> result;
+      try {
+        auto output = qr_core_output([&](uint8_t *target, uint64_t capacity, uint64_t *required) {
+          return citizensdk_encode_signing_payload(request.payload_kind, view(request.input_json),
+              view(request.payload), target, capacity, required);
+        }, 16 * 1024 * 1024);
+        result = Reply{true, Value::list({Value::integer(kProtocolVersion), Value::bytes(std::move(output))}), CITIZENSDK_OK, {}};
+      } catch (const ContractFailure &error) { result = failure(error.code, error.what(), request, error.stage); }
+      catch (const Error &error) { result = failure(error.code(), error.what(), request, error.stage()); }
+      catch (...) { result = failure(CITIZENSDK_ERROR_INTERNAL, "Payload encoding failed", request); }
+      reply(std::move(*result));
+      return;
+    }
     if (request.method == Method::verify_signature) {
       uint8_t valid = 0;
       const auto code = citizensdk_verify_signature(
@@ -1180,8 +1348,36 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
       reply(failure(CITIZENSDK_ERROR_INTEGRITY, "CitizenSDK request sequence is exhausted", request)); return;
     }
     ++session->next_request;
+    if (request.method == Method::respond_credential || request.method == Method::cancel_credential) {
+      std::optional<Reply> result;
+      try {
+        {
+          std::lock_guard<std::mutex> guard(session->lock);
+          if (session->credentials.find(request.host_operation_id) == session->credentials.end())
+            throw ContractFailure(CITIZENSDK_ERROR_INVALID_STATE, "Credential challenge is not active");
+        }
+        if (request.method == Method::cancel_credential)
+          session->transport->cancel_credential(request.host_operation_id);
+        CredentialValue credential_value;
+        if (request.method == Method::respond_credential && request.credential)
+          credential_value = std::move(request.credential->value);
+        if (!settle_credential(session, request.host_operation_id, std::move(credential_value)) &&
+            request.method != Method::cancel_credential)
+          throw ContractFailure(CITIZENSDK_ERROR_INVALID_STATE, "Credential challenge was revoked");
+        result = success(request, Value::list({}));
+      } catch (const ContractFailure &error) {
+        result = failure(error.code, error.what(), request, error.stage);
+      } catch (const Error &error) {
+        result = failure(error.code(), error.what(), request, error.stage());
+      } catch (...) {
+        result = failure(CITIZENSDK_ERROR_INTERNAL, "Credential response failed", request);
+      }
+      reply(std::move(*result));
+      return;
+    }
     if (request.method == Method::close) { begin_close(session, request, std::move(reply)); return; }
-    if (request.method >= Method::qr_parse && request.method <= Method::qr_encode) {
+    if ((request.method >= Method::qr_parse && request.method <= Method::qr_encode) ||
+        request.method == Method::qr_validate_sign_response || request.method == Method::qr_encode_document || request.method == Method::qr_prepare_account_authorization) {
       std::optional<Reply> result;
       try { result = success(request, session->transport->qr(request)); }
       catch (const ContractFailure &error) { result = failure(error.code, error.what(), request, error.stage); }
@@ -1290,6 +1486,8 @@ struct Sessions::State final : std::enable_shared_from_this<State> {
     require_owner();
     if (is_detached()) { sink = {}; return; }
     advance_epoch(); sink = {};
+    // 失去唯一凭据回包通道后撤销本实例实际挑战，不能无限保留一个不可见等待。
+    for (const auto &entry : sessions) cancel_credentials(entry.second);
   }
 
   void detach() noexcept {

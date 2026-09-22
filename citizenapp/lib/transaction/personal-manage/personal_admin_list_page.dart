@@ -11,7 +11,7 @@
 //   - 多签 Active:无按钮(创建已完成)
 //
 // "激活"行为本质是 votingengine `internal_vote(proposal_id, approve=true)`,
-// 沿用现有 [MultisigProposalDetailPage] 的 AppBusinessQrCodec 签名 + InternalVoteService 投票流程,
+// 沿用现有 [MultisigProposalDetailPage] 的 CitizenSDK二维码编解码 签名 + InternalVoteService 投票流程,
 // 不引入新的签名逻辑。
 
 import 'package:citizen_sdk/citizen_sdk.dart';

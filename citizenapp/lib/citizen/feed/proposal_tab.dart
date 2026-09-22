@@ -217,7 +217,7 @@ class _ProposalViewState extends State<ProposalTab> {
         .catchError((_) => <Institution>[]);
     CitizenWalletStateAccount? activeWallet;
     try {
-      activeWallet = (await _wallet.getState()).defaultAccount;
+      activeWallet = (await _wallet.getState().result).defaultAccount;
     } on Object {
       activeWallet = null;
     }

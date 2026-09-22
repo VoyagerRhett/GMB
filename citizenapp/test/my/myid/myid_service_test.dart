@@ -730,24 +730,26 @@ class _FakeWalletManager
   pendingHandover;
 
   @override
-  Future<CitizenWalletState> getState() async => CitizenWalletState(
+  CitizenSdkOperation<CitizenWalletState> getState() => testCitizenOperation(() async => CitizenWalletState(
+    initializationState: _wallet == null && accounts.isEmpty ? CitizenWalletInitializationState.empty : CitizenWalletInitializationState.ready,
+    cleanupPending: false,
     revision: BigInt.one,
     hotProfile: null,
     accounts: <CitizenWalletStateAccount>[
       if (_wallet != null) _wallet,
       ...accounts.where((account) => account.accountId != _wallet?.accountId),
     ],
-  );
+  ));
 
   @override
-  Future<CitizenSigningOutcome> begin(CitizenSigningIntent intent) async {
+  CitizenSdkOperation<CitizenSigningOutcome> begin(CitizenSigningIntent intent) => testCitizenOperation(() async {
     signCalls++;
     return CitizenSigningCompleted(
       accountId: intent.accountId,
       payloadHash: '0x${'00' * 32}',
       signature: Uint8List(64),
     );
-  }
+  });
 
   @override
   Future<void> activateAccountDataBinding({

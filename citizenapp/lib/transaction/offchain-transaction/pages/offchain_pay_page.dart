@@ -10,7 +10,6 @@ import 'package:citizenapp/transaction/offchain-transaction/rpc/offchain_clearin
 import 'package:citizenapp/transaction/offchain-transaction/models/payment_intent.dart';
 import 'package:citizenapp/transaction/offchain-transaction/services/clearing_bank_directory.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/signer/signing.dart' show kOpSignL3Pay;
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 扫码支付清算体系付款确认页。
@@ -221,7 +220,7 @@ class _OffchainClearingPayPageState extends State<OffchainClearingPayPage> {
 
       // 8. 签名:热钱包直签;冷钱包不能独立验证 PaymentIntent hash,必须拒绝。
       final sig = await _signSigningHash(
-        signingHash: intent.signingHash(),
+        signingHash: await intent.signingHash(),
         amountFen: amountFen,
         feeFen: feeFen,
       );

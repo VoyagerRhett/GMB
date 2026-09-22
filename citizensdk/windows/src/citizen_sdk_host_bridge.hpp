@@ -18,8 +18,6 @@
 
 namespace citizen_sdk::windows {
 
-class WalletFlow;
-
 class HostBridge final : public std::enable_shared_from_this<HostBridge> {
  public:
   HostBridge(std::filesystem::path storage_root,
@@ -31,7 +29,6 @@ class HostBridge final : public std::enable_shared_from_this<HostBridge> {
 
   citizensdk_error_code_t create_sdk(citizensdk_handle_t *out_sdk);
   uint32_t modules() const noexcept { return modules_; }
-  const void *authentication_owner() const noexcept { return &parent_window_; }
   citizensdk_handle_t sdk() const noexcept;
   citizensdk_handle_t public_sdk() const noexcept;
   citizensdk_error_code_t set_event_callback(citizensdk_event_callback_t callback,
@@ -40,13 +37,15 @@ class HostBridge final : public std::enable_shared_from_this<HostBridge> {
   WindowLease acquire_parent_window() const noexcept;
   citizensdk_host_vault_availability_t vault_availability() noexcept;
   citizensdk_error_code_t close();
+  citizensdk_error_code_t set_credential_provider(const citizensdk_credential_provider_v1_t *provider);
+  citizensdk_error_code_t respond_credential(uint64_t host_operation_id, citizensdk_bytes_view_t credential);
+  citizensdk_error_code_t cancel_credential(uint64_t host_operation_id);
 
-  uint64_t reserve_wallet_flow();
-  void finish_wallet_flow(uint64_t token) noexcept;
   RequestRouter &private_requests() noexcept { return private_requests_; }
   citizensdk_error_code_t submit_private(
       const std::function<citizensdk_error_code_t(citizensdk_request_id_t *)> &accept,
-      RequestRouter::Handler handler, citizensdk_request_id_t *out_request);
+      RequestRouter::Handler handler, citizensdk_request_id_t *out_request,
+      RequestRouter::Cancellation cancel = {});
 
   HostRecord chain_load();
   HostRecord chain_cas(uint64_t expected, const Bytes &candidate);
@@ -61,10 +60,10 @@ class HostBridge final : public std::enable_shared_from_this<HostBridge> {
   HostRecord secret_load(const SecretIdentity &identity);
   HostRecord secret_cas(const SecretIdentity &identity, uint64_t expected,
                         const Bytes &candidate);
-  void vault_ensure(const WalletKey &key,
+  void vault_ensure(uint64_t host_operation_id, const WalletKey &key,
                     const std::array<uint8_t, 16> &operation_id);
   bool vault_has(const WalletKey &key);
-  Bytes vault_wrap(const WalletKey &key,
+  Bytes vault_wrap(uint64_t host_operation_id, const WalletKey &key,
                    const std::array<uint8_t, 16> &operation_id,
                    const uint8_t plaintext_dek[32]);
   void vault_unwrap(uint64_t host_operation_id, const WalletKey &key,
@@ -95,9 +94,8 @@ class HostBridge final : public std::enable_shared_from_this<HostBridge> {
   };
   template <typename Function>
   auto service_call(Function function) -> decltype(function()) {
-    // Admission is short and protects resource lifetime. The provider itself
-    // must run unlocked: authentication waits for the Win32 owner, which is
-    // permitted to query Host state or request a BUSY close in the meantime.
+    // 短租约保护Host资源生命周期；凭据等待不持有Host锁，
+    // 允许宿主异步回包、查询状态和发起真实取消/关闭。
     ServiceLease lease(*this);
     return function();
   }

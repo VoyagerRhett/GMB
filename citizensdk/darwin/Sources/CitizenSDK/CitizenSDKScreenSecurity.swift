@@ -1,66 +1,44 @@
 import Foundation
-
 #if os(iOS)
 import UIKit
-
-/// Best available iOS screen boundary: obscures on capture/background.
-@MainActor
-internal final class CitizenSDKScreenSecurity {
-    private weak var view: UIView?
-    private let cover = UIView()
-    private var tokens: [NSObjectProtocol] = []
-
-    init(view: UIView) {
-        self.view = view
-        cover.backgroundColor = .systemBackground
-        cover.isHidden = true
-        cover.accessibilityLabel = "钱包内容已隐藏"
-        view.addSubview(cover)
-        cover.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            cover.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            cover.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            cover.topAnchor.constraint(equalTo: view.topAnchor),
-            cover.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-        ])
-        let center = NotificationCenter.default
-        tokens = [
-            center.addObserver(forName: UIScreen.capturedDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.refresh() }
-            },
-            center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.cover.isHidden = false }
-            },
-            center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.refresh() }
-            },
-        ]
-        refresh()
-    }
-
-    private func refresh() { cover.isHidden = !UIScreen.main.isCaptured }
-
-    /// Wallet-flow teardown runs on the main actor before its view is released.
-    func finish() {
-        tokens.forEach(NotificationCenter.default.removeObserver)
-        tokens.removeAll(keepingCapacity: false)
-        cover.removeFromSuperview()
-    }
-}
 #elseif os(macOS)
 import AppKit
+#endif
 
-/// macOS can explicitly exclude the SDK-owned wallet window from sharing.
+/// 只报告系统前后台/录屏事实，不创建遮罩、窗口、文本或约束；原UI保护层属于宿主。
 @MainActor
 internal final class CitizenSDKScreenSecurity {
-    private weak var window: NSWindow?
-    init(window: NSWindow) {
-        self.window = window
-        window.sharingType = .none
+    enum Change: Sendable { case inactive, background, capture }
+    private var tokens: [NSObjectProtocol] = []
+
+    var allowsDelivery: Bool {
+        #if os(iOS)
+        return UIApplication.shared.applicationState == .active && !UIScreen.main.isCaptured
+        #elseif os(macOS)
+        return NSApplication.shared.isActive
+        #else
+        return false
+        #endif
     }
 
-    /// The non-closable wallet sheet is destroyed immediately after the flow,
-    /// so it must not be made shareable during teardown.
-    func finish() { window = nil }
+    init(changed: @escaping @MainActor @Sendable (Change) -> Void) {
+        func observe(_ name: Notification.Name, _ value: Change) {
+            tokens.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in
+                Task { @MainActor in changed(value) }
+            })
+        }
+        #if os(iOS)
+        observe(UIApplication.willResignActiveNotification, .inactive)
+        observe(UIApplication.didEnterBackgroundNotification, .background)
+        observe(UIApplication.protectedDataWillBecomeUnavailableNotification, .background)
+        observe(UIScreen.capturedDidChangeNotification, .capture)
+        #elseif os(macOS)
+        observe(NSApplication.didResignActiveNotification, .inactive)
+        #endif
+    }
+
+    func finish() {
+        tokens.forEach(NotificationCenter.default.removeObserver)
+        tokens.removeAll()
+    }
 }
-#endif

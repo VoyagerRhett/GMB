@@ -1,3 +1,4 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'dart:typed_data';
 
 import 'package:citizenapp/8964/services/square_api_client.dart';
@@ -86,14 +87,14 @@ class DeviceSubkeyRegistrar {
     // 跨端 wire 文本统一带 `0x`（ADR-041），后端入口一次 require 0x + strip。
     final publicKey = await _subkey.publicKeyHex(cidNumber);
     final issuedAt = issuedAtMillis ?? DateTime.now().millisecondsSinceEpoch;
-    final payload = encodeDeviceBindingPayload(
+    final payload = await encodeDeviceBindingPayload(
       cidNumber: cidNumber,
       bindingRevision: bindingRevision,
       accountId: accountId,
       p256PublicKeyHex: publicKey,
       issuedAtMillis: issuedAt,
     );
-    final message = buildDeviceBindingSigningMessage(
+    final message = await buildDeviceBindingSigningMessage(
       cidNumber,
       bindingRevision,
       accountId,

@@ -1,37 +1,18 @@
-import 'dart:convert';
+import '../support/fake_citizen_sdk.dart';
 
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:citizenapp/qr/scanner/scanner.dart';
 
-import 'package:citizenapp/qr/bodies/sign_request_body.dart';
 import 'package:citizenapp/qr/pages/qr_scan_page.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
 
 /// 扫码填地址时扫到签名请求:必须给明确去向,不得用「无法识别」含糊过去。
 ///
 /// 签名请求(广场动作 / 公民身份 / 注册局占号换绑)统一在「聊天 → 扫一扫」处理;
 /// 交易页与多签各页的地址框扫码都走 [QrScanMode.transfer],共用这一条提示。
 void main() {
-  // 与 qr_router_test 的 k=1 样本同形,保证是扫码页真正会收到的字节形态。
-  final signRequestCode = jsonEncode({
-    'p': QrProtocol.qrV1,
-    'k': QrKind.signRequest.code,
-    'i': 'ch-0123456789abcdef',
-    'e': DateTime.now().millisecondsSinceEpoch ~/ 1000 + 90,
-    'b': SignRequestBody.fromHex(
-      action: QrActions.squareAccountAction,
-      signerPublicKeyHex:
-          '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-      payloadHex: '0x6369647c736967',
-    ).toJson(),
-  });
-  final accountCode = jsonEncode({
-    'p': QrProtocol.qrV1,
-    'k': QrKind.accountIdCode.code,
-    'b': {'n': '0x${List.filled(32, '11').join()}'},
-  });
+  const signRequestCode = 'synthetic-sign-request';
+  const accountCode = 'synthetic-account-code';
 
   testWidgets('transfer 模式扫到签名请求:指路聊天扫一扫,不回传结果', (tester) async {
     QrScanTransferResult? popped;
@@ -101,8 +82,7 @@ Future<Object?> unawaitedPushMode(
       builder: (_) => QrScanPage(
         mode: mode,
         initialCode: initialCode,
-        scannerController: ScannerController(backend: _FakeScannerBackend()),
-        qr: const _TestQr(),
+        qr: _qrFor(initialCode),
       ),
     ),
   );
@@ -117,51 +97,23 @@ Future<QrScanTransferResult?> unawaitedPush(
       builder: (_) => QrScanPage(
         mode: QrScanMode.transfer,
         initialCode: initialCode,
-        scannerController: ScannerController(backend: _FakeScannerBackend()),
-        qr: const _TestQr(),
+        qr: _qrFor(initialCode),
       ),
     ),
   );
 }
 
-/// 页面测试只验证入口业务判断，不接触真实相机插件。
-final class _FakeScannerBackend implements ScannerDeviceBackend {
-  @override
-  Future<Iterable<String?>> analyzeImage(String imagePath) async => const [];
-
-  @override
-  Widget buildPreview({required ScannerCandidatesCallback onCandidates}) =>
-      const SizedBox.expand();
-
-  @override
-  Future<void> dispose() async {}
-
-  @override
-  Future<void> start() async {}
-
-  @override
-  Future<void> stop() async {}
-
-  @override
-  Future<void> toggleTorch() async {}
-}
-
-final class _TestQr implements CitizenQr {
-  const _TestQr();
-
-  @override
-  Future<CitizenQrDocument> parse(String text) async {
-    if (text.contains('"k":5')) {
-      return CitizenQrDocument(
-        kind: CitizenQrKind.accountId,
-        canonicalText: text,
-        accountId:
-            '0x1111111111111111111111111111111111111111111111111111111111111111',
-      );
-    }
-    throw const FormatException('CitizenApp business QR');
-  }
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
-}
+/// 页面只根据SDK事实选择原提示；协议有效性由SDK Core金标测试覆盖。
+TestCitizenQr _qrFor(String code) => TestCitizenQr()
+  ..captureFactory = (_) async => TestCitizenQrCapture()
+  ..parseDocument = (text) async {
+    expect(text, code);
+    return CitizenQrDocument(
+      kind: code == 'synthetic-account-code' ? CitizenQrKind.accountId : CitizenQrKind.signRequest,
+      canonicalText: code,
+      scanPurposeMask: code == 'synthetic-account-code' ? 195 : 80,
+      accountId: code == 'synthetic-account-code' ? testCitizenAccountId : null,
+      signerAccountId: code == 'synthetic-sign-request' ? testCitizenAccountId : null,
+      action: code == 'synthetic-sign-request' ? CitizenQrActions.squareAccountAction : null,
+    );
+  };

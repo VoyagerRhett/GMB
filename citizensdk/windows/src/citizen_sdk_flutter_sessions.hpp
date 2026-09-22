@@ -56,6 +56,9 @@ class NativeTransport {
   virtual WalletCancellation present_qr(const DecodedRequest &, QrCompletion) {
     throw ContractFailure(CITIZENSDK_ERROR_UNSUPPORTED, "QR native UI is unavailable");
   }
+  virtual void cancel_credential(uint64_t) {
+    throw ContractFailure(CITIZENSDK_ERROR_UNSUPPORTED, "Credential transport is unavailable");
+  }
   virtual void cancel(citizensdk_request_id_t request) = 0;
   virtual WalletCancellation present(const DecodedRequest &request,
                                       WalletFlowCompletion completion) = 0;

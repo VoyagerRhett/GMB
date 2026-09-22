@@ -8,10 +8,6 @@ import org.citizen.sdk.internal.CitizenSdkNative
 import org.citizen.sdk.internal.CitizenSdkNativeCodec
 import org.citizen.sdk.internal.CitizenSdkNativeResult
 import org.citizen.sdk.internal.CitizenSdkRequestRouter
-import org.citizen.sdk.ui.CitizenSdkWalletFlowContract
-import org.citizen.sdk.ui.CitizenSdkWalletFlowCoordinator
-import org.citizen.sdk.ui.CitizenSdkPrivateKeyDisplayBuffer
-import org.citizen.sdk.ui.CitizenSdkQrCoordinator
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
@@ -49,6 +45,10 @@ class CitizenSdk private constructor(
     }
     /** Only native handles are retained; the public preparation identity is never a Core handle. */
     private val preparedTransactions = ConcurrentHashMap<String, Long>()
+    private val privateKeys = ConcurrentHashMap.newKeySet<CitizenSdkPrivateKey>()
+    private val preparedWallets = ConcurrentHashMap.newKeySet<CitizenSdkPreparedWallet>()
+    private val qrReviews = ConcurrentHashMap.newKeySet<CitizenQrReview>()
+    private val qrCaptures = ConcurrentHashMap.newKeySet<CitizenSdkQrCapture>()
 
     @Volatile
     private var eventListener: CitizenSdkEvents.Listener? = listener
@@ -71,6 +71,11 @@ class CitizenSdk private constructor(
             native.bind(requests) { event ->
                 if (event is CitizenSdkEvents.Event.LifecycleChanged) {
                     lifecycle = event.lifecycle
+                }
+                if (event is CitizenSdkEvents.Event.WalletChanged) {
+                    privateKeys.toList().forEach { resource ->
+                        CompletableFuture.runAsync { resource.close() }
+                    }
                 }
                 eventListener?.onEvent(event)
             }
@@ -103,7 +108,11 @@ class CitizenSdk private constructor(
 
     fun detachActivity(activity: FragmentActivity) {
         synchronized(lifecycleGate) {
-            if (!closed.get()) hostServices.detachActivity(activity)
+            if (!closed.get()) {
+                privateKeys.toList().forEach { it.close() }
+                closeQrCaptures()
+                hostServices.detachActivity(activity)
+            }
         }
     }
 
@@ -216,20 +225,22 @@ class CitizenSdk private constructor(
         accountId: ByteArray,
         salt: ByteArray,
         info: ByteArray,
-    ): CompletableFuture<ByteArray> {
+    ): CitizenSdkOperation<ByteArray> {
         val checkedAccount = accountId.requireSize(32, "account id")
         require(salt.size == 32 && info.size in 1..256) {
             "application key requires 32-byte salt and 1..256-byte info"
         }
         val saltCopy = salt.clone()
         val infoCopy = info.clone()
-        return request({ native.deriveApplicationKey(checkedAccount, saltCopy, infoCopy) }) {
+        val operation = requestOperation({ native.deriveApplicationKey(checkedAccount, saltCopy, infoCopy) }) {
             val source = (it as CitizenSdkNativeResult.ApplicationKey).value
             source.clone().also { source.fill(0) }
-        }.whenComplete { _, _ ->
+        }
+        operation.future.whenComplete { _, _ ->
             saltCopy.fill(0)
             infoCopy.fill(0)
         }
+        return operation
     }
 
     fun exportState(): CompletableFuture<CitizenChainState> =
@@ -290,101 +301,79 @@ class CitizenSdk private constructor(
     fun getFeeSnapshot(): CompletableFuture<CitizenFeeSnapshot> =
         request({ native.getFeeSnapshot() }) { (it as CitizenSdkNativeResult.Fee).value }
 
-    fun getWalletProfile(): CompletableFuture<CitizenWalletProfile?> =
-        request({ native.getWalletProfile() }) { (it as CitizenSdkNativeResult.Profile).value }
+    /** 所有目录事实均来自同一次Core快照，冷钱包同样满足初始化门禁。 */
+    fun getWalletState(): CitizenSdkOperation<CitizenWalletState> =
+        requestOperation({ native.getWalletState() }) { (it as CitizenSdkNativeResult.WalletState).value }
 
-    /** Stable secret-free hot/cold catalog; its first item is the default account. */
-    fun getWalletState(): CompletableFuture<CitizenWalletState> =
-        request({ native.getWalletState() }) { (it as CitizenSdkNativeResult.WalletState).value }
-
-    fun importColdAccount(accountId: ByteArray, name: String): CompletableFuture<CitizenWalletState> {
-        val normalized = checkedAccountName(name)
-        return walletMutation {
-            request({ native.importColdAccountId(accountId.requireSize(32, "accountId"), normalized) }) {
-                (it as CitizenSdkNativeResult.WalletState).value
-            }
+    fun importColdAccount(accountId: ByteArray, name: String = ""): CitizenSdkOperation<CitizenWalletState> {
+        val normalized = if (name.isEmpty()) "" else checkedAccountName(name)
+        return requestOperation({ native.importColdAccountId(accountId.requireSize(32, "accountId"), normalized) }) {
+            (it as CitizenSdkNativeResult.WalletState).value
         }
     }
 
-    fun importColdAccount(ss58Address: String, name: String): CompletableFuture<CitizenWalletState> {
+    fun importColdAccount(ss58Address: String, name: String = ""): CitizenSdkOperation<CitizenWalletState> {
         require(ss58Address.isNotEmpty() && ss58Address.toByteArray(Charsets.UTF_8).size <= 64) {
             "cold account SS58 is invalid"
         }
-        val normalized = checkedAccountName(name)
-        return walletMutation {
-            request({ native.importColdAccountSs58(ss58Address, normalized) }) {
-                (it as CitizenSdkNativeResult.WalletState).value
-            }
+        val normalized = if (name.isEmpty()) "" else checkedAccountName(name)
+        return requestOperation({ native.importColdAccountSs58(ss58Address, normalized) }) {
+            (it as CitizenSdkNativeResult.WalletState).value
         }
+    }
+
+    /** 扫码导入只接纳账户码，不把用户码或其它码型当作账户输入。 */
+    fun importColdAccountCode(code: String, name: String = ""): CitizenSdkOperation<CitizenWalletState> {
+        val content = parseForPurpose(code, CitizenQrScanPurpose.COLD_ACCOUNT_IMPORT).document.content as? CitizenQrDocument.Content.AccountId
+            ?: throw CitizenSdkException(CitizenSdkErrorCode.INVALID_ARGUMENT, "QR code is not an account code")
+        val bytes = ByteArray(32) { index -> content.accountId.substring(2 + index * 2, 4 + index * 2).toInt(16).toByte() }
+        return importColdAccount(bytes, name)
     }
 
     fun reorderWalletAccountsWithoutDefaultChange(
         expectedRevision: String,
         accountIds: List<ByteArray>,
-    ): CompletableFuture<CitizenWalletState> {
+    ): CitizenSdkOperation<CitizenWalletState> {
         require(accountIds.size in 1..3980) { "wallet catalog must contain 1..3980 accounts" }
         val revision = java.lang.Long.parseUnsignedLong(expectedRevision)
         val checked = accountIds.map { it.requireSize(32, "accountId") }.toTypedArray()
-        return walletMutation {
-            request({ native.reorderWalletAccounts(revision, checked) }) {
-                (it as CitizenSdkNativeResult.WalletState).value
-            }
-        }
-    }
-
-    fun renameAccount(accountId: ByteArray, name: String): CompletableFuture<CitizenWalletState> {
-        val normalized = checkedAccountName(name)
-        return walletMutation {
-            request({ native.renameAnyAccount(accountId.requireSize(32, "accountId"), normalized) }) {
-                (it as CitizenSdkNativeResult.WalletState).value
-            }
-        }
-    }
-
-    fun deleteAccount(accountId: ByteArray): CompletableFuture<CitizenWalletState> = walletMutation {
-        request({ native.deleteAnyAccount(accountId.requireSize(32, "accountId")) }) {
+        return requestOperation({ native.reorderWalletAccounts(revision, checked) }) {
             (it as CitizenSdkNativeResult.WalletState).value
         }
     }
 
-    fun setActiveWalletAccount(accountId: ByteArray): CompletableFuture<CitizenWalletProfile> =
-        walletMutation {
-            request({ native.setActiveWalletAccount(accountId.requireSize(32, "accountId")) }) {
-                requireWalletProfile(it, "set active wallet account")
-            }
-        }
-
-    fun renameWalletAccount(accountId: ByteArray, name: String): CompletableFuture<CitizenWalletProfile> {
-        CitizenSdkInputLimits.requireWalletAccountNameInput(name)
-        require(name.codePoints().noneMatch { value ->
-            value in 0x00..0x1f || value in 0x7f..0x9f
-        }) { "wallet account name must not contain control characters" }
-        val normalized = name.trim()
-        require(normalized.codePointCount(0, normalized.length) in 1..30) {
-            "wallet account name must contain 1..30 Unicode scalars"
-        }
-        return walletMutation {
-            request({
-                native.renameWalletAccount(accountId.requireSize(32, "accountId"), normalized)
-            }) {
-                requireWalletProfile(it, "rename wallet account")
-            }
+    fun renameAccount(accountId: ByteArray, name: String): CitizenSdkOperation<CitizenWalletState> {
+        val normalized = checkedAccountName(name)
+        return requestOperation({ native.renameAnyAccount(accountId.requireSize(32, "accountId"), normalized) }) {
+            (it as CitizenSdkNativeResult.WalletState).value
         }
     }
 
-    /** Atomically returns the post-delete profile under the process mutation gate. */
-    fun deleteWalletAccount(accountId: ByteArray): CompletableFuture<CitizenWalletProfile?> =
-        walletMutationWithProfile {
-            native.deleteWalletAccount(accountId.requireSize(32, "accountId"))
+    fun deleteAccount(accountId: ByteArray): CitizenSdkOperation<CitizenWalletState> =
+        requestOperation({ native.deleteAnyAccount(accountId.requireSize(32, "accountId")) }) {
+            (it as CitizenSdkNativeResult.WalletState).value
         }
 
-    /** Returns `null` only after Core deletion and the same gated profile read complete. */
-    fun deleteWallet(): CompletableFuture<CitizenWalletProfile?> =
-        walletMutationWithProfile { native.deleteWallet() }
+    fun setActiveWalletAccount(accountId: ByteArray): CitizenSdkOperation<CitizenWalletProfile> =
+        requestOperation({ native.setActiveWalletAccount(accountId.requireSize(32, "accountId")) }) {
+            requireWalletProfile(it, "set active wallet account")
+        }
 
-    /** Returns the post-reconciliation profile without a host-side query window. */
-    fun reconcileWalletCleanup(): CompletableFuture<CitizenWalletProfile?> =
-        walletMutationWithProfile { native.reconcileWalletCleanup() }
+    /** 胁迫/PIN清除不追加认证；用户主动“签名并删除”使用独立授权入口。 */
+    fun deleteWallet(): CitizenSdkOperation<Unit> = emptyOperation { native.deleteWallet() }
+    fun signAndDeleteWallet(): CitizenSdkOperation<Unit> = emptyOperation { native.signAndDeleteWallet() }
+
+    /** 清理完成后读公开profile；取消只转交当前真实请求，不提前完成结果。 */
+    fun reconcileWalletCleanup(): CitizenSdkOperation<CitizenWalletProfile?> {
+        val cleanup = emptyOperation { native.reconcileWalletCleanup() }
+        val current = java.util.concurrent.atomic.AtomicReference<() -> Boolean>(cleanup::cancel)
+        val result = cleanup.future.thenCompose {
+            val read = requestOperation({ native.getWalletProfile() }) { (it as CitizenSdkNativeResult.Profile).value }
+            current.set(read::cancel)
+            read.future
+        }
+        return CitizenSdkOperation(cleanup.operationId, result) { current.get().invoke() }
+    }
 
     /** 通用签名只接收不透明载荷；应用业务语义不会进入 SDK。 */
     val signing = CitizenSigning.create(
@@ -392,6 +381,8 @@ class CitizenSdk private constructor(
         ::beginSigning,
         ::consumeExternalSignature,
         ::cancelSigningSession,
+        ::reviewQrRequest,
+        ::signQrRequest,
     )
 
     /**
@@ -402,7 +393,7 @@ class CitizenSdk private constructor(
         expectedRevision: String,
         orderedAccountIds: List<ByteArray>,
         ttlSeconds: Long = 120,
-    ): CompletableFuture<CitizenDefaultAccountChangeOutcome> {
+    ): CitizenSdkOperation<CitizenDefaultAccountChangeOutcome> {
         require(orderedAccountIds.size in 1..256) {
             "default-account change must contain 1..256 accounts"
         }
@@ -411,36 +402,61 @@ class CitizenSdk private constructor(
         val checked = orderedAccountIds.map {
             it.requireSize(32, "accountId")
         }.toTypedArray()
-        return walletMutation {
-            request({ native.beginDefaultAccountChange(revision, checked, ttlSeconds) }) {
-                (it as? CitizenSdkNativeResult.DefaultAccountChange)?.value
-                    ?: throw CitizenSdkException(
-                        CitizenSdkErrorCode.INTEGRITY,
-                        "Core returned an invalid default-account-change result kind",
-                    )
-            }
+        return requestOperation({ native.beginDefaultAccountChange(revision, checked, ttlSeconds) }) {
+            (it as? CitizenSdkNativeResult.DefaultAccountChange)?.value
+                ?: throw CitizenSdkException(
+                    CitizenSdkErrorCode.INTEGRITY,
+                    "Core returned an invalid default-account-change result kind",
+                )
         }
     }
 
     fun consumeDefaultAccountChange(
         sessionId: String,
         response: String,
-    ): CompletableFuture<CitizenDefaultAccountChangeOutcome> {
+    ): CitizenSdkOperation<CitizenDefaultAccountChangeOutcome> {
         requireExternalSigningText(sessionId, response)
-        return walletMutation {
-            request({ native.consumeDefaultAccountChange(sessionId, response) }) {
-                (it as? CitizenSdkNativeResult.DefaultAccountChange)?.value
-                    ?: throw CitizenSdkException(
-                        CitizenSdkErrorCode.INTEGRITY,
-                        "Core returned an invalid default-account-change result kind",
-                    )
-            }
+        return requestOperation({ native.consumeDefaultAccountChange(sessionId, response) }) {
+            (it as? CitizenSdkNativeResult.DefaultAccountChange)?.value
+                ?: throw CitizenSdkException(
+                    CitizenSdkErrorCode.INTEGRITY,
+                    "Core returned an invalid default-account-change result kind",
+                )
         }
     }
 
     /** QR 协议与会话都由 Rust 处理；图像编解码在五端共同使用 ZXing-C++。 */
+    fun parseForPurpose(text: String, purpose: CitizenQrScanPurpose): CitizenQrScanResult =
+        CitizenQrScanResult.forPurpose(qrParse(text), purpose)
+
+    /** 宿主只提供预览纹理和监听器；权限、CameraX、帧识别及资源释放均由SDK管理。 */
+    fun openCapture(
+        activity: FragmentActivity,
+        texture: android.graphics.SurfaceTexture,
+        purpose: CitizenQrScanPurpose,
+        listener: CitizenSdkQrCapture.Listener,
+    ): CompletableFuture<CitizenSdkQrCapture> = synchronized(lifecycleGate) {
+        requireOpen(); requireQrModule()
+        check(android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) { "camera admission requires main thread" }
+        if (activity.isDestroyed || activity.isFinishing) throw CitizenSdkException(CitizenSdkErrorCode.UNAVAILABLE, "camera host is unavailable")
+        val resource = CitizenSdkQrCapture(this, activity, texture, purpose, listener)
+        qrCaptures.add(resource)
+        resource.closed.whenComplete { _, _ -> qrCaptures.remove(resource) }
+        try { resource.open() } catch (error: Throwable) {
+            resource.close().thenCompose { failedFuture<CitizenSdkQrCapture>(error) }
+        }
+    }
+
+    /** 包含尚在等待系统权限/初始化的采集，关闭不能只处理已交给Flutter的资源。 */
+    @JvmSynthetic
+    internal fun closeQrCaptures(): List<CompletableFuture<Void>> = qrCaptures.toList().map { it.close() }
+
     fun qrParse(text: String): CitizenQrDocument =
         synchronized(lifecycleGate) { requireOpen(); native.qrParse(text) }
+    fun qrEncodeDocument(content: CitizenQrContent): CitizenQrDocument =
+        synchronized(lifecycleGate) { requireOpen(); native.qrEncodeDocument(content.inputJson) }
+    fun qrPrepareAccountAuthorization(action: Int, payload: ByteArray, accountId: String): CitizenQrAuthorization =
+        synchronized(lifecycleGate) { requireOpen(); native.qrPrepareAccountAuthorization(action, payload, accountId) }
 
     fun qrCreateSignRequest(
         action: Int, signerAccountId: ByteArray, reviewPayload: ByteArray, ttlSeconds: Long,
@@ -448,6 +464,10 @@ class CitizenSdk private constructor(
         requireOpen()
         native.qrCreateSignRequest(action, signerAccountId.requireSize(32, "signerAccountId"), reviewPayload.clone(), ttlSeconds)
     }
+
+    /** 只验证本实例会话，不消费；最终提交仍须调用原消费入口。 */
+    fun qrValidateSignResponse(sessionId: String, response: String) =
+        synchronized(lifecycleGate) { requireOpen(); native.qrValidateSignResponse(sessionId, response) }
 
     fun qrConsumeSignResponse(text: String): ByteArray =
         synchronized(lifecycleGate) { requireOpen(); native.qrConsumeSignResponse(text) }
@@ -464,53 +484,64 @@ class CitizenSdk private constructor(
             native.qrDecodeLuminance(data.clone(), width, height, rowStride)
         }
 
+    /** 相册只提供编码图片字节；尺寸检查、像素解码、ZXing识别和用途过滤全部在SDK。 */
+    fun decodeImage(encodedImage: ByteArray, purpose: CitizenQrScanPurpose): List<CitizenQrScanResult> {
+        require(encodedImage.isNotEmpty() && encodedImage.size <= 16 * 1024 * 1024) { "encoded image size is invalid" }
+        synchronized(lifecycleGate) { requireOpen(); requireQrModule() }
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(encodedImage, 0, encodedImage.size, bounds)
+        require(bounds.outWidth in 1..4096 && bounds.outHeight in 1..4096) { "decoded image dimensions are invalid" }
+        val bitmap = android.graphics.BitmapFactory.decodeByteArray(encodedImage, 0, encodedImage.size)
+            ?: throw CitizenSdkException(CitizenSdkErrorCode.DECODE, "encoded image could not be decoded")
+        if (bitmap.width !in 1..4096 || bitmap.height !in 1..4096) {
+            bitmap.recycle()
+            throw CitizenSdkException(CitizenSdkErrorCode.INVALID_ARGUMENT, "decoded image dimensions are invalid")
+        }
+        val luminance = ByteArray(bitmap.width * bitmap.height)
+        val row = IntArray(bitmap.width)
+        try {
+            for (y in 0 until bitmap.height) {
+                bitmap.getPixels(row, 0, bitmap.width, 0, y, bitmap.width, 1)
+                for (x in row.indices) {
+                    val color = row[x]
+                    luminance[y * bitmap.width + x] = (((color shr 16 and 255) * 77 +
+                        (color shr 8 and 255) * 150 + (color and 255) * 29) shr 8).toByte()
+                }
+            }
+            val documents = try {
+                synchronized(lifecycleGate) { requireOpen(); native.qrDecodeLuminanceAll(luminance, bitmap.width, bitmap.height, bitmap.width) }
+            } catch (error: CitizenSdkException) {
+                if (error.code == CitizenSdkErrorCode.NOT_FOUND) return emptyList()
+                throw error
+            }
+            return documents.map { CitizenQrScanResult.forPurpose(it, purpose) }
+        } finally { row.fill(0); luminance.fill(0); bitmap.recycle() }
+    }
+
     fun qrEncode(text: String, scale: Int = 4): CitizenQrImage =
         synchronized(lifecycleGate) {
             requireOpen(); requireQrModule()
             native.qrEncode(text, scale)
         }
 
-    /** 完整相机界面只需要 QR 模块；不会初始化钱包、金库或启动轻节点。 */
-    fun qrScan(activity: FragmentActivity): CitizenSdkOperation<CitizenQrDocument> = launchQr(activity, null)
-
-    /** SDK 展示完整 Core 审阅、确认后安全签名，并直接提供响应二维码图像。 */
-    fun signQrRequest(activity: FragmentActivity, text: String): CitizenSdkOperation<CitizenQrSigned> {
-        val operation = launchQr(activity, text)
-        return CitizenSdkOperation(operation.operationId, operation.future.thenApply {
-            CitizenQrSigned(it, checkNotNull(it.signedImage) { "签名二维码结果缺失" })
-        }, operation::cancel)
-    }
-
-    private fun launchQr(activity: FragmentActivity, text: String?): CitizenSdkOperation<CitizenQrDocument> =
-        synchronized(lifecycleGate) {
-            requireOpen(); requireQrModule()
-            CitizenSdkWalletFlowCoordinator.requireCloseReady(this)
-            CitizenSdkQrCoordinator.launch(this, activity, text)
+    /** Core返回审阅事实；是否确认和如何展示由宿主自己的UI负责。 */
+    private fun reviewQrRequest(text: String): CitizenSdkOperation<CitizenQrReview> =
+        requestOperation({ native.reviewQrSignRequest(text) }) {
+            check(it is CitizenSdkNativeResult.QrReview)
+            CitizenQrReview(native, it.token, it.json) { review -> qrReviews.remove(review) }
+                .also { review -> qrReviews.add(review) }
         }
 
-    @JvmSynthetic
-    internal fun reviewQrSignRequest(text: String): CitizenSdkOperation<CitizenSdkQrReview> =
-        synchronized(lifecycleGate) {
-            requireOpen()
-            requests.submitOperation({ native.reviewQrSignRequest(text) }, {
-                check(it is CitizenSdkNativeResult.QrReview)
-                CitizenSdkQrReview(native, it.token, it.json)
-            })
-        }
-
-    @JvmSynthetic
-    internal fun signQrReview(review: CitizenSdkQrReview): CitizenSdkOperation<CitizenQrDocument> =
-        synchronized(lifecycleGate) {
-            requireOpen()
-            val operation = review.withHandle { token ->
-                requests.submitOperation({ native.signQrRequest(token) }, {
-                    check(it is CitizenSdkNativeResult.QrSigned); it.value
-                })
+    private fun signQrRequest(review: CitizenQrReview): CitizenSdkOperation<CitizenQrSigned> {
+        val operation = review.withHandle(native) { token ->
+            requestOperation({ native.signQrRequest(token) }) {
+                check(it is CitizenSdkNativeResult.QrSigned)
+                CitizenQrSigned(it.value, qrEncode(it.value.canonicalText))
             }
-            review.close()
-            operation.future.whenComplete { _, _ -> readinessBoundaryCompleted() }
-            operation
         }
+        // Core原子领取阻止重复签名；显式release单独归还引用，清理失败不掩盖已接纳操作。
+        return operation
+    }
 
     private fun requireQrModule() {
         if (selectedModules and CitizenSdkModules.QR == 0) throw CitizenSdkException(
@@ -518,15 +549,15 @@ class CitizenSdk private constructor(
         )
     }
 
-    private fun sign(accountId: ByteArray, message: ByteArray): CompletableFuture<CitizenSignature> {
+    private fun sign(accountId: ByteArray, message: ByteArray): CitizenSdkOperation<CitizenSignature> {
         CitizenSdkInputLimits.requireSignPayload(message.size)
-        return request({
+        return requestOperation({
             native.signWalletPayload(accountId.requireSize(32, "accountId"), message.clone())
         }) { (it as CitizenSdkNativeResult.Signature).value }
     }
 
-    private fun beginSigning(intent: CitizenSigningIntent): CompletableFuture<CitizenSigningOutcome> =
-        request({ native.beginSigning(intent) }) {
+    private fun beginSigning(intent: CitizenSigningIntent): CitizenSdkOperation<CitizenSigningOutcome> =
+        requestOperation({ native.beginSigning(intent) }) {
             (it as? CitizenSdkNativeResult.SigningOutcome)?.value
                 ?: throw CitizenSdkException(
                     CitizenSdkErrorCode.INTEGRITY,
@@ -537,9 +568,9 @@ class CitizenSdk private constructor(
     private fun consumeExternalSignature(
         sessionId: String,
         response: String,
-    ): CompletableFuture<CitizenSigningOutcome> {
+    ): CitizenSdkOperation<CitizenSigningOutcome> {
         requireExternalSigningText(sessionId, response)
-        return request({ native.consumeExternalSignature(sessionId, response) }) {
+        return requestOperation({ native.consumeExternalSignature(sessionId, response) }) {
             (it as? CitizenSdkNativeResult.SigningOutcome)?.value
                 ?: throw CitizenSdkException(
                     CitizenSdkErrorCode.INTEGRITY,
@@ -669,34 +700,21 @@ class CitizenSdk private constructor(
             (it as CitizenSdkNativeResult.TransactionHistoryPage).value
         }
 
-    /** Starts a non-exported FLAG_SECURE flow; no secret is an API argument. */
-    fun launchWalletFlow(
-        activity: FragmentActivity,
-        request: CitizenSdkWalletFlowContract.Request,
-        callback: CitizenSdkWalletFlowContract.Callback,
-    ): CitizenSdkWalletFlowCoordinator {
-        return synchronized(lifecycleGate) {
-            requireOpen()
-            CitizenSdkQrCoordinator.requireCloseReady(this)
-            hostServices.attachActivity(activity)
-            CitizenSdkWalletFlowCoordinator.launch(this, activity, request, callback)
-        }
-    }
-
-    /** 只控制 SDK 自有安全显示界面；操作结果不含私钥、内部句柄或显示回调。 */
-    fun viewAccountPrivateKey(activity: FragmentActivity, accountId: ByteArray): CitizenSdkOperation<Unit> =
+    /** 只打开无窗口资源；原应用页面决定何时显示、请求reveal和关闭。 */
+    fun openPrivateKey(accountId: ByteArray): CompletableFuture<CitizenSdkPrivateKey> =
         synchronized(lifecycleGate) {
             requireOpen()
-            val checked = accountId.requireSize(32, "accountId")
-            CitizenSdkQrCoordinator.requireCloseReady(this)
-            requireWalletUI()
-            hostServices.attachActivity(activity)
-            CitizenSdkWalletFlowCoordinator.launchPrivateKeyView(this, activity, checked)
+            val host = hostServices.privateKeyActivity()
+                ?: throw CitizenSdkException(CitizenSdkErrorCode.AUTHENTICATION_REQUIRED, "private key requires a foreground host")
+            val resource = CitizenSdkPrivateKey(this, accountId.requireSize(32, "accountId"), host)
+            privateKeys.add(resource)
+            resource.closed.whenComplete { _, _ -> privateKeys.remove(resource) }
+            resource.opened
         }
 
     @JvmSynthetic
-    internal fun openPrivateKeyView(accountId: ByteArray, buffer: CitizenSdkPrivateKeyDisplayBuffer): Pair<Long, CitizenSdkOperation<Unit>> {
-        buffer.bindAuthenticationRegistry(hostServices::registerPrivateKeyAuthentication)
+    internal fun openPrivateKeyResource(accountId: ByteArray, buffer: CitizenSdkPrivateKeyReceiver, host: FragmentActivity): Pair<Long, CitizenSdkOperation<Unit>> {
+        buffer.bindAuthenticationRegistry { operationId -> hostServices.registerPrivateKeyAuthentication(operationId, host) }
         var identities: LongArray? = null
         val core = synchronized(lifecycleGate) {
             requireOpen()
@@ -716,84 +734,55 @@ class CitizenSdk private constructor(
         }
         return ids[1] to CitizenSdkOperation(core.operationId, drained, core::cancel)
     }
-    @JvmSynthetic internal fun revealPrivateKeyView(viewId: Long) = native.revealPrivateKeyView(viewId)
-    @JvmSynthetic internal fun cancelPrivateKeyView(viewId: Long) = native.cancelPrivateKeyView(viewId)
-    @JvmSynthetic internal fun finishPrivateKeyView(viewId: Long) = native.finishPrivateKeyView(viewId)
+    @JvmSynthetic internal fun revealPrivateKeyResource(viewId: Long) = native.revealPrivateKeyView(viewId)
+    @JvmSynthetic internal fun cancelPrivateKeyResource(viewId: Long) = native.cancelPrivateKeyView(viewId)
+    @JvmSynthetic internal fun finishPrivateKeyResource(viewId: Long) = native.finishPrivateKeyView(viewId)
     @JvmSynthetic internal fun isPrivateKeyAuthenticationActive(operationId: Long, activity: FragmentActivity): Boolean =
         hostServices.isPrivateKeyAuthenticationActive(operationId, activity)
     @JvmSynthetic internal fun cancelPrivateKeyAuthentication(operationId: Long) = hostServices.cancelPrivateKeyAuthentication(operationId)
 
-    @JvmSynthetic
-    internal fun prepareWalletCreation(wordCount: Int, password: ByteArray): CompletableFuture<CitizenSdkPreparedWallet> =
-        request({
+    /** 输入字节仅在同步接纳期间借用；Core在返回请求前复制并负责清零。 */
+    fun prepareWalletCreation(wordCount: Int, password: ByteArray = byteArrayOf()): CitizenSdkOperation<CitizenSdkPreparedWallet> =
+        requestOperation({
             CitizenSdkInputLimits.requireWalletSecret("password", password.size)
             native.prepareWalletCreation(wordCount, password)
         }) {
-            CitizenSdkPreparedWallet.create(native, (it as CitizenSdkNativeResult.Prepared).token)
-        }
-
-    @JvmSynthetic
-    internal fun importWallet(mnemonic: ByteArray, password: ByteArray): CompletableFuture<CitizenWalletProfile?> =
-        walletMutation {
-            request({
-                CitizenSdkInputLimits.requireWalletSecret("mnemonic", mnemonic.size)
-                CitizenSdkInputLimits.requireWalletSecret("password", password.size)
-                native.importWallet(mnemonic, password)
-            }) {
-                (it as CitizenSdkNativeResult.Profile).value
+            CitizenSdkPreparedWallet.create(native, (it as CitizenSdkNativeResult.Prepared).token, ::commitPreparedWallet) {
+                prepared -> preparedWallets.remove(prepared)
             }
+                .also { prepared -> preparedWallets.add(prepared) }
         }
 
-    @JvmSynthetic
-    internal fun addWalletAccounts(
+    fun importWallet(mnemonic: ByteArray, password: ByteArray = byteArrayOf()): CitizenSdkOperation<CitizenWalletProfile> =
+        requestOperation({
+            CitizenSdkInputLimits.requireWalletSecret("mnemonic", mnemonic.size)
+            CitizenSdkInputLimits.requireWalletSecret("password", password.size)
+            native.importWallet(mnemonic, password)
+        }) { requireWalletProfile(it, "import wallet") }
+
+    fun addWalletAccounts(
         mnemonic: ByteArray,
-        password: ByteArray,
+        password: ByteArray = byteArrayOf(),
         indices: IntArray,
-    ): CompletableFuture<CitizenWalletProfile> = walletMutation {
+    ): CitizenSdkOperation<CitizenWalletProfile> {
         CitizenSdkInputLimits.requireAddAccountIndices(indices)
-        request({
+        return requestOperation({
             CitizenSdkInputLimits.requireWalletSecret("mnemonic", mnemonic.size)
             CitizenSdkInputLimits.requireWalletSecret("password", password.size)
             native.addWalletAccounts(mnemonic, password, indices)
-        }) {
-            (it as CitizenSdkNativeResult.Accounts).value
-        }.thenCompose { added ->
-            if (added.size != indices.size ||
-                added.map { it.index }.toSet() != indices.map(Int::toLong).toSet()
-            ) {
-                return@thenCompose failedFuture<CitizenWalletProfile>(
-                    CitizenSdkException(
-                        CitizenSdkErrorCode.INTEGRITY,
-                        "add accounts result does not match the requested indices",
-                    ),
-                )
-            }
-            request({ native.getWalletProfile() }) { result ->
-                val profile = requireWalletProfile(result, "add wallet accounts")
-                if (added.any { addedAccount ->
-                        profile.accounts.none { profileAccount ->
-                            profileAccount.accountId().contentEquals(addedAccount.accountId())
-                        }
-                    }
-                ) {
-                    throw CitizenSdkException(
-                        CitizenSdkErrorCode.INTEGRITY,
-                        "updated wallet profile is missing an added account",
-                    )
-                }
-                profile
-            }
-        }
+        }) { requireWalletProfile(it, "add wallet accounts") }
     }
 
-    @JvmSynthetic
-    internal fun commitPreparedWallet(prepared: CitizenSdkPreparedWallet): CompletableFuture<CitizenWalletProfile?> =
-        walletMutation {
-            request({ prepared.commitRequest() }) { (it as CitizenSdkNativeResult.Profile).value }
-        }
+    /** 编号由Core在同一操作门内分配，绑定层不读max+1，也不进行追加后的二次查询。 */
+    fun addNextWalletAccount(mnemonic: ByteArray, password: ByteArray = byteArrayOf()): CitizenSdkOperation<CitizenWalletProfile> =
+        requestOperation({
+            CitizenSdkInputLimits.requireWalletSecret("mnemonic", mnemonic.size)
+            CitizenSdkInputLimits.requireWalletSecret("password", password.size)
+            native.addNextWalletAccount(mnemonic, password)
+        }) { requireWalletProfile(it, "add next wallet account") }
 
-    @JvmSynthetic
-    internal fun requireWalletUI() = CitizenSdkWalletUiAdmission.check(getCapabilities())
+    private fun commitPreparedWallet(prepared: CitizenSdkPreparedWallet): CitizenSdkOperation<CitizenWalletProfile> =
+        requestOperation({ prepared.commitRequest() }) { requireWalletProfile(it, "commit wallet creation") }
 
     @JvmSynthetic
     internal fun whenActivityReady(callback: (Throwable?) -> Unit): AutoCloseable =
@@ -810,9 +799,8 @@ class CitizenSdk private constructor(
      * A RUNNING instance must first complete [stop], which persists the exact
      * host checkpoint. STARTING/IMPORTING or any accepted request fails closed.
      * START_FAILED is intentionally destroyable without stop, as required by
-     * the one-way imported-state failure contract. An SDK-owned wallet flow
-     * must first be cancelled and reach its callback; close returns BUSY while
-     * its secure Activity or managed secret buffers are still owned.
+     * the one-way imported-state failure contract. 私钥资源先撤销并排空，准备与
+     * 审阅资源先释放；Core回调仍在执行时close返回BUSY，绝不提前报告销毁成功。
      */
     override fun close() {
         synchronized(lifecycleGate) {
@@ -823,9 +811,13 @@ class CitizenSdk private constructor(
                 CitizenSdkErrorCode.BUSY, "CitizenSDK capability refresh is active",
             )
             if (!closing.get()) {
+                val captures = qrCaptures.toList()
+                captures.forEach { it.close() }
+                if (captures.any { !it.closed.isDone }) throw CitizenSdkException(CitizenSdkErrorCode.BUSY, "camera resources are still draining")
+                privateKeys.toList().forEach { it.close() }
                 requests.requireIdle()
-                CitizenSdkWalletFlowCoordinator.requireCloseReady(this)
-                CitizenSdkQrCoordinator.requireCloseReady(this)
+                preparedWallets.toList().forEach { it.close() }
+                qrReviews.toList().forEach { it.close() }
                 CitizenSdkClosePolicy.validate(native.lifecycle())
             }
             closing.set(true)
@@ -835,8 +827,8 @@ class CitizenSdk private constructor(
             // 回调可以同步重入公开门面。屏障期间只保留 closing 状态，不占 lifecycleGate。
             native.close()
             preparedTransactions.clear()
-            // Core destroy 是 prepared mnemonic 清理的唯一成功依据。
-            CitizenSdkWalletFlowCoordinator.onCoreDestroyed(this)
+            preparedWallets.clear()
+            qrReviews.clear()
             requests.close()
             eventListener = null
             try {
@@ -989,44 +981,32 @@ class CitizenSdk private constructor(
         else -> error
     }
 
+    private fun <T> requestOperation(
+        begin: () -> Long,
+        notifyReadinessBoundary: Boolean = true,
+        decode: (CitizenSdkNativeResult) -> T,
+    ): CitizenSdkOperation<T> {
+        val operation = synchronized(lifecycleGate) {
+            requireOpen()
+            requests.submitOperation(begin, decode)
+        }
+        if (notifyReadinessBoundary) operation.future.whenComplete { _, _ -> readinessBoundaryCompleted() }
+        return operation
+    }
+
     private fun <T> request(
         begin: () -> Long,
         notifyReadinessBoundary: Boolean = true,
         decode: (CitizenSdkNativeResult) -> T,
-    ): CompletableFuture<T> {
-        val future = synchronized(lifecycleGate) {
-            requireOpen()
-            requests.submit(begin, decode)
-        }
-        if (notifyReadinessBoundary) future.whenComplete { _, _ -> readinessBoundaryCompleted() }
-        return future
-    }
+    ): CompletableFuture<T> = requestOperation(begin, notifyReadinessBoundary, decode).future
 
-    /**
-     * Admits one process-wide profile mutation sequence. Concurrent sessions
-     * fail BUSY instead of interleaving with add-accounts' exact profile read.
-     */
-    private fun <T> walletMutation(operation: () -> CompletableFuture<T>): CompletableFuture<T> {
-        synchronized(walletMutationGate) {
-            if (walletMutationActive) return failedFuture(
-                CitizenSdkException(CitizenSdkErrorCode.BUSY, "another wallet mutation is active"),
+    private fun emptyOperation(begin: () -> Long): CitizenSdkOperation<Unit> =
+        requestOperation(begin) {
+            if (it !is CitizenSdkNativeResult.Empty) throw CitizenSdkException(
+                CitizenSdkErrorCode.INTEGRITY, "Core returned a non-empty result",
             )
-            walletMutationActive = true
+            Unit
         }
-        val internal = try {
-            operation()
-        } catch (error: Throwable) {
-            synchronized(walletMutationGate) { walletMutationActive = false }
-            throw error
-        }
-        val outward = CompletableFuture<T>()
-        internal.whenComplete { value, error ->
-            synchronized(walletMutationGate) { walletMutationActive = false }
-            if (error == null) outward.complete(value)
-            else outward.completeExceptionally(unwrapCompletion(error))
-        }
-        return outward
-    }
 
     private fun checkedAccountName(name: String): String {
         CitizenSdkInputLimits.requireWalletAccountNameInput(name)
@@ -1040,26 +1020,28 @@ class CitizenSdk private constructor(
         }
     }
 
-    /** Keeps the mutation and its resulting profile snapshot under one process gate. */
-    private fun walletMutationWithProfile(
-        begin: () -> Long,
-    ): CompletableFuture<CitizenWalletProfile?> = walletMutation {
-        unitRequest(begin).thenCompose {
-            request({ native.getWalletProfile() }) {
-                (it as CitizenSdkNativeResult.Profile).value
-            }
+    /** 校验只返回Core原因和位置；绑定不复制密码或BIP39规则，不生成UI文案。 */
+    fun validateWalletPassword(password: ByteArray): CitizenWalletInputValidation =
+        validateWalletInput(1, password, 0)
+
+    fun validateWalletMnemonic(mnemonic: ByteArray, wordCount: Int): CitizenWalletInputValidation =
+        validateWalletInput(2, mnemonic, wordCount)
+
+    private fun validateWalletInput(kind: Int, input: ByteArray, wordCount: Int): CitizenWalletInputValidation {
+        require(kind == 1 && wordCount == 0 || kind == 2 && wordCount in listOf(12, 18, 24))
+        if (input.size > CitizenSdkInputLimits.MAX_WALLET_SECRET_BYTES) {
+            return CitizenWalletInputValidation(CitizenWalletInputReason.INPUT_TOO_LONG, null)
         }
+        val tuple = native.validateWalletInput(kind, input, wordCount)
+        check(tuple.size == 2 && tuple[0] in CitizenWalletInputReason.entries.indices)
+        val reason = CitizenWalletInputReason.entries[tuple[0]]
+        val position = if (tuple[1] == -1) null else tuple[1]
+        check(if (reason == CitizenWalletInputReason.UNKNOWN_WORD) position != null && position in 0..23 else position == null)
+        return CitizenWalletInputValidation(reason, position)
     }
 
-    // 仅 SDK 安全 Activity 调用。校验和词表来自同一个 Rust Core，不向 Flutter 导出秘密参数。
-    @JvmSynthetic
-    internal fun validateWalletPassword(password: ByteArray) = native.validateWalletPassword(password)
-
-    @JvmSynthetic
-    internal fun validateWalletMnemonic(mnemonic: ByteArray, wordCount: Int) = native.validateWalletMnemonic(mnemonic, wordCount)
-
-    @JvmSynthetic
-    internal fun walletWordSuggestions(prefix: ByteArray): List<String> {
+    fun walletWordSuggestions(prefix: ByteArray): List<String> {
+        CitizenSdkInputLimits.requireWalletSecret("prefix", prefix.size)
         val bytes = native.walletWordSuggestions(prefix)
         return try { bytes.toString(Charsets.UTF_8).split('\n').filter { it.isNotEmpty() } }
         finally { bytes.fill(0) }
@@ -1083,8 +1065,6 @@ class CitizenSdk private constructor(
 
     companion object {
         private val PREPARATION_ID = Regex("^0x[0-9a-f]{32}$")
-        private val walletMutationGate = Any()
-        private var walletMutationActive = false
 
         @JvmStatic
         @JvmOverloads
@@ -1104,46 +1084,41 @@ class CitizenSdk private constructor(
     }
 }
 
-/** 只使用核心已经解析的能力，不在平台层复制模块依赖或设备可用性规则。 */
-internal object CitizenSdkWalletUiAdmission {
-    fun check(snapshot: CitizenSdkCapabilities) {
-        val status = snapshot.statuses.singleOrNull { it.name == CitizenCapabilityName.WALLET_PROFILE }
-            ?: throw CitizenSdkException(CitizenSdkErrorCode.INTEGRITY, "Core wallet capability is missing or duplicated")
-        if (!status.supported || !status.enabled) throw CitizenSdkException(
-            CitizenSdkErrorCode.NOT_READY, "wallet_profile is not ready",
-        )
-    }
-}
-
 /** 本地签名始终使用 SDK 金库；静态验签只处理公开数据，不创建 SDK 或访问设备密钥。 */
 class CitizenSigning private constructor(
-    private val signOperation: (ByteArray, ByteArray) -> CompletableFuture<CitizenSignature>,
-    private val beginOperation: (CitizenSigningIntent) -> CompletableFuture<CitizenSigningOutcome>,
-    private val consumeOperation: (String, String) -> CompletableFuture<CitizenSigningOutcome>,
+    private val signOperation: (ByteArray, ByteArray) -> CitizenSdkOperation<CitizenSignature>,
+    private val beginOperation: (CitizenSigningIntent) -> CitizenSdkOperation<CitizenSigningOutcome>,
+    private val consumeOperation: (String, String) -> CitizenSdkOperation<CitizenSigningOutcome>,
     private val cancelOperation: (String) -> Boolean,
+    private val reviewOperation: (String) -> CitizenSdkOperation<CitizenQrReview>,
+    private val signQrOperation: (CitizenQrReview) -> CitizenSdkOperation<CitizenQrSigned>,
 ) {
-    fun sign(accountId: ByteArray, message: ByteArray): CompletableFuture<CitizenSignature> =
+    fun sign(accountId: ByteArray, message: ByteArray): CitizenSdkOperation<CitizenSignature> =
         signOperation(accountId, message)
 
-    fun begin(intent: CitizenSigningIntent): CompletableFuture<CitizenSigningOutcome> =
+    fun begin(intent: CitizenSigningIntent): CitizenSdkOperation<CitizenSigningOutcome> =
         beginOperation(intent)
 
     fun consumeExternalSignature(
         sessionId: String,
         response: String,
-    ): CompletableFuture<CitizenSigningOutcome> = consumeOperation(sessionId, response)
+    ): CitizenSdkOperation<CitizenSigningOutcome> = consumeOperation(sessionId, response)
 
     fun cancel(sessionId: String): Boolean = cancelOperation(sessionId)
+    fun reviewQrRequest(text: String): CitizenSdkOperation<CitizenQrReview> = reviewOperation(text)
+    fun signQrRequest(review: CitizenQrReview): CitizenSdkOperation<CitizenQrSigned> = signQrOperation(review)
 
     companion object {
         /** 签名分区只能由 SDK 持有的原生请求入口构造，Java 宿主不能注入替代实现。 */
         @JvmSynthetic
         internal fun create(
-            sign: (ByteArray, ByteArray) -> CompletableFuture<CitizenSignature>,
-            begin: (CitizenSigningIntent) -> CompletableFuture<CitizenSigningOutcome>,
-            consume: (String, String) -> CompletableFuture<CitizenSigningOutcome>,
+            sign: (ByteArray, ByteArray) -> CitizenSdkOperation<CitizenSignature>,
+            begin: (CitizenSigningIntent) -> CitizenSdkOperation<CitizenSigningOutcome>,
+            consume: (String, String) -> CitizenSdkOperation<CitizenSigningOutcome>,
             cancel: (String) -> Boolean,
-        ): CitizenSigning = CitizenSigning(sign, begin, consume, cancel)
+            review: (String) -> CitizenSdkOperation<CitizenQrReview>,
+            signQr: (CitizenQrReview) -> CitizenSdkOperation<CitizenQrSigned>,
+        ): CitizenSigning = CitizenSigning(sign, begin, consume, cancel, review, signQr)
 
         @JvmStatic
         fun verify(accountId: ByteArray, signature: ByteArray, message: ByteArray): Boolean {
@@ -1152,6 +1127,9 @@ class CitizenSigning private constructor(
                 accountId.requireSize(32, "accountId"), signature.requireSize(64, "signature"), message,
             )
         }
+        @JvmStatic
+        fun encodePayload(payload: CitizenSigningPayload): ByteArray =
+            CitizenSdkNative.encodeSigningPayload(payload.kind, payload.fieldsJson.toByteArray(Charsets.UTF_8), payload.payloadBytes())
     }
 }
 

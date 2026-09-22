@@ -1,9 +1,6 @@
 import 'package:flutter/material.dart';
 
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
-import 'package:citizenapp/qr/bodies/user_contact_body.dart';
-import 'package:citizenapp/qr/envelope.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
 import 'package:citizenapp/qr/widgets/qr_display_scaffold.dart';
 
 /// 用户码展示页(`QR_V1 k=3 user_contact`,固定码)。
@@ -21,8 +18,12 @@ class UserQrPage extends StatelessWidget {
     required this.cidNumber,
     required this.displayName,
     required this.accountId,
+    required this.qrData,
     this.isSelf = false,
   });
+
+  /// SDK已编码的用户码；页面只展示，不解析或构造QR_V1。
+  final String qrData;
 
   /// 永久公民身份号,身份主键。
   final String cidNumber;
@@ -39,24 +40,12 @@ class UserQrPage extends StatelessWidget {
   /// 展示态 SS58 地址(accountId 为授权真源,ss58 仅用于展示与二维码载荷)。
   String get _ss58Address => ss58FromAccountIdText(accountId);
 
-  String _buildQrData() {
-    return QrEnvelope<UserContactBody>(
-      kind: QrKind.userContact,
-      id: null,
-      issuedAt: null,
-      expiresAt: null,
-      // 码内只放身份主键与账户标识:昵称由扫码端按 CID 从服务端拉取(本机昵称
-      // 可随意改写,进码即冒名风险);SS58 是展示形态,扫码端自行派生。
-      body: UserContactBody(cidNumber: cidNumber, accountId: accountId),
-    ).toRawJson();
-  }
-
   @override
   Widget build(BuildContext context) {
     return QrDisplayScaffold(
       title: isSelf ? '我的用户码' : '用户码',
       headline: displayName,
-      qrData: _buildQrData(),
+      qrData: qrData,
       ss58Address: _ss58Address,
       footerText: '扫描此二维码可加为联系人，或向其转账',
     );

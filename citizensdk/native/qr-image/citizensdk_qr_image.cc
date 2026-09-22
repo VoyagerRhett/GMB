@@ -6,6 +6,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <vector>
 
 namespace {
 
@@ -90,11 +91,11 @@ citizensdk_qr_image_status_t copy_output(const uint8_t *source, size_t size,
 
 }  // namespace
 
-extern "C" citizensdk_qr_image_status_t
-citizensdk_qr_image_decode_luminance(
+static citizensdk_qr_image_status_t
+decode_luminance(
     const uint8_t *data, size_t data_size, uint32_t width, uint32_t height,
     uint32_t row_stride, uint8_t *output, size_t output_capacity,
-    size_t *output_size) {
+    size_t *output_size, bool multiple) {
   // 每帧失败清空长度，防止调用方误用上一帧的识别结果。
   if (output_size != nullptr) *output_size = 0;
   if (data == nullptr || output_size == nullptr ||
@@ -128,7 +129,7 @@ citizensdk_qr_image_decode_luminance(
     ZXing_ReaderOptions_setTryInvert(options.get(), true);
     ZXing_ReaderOptions_setReturnErrors(options.get(), false);
     ZXing_ReaderOptions_setTextMode(options.get(), ZXing_TextMode_Plain);
-    ZXing_ReaderOptions_setMaxNumberOfSymbols(options.get(), 2);
+    ZXing_ReaderOptions_setMaxNumberOfSymbols(options.get(), multiple ? 64 : 2);
 
     ZxingPointer<ZXing_Barcodes, ZXing_Barcodes_delete> barcodes(
         ZXing_ReadBarcodes(image.get(), options.get()), ZXing_Barcodes_delete);
@@ -139,33 +140,53 @@ citizensdk_qr_image_decode_luminance(
     if (count == 0) {
       return CITIZENSDK_QR_IMAGE_NO_CODE;
     }
-    if (count != 1) {
+    if (!multiple && count != 1) {
       return CITIZENSDK_QR_IMAGE_MULTIPLE_CODES;
     }
-    const ZXing_Barcode *barcode = ZXing_Barcodes_at(barcodes.get(), 0);
-    // 3.1.1 的 Reader 用 Model2 过滤，但成功结果返回 QRCode 符号族。
-    // 不可把返回格式误当成输入过滤项，否则会丢弃所有合法二维码。
-    if (barcode == nullptr || !ZXing_Barcode_isValid(barcode) ||
-        ZXing_Barcode_format(barcode) != ZXing_BarcodeFormat_QRCode) {
-      return CITIZENSDK_QR_IMAGE_NO_CODE;
+    if (count < 0 || count > 64) return CITIZENSDK_QR_IMAGE_CAPACITY_EXCEEDED;
+    std::vector<uint8_t> packed;
+    auto append_u32 = [&](uint32_t value) {
+      for (unsigned shift = 0; shift != 32; shift += 8)
+        packed.push_back(static_cast<uint8_t>(value >> shift));
+    };
+    if (multiple) append_u32(static_cast<uint32_t>(count));
+    for (int index = 0; index < count; ++index) {
+      const ZXing_Barcode *barcode = ZXing_Barcodes_at(barcodes.get(), index);
+      // Reader过滤Model2，成功结果返回QRCode符号族；不把bytesECI当作原文。
+      if (barcode == nullptr || !ZXing_Barcode_isValid(barcode) ||
+          ZXing_Barcode_format(barcode) != ZXing_BarcodeFormat_QRCode)
+        return CITIZENSDK_QR_IMAGE_NO_CODE;
+      int text_size = 0;
+      std::unique_ptr<uint8_t, decltype(&ZXing_free)> text(
+          ZXing_Barcode_bytes(barcode, &text_size), ZXing_free);
+      if (!text || text_size <= 0 || static_cast<size_t>(text_size) > kMaxQrTextBytes)
+        return CITIZENSDK_QR_IMAGE_CAPACITY_EXCEEDED;
+      if (!is_valid_utf8(text.get(), static_cast<size_t>(text_size)))
+        return CITIZENSDK_QR_IMAGE_INVALID_UTF8;
+      if (!multiple) return copy_output(text.get(), static_cast<size_t>(text_size),
+                                        output, output_capacity, output_size);
+      append_u32(static_cast<uint32_t>(text_size));
+      packed.insert(packed.end(), text.get(), text.get() + text_size);
     }
-    int text_size = 0;
-    // bytesECI 会添加符号标识与 ECI 转义，不能作为 QR_V1 原文。
-    // 只取原始字节并在下方严格校验 UTF-8，不自动猜测或转换字符集。
-    std::unique_ptr<uint8_t, decltype(&ZXing_free)> text(
-        ZXing_Barcode_bytes(barcode, &text_size), ZXing_free);
-    if (!text || text_size <= 0 ||
-        static_cast<size_t>(text_size) > kMaxQrTextBytes) {
-      return CITIZENSDK_QR_IMAGE_CAPACITY_EXCEEDED;
-    }
-    if (!is_valid_utf8(text.get(), static_cast<size_t>(text_size))) {
-      return CITIZENSDK_QR_IMAGE_INVALID_UTF8;
-    }
-    return copy_output(text.get(), static_cast<size_t>(text_size), output,
-                       output_capacity, output_size);
+    return copy_output(packed.data(), packed.size(), output, output_capacity, output_size);
   } catch (...) {
     return CITIZENSDK_QR_IMAGE_LIBRARY_ERROR;
   }
+}
+
+extern "C" citizensdk_qr_image_status_t citizensdk_qr_image_decode_luminance(
+    const uint8_t *data, size_t data_size, uint32_t width, uint32_t height,
+    uint32_t row_stride, uint8_t *output, size_t output_capacity, size_t *output_size) {
+  return decode_luminance(data, data_size, width, height, row_stride,
+                          output, output_capacity, output_size, false);
+}
+
+// 多码入口与单码入口共用同一读取/UTF-8验证实现；只改变结果容器，不另造识别器。
+extern "C" citizensdk_qr_image_status_t citizensdk_qr_image_decode_luminance_all(
+    const uint8_t *data, size_t data_size, uint32_t width, uint32_t height,
+    uint32_t row_stride, uint8_t *output, size_t output_capacity, size_t *output_size) {
+  return decode_luminance(data, data_size, width, height, row_stride,
+                          output, output_capacity, output_size, true);
 }
 
 extern "C" citizensdk_qr_image_status_t citizensdk_qr_image_encode_text(

@@ -1,3 +1,4 @@
+import '../support/fake_citizen_sdk.dart';
 import 'dart:async';
 import 'dart:io';
 
@@ -75,11 +76,13 @@ class _FakeWallet implements CitizenSdkWallet {
   final CitizenWalletStateAccount wallet;
 
   @override
-  Future<CitizenWalletState> getState() async => CitizenWalletState(
+  CitizenSdkOperation<CitizenWalletState> getState() => testCitizenOperation(() async => CitizenWalletState(
+    initializationState: CitizenWalletInitializationState.ready,
+    cleanupPending: false,
     revision: BigInt.one,
     hotProfile: null,
     accounts: [wallet],
-  );
+  ));
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

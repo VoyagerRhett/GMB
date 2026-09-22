@@ -20,10 +20,7 @@ dependencies:
   # 0.7.1 与本产品使用的 polkadart 0.7.x 共同依赖 ss58 1.x；0.7.2 已切到
   # ss58 2.x，会造成解依赖冲突。两款移动产品统一锁定同一兼容版本。
   polkadart_keyring: 0.7.1
-  # 扫码设备适配已归入 lib/qr/scanner，不再保留内部 package 包装层。
-  mobile_scanner: 7.4.2
-  qr: ^3.0.2
-  qr_flutter: ^4.1.0
+  # QR协议、图像编码/识别及采集只由CitizenSDK提供，App仅绘制原界面。
   flutter_svg: ^2.3.0
   local_auth: ^3.0.2
   # 生物识别对话框文案本地化需要直接引用消息类(local_auth 不再导出它们)。

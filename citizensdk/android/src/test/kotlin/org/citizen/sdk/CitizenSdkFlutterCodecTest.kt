@@ -7,6 +7,41 @@ import org.junit.Test
 
 class CitizenSdkFlutterCodecTest {
     @Test
+    fun `non consuming response validation has exactly two owned fields`() {
+        val request = CitizenSdkFlutterCodec.decode("qrValidateSignResponse",
+            listOf(2, "sdk", 1L, "request", "{}")) as CitizenSdkFlutterCodec.Request.Qr
+        assertEquals(listOf("request", "{}"), request.fields)
+        for (fields in listOf(listOf(2, "sdk", 2L, "", "{}"),
+                listOf(2, "sdk", 2L, "request", "{}", 100L),
+                listOf(2, "sdk", 2L, "x".repeat(129), "{}"))) {
+            assertThrows(CitizenSdkFlutterCodec.ContractFailure::class.java) {
+                CitizenSdkFlutterCodec.decode("qrValidateSignResponse", fields)
+            }
+        }
+    }
+
+    @Test
+    fun `encoding methods keep exact stateless and session tuple boundaries`() {
+        val payload = CitizenSdkFlutterCodec.decode("encodeSigningPayload", listOf(2, 1, "{\"op_tag\":16}", byteArrayOf()))
+            as CitizenSdkFlutterCodec.Request.EncodePayload
+        assertNull(payload.sessionId)
+        assertEquals(0L, payload.requestSequence)
+        assertEquals(1, payload.kind)
+        val document = CitizenSdkFlutterCodec.decode("qrEncodeDocument", listOf(2, "s", 1L, "{}")) as CitizenSdkFlutterCodec.Request.Qr
+        assertEquals(listOf("{}"), document.fields)
+        val authorization = CitizenSdkFlutterCodec.decode("qrPrepareAccountAuthorization", listOf(2, "s", 2L, 10, byteArrayOf(), "")) as CitizenSdkFlutterCodec.Request.Qr
+        assertEquals(10, authorization.fields[0])
+        assertThrows(CitizenSdkFlutterCodec.ContractFailure::class.java) {
+            CitizenSdkFlutterCodec.decode("qrPrepareAccountAuthorization", listOf(2, "s", 3L, 10, ByteArray(1921), ""))
+        }
+        assertThrows(CitizenSdkFlutterCodec.ContractFailure::class.java) {
+            CitizenSdkFlutterCodec.decode("encodeSigningPayload", listOf(2, 7, "{}", byteArrayOf()))
+        }
+        assertThrows(CitizenSdkFlutterCodec.ContractFailure::class.java) {
+            CitizenSdkFlutterCodec.decode("encodeSigningPayload", listOf(1, 1, "{}", byteArrayOf()))
+        }
+    }
+    @Test
     fun `QR UI routes reject clocks signatures and retired methods`() {
         val scan = CitizenSdkFlutterCodec.decode("qrScan", listOf(1, "session", 1L)) as CitizenSdkFlutterCodec.Request.Qr
         assertEquals(emptyList<Any?>(), scan.fields)
@@ -121,6 +156,13 @@ class CitizenSdkFlutterCodecTest {
 
     @Test
     fun `history invalidation has no payload`() {
+        assertEquals("walletChanged", CitizenSdkFlutterCodec.event("session", 7L, "walletChanged", emptyList())[3])
+        assertThrows(IllegalArgumentException::class.java) {
+            CitizenSdkFlutterCodec.event("session", 0L, "walletChanged", emptyList())
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            CitizenSdkFlutterCodec.event("session", 7L, "walletChanged", listOf(1))
+        }
         assertEquals("historyChanged", CitizenSdkFlutterCodec.event("session", 7L, "historyChanged", emptyList())[3])
         assertThrows(IllegalArgumentException::class.java) {
             CitizenSdkFlutterCodec.event("session", 0L, "historyChanged", emptyList())

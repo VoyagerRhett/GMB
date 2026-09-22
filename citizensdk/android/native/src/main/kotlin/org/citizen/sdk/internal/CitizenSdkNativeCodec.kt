@@ -295,7 +295,11 @@ internal object CitizenSdkNativeCodec {
                     value.master, value.active, hot)
             }
             check(profile != null || accounts.none { it.signMode == CitizenWalletSignMode.HOT })
-            return CitizenWalletState(revision, profile, accounts)
+            val initialization = u32Long().toInt()
+            val cleanup = u8()
+            check(initialization in 0..2 && cleanup in 0..1)
+            check((initialization == 1) == accounts.isNotEmpty() && !(initialization == 0 && cleanup != 0))
+            return CitizenWalletState(revision, profile, accounts, initialization, cleanup != 0)
         }
 
         fun signingOutcome(): CitizenSigningOutcome {

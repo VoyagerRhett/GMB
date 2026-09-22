@@ -60,5 +60,8 @@ pub use transaction_outcome::{
     signed_extrinsic_hash, verify_transaction_outcome, TransactionEvidence,
 };
 pub use wallet_derivation::{validate_wallet_password, WalletWordCount};
-pub use wallet_input::{validate_wallet_mnemonic, wallet_word_suggestions};
-pub use wallet_service::PreparedWalletCreation;
+pub use wallet_input::{
+    validate_wallet_mnemonic, wallet_mnemonic_validation, wallet_password_validation,
+    wallet_word_suggestions, WalletInputReason, WalletInputValidation,
+};
+pub use wallet_service::{PreparedWalletCreation, WalletInitializationState, WalletStateSnapshot};

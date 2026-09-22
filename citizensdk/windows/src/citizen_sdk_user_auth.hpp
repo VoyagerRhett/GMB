@@ -1,34 +1,55 @@
 #ifndef CITIZENSDK_WINDOWS_USER_AUTH_HPP
 #define CITIZENSDK_WINDOWS_USER_AUTH_HPP
 
+#include <condition_variable>
+#include <memory>
 #include <mutex>
+#include <unordered_map>
 #include "citizen_sdk_sensitive_buffer.hpp"
-#include "citizen_sdk_window.hpp"
+#include "citizen_sdk/citizensdk_host.h"
 
 namespace citizen_sdk::windows {
+
 struct AuthenticationResult final {
   citizensdk_error_code_t code{CITIZENSDK_ERROR_INTERNAL};
   SensitiveBuffer password;
 };
 
-// 仅原生 UI 线程调用；精确匹配本 Host/本次解包，不向业务暴露认证归属。
-bool accept_private_key_authentication_window(
-    void *window, void *view_window, const void *owner, uint64_t host_operation_id) noexcept;
-
+// 仅维护凭据请求及可擦除缓冲。没有窗口、UI文案、认证成功缓存或替代签名器。
 class UserAuth final {
  public:
-  explicit UserAuth(WindowRef &parent);
+  UserAuth() = default;
   UserAuth(const UserAuth &) = delete;
   UserAuth &operator=(const UserAuth &) = delete;
-  ~UserAuth();
+  citizensdk_error_code_t configure(const citizensdk_credential_provider_v1_t *provider);
   bool available() const noexcept;
-  AuthenticationResult create_vault_password();
+  bool idle() const noexcept;
+  AuthenticationResult create_vault_password(uint64_t host_operation_id);
   AuthenticationResult unlock_vault_password(uint64_t host_operation_id);
+  citizensdk_error_code_t respond(uint64_t host_operation_id, citizensdk_bytes_view_t credential);
+  citizensdk_error_code_t cancel(uint64_t host_operation_id);
+  void cancel_all();
 
  private:
-  AuthenticationResult prompt(bool confirmation, uint64_t host_operation_id);
-  std::mutex prompt_lock_;
-  WindowRef &parent_;
+  struct Provider final {
+    explicit Provider(const citizensdk_credential_provider_v1_t &source) : value(source) {
+      value.retain(value.context);
+    }
+    ~Provider() { value.release(value.context); }
+    const citizensdk_credential_provider_v1_t value;
+  };
+  struct Pending final {
+    std::condition_variable ready;
+    bool done{false};
+    AuthenticationResult result;
+  };
+  AuthenticationResult request(uint32_t key_purpose, uint64_t host_operation_id);
+  // 独立回调锁保证request先于cancel；允许宿主同步回包或重入取消。
+  std::recursive_mutex callback_lock_;
+  mutable std::mutex lock_;
+  std::shared_ptr<Provider> provider_;
+  std::unordered_map<uint64_t, std::shared_ptr<Pending>> pending_;
 };
+
 }  // namespace citizen_sdk::windows
 #endif

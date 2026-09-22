@@ -332,7 +332,16 @@ internal enum CitizenSDKNativeCodec {
             guard hotProfile != nil || accounts.allSatisfy({ $0.signMode == .cold }) else {
                 throw CitizenSDKError(.integrity, "Core exposes hot wallet accounts without a profile")
             }
-            return CitizenWalletState(revision: stateInfo.revision, hotProfile: hotProfile, accounts: accounts)
+            var initialization: UInt32 = 0
+            var cleanup: UInt8 = 0
+            try CitizenSDKChecks.requireOK(citizensdk_wallet_state_get_initialization(result, &initialization, &cleanup), "wallet state flags failed")
+            guard initialization <= 2, cleanup <= 1,
+                  (initialization == 1) == !accounts.isEmpty,
+                  !(initialization == 0 && cleanup != 0) else {
+                throw CitizenSDKError(.integrity, "wallet initialization facts disagree with the catalog")
+            }
+            return CitizenWalletState(revision: stateInfo.revision, hotProfile: hotProfile, accounts: accounts,
+                                      initializationState: initialization, cleanupPending: cleanup != 0)
         }
     }
 

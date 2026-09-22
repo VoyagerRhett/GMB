@@ -1,3 +1,4 @@
+import '../support/fake_citizen_sdk.dart';
 import 'dart:convert';
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:crypto/crypto.dart' hide Hmac;
@@ -45,13 +46,13 @@ final class _DerivingWallet implements CitizenSdkWallet {
   final Uint8List _secret;
 
   @override
-  Future<Uint8List> deriveApplicationKey({
+  CitizenSdkOperation<Uint8List> deriveApplicationKey({
     required String accountId,
     required Uint8List salt,
     required Uint8List info,
-  }) async => Uint8List.fromList(
+  }) => testCitizenOperation(() async => Uint8List.fromList(
     sha256.convert(<int>[..._secret, ...salt, ...info]).bytes,
-  );
+  ));
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

@@ -102,7 +102,10 @@ mod enabled {
     }
     fn current_request(text: &str) -> FfiResult<SignRequest> {
         match parse(text).map_err(map_qr_error)? {
-            QrCode::SignRequest(request) => Ok(request),
+            QrCode::SignRequest(request) => {
+                request.require_signer().map_err(map_qr_error)?;
+                Ok(request)
+            }
             _ => Err(FfiError::invalid("二维码不是签名请求")),
         }
     }
@@ -277,13 +280,24 @@ mod enabled {
         .map_err(map_qr_error)?;
         owner.generic_signing.remove(session_id);
         Ok(SigningCompletion::new(
-            AccountId32::from_bytes(*request.signer_public_key.as_bytes()),
+            AccountId32::from_bytes(*request.require_signer().map_err(map_qr_error)?.as_bytes()),
             citizen_sdk_contracts::Hash32::from_bytes(
                 citizen_sdk_contracts::blake2_256(&request.review_payload)
                     .map_err(FfiError::from)?,
             ),
             signature,
         ))
+    }
+
+    /// 只核原实例未消费请求的真实期限；错误响应不能借自己的期限销毁有效会话。
+    pub(crate) fn external_qr_session_pending(handle: CitizenSdkHandle, session_id: &str) -> FfiResult<bool> {
+        let registry = lock_sessions()?;
+        let Some(owner) = registry.get(&handle) else { return Ok(false); };
+        if !owner.generic_signing.contains(session_id) { return Ok(false); }
+        match owner.outbound.as_ref() {
+            Some(store) => store.is_pending(session_id).map_err(map_qr_error),
+            None => Ok(false),
+        }
     }
 
     /// Create the existing independent CitizenWallet action-12 adapter for an SDK wallet mutation.
@@ -565,9 +579,10 @@ mod enabled {
                             .await?;
                         ensure_current(&job_review.request, &token)?;
                         let response = SignResponse {
+                current_account: None,
                             request_id: job_review.request.request_id.clone(),
                             expires_at: job_review.request.expires_at,
-                            signer_public_key: job_review.request.signer_public_key,
+                            signer_public_key: job_review.request.require_signer().map_err(map_qr_error)?,
                             signature,
                         };
                         let mut value = QrCode::SignResponse(response)
@@ -623,6 +638,35 @@ mod enabled {
                 _ => return Err(FfiError::invalid("结果不是二维码公开事实")),
             };
             copy_to_host(text.as_bytes(), output, output_capacity, out_required)
+        })
+    }
+
+    /// 同实例非消费预检；持有原会话锁至验签结束，不接收调用方替换的transform。
+    /// # Safety
+    /// 两个输入视图仅在本次调用借用，必须指向各自长度内可读的UTF-8。
+    #[no_mangle]
+    pub unsafe extern "C" fn citizensdk_qr_validate_sign_response(
+        handle: CitizenSdkHandle,
+        session_id: CitizenSdkBytesView,
+        text: CitizenSdkBytesView,
+    ) -> i32 {
+        ffi_status(|| {
+            runtime_with(handle, Modules::QR)?;
+            let session_id = String::from_utf8(copy_view(session_id, "session_id", 128)?)
+                .map_err(|_| FfiError::invalid("session_id必须是UTF-8"))?;
+            if session_id.is_empty() { return Err(FfiError::invalid("session_id不能为空")); }
+            let QrCode::SignResponse(response) = parse(&qr_text(text, "sign response")?).map_err(map_qr_error)?
+                else { return Err(FfiError::invalid("二维码不是签名响应")); };
+            if response.request_id != session_id {
+                return Err(FfiError::new(CitizenSdkErrorCode::Conflict, "响应与当前会话不一致"));
+            }
+            let registry = lock_sessions()?;
+            let store = registry.get(&handle).and_then(|owner| owner.outbound.as_ref())
+                .ok_or_else(|| FfiError::new(CitizenSdkErrorCode::Conflict, "没有本实例请求会话"))?;
+            futures_executor::block_on(store.verify_response(
+                &citizen_signer::Sr25519SoftwareSigner, &response,
+            )).map_err(map_qr_error)?;
+            Ok(())
         })
     }
 
@@ -713,6 +757,43 @@ mod enabled {
         })
     }
 
+
+    /// 只调用同一Rust QR编码器；显式expires_at不因绑定往返重新计算。
+    /// # Safety
+    /// 输入及按容量提供的输出必须在本同步调用内有效。
+    #[no_mangle]
+    pub unsafe extern "C" fn citizensdk_qr_encode_document(
+        handle: CitizenSdkHandle, input_json: CitizenSdkBytesView,
+        buffer: *mut u8, capacity: u64, out_required: *mut u64,
+    ) -> i32 {
+        ffi_status(|| {
+            let _runtime = runtime_with(handle, Modules::QR)?;
+            let input = String::from_utf8(copy_view(input_json, "QR content", MAX_QR_JSON_BYTES)?)
+                .map_err(|_| FfiError::invalid("二维码编码输入必须是UTF8"))?;
+            let value = citizen_sdk_qr::encode_document(&input).map_err(map_qr_error)?;
+            let json = encode_json(&value)?;
+            copy_to_host(json.as_bytes(), buffer, capacity, out_required)
+        })
+    }
+
+    /// 模板准备只返回公开字节与原因，不做签名、链查询或资格授权。
+    /// # Safety
+    /// 输入及按容量提供的输出必须在本同步调用内有效。
+    #[no_mangle]
+    pub unsafe extern "C" fn citizensdk_qr_prepare_account_authorization(
+        handle: CitizenSdkHandle, action: u32, payload: CitizenSdkBytesView,
+        account_id_utf8: CitizenSdkBytesView, buffer: *mut u8, capacity: u64, out_required: *mut u64,
+    ) -> i32 {
+        ffi_status(|| {
+            let _runtime = runtime_with(handle, Modules::QR)?;
+            let payload = copy_view(payload, "authorization payload", 1920)?;
+            let account = String::from_utf8(copy_view(account_id_utf8, "account_id", 1024)?)
+                .map_err(|_| FfiError::invalid("账户边界输入必须是UTF8"))?;
+            let value = citizen_sdk_qr::prepare_account_authorization(action, &payload, &account);
+            let json = encode_json(&value)?;
+            copy_to_host(json.as_bytes(), buffer, capacity, out_required)
+        })
+    }
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -772,7 +853,7 @@ mod enabled {
                 request_id: "0123456789abcdef".into(),
                 expires_at: 1,
                 action: 0x0400,
-                signer_public_key: Sr25519PublicKey::from_bytes([7; 32]),
+                signer_public_key: Some(Sr25519PublicKey::from_bytes([7; 32])),
                 review_payload: vec![4, 0, 3],
             };
             assert!(
@@ -791,7 +872,7 @@ mod enabled {
                 request_id: "0123456789abcdef".into(),
                 expires_at: SystemQrClock.now_epoch_seconds() + 300,
                 action: 0x0400,
-                signer_public_key: Sr25519PublicKey::from_bytes([7; 32]),
+                signer_public_key: Some(Sr25519PublicKey::from_bytes([7; 32])),
                 review_payload: vec![4, 0, 3],
             };
             let claimed = AtomicBool::new(false);
@@ -877,7 +958,7 @@ pub use enabled::*;
 pub(crate) use enabled::{
     cancel_unified_signing_session, consume_default_account_qr_session,
     consume_external_qr_session, create_default_account_qr_session, create_external_qr_session,
-    drop_sessions_for_owner, QrReviewResult,
+    drop_sessions_for_owner, external_qr_session_pending, QrReviewResult,
 };
 
 // 裁剪构建保留精确同一 ABI；不解析指针、不加载 QR/链/钱包依赖，统一明确拒绝。
@@ -907,8 +988,14 @@ qr_unavailable!(citizensdk_sign_qr_request(handle: CitizenSdkHandle, review: Cit
 #[cfg(not(feature = "qr"))]
 qr_unavailable!(citizensdk_result_copy_qr(result: CitizenSdkResultHandle, output: *mut u8, capacity: u64, required: *mut u64));
 #[cfg(not(feature = "qr"))]
+qr_unavailable!(citizensdk_qr_validate_sign_response(handle: CitizenSdkHandle, session_id: CitizenSdkBytesView, text: CitizenSdkBytesView));
+#[cfg(not(feature = "qr"))]
 qr_unavailable!(citizensdk_qr_consume_sign_response(handle: CitizenSdkHandle, text: CitizenSdkBytesView, signature: *mut u8));
 #[cfg(not(feature = "qr"))]
 qr_unavailable!(citizensdk_qr_cancel_sign_request(handle: CitizenSdkHandle, request: CitizenSdkBytesView, cancelled: *mut u8));
 #[cfg(not(feature = "qr"))]
 qr_unavailable!(citizensdk_qr_encode_account_id(handle: CitizenSdkHandle, account: *const CitizenSdkAccountId, output: *mut u8, capacity: u64, required: *mut u64));
+#[cfg(not(feature = "qr"))]
+qr_unavailable!(citizensdk_qr_encode_document(handle: CitizenSdkHandle, input: CitizenSdkBytesView, output: *mut u8, capacity: u64, required: *mut u64));
+#[cfg(not(feature = "qr"))]
+qr_unavailable!(citizensdk_qr_prepare_account_authorization(handle: CitizenSdkHandle, action: u32, payload: CitizenSdkBytesView, account: CitizenSdkBytesView, output: *mut u8, capacity: u64, required: *mut u64));

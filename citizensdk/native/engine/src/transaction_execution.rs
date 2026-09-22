@@ -35,6 +35,9 @@ impl TransactionExecutionCancellation {
         self.signal.cancel();
     }
 
+    /// ABI在无效回扫后决定保留会话时读取同一个真实执行取消信号。
+    pub fn is_cancelled(&self) -> bool { self.signal.is_cancelled() }
+
     fn ensure_active(&self) -> Result<(), EngineError> {
         if self.signal.is_cancelled() {
             Err(cancelled())

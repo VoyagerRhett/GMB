@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <functional>
 #include <mutex>
+#include <map>
 #include <unordered_set>
 #include "citizensdk_types.h"
 
@@ -26,10 +27,12 @@ class RequestRouter final {
    * before invocation. Production handlers are noexcept and must release that
    * handle exactly once, including every failure path. */
   using Handler = std::function<void(citizensdk_result_handle_t)>;
-  // There is exactly one SDK-owned wallet flow per Host. Prime its completion
-  // handler before crossing into Core, then bind the returned request identity
-  // without allocating after Core has accepted irreversible ownership.
-  void prime(Handler handler);
+  using Cancellation = std::function<void()>;
+  // 多个无UI资源各自保有终态回调；先分配占位节点，再接纳Core请求。
+  // bind只转移预分配map节点，不在Core接纳后分配内存或丢弃真实请求。
+  void prime(Handler handler, Cancellation cancel = {});
+  // 只请求各资源真实取消；不会移除终态路由或冒充排空。回调在路由锁外调用。
+  void cancel_all();
   void bind(citizensdk_request_id_t request) noexcept;
   void cancel_primed() noexcept;
   Handler take(const citizensdk_event_t &event);
@@ -37,9 +40,9 @@ class RequestRouter final {
 
  private:
   mutable std::mutex lock_;
-  Handler handler_;
-  citizensdk_request_id_t request_{};
-  bool primed_{false};
+  // key=0仅表示当前尚未接纳的预约；真实Core请求编号永不为0。
+  struct Callbacks { Handler handler; Cancellation cancel; };
+  std::map<citizensdk_request_id_t, Callbacks> routes_;
 };
 
 // Serializes the short interval in which Core has accepted a request but has

@@ -17,7 +17,56 @@ extern "C" {
 #define CITIZENSDK_HOST_ABI_VERSION UINT32_C(1)
 
 typedef uint64_t citizensdk_host_handle_t;
-typedef uint64_t citizensdk_wallet_flow_handle_t;
+
+/* 无UI请求接纳桥：accept只投影已有Core函数；complete接管真实result并释放一次。
+ * cancel只请求资源关闭，不完成请求。context由retain/release保有至终态与并发取消回调结束。
+ * 所有回调不得抛异常；retain/release不得阻塞或反调Host。旧Host配置布局不变。 */
+typedef struct citizensdk_host_request_v1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  void *context;
+  citizensdk_error_code_t (*accept)(void *context, citizensdk_handle_t core,
+                                    citizensdk_request_id_t *out_request_id);
+  void (*complete)(void *context, citizensdk_request_id_t request_id,
+                   citizensdk_result_handle_t result);
+  void (*cancel)(void *context, citizensdk_handle_t core);
+  void (*retain)(void *context);
+  void (*release)(void *context);
+} citizensdk_host_request_v1_t;
+CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_submit_request(
+    citizensdk_host_handle_t host, const citizensdk_host_request_v1_t *request,
+    citizensdk_request_id_t *out_request_id);
+
+
+/* 非UI凭据绑定。request/cancel可在Host工作线程回调；宿主只派发UI，
+ * 不阻塞回调。context保留至Host销毁；配置只允许在create_sdk之前登记。
+ * 回包借用12..1024个UTF-8字节；NULL/0表示用户取消，不表示认证成功。 */
+typedef struct citizensdk_credential_challenge_v1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint64_t host_operation_id;
+  uint32_t key_purpose; /* 1=create，2=unlock；不复用二维码purpose。 */
+  uint32_t reserved;
+} citizensdk_credential_challenge_v1_t;
+typedef struct citizensdk_credential_provider_v1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  void *context;
+  void (*request)(void *context, const citizensdk_credential_challenge_v1_t *challenge);
+  void (*cancel)(void *context, uint64_t host_operation_id);
+  /* 生命周期回调不得等待UI或反调Host。retain/release成对保有context，
+   * idle只读报告提供者异步结果是否排空，取消通知不等于idle。 */
+  void (*retain)(void *context);
+  void (*release)(void *context);
+  uint8_t (*idle)(void *context);
+} citizensdk_credential_provider_v1_t;
+CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_set_credential_provider(
+    citizensdk_host_handle_t host, const citizensdk_credential_provider_v1_t *provider);
+CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_respond_credential(
+    citizensdk_host_handle_t host, uint64_t host_operation_id,
+    citizensdk_bytes_view_t credential);
+CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_cancel_credential(
+    citizensdk_host_handle_t host, uint64_t host_operation_id);
 
 typedef struct citizensdk_host_config_v1 {
   uint32_t struct_size;
@@ -29,55 +78,6 @@ typedef struct citizensdk_host_config_v1 {
   uint8_t enable_wallet;
   uint8_t reserved[7];
 } citizensdk_host_config_v1_t;
-
-typedef uint32_t citizensdk_wallet_flow_kind_t;
-#define CITIZENSDK_WALLET_FLOW_CREATE UINT32_C(1)
-#define CITIZENSDK_WALLET_FLOW_IMPORT UINT32_C(2)
-#define CITIZENSDK_WALLET_FLOW_ADD_ACCOUNTS UINT32_C(3)
-#define CITIZENSDK_WALLET_FLOW_INITIALIZE UINT32_C(4)
-#define CITIZENSDK_WALLET_FLOW_IMPORT_COLD_ACCOUNT UINT32_C(5)
-
-typedef struct citizensdk_wallet_flow_request_v1 {
-  uint32_t struct_size;
-  uint32_t abi_version;
-  citizensdk_wallet_flow_kind_t kind;
-  citizensdk_wallet_word_count_t word_count;
-  const uint32_t *account_indices;
-  uint32_t account_index_count;
-  citizensdk_bytes_view_t wallet_account_role_text;
-  citizensdk_bytes_view_t wallet_authorization_text;
-  citizensdk_bytes_view_t wallet_completion_text;
-  citizensdk_bytes_view_t wallet_backup_text;
-  citizensdk_bytes_view_t wallet_cold_account_text;
-} citizensdk_wallet_flow_request_v1_t;
-
-typedef uint32_t citizensdk_wallet_flow_status_t;
-#define CITIZENSDK_WALLET_FLOW_COMPLETED UINT32_C(1)
-#define CITIZENSDK_WALLET_FLOW_CANCELLED UINT32_C(2)
-#define CITIZENSDK_WALLET_FLOW_FAILED UINT32_C(3)
-
-typedef struct citizensdk_wallet_flow_result_v1 {
-  uint32_t struct_size;
-  uint32_t abi_version;
-  citizensdk_wallet_flow_status_t status;
-  citizensdk_error_code_t error_code;
-} citizensdk_wallet_flow_result_v1_t;
-
-typedef void (*citizensdk_wallet_flow_completion_v1_t)(
-    void *context, const citizensdk_wallet_flow_result_v1_t *result);
-
-/* 只借用非秘密的 Core JSON，最多 65536 字节；回调返回前复制。
- * 完成只发生在相机停止或真实 Core 认证/签名请求排空之后。 */
-typedef void (*citizensdk_qr_completion_v1_t)(
-    void *context, citizensdk_error_code_t error_code,
-    citizensdk_bytes_view_t document);
-CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_scan_qr(
-    citizensdk_host_handle_t host, void *context,
-    citizensdk_qr_completion_v1_t completion, citizensdk_wallet_flow_handle_t *out_flow);
-CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_sign_qr_request(
-    citizensdk_host_handle_t host, citizensdk_bytes_view_t sign_request,
-    void *context, citizensdk_qr_completion_v1_t completion,
-    citizensdk_wallet_flow_handle_t *out_flow);
 
 CITIZENSDK_HOST_API uint32_t citizensdk_host_abi_version(void);
 CITIZENSDK_HOST_API uint32_t citizensdk_host_config_size(void);
@@ -107,21 +107,7 @@ CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_vault_availability(
     citizensdk_host_handle_t host,
     citizensdk_host_vault_availability_t *out_availability);
 
-CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_present_wallet_flow(
-    citizensdk_host_handle_t host,
-    const citizensdk_wallet_flow_request_v1_t *request, void *context,
-    citizensdk_wallet_flow_completion_v1_t completion,
-    citizensdk_wallet_flow_handle_t *out_flow);
-/* 只打开 SDK 自有账户私钥安全视图；完成结果不含任何秘密或显示回调。
- * 取消及关闭沿用 WalletFlow 的真实排空语义，账户只作为公开控制输入。 */
-CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_view_account_private_key(
-    citizensdk_host_handle_t host, const citizensdk_account_id_t *account_id,
-    void *context, citizensdk_wallet_flow_completion_v1_t completion,
-    citizensdk_wallet_flow_handle_t *out_flow);
-CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_cancel_wallet_flow(
-    citizensdk_host_handle_t host, citizensdk_wallet_flow_handle_t flow);
-
-/* Fails with BUSY while requests, results, callbacks, or wallet UI remain.
+/* Fails with BUSY while requests, results, callbacks, or resources remain.
  * Success destroys Core first, closes stores, zeroizes vault state, and makes
  * the host handle permanently invalid. */
 CITIZENSDK_HOST_API citizensdk_error_code_t

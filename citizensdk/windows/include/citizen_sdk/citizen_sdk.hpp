@@ -5,17 +5,154 @@
 #include "citizensdk_qr_image.h"
 #include <limits>
 #include <memory>
+#include <atomic>
+#include <map>
 #include <mutex>
+#include <thread>
 #include <string>
 #include <utility>
 #include "citizen_sdk/citizen_sdk_config.hpp"
 #include "citizen_sdk/citizen_sdk_error.hpp"
 #include "citizen_sdk/citizen_sdk_events.hpp"
 #include "citizen_sdk/citizen_sdk_models.hpp"
-#include "citizen_sdk/citizen_sdk_wallet_flow.hpp"
 
 namespace citizen_sdk {
 namespace detail {
+
+// 非UI Future适配只拥有异步结果和可撤销关联；真正认证仍由Host原金库执行。
+struct CredentialProviderState final {
+  struct Pending final {
+    std::promise<void> cancelled;
+    bool revoked{false};
+  };
+  citizensdk_host_handle_t host{};
+  decltype(Config::credentialProvider) provide;
+  std::mutex lock;
+  std::map<uint64_t, std::shared_ptr<Pending>> pending;
+};
+struct CredentialProviderBox final {
+  std::atomic<uint32_t> references{1};
+  std::shared_ptr<CredentialProviderState> state;
+};
+inline void release_credential_provider(void *raw) noexcept {
+  auto *box = static_cast<CredentialProviderBox *>(raw);
+  if (box->references.fetch_sub(1) == 1) delete box;
+}
+inline void install_credential_provider(citizensdk_host_handle_t host,
+                                         const Config &config) {
+  if (!config.credentialProvider) return;
+  auto state = std::make_shared<CredentialProviderState>();
+  state->host = host;
+  state->provide = config.credentialProvider;
+  auto *box = new CredentialProviderBox();
+  box->state = state;
+  citizensdk_credential_provider_v1_t provider{
+      sizeof(citizensdk_credential_provider_v1_t), 1, box,
+      +[](void *raw, const citizensdk_credential_challenge_v1_t *request) {
+        const auto state = static_cast<CredentialProviderBox *>(raw)->state;
+        if (request == nullptr || request->struct_size != sizeof(*request) ||
+            request->abi_version != 1 || request->host_operation_id == 0 ||
+            request->reserved != 0 || (request->key_purpose != 1 && request->key_purpose != 2))
+          throw Error(CITIZENSDK_ERROR_INTEGRITY, "Credential challenge is invalid");
+        auto pending = std::make_shared<CredentialProviderState::Pending>();
+        CredentialChallenge challenge;
+        challenge.host_operation_id = request->host_operation_id;
+        challenge.key_purpose = request->key_purpose == 1 ? "create" : "unlock";
+        challenge.cancelled = pending->cancelled.get_future().share();
+        {
+          std::lock_guard<std::mutex> guard(state->lock);
+          if (!state->pending.emplace(challenge.host_operation_id, pending).second)
+            throw Error(CITIZENSDK_ERROR_CONFLICT, "Credential challenge is already active");
+        }
+        try {
+          std::thread([state, pending, challenge] {
+            struct CredentialBytes final {
+              std::optional<std::vector<uint8_t>> value;
+              ~CredentialBytes() {
+                if (!value) return;
+                volatile uint8_t *data = value->data();
+                for (std::size_t i = 0; i < value->size(); ++i) data[i] = 0;
+              }
+            } bytes;
+            bool invoke = false;
+            {
+              std::lock_guard<std::mutex> guard(state->lock);
+              invoke = !pending->revoked;
+            }
+            if (invoke) {
+              try { bytes.value = state->provide(challenge).get(); }
+              catch (...) { bytes.value.reset(); } // 不传播可能带秘密的宿主异常文案。
+            }
+            bool deliver = false;
+            {
+              std::lock_guard<std::mutex> guard(state->lock);
+              deliver = !pending->revoked;
+            }
+            if (deliver) {
+              // 不持有适配器锁反调Host，避免关闭->idle和回包之间的锁顺序倒置。
+              const uint8_t nonnull_empty = 0;
+              const citizensdk_bytes_view_t view = bytes.value
+                  ? citizensdk_bytes_view_t{
+                      bytes.value->empty() ? &nonnull_empty : bytes.value->data(),
+                      static_cast<uint64_t>(bytes.value->size())}
+                  : citizensdk_bytes_view_t{nullptr, 0};
+              (void)citizensdk_host_respond_credential(
+                  state->host, challenge.host_operation_id, view);
+            }
+            // 先清零结果再报告排空；取消通知绝不伪造提供者Future完成。
+            if (bytes.value) {
+              volatile uint8_t *data = bytes.value->data();
+              for (std::size_t i = 0; i < bytes.value->size(); ++i) data[i] = 0;
+              bytes.value.reset();
+            }
+            std::lock_guard<std::mutex> guard(state->lock);
+            state->pending.erase(challenge.host_operation_id);
+          }).detach();
+        } catch (...) {
+          std::lock_guard<std::mutex> guard(state->lock);
+          state->pending.erase(challenge.host_operation_id);
+          throw;
+        }
+      },
+      +[](void *raw, uint64_t id) {
+        const auto state = static_cast<CredentialProviderBox *>(raw)->state;
+        std::lock_guard<std::mutex> guard(state->lock);
+        const auto found = state->pending.find(id);
+        if (found == state->pending.end() || found->second->revoked) return;
+        found->second->revoked = true;
+        found->second->cancelled.set_value();
+      },
+      +[](void *raw) {
+        auto *box = static_cast<CredentialProviderBox *>(raw);
+        if (box->references.fetch_add(1) == std::numeric_limits<uint32_t>::max())
+          std::terminate();
+      },
+      release_credential_provider,
+      +[](void *raw) -> uint8_t {
+        const auto state = static_cast<CredentialProviderBox *>(raw)->state;
+        std::lock_guard<std::mutex> guard(state->lock);
+        return state->pending.empty() ? 1 : 0;
+      }};
+  const auto code = citizensdk_host_set_credential_provider(host, &provider);
+  release_credential_provider(box); // 成功时Host已经retain；失败时释放唯一所有权。
+  throw_if_error(code, "CitizenSDK credential provider registration failed");
+}
+
+
+
+
+struct RequestBox final {
+  std::atomic<uint32_t> references{1};
+  std::function<citizensdk_error_code_t(citizensdk_handle_t, citizensdk_request_id_t *)> accept;
+  std::function<void(citizensdk_request_id_t, citizensdk_result_handle_t)> complete;
+  std::function<void(citizensdk_handle_t)> cancel;
+};
+inline void release_request_box(void *raw) noexcept {
+  auto *box = static_cast<RequestBox *>(raw);
+  const auto previous = box->references.fetch_sub(1);
+  if (previous == 0) std::terminate();
+  if (previous == 1) delete box;
+}
 
 struct EventContext final {
   std::mutex lock;
@@ -33,7 +170,6 @@ struct EventResultScope final {
   citizensdk_result_handle_t value{};
 };
 
-struct WalletCompletionContext final { WalletFlowCompletion completion; };
 
 inline void event_trampoline(void *context,
                              const citizensdk_event_t *event) noexcept {
@@ -50,24 +186,6 @@ inline void event_trampoline(void *context,
     if (observer) observer(*event);
   } catch (...) {}
 }
-
-inline void wallet_trampoline(
-    void *context, const citizensdk_wallet_flow_result_v1_t *result) noexcept {
-  std::unique_ptr<WalletCompletionContext> state(
-      static_cast<WalletCompletionContext *>(context));
-  if (!state) return;
-  try {
-    if (result == nullptr || result->struct_size < sizeof(*result) ||
-        result->abi_version != CITIZENSDK_HOST_ABI_VERSION) {
-      state->completion(
-          {WalletFlowStatus::Failed, CITIZENSDK_ERROR_INTEGRITY});
-    } else {
-      state->completion({static_cast<WalletFlowStatus>(result->status),
-                         result->error_code});
-    }
-  } catch (...) {}
-}
-
 
 // 只读取 Core 输出 JSON 的字符串字段，不解释 QR_V1 或重新创建待签数据。
 inline std::string qr_json_string(const std::string &json, std::size_t &at) {
@@ -164,41 +282,6 @@ inline QrImage qr_image(const std::string &text) {
     throw Error(CITIZENSDK_ERROR_INTEGRITY, "QR response image encoding failed");
   return image;
 }
-struct QrCompletionContext final { QrFlowCompletion completion; bool encode_response{}; };
-inline void qr_trampoline(void *context, citizensdk_error_code_t error,
-                            citizensdk_bytes_view_t document) noexcept {
-  std::unique_ptr<QrCompletionContext> state(static_cast<QrCompletionContext *>(context));
-  if (!state) return;
-  QrFlowResult result; result.error_code = error;
-  try {
-    if (error == CITIZENSDK_OK) {
-      if (document.data == nullptr || document.len == 0 || document.len > 65536)
-        throw Error(CITIZENSDK_ERROR_INTEGRITY, "Core QR document is invalid");
-      result.document.assign(reinterpret_cast<const char *>(document.data), static_cast<std::size_t>(document.len));
-      result.canonical_text = qr_public_field(result.document, "canonical_text", 2331);
-      if (state->encode_response) {
-        result.request_id = qr_public_field(result.document, "request_id", 128);
-        result.signer_account_id = qr_public_field(result.document, "signer_account_id", 66);
-        result.sign_request = qr_public_field(result.document, "sign_request", 2331);
-        const auto signature = qr_public_field(result.document, "signature", 130);
-        if (signature.size() != 130 || signature.compare(0, 2, "0x") != 0)
-          throw Error(CITIZENSDK_ERROR_INTEGRITY, "Core QR signature length is invalid");
-        const auto nibble = [](char digit) -> uint8_t {
-          if (digit >= '0' && digit <= '9') return static_cast<uint8_t>(digit - '0');
-          if (digit >= 'a' && digit <= 'f') return static_cast<uint8_t>(digit - 'a' + 10);
-          throw Error(CITIZENSDK_ERROR_INTEGRITY, "Core QR signature encoding is invalid");
-        };
-        result.signature.reserve(64);
-        for (std::size_t index = 2; index < signature.size(); index += 2)
-          result.signature.push_back(static_cast<uint8_t>((nibble(signature[index]) << 4) | nibble(signature[index + 1])));
-        result.qr_image = qr_image(result.canonical_text);
-      }
-    }
-  } catch (const Error &failure) { result = {}; result.error_code = failure.code(); }
-    catch (...) { result = {}; result.error_code = CITIZENSDK_ERROR_INTERNAL; }
-  try { state->completion(std::move(result)); } catch (...) {}
-}
-
 }  // namespace detail
 
 /* Header-only ownership wrapper. Construction owns only Host resources; open()
@@ -219,6 +302,8 @@ class Host final {
     native.enable_wallet = (config.modules & (CITIZENSDK_MODULE_WALLET | CITIZENSDK_MODULE_SIGNING)) != 0 ? 1 : 0;
     throw_if_error(citizensdk_host_create_with_modules(&native, config.modules, &host_),
                    "CitizenSDK Host creation failed");
+    try { detail::install_credential_provider(host_, config); }
+    catch (...) { close_noexcept(); throw; }
   }
 
   Host(const Host &) = delete;
@@ -246,6 +331,52 @@ class Host final {
     if (sdk_ != 0) return;
     throw_if_error(citizensdk_host_create_sdk(host_, &sdk_),
                    "CitizenSDK Core creation failed");
+  }
+
+  // 只验签当前Core实例会话；不替换其固定transform，不消费或发起交易。
+  void qr_validate_sign_response(const std::string &session_id, const std::string &response) {
+    throw_if_error(citizensdk_qr_validate_sign_response(sdk_, bytes_view(session_id), bytes_view(response)),
+                   "CitizenSDK QR response preflight failed");
+  }
+
+
+  // 一条Host终态路由保有上下文；公共观察者/Flutter界面关闭不会释放在途资源的回调。
+  citizensdk_error_code_t submit_request(
+      std::function<citizensdk_error_code_t(citizensdk_handle_t, citizensdk_request_id_t *)> accept,
+      std::function<void(citizensdk_request_id_t, citizensdk_result_handle_t)> complete,
+      std::function<void(citizensdk_handle_t)> cancel,
+      citizensdk_request_id_t *out) {
+    if (!accept || !complete || out == nullptr) return CITIZENSDK_ERROR_INVALID_ARGUMENT;
+    *out = 0;
+    auto *box = new detail::RequestBox();
+    box->accept = std::move(accept);
+    box->complete = std::move(complete);
+    box->cancel = std::move(cancel);
+    const citizensdk_host_request_v1_t callbacks{
+      sizeof(citizensdk_host_request_v1_t), CITIZENSDK_HOST_ABI_VERSION, box,
+      +[](void *raw, citizensdk_handle_t core, citizensdk_request_id_t *request) -> citizensdk_error_code_t {
+        auto *state = static_cast<detail::RequestBox *>(raw);
+        // Core已同步复制输入后立即释放接纳闭包，避免秘密输入随整个异步请求驻留。
+        auto function = std::move(state->accept);
+        try { return function(core, request); }
+        catch (const Error &error) { return error.code(); }
+        catch (...) { return CITIZENSDK_ERROR_INTERNAL; }
+      },
+      +[](void *raw, citizensdk_request_id_t request, citizensdk_result_handle_t result) {
+        static_cast<detail::RequestBox *>(raw)->complete(request, result);
+      },
+      +[](void *raw, citizensdk_handle_t core) {
+        auto *state = static_cast<detail::RequestBox *>(raw);
+        if (state->cancel) state->cancel(core);
+      },
+      +[](void *raw) {
+        auto *state = static_cast<detail::RequestBox *>(raw);
+        if (state->references.fetch_add(1) == std::numeric_limits<uint32_t>::max()) std::terminate();
+      },
+      detail::release_request_box};
+    const auto code = citizensdk_host_submit_request(host_, &callbacks, out);
+    detail::release_request_box(box);
+    return code;
   }
 
   citizensdk_handle_t native_handle() const noexcept { return sdk_; }
@@ -302,80 +433,6 @@ class Host final {
     return value;
   }
 
-  WalletFlow present_wallet_flow(const WalletFlowRequest &request,
-                                 WalletFlowCompletion completion) {
-    if (!completion) {
-      throw Error(CITIZENSDK_ERROR_INVALID_ARGUMENT,
-                  "wallet-flow completion is required");
-    }
-    citizensdk_wallet_flow_request_v1_t native{};
-    native.struct_size = sizeof(native);
-    native.abi_version = CITIZENSDK_HOST_ABI_VERSION;
-    native.kind = static_cast<uint32_t>(request.kind);
-    native.word_count = request.word_count;
-    if (request.account_indices.size() >
-        static_cast<std::size_t>(std::numeric_limits<uint32_t>::max())) {
-      throw Error(CITIZENSDK_ERROR_INVALID_ARGUMENT,
-                  "wallet-flow account index count exceeds the C ABI");
-    }
-    native.account_indices = request.account_indices.empty()
-                                 ? nullptr : request.account_indices.data();
-    native.account_index_count =
-        static_cast<uint32_t>(request.account_indices.size());
-    if (!request.initialization_text.empty()) {
-      if (request.kind == WalletFlowKind::ImportColdAccount &&
-          request.initialization_text.size() == 1) {
-        native.wallet_cold_account_text = bytes_view(request.initialization_text[0]);
-      } else if (request.initialization_text.size() != 5) {
-        throw Error(CITIZENSDK_ERROR_INVALID_ARGUMENT,
-                    "wallet initialization requires five presentation texts");
-      } else {
-        native.wallet_account_role_text = bytes_view(request.initialization_text[0]);
-        native.wallet_authorization_text = bytes_view(request.initialization_text[1]);
-        native.wallet_completion_text = bytes_view(request.initialization_text[2]);
-        native.wallet_backup_text = bytes_view(request.initialization_text[3]);
-        native.wallet_cold_account_text = bytes_view(request.initialization_text[4]);
-      }
-    }
-    auto state = std::make_unique<detail::WalletCompletionContext>();
-    state->completion = std::move(completion);
-    citizensdk_wallet_flow_handle_t flow = 0;
-    const auto code = citizensdk_host_present_wallet_flow(
-        host_, &native, state.get(), detail::wallet_trampoline, &flow);
-    if (code != CITIZENSDK_OK) {
-      throw Error(code, last_host_error("CitizenSDK wallet flow failed"));
-    }
-    (void)state.release();
-    return WalletFlow(host_, flow);
-  }
-
-  // 返回的仍是无秘密取消能力；私有 view_id 与显示缓冲仅存在于 Host 内。
-  WalletFlow view_account_private_key(const citizensdk_account_id_t &account_id,
-                                      WalletFlowCompletion completion) {
-    if (!completion)
-      throw Error(CITIZENSDK_ERROR_INVALID_ARGUMENT, "wallet-flow completion is required");
-    auto state = std::make_unique<detail::WalletCompletionContext>();
-    state->completion = std::move(completion);
-    citizensdk_wallet_flow_handle_t flow = 0;
-    const auto code = citizensdk_host_view_account_private_key(
-        host_, &account_id, state.get(), detail::wallet_trampoline, &flow);
-    if (code != CITIZENSDK_OK)
-      throw Error(code, last_host_error("CitizenSDK private-key view failed"));
-    (void)state.release();
-    return WalletFlow(host_, flow);
-  }
-
-
-  // 原生窗口负责摄像头、审阅与设备认证；结果中只有 Core 公共 JSON 与响应图像。
-  WalletFlow scan_qr(QrFlowCompletion completion) {
-    return present_qr({}, std::move(completion), false);
-  }
-  WalletFlow sign_qr_request(const std::string &request, QrFlowCompletion completion) {
-    if (request.empty() || request.size() > 2331)
-      throw Error(CITIZENSDK_ERROR_INVALID_ARGUMENT, "QR sign request is empty or too large");
-    return present_qr(request, std::move(completion), true);
-  }
-
   void close() {
     if (host_ == 0) return;
     // Windows 窗口退休可以晚于 Core 销毁。上次 BUSY 后不能再查询已经
@@ -410,27 +467,6 @@ class Host final {
   }
 
  private:
-  WalletFlow present_qr(const std::string &request, QrFlowCompletion completion, bool signing) {
-    if (!completion) throw Error(CITIZENSDK_ERROR_INVALID_ARGUMENT, "QR completion is required");
-    auto state = std::make_unique<detail::QrCompletionContext>();
-    state->completion = std::move(completion); state->encode_response = signing;
-    citizensdk_wallet_flow_handle_t flow = 0;
-    const auto code = signing
-        ? citizensdk_host_sign_qr_request(host_, bytes_view(request), state.get(), detail::qr_trampoline, &flow)
-        : citizensdk_host_scan_qr(host_, state.get(), detail::qr_trampoline, &flow);
-    if (code != CITIZENSDK_OK) throw Error(code, last_host_error("CitizenSDK QR flow failed"));
-    (void)state.release();
-    return WalletFlow(host_, flow);
-  }
-
-  void refresh_core_handle() {
-    citizensdk_handle_t current = 0;
-    const auto code = citizensdk_host_sdk(host_, &current);
-    if (code == CITIZENSDK_OK) sdk_ = current;
-    else if (code == CITIZENSDK_ERROR_NOT_READY) sdk_ = 0;
-    else throw_if_error(code, "CitizenSDK Host ownership query failed");
-  }
-
   void close_noexcept() noexcept {
     if (host_ == 0) return;
     // Clearing the Host callback is a synchronization barrier: success waits

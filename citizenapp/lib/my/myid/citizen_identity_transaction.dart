@@ -8,8 +8,6 @@ import 'package:polkadart/scale_codec.dart' show CompactBigIntCodec, ByteOutput;
 
 import 'package:citizenapp/citizen/shared/account_derivation.dart'
     show isAccountIdText;
-import 'package:citizenapp/signer/signing.dart'
-    show kOpSignCidRebind, signingMessage;
 
 import 'package:citizenapp/citizen/shared/pallet_registry.dart';
 
@@ -343,7 +341,7 @@ class CitizenIdentityTransaction {
   /// `digest  = signing_message(OP_SIGN_CID_REBIND, payload)`
   ///         `= blake2_256( GMB(3B) ++ [0x11] ++ payload )`。
   /// 逐字节对齐链端 `CidRebindAuthorization::encode()` 与 `verify_rebind_signature`。
-  static Uint8List buildRebindSigningDigest({
+  static Future<Uint8List> buildRebindSigningDigest({
     required Uint8List genesisHash,
     required String cidNumber,
     required String currentAccountId,
@@ -362,7 +360,9 @@ class CitizenIdentityTransaction {
       ..._u64LittleEndian(expectedBindingRevision),
       ..._u64LittleEndian(expiresAt),
     ];
-    return signingMessage(opTag: kOpSignCidRebind, scalePayload: payload);
+    return CitizenSigning.encodePayload(CitizenSigningPayload.message(
+      opTag: kOpSignCidRebind, scalePayload: Uint8List.fromList(payload),
+    ));
   }
 
   static void _writeCidBoundedVec(ByteOutput output, String cidNumber) {

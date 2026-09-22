@@ -616,7 +616,7 @@ class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
 
   Future<Set<String>> _currentWalletAccountIds() async {
     final wallets =
-        (await context.read<CitizenSdk>().wallet.getState()).accounts;
+        (await context.read<CitizenSdk>().wallet.getState().result).accounts;
     return wallets.map((wallet) => wallet.accountId).toSet();
   }
 

@@ -2,10 +2,10 @@
 //!
 //! Secret inputs are copied synchronously into Rust-owned zeroizing containers
 //! before an asynchronous request is accepted. The only secret output is the
-//! one-time recovery phrase owned by a prepared-wallet handle. The separate
-//! private SDK bridge at the end of this file only lends an account mini-secret
-//! synchronously to the SDK-owned native display; it is absent from public
-//! headers, ordinary results and application callbacks.
+//! recovery phrase owned by a prepared-wallet handle. Explicit private-key
+//! access uses the public receiver lease: it borrows the account mini-secret
+//! only after real authorization and stays alive until callbacks drain.
+//! Rendering belongs to the host, never to a native SDK window.
 
 use std::{
     collections::HashMap,
@@ -37,25 +37,150 @@ use crate::{
     validate_output_versioned, wrong_result, MAX_ABI_INPUT_BYTES,
 };
 
+
+/// 载荷字段采用明确struct而不是Value覆盖：serde自动拒绝重复键、缺字段和未知字段。
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PayloadTagFields { op_tag: u8 }
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PayloadActivationFields {
+    cid_number: String, institution_code: String, kind: u8,
+    signer_public_key: String, timestamp: String, nonce: String,
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PayloadDecryptionFields {
+    cid_number: String, signer_public_key: String, timestamp: String, nonce: String,
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PayloadEmptyFields {}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PayloadU64Fields { value: String }
+
+fn payload_fields<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> FfiResult<T> {
+    serde_json::from_slice(bytes).map_err(|_| FfiError::invalid("载荷字段结构无效"))
+}
+fn payload_hex<const N: usize>(text: &str) -> FfiResult<[u8; N]> {
+    let raw = text.strip_prefix("0x").ok_or_else(|| FfiError::invalid("载荷字节前缀无效"))?;
+    if raw.len() != N * 2 || !raw.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Err(FfiError::invalid("载荷字节长度或编码无效"));
+    }
+    let mut result = [0; N];
+    for (index, pair) in raw.as_bytes().chunks_exact(2).enumerate() {
+        let digit = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
+        result[index] = (digit(pair[0]) << 4) | digit(pair[1]);
+    }
+    Ok(result)
+}
+fn payload_u64(text: &str) -> FfiResult<u64> {
+    if text.is_empty() || (text.len() > 1 && text.starts_with('0')) ||
+        !text.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(FfiError::invalid("载荷整数必须是规范u64十进制"));
+    }
+    text.parse().map_err(|_| FfiError::invalid("载荷整数超出u64"))
+}
+
+fn encode_payload(kind: u32, fields: &[u8], payload: &[u8]) -> FfiResult<Vec<u8>> {
+    use citizen_sdk_contracts::{encode_signing_payload, SigningPayload};
+    if !matches!(kind, 1 | 5) && !payload.is_empty() {
+        return Err(FfiError::invalid("此载荷种类不接收附加字节"));
+    }
+    Ok(match kind {
+        1 => {
+            let f: PayloadTagFields = payload_fields(fields)?;
+            encode_signing_payload(SigningPayload::Message { op_tag: f.op_tag, scale_payload: payload })?
+        }
+        2 => {
+            let f: PayloadTagFields = payload_fields(fields)?;
+            encode_signing_payload(SigningPayload::BinaryPrefix { op_tag: f.op_tag })?
+        }
+        3 => {
+            let f: PayloadActivationFields = payload_fields(fields)?;
+            encode_signing_payload(SigningPayload::ActivateAdmin {
+                cid_number: &f.cid_number, institution_code: payload_hex(&f.institution_code)?,
+                kind: f.kind, signer_public_key: payload_hex(&f.signer_public_key)?,
+                timestamp: payload_u64(&f.timestamp)?, nonce: payload_hex(&f.nonce)?,
+            })?
+        }
+        4 => {
+            let f: PayloadDecryptionFields = payload_fields(fields)?;
+            encode_signing_payload(SigningPayload::DecryptAdmin {
+                cid_number: &f.cid_number, signer_public_key: payload_hex(&f.signer_public_key)?,
+                timestamp: payload_u64(&f.timestamp)?, nonce: payload_hex(&f.nonce)?,
+            })?
+        }
+        5 => {
+            let _: PayloadEmptyFields = payload_fields(fields)?;
+            let text = std::str::from_utf8(payload).map_err(|_| FfiError::invalid("SCALE字符串必须是UTF8"))?;
+            encode_signing_payload(SigningPayload::ScaleString(text))?
+        }
+        6 => {
+            let f: PayloadU64Fields = payload_fields(fields)?;
+            encode_signing_payload(SigningPayload::U64Le(payload_u64(&f.value)?))?
+        }
+        _ => return Err(FfiError::invalid("未知签名载荷原语")),
+    })
+}
+
+/// 无实例、无金库的纯编码；大载荷与小型字段分开传入，避免JSON十六进制放大。
+/// # Safety
+/// 输入必须在同步调用期间可读；输出按capacity提供，out_required必须可写。
+#[no_mangle]
+pub unsafe extern "C" fn citizensdk_encode_signing_payload(
+    payload_kind: u32, fields_json: CitizenSdkBytesView, payload_bytes: CitizenSdkBytesView,
+    buffer: *mut u8, capacity: u64, out_required: *mut u64,
+) -> i32 {
+    ffi_status(|| {
+        let fields = copy_view(fields_json, "payload fields", 4096)?;
+        let payload = copy_view(payload_bytes, "payload", MAX_ABI_INPUT_BYTES)?;
+        let output = encode_payload(payload_kind, &fields, &payload)?;
+        copy_to_host(&output, buffer, capacity, out_required)
+    })
+}
 const MAX_WALLET_SECRET_INPUT_BYTES: usize = 1024;
 const MAX_WALLET_NAME_BYTES: usize = 1024;
 const MAX_ACCOUNT_BATCH: usize = citizen_sdk_contracts::MAX_WALLET_ACCOUNT_INDEX as usize + 1;
 const MAX_WALLET_CATALOG_ACCOUNTS: usize = MAX_ACCOUNT_BATCH * 2;
 
-/// 仅 SDK 构建时生成的私有头声明此布局；禁止加入公开 ABI 类型和业务绑定。
+/// 钱包写入沿同一请求调度器执行；额外预留失效事件，不复制请求/取消状态机。
+/// 即使清理在持久提交后失败也必须通知回读，不能把“返回错误”等同“目录未改变”。
+unsafe fn accept_wallet_change_and_write<F>(
+    runtime: Arc<NativeRuntime>,
+    out_request_id: *mut CitizenSdkRequestId,
+    operation: F,
+) -> FfiResult<()>
+where
+    F: FnOnce(&Arc<NativeRuntime>, CitizenSdkRequestId, Option<crate::requests::RequestCancellation>)
+        -> FfiResult<ResultPayload> + Send + 'static,
+{
+    require_output(out_request_id, "out_request_id")?;
+    let notification = runtime.reserve_wallet_changed()?;
+    accept_and_write(runtime, out_request_id, move |runtime, request_id, cancellation| {
+        let outcome = operation(runtime, request_id, cancellation);
+        // 槽已预留，正常发送不会QueueFull；dispatcher损坏由既有生命周期处理。
+        // 通知错误不得把已经提交的业务结果改写成“未提交”，诱导宿主重复操作。
+        let _ = runtime.publish_wallet_changed(notification);
+        outcome
+    })
+}
+
+/// 与公开头唯一对应的无UI接收表；真实请求终态之前由调用者保留线程安全context。
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub(crate) struct CitizenSdkInternalPrivateKeyViewV1 {
+pub struct CitizenSdkPrivateKeyReceiverV1 {
     pub struct_size: u32,
     pub abi_version: u32,
     pub context: *mut std::ffi::c_void,
-    pub display:
+    pub receive:
         Option<unsafe extern "C" fn(*mut std::ffi::c_void, u64, CitizenSdkBytesView) -> i32>,
     pub settled: Option<unsafe extern "C" fn(*mut std::ffi::c_void, u64, i32)>,
     pub authorizing: Option<unsafe extern "C" fn(*mut std::ffi::c_void, u64, u64) -> i32>,
 }
 
-impl CitizenSdkInternalPrivateKeyViewV1 {
+impl CitizenSdkPrivateKeyReceiverV1 {
     fn authorize(&self, view_id: u64, host_operation_id: u64) -> i32 {
         let Some(authorizing) = self.authorizing else {
             return CitizenSdkErrorCode::Internal.as_i32();
@@ -67,15 +192,15 @@ impl CitizenSdkInternalPrivateKeyViewV1 {
 
 // SAFETY: 私有 SDK 平台桥接保证 context 和代码直到唯一最终 request 完成均有效；
 // display 是线程安全的同步复制，settled 只派发无秘密状态，二者不等待 UI 线程。
-unsafe impl Send for CitizenSdkInternalPrivateKeyViewV1 {}
-unsafe impl Sync for CitizenSdkInternalPrivateKeyViewV1 {}
+unsafe impl Send for CitizenSdkPrivateKeyReceiverV1 {}
+unsafe impl Sync for CitizenSdkPrivateKeyReceiverV1 {}
 
 struct PrivateKeyViewSlot {
     view_id: u64,
     request_id: CitizenSdkRequestId,
     runtime: Arc<NativeRuntime>,
     core: Arc<citizen_sdk_engine::engine::InternalPrivateKeyView>,
-    callbacks: CitizenSdkInternalPrivateKeyViewV1,
+    callbacks: CitizenSdkPrivateKeyReceiverV1,
 }
 
 static NEXT_PRIVATE_KEY_VIEW: AtomicU64 = AtomicU64::new(1);
@@ -89,30 +214,30 @@ mod private_key_view_tests {
     fn private_table_has_exact_layout_and_rejects_invalid_inputs_without_admission() {
         use std::mem::{offset_of, size_of};
         if size_of::<usize>() == 8 {
-            assert_eq!(size_of::<CitizenSdkInternalPrivateKeyViewV1>(), 40);
+            assert_eq!(size_of::<CitizenSdkPrivateKeyReceiverV1>(), 40);
             assert_eq!(
-                offset_of!(CitizenSdkInternalPrivateKeyViewV1, struct_size),
+                offset_of!(CitizenSdkPrivateKeyReceiverV1, struct_size),
                 0
             );
             assert_eq!(
-                offset_of!(CitizenSdkInternalPrivateKeyViewV1, abi_version),
+                offset_of!(CitizenSdkPrivateKeyReceiverV1, abi_version),
                 4
             );
-            assert_eq!(offset_of!(CitizenSdkInternalPrivateKeyViewV1, context), 8);
-            assert_eq!(offset_of!(CitizenSdkInternalPrivateKeyViewV1, display), 16);
-            assert_eq!(offset_of!(CitizenSdkInternalPrivateKeyViewV1, settled), 24);
+            assert_eq!(offset_of!(CitizenSdkPrivateKeyReceiverV1, context), 8);
+            assert_eq!(offset_of!(CitizenSdkPrivateKeyReceiverV1, receive), 16);
+            assert_eq!(offset_of!(CitizenSdkPrivateKeyReceiverV1, settled), 24);
             assert_eq!(
-                offset_of!(CitizenSdkInternalPrivateKeyViewV1, authorizing),
+                offset_of!(CitizenSdkPrivateKeyReceiverV1, authorizing),
                 32
             );
         }
         let mut view_id = 91;
         let mut request_id = 92;
-        let mut table = CitizenSdkInternalPrivateKeyViewV1 {
+        let mut table = CitizenSdkPrivateKeyReceiverV1 {
             struct_size: 8,
             abi_version: 1,
             context: ptr::null_mut(),
-            display: None,
+            receive: None,
             settled: None,
             authorizing: None,
         };
@@ -124,7 +249,7 @@ mod private_key_view_tests {
         } as i32;
         unsafe {
             assert_eq!(
-                citizensdk_internal_private_key_view_open(
+                citizensdk_private_key_open(
                     0,
                     ptr::null(),
                     ptr::null(),
@@ -134,7 +259,7 @@ mod private_key_view_tests {
                 invalid
             );
             assert_eq!(
-                citizensdk_internal_private_key_view_open(
+                citizensdk_private_key_open(
                     0,
                     &account,
                     &table,
@@ -143,10 +268,10 @@ mod private_key_view_tests {
                 ),
                 invalid
             );
-            table.struct_size = size_of::<CitizenSdkInternalPrivateKeyViewV1>() as u32;
+            table.struct_size = size_of::<CitizenSdkPrivateKeyReceiverV1>() as u32;
             table.abi_version = 2;
             assert_eq!(
-                citizensdk_internal_private_key_view_open(
+                citizensdk_private_key_open(
                     0,
                     &account,
                     &table,
@@ -157,7 +282,7 @@ mod private_key_view_tests {
             );
             table.abi_version = 1;
             assert_eq!(
-                citizensdk_internal_private_key_view_open(
+                citizensdk_private_key_open(
                     0,
                     &account,
                     &table,
@@ -167,7 +292,7 @@ mod private_key_view_tests {
                 invalid
             );
             assert_eq!(
-                citizensdk_internal_private_key_view_open(
+                citizensdk_private_key_open(
                     0,
                     &account,
                     &table,
@@ -181,15 +306,15 @@ mod private_key_view_tests {
         if !cfg!(feature = "wallet") {
             unsafe {
                 assert_eq!(
-                    citizensdk_internal_private_key_view_reveal(0, 0),
+                    citizensdk_private_key_reveal(0, 0),
                     CitizenSdkErrorCode::Unsupported as i32
                 );
                 assert_eq!(
-                    citizensdk_internal_private_key_view_cancel(0, 0),
+                    citizensdk_private_key_cancel(0, 0),
                     CitizenSdkErrorCode::Unsupported as i32
                 );
                 assert_eq!(
-                    citizensdk_internal_private_key_view_finish(0, 0),
+                    citizensdk_private_key_finish(0, 0),
                     CitizenSdkErrorCode::Unsupported as i32
                 );
             }
@@ -268,7 +393,7 @@ fn pump_private_key_view(slot: &Arc<PrivateKeyViewSlot>) -> FfiResult<()> {
 fn enqueue_private_key_view(slot: &Arc<PrivateKeyViewSlot>) -> FfiResult<()> {
     let display = slot
         .callbacks
-        .display
+        .receive
         .ok_or_else(|| FfiError::internal("安全查看 display 回调缺失"))?;
     let job = Arc::clone(slot);
     crate::requests::execute_private_view(move || {
@@ -313,12 +438,12 @@ fn enqueue_private_key_view(slot: &Arc<PrivateKeyViewSlot>) -> FfiResult<()> {
 }
 
 /// # Safety
-/// 仅 SDK 自有平台桥接调用；表和输出必须有效，context 必须存续到唯一最终 request。
+/// 接收表和输出必须有效，context必须存续到唯一最终request；不允许回调重入Core。
 #[no_mangle]
-pub(crate) unsafe extern "C" fn citizensdk_internal_private_key_view_open(
+pub unsafe extern "C" fn citizensdk_private_key_open(
     handle: CitizenSdkHandle,
     account_id: *const CitizenSdkAccountId,
-    view: *const CitizenSdkInternalPrivateKeyViewV1,
+    view: *const CitizenSdkPrivateKeyReceiverV1,
     out_view_id: *mut u64,
     out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
@@ -333,7 +458,7 @@ pub(crate) unsafe extern "C" fn citizensdk_internal_private_key_view_open(
         }
         let callbacks = read_versioned(view, "internal private-key view")?;
         if callbacks.context.is_null()
-            || callbacks.display.is_none()
+            || callbacks.receive.is_none()
             || callbacks.settled.is_none()
             || callbacks.authorizing.is_none()
         {
@@ -399,7 +524,7 @@ pub(crate) unsafe extern "C" fn citizensdk_internal_private_key_view_open(
 /// # Safety
 /// 只能由 SDK 自有确认操作调用；成功只代表登记，不表示授权或显示已完成。
 #[no_mangle]
-pub(crate) unsafe extern "C" fn citizensdk_internal_private_key_view_reveal(
+pub unsafe extern "C" fn citizensdk_private_key_reveal(
     handle: CitizenSdkHandle,
     view_id: u64,
 ) -> i32 {
@@ -424,7 +549,7 @@ pub(crate) unsafe extern "C" fn citizensdk_internal_private_key_view_reveal(
 /// # Safety
 /// 撤销只能阻止显示，不能释放仍在授权中的宿主上下文或代替 finish。
 #[no_mangle]
-pub(crate) unsafe extern "C" fn citizensdk_internal_private_key_view_cancel(
+pub unsafe extern "C" fn citizensdk_private_key_cancel(
     handle: CitizenSdkHandle,
     view_id: u64,
 ) -> i32 {
@@ -441,7 +566,7 @@ pub(crate) unsafe extern "C" fn citizensdk_internal_private_key_view_cancel(
 /// # Safety
 /// SDK 原生界面关闭且可擦除显示 buffer 已清零后才能调用；必须等最终 request 再销毁 context。
 #[no_mangle]
-pub(crate) unsafe extern "C" fn citizensdk_internal_private_key_view_finish(
+pub unsafe extern "C" fn citizensdk_private_key_finish(
     handle: CitizenSdkHandle,
     view_id: u64,
 ) -> i32 {
@@ -836,6 +961,57 @@ pub unsafe extern "C" fn citizensdk_get_best_fee_snapshot(
 }
 
 #[no_mangle]
+/// 无UI校验：原因/位置与核心派生复用同一解析器，不从文案反推错误类型。
+/// 超长输入不复制；其余输入同步复制进可清零缓冲，调用结束释放。
+///
+/// # Safety
+/// 非空input须在声明长度内可读；out_validation须带有效ABI前缀且可写。
+pub unsafe extern "C" fn citizensdk_validate_wallet_input(
+    input_kind: u32,
+    input: CitizenSdkBytesView,
+    word_count: u32,
+    out_validation: *mut CitizenSdkWalletInputValidationV1,
+) -> i32 {
+    #[cfg(not(feature = "wallet"))]
+    {
+        let _ = (input_kind, input, word_count, out_validation);
+        ffi_status(|| Err(FfiError::new(CitizenSdkErrorCode::Unsupported, "当前构建不包含钱包模块")))
+    }
+    #[cfg(feature = "wallet")]
+    {
+        ffi_status(|| {
+            use citizen_sdk_engine::{WalletInputReason, WalletInputValidation};
+            validate_output_versioned(out_validation, "wallet input validation")?;
+            let selected = match input_kind {
+                1 if word_count == 0 => None,
+                2 => Some(wallet_word_count(word_count)?),
+                _ => return Err(FfiError::invalid("钱包输入类型或词数参数无效")),
+            };
+            if input.len != 0 && input.data.is_null() {
+                return Err(FfiError::invalid("非空钱包输入的指针不能为空"));
+            }
+            let validation = if input.len > MAX_WALLET_SECRET_INPUT_BYTES as u64 {
+                WalletInputValidation::new(WalletInputReason::InputTooLong)
+            } else {
+                let bytes = Zeroizing::new(copy_view(input, "wallet input", MAX_WALLET_SECRET_INPUT_BYTES)?);
+                match (std::str::from_utf8(&bytes), selected) {
+                    (Ok(text), Some(count)) => citizen_sdk_engine::wallet_mnemonic_validation(text, count),
+                    (Ok(text), None) => citizen_sdk_engine::wallet_password_validation(text),
+                    (Err(_), Some(_)) => WalletInputValidation::new(WalletInputReason::MnemonicFormat),
+                    (Err(_), None) => WalletInputValidation::new(WalletInputReason::PasswordFormat),
+                }
+            };
+            ptr::write(out_validation, CitizenSdkWalletInputValidationV1 {
+                reason: validation.reason as u32,
+                position: validation.position.map_or(u32::MAX, |index| index as u32),
+                ..CitizenSdkWalletInputValidationV1::default()
+            });
+            Ok(())
+        })
+    }
+}
+
+#[no_mangle]
 /// 同步复用派生密码校验，不返回规范化密码，不创建持久化状态。
 ///
 /// # Safety
@@ -1006,7 +1182,7 @@ pub unsafe extern "C" fn citizensdk_import_cold_account_id(
             let runtime = handles::get(handle)?;
             let account_id = account_id_from_pointer(account_id, "account_id")?;
             let name = utf8(name, "cold account name", MAX_WALLET_NAME_BYTES)?;
-            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 runtime.drive(
                     runtime
@@ -1042,7 +1218,7 @@ pub unsafe extern "C" fn citizensdk_import_cold_account_ss58(
             let runtime = handles::get(handle)?;
             let ss58_address = utf8(ss58_address, "cold account SS58", 64)?;
             let name = utf8(name, "cold account name", MAX_WALLET_NAME_BYTES)?;
-            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 runtime.drive(runtime.engine().import_cold_wallet_ss58(ss58_address, name))??;
                 let state = runtime.drive(runtime.engine().wallet_state())??;
@@ -1080,7 +1256,7 @@ pub unsafe extern "C" fn citizensdk_reorder_wallet_accounts_without_default_chan
         ffi_status(|| {
             let runtime = handles::get(handle)?;
             let account_ids = copy_wallet_catalog_account_ids(account_ids, account_count)?;
-            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 let state = runtime.drive(
                     runtime
@@ -1118,7 +1294,7 @@ pub unsafe extern "C" fn citizensdk_rename_account(
             let runtime = handles::get(handle)?;
             let account_id = account_id_from_pointer(account_id, "account_id")?;
             let name = utf8(name, "wallet account name", MAX_WALLET_NAME_BYTES)?;
-            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 let state = runtime
                     .drive(runtime.engine().rename_wallet_account_any(account_id, name))??;
@@ -1148,7 +1324,7 @@ pub unsafe extern "C" fn citizensdk_delete_account(
         ffi_status(|| {
             let runtime = handles::get(handle)?;
             let account_id = account_id_from_pointer(account_id, "account_id")?;
-            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 let state =
                     runtime.drive(runtime.engine().delete_wallet_account_any(account_id))??;
@@ -1336,7 +1512,7 @@ pub unsafe extern "C" fn citizensdk_commit_wallet_creation(
         ffi_status(|| {
             let runtime = handles::get(handle)?;
             let claim = claim_prepared_wallet(prepared_wallet, handle)?;
-            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
                 let prepared = claim.consume()?;
                 runtime.refresh_provider_capabilities()?;
                 let profile = runtime.drive(
@@ -1378,7 +1554,7 @@ pub unsafe extern "C" fn citizensdk_import_wallet(
             let mnemonic =
                 secret_buffer(mnemonic, "wallet mnemonic", MAX_WALLET_SECRET_INPUT_BYTES)?;
             let password = secret_utf8(password, "wallet password", MAX_WALLET_SECRET_INPUT_BYTES)?;
-            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 let profile =
                     runtime.drive(runtime.engine().import_wallet(mnemonic, password))??;
@@ -1426,14 +1602,45 @@ pub unsafe extern "C" fn citizensdk_add_wallet_accounts(
                 secret_buffer(mnemonic, "wallet mnemonic", MAX_WALLET_SECRET_INPUT_BYTES)?;
             let password = secret_utf8(password, "wallet password", MAX_WALLET_SECRET_INPUT_BYTES)?;
             let indices = copy_indices(indices, index_count)?;
-            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
-                let accounts = runtime.drive(
+                let profile = runtime.drive(
                     runtime
                         .engine()
                         .add_wallet_accounts(mnemonic, password, indices),
                 )??;
-                Ok(ResultPayload::WalletAccounts(accounts))
+                Ok(ResultPayload::WalletProfile(Some(profile)))
+            })
+        })
+    }
+}
+
+#[no_mangle]
+/// 在同一钱包操作门内计算下一个编号并追加；返回本次提交的公开profile。
+///
+/// # Safety
+/// 秘密输入在调用期间可读；out_request_id必须可写。
+pub unsafe extern "C" fn citizensdk_add_next_wallet_account(
+    handle: CitizenSdkHandle,
+    mnemonic: CitizenSdkBytesView,
+    password: CitizenSdkBytesView,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "wallet"))]
+    {
+        let _ = (handle, mnemonic, password, out_request_id);
+        ffi_status(|| Err(module_unsupported("wallet")))
+    }
+    #[cfg(feature = "wallet")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            let mnemonic = secret_buffer(mnemonic, "wallet mnemonic", MAX_WALLET_SECRET_INPUT_BYTES)?;
+            let password = secret_utf8(password, "wallet password", MAX_WALLET_SECRET_INPUT_BYTES)?;
+            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let profile = runtime.drive(runtime.engine().add_next_wallet_account(mnemonic, password))??;
+                Ok(ResultPayload::WalletProfile(Some(profile)))
             })
         })
     }
@@ -1494,7 +1701,7 @@ pub unsafe extern "C" fn citizensdk_rename_wallet_account(
             let runtime = handles::get(handle)?;
             let account_id = account_id_from_pointer(account_id, "account_id")?;
             let name = utf8(name, "wallet account name", MAX_WALLET_NAME_BYTES)?;
-            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 let profile =
                     runtime.drive(runtime.engine().rename_wallet_account(account_id, name))??;
@@ -1529,7 +1736,7 @@ pub unsafe extern "C" fn citizensdk_delete_wallet_account(
         ffi_status(|| {
             let runtime = handles::get(handle)?;
             let account_id = account_id_from_pointer(account_id, "account_id")?;
-            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 runtime.drive(runtime.engine().delete_wallet_account(account_id))??;
                 Ok(ResultPayload::Empty)
@@ -1561,9 +1768,36 @@ pub unsafe extern "C" fn citizensdk_delete_wallet(
     {
         ffi_status(|| {
             let runtime = handles::get(handle)?;
-            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 runtime.drive(runtime.engine().delete_wallet())??;
+                Ok(ResultPayload::Empty)
+            })
+        })
+    }
+}
+
+#[no_mangle]
+/// 账户0真实签名并验签后删除同代际钱包；不替换紧急擦除的delete入口。
+///
+/// # Safety
+/// out_request_id须可写；请求和真实授权均按既有SDK所有权规则排空。
+pub unsafe extern "C" fn citizensdk_sign_and_delete_wallet(
+    handle: CitizenSdkHandle,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "wallet"))]
+    {
+        let _ = (handle, out_request_id);
+        ffi_status(|| Err(module_unsupported("wallet")))
+    }
+    #[cfg(feature = "wallet")]
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                runtime.drive(runtime.engine().sign_and_delete_wallet())??;
                 Ok(ResultPayload::Empty)
             })
         })
@@ -1593,7 +1827,7 @@ pub unsafe extern "C" fn citizensdk_reconcile_wallet_cleanup(
     {
         ffi_status(|| {
             let runtime = handles::get(handle)?;
-            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 runtime.drive(runtime.engine().reconcile_wallet_cleanup())??;
                 Ok(ResultPayload::Empty)
@@ -1935,7 +2169,7 @@ pub unsafe extern "C" fn citizensdk_begin_default_account_change(
         ffi_status(|| {
             let runtime = handles::get(handle)?;
             let account_ids = copy_wallet_catalog_account_ids(account_ids, account_count)?;
-            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 let authorization =
                     runtime.drive(runtime.engine().prepare_default_wallet_account_change(
@@ -2029,7 +2263,7 @@ pub unsafe extern "C" fn citizensdk_consume_default_account_change(
                 "default change response",
                 citizen_sdk_qr::MAX_QR_TEXT_BYTES,
             )?;
-            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
                 let (authorization, signature) = crate::qr_abi::consume_default_account_qr_session(
                     handle,
                     &session_id,
@@ -2267,6 +2501,29 @@ pub unsafe extern "C" fn citizensdk_result_get_wallet_state(
                 ..CitizenSdkWalletStateInfo::default()
             },
         );
+        Ok(())
+    })
+}
+
+#[no_mangle]
+/// 从同一钱包快照取得初始化和清理事实，不另读数据库、不依赖热金库。
+///
+/// # Safety
+/// 两个输出指针均须可写；任一参数/结果类型错误不写任何输出。
+pub unsafe extern "C" fn citizensdk_wallet_state_get_initialization(
+    result: CitizenSdkResultHandle,
+    out_initialization_state: *mut u32,
+    out_cleanup_pending: *mut u8,
+) -> i32 {
+    ffi_status(|| {
+        require_output(out_initialization_state, "initialization state")?;
+        require_output(out_cleanup_pending, "cleanup pending")?;
+        let owned = ownership::get(result)?;
+        let ResultPayload::WalletState(state) = &owned.payload else {
+            return Err(wrong_result("wallet state"));
+        };
+        ptr::write(out_initialization_state, state.initialization_state() as u32);
+        ptr::write(out_cleanup_pending, u8::from(state.cleanup_pending()));
         Ok(())
     })
 }

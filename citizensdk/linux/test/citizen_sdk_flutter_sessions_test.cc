@@ -1,4 +1,6 @@
 #include <cassert>
+#include <algorithm>
+#include <future>
 #include <functional>
 #include <memory>
 #include <string>
@@ -81,6 +83,12 @@ class FakeTransport final : public csf::NativeTransport {
   }
   csf::Value capability_snapshot() override {
     return csf::Value::list({csf::Value::integer(10)});
+  }
+  std::function<void(uint64_t)> credential_cancel;
+  std::vector<uint64_t> credential_cancellations;
+  void cancel_credential(uint64_t id) override {
+    credential_cancellations.push_back(id);
+    if (credential_cancel) credential_cancel(id);
   }
   void cancel(citizensdk_request_id_t request) override {
     ++cancelled;
@@ -165,6 +173,121 @@ void drain_tasks(std::vector<std::function<void()>> &queue) {
 }  // namespace
 
 int main() {
+
+  {
+    // 只替代OS/Core执行器；凭据关联、事件、回包、关闭均运行生产Sessions状态机。
+    std::vector<std::function<void()>> credential_queue;
+    std::vector<decltype(citizen_sdk::Config::credentialProvider)> providers;
+    std::vector<std::shared_ptr<FakeTransport>> natives;
+    std::vector<csf::Value> events;
+    auto credential_sessions = csf::Sessions::create(
+        [](uint32_t) { return csf::OpenEnvironment{}; },
+        [&](std::function<void()> work) { credential_queue.push_back(std::move(work)); },
+        [&](const citizen_sdk::Config &config) {
+          providers.push_back(config.credentialProvider);
+          auto native = std::make_shared<FakeTransport>();
+          natives.push_back(native);
+          return native;
+        });
+    credential_sessions->listen([&](csf::Value value) { events.push_back(std::move(value)); });
+    auto open = request(csf::Method::open, {}, 0);
+    open.has_credential_provider = true;
+    csf::Reply first_open, second_open;
+    credential_sessions->dispatch(open, [&](csf::Reply value) { first_open = std::move(value); });
+    credential_sessions->dispatch(open, [&](csf::Reply value) { second_open = std::move(value); });
+    assert(first_open.success && second_open.success && providers.size() == 2);
+    assert(providers[0] && providers[1]);
+    const auto first = text(items(first_open.value)[1]);
+    const auto second = text(items(second_open.value)[1]);
+    std::promise<void> cancel_first;
+    citizen_sdk::CredentialChallenge challenge{71, "unlock", std::nullopt,
+                                               cancel_first.get_future().share()};
+    auto future = providers[0](challenge);
+    drain_tasks(credential_queue);
+    bool seen = false;
+    for (const auto &event : events) {
+      const auto &fields = items(event);
+      if (text(fields[3]) == "credentialRequest") {
+        assert(text(fields[1]) == first);
+        const auto &payload = items(fields[4]);
+        assert(payload.size() == 3 && text(payload[0]) == "71" && text(payload[1]) == "unlock");
+        seen = true;
+      }
+    }
+    assert(seen);
+    auto response = request(csf::Method::respond_credential, second, 1);
+    response.host_operation_id = 71;
+    response.credential.emplace(std::vector<uint8_t>(12, 'a'));
+    csf::Reply wrong_host;
+    credential_sessions->dispatch(response, [&](csf::Reply value) { wrong_host = std::move(value); });
+    assert(!wrong_host.success && wrong_host.error_code == CITIZENSDK_ERROR_INVALID_STATE);
+    response.session = first;
+    csf::Reply delivered;
+    credential_sessions->dispatch(response, [&](csf::Reply value) { delivered = std::move(value); });
+    assert(delivered.success && items(items(delivered.value)[3]).empty());
+    auto bytes = future.get();
+    assert(bytes && *bytes == std::vector<uint8_t>(12, 'a'));
+    std::fill(bytes->begin(), bytes->end(), 0);
+    response.sequence = 2;
+    csf::Reply duplicate;
+    credential_sessions->dispatch(response, [&](csf::Reply value) { duplicate = std::move(value); });
+    assert(!duplicate.success && duplicate.error_code == CITIZENSDK_ERROR_INVALID_STATE);
+
+    std::promise<void> cancel_second;
+    challenge.host_operation_id = 72;
+    challenge.cancelled = cancel_second.get_future().share();
+    auto pending = providers[0](challenge);
+    drain_tasks(credential_queue);
+    natives[0]->credential_cancel = [&](uint64_t id) {
+      assert(id == 72); cancel_second.set_value();
+    };
+    auto cancel = request(csf::Method::cancel_credential, first, 3);
+    cancel.host_operation_id = 72;
+    csf::Reply cancelled;
+    credential_sessions->dispatch(cancel, [&](csf::Reply value) { cancelled = std::move(value); });
+    assert(cancelled.success && !pending.get());
+    drain_tasks(credential_queue);
+    assert(natives[0]->credential_cancellations == std::vector<uint64_t>{72});
+    response.host_operation_id = 72; response.sequence = 4;
+    credential_sessions->dispatch(response, [&](csf::Reply value) {
+      assert(!value.success && value.error_code == CITIZENSDK_ERROR_INVALID_STATE);
+    });
+
+    // 关闭失败保留同一session；取消已撤销的挑战不能被下一次关闭复活。
+    std::promise<void> cancel_close;
+    challenge.host_operation_id = 73;
+    challenge.cancelled = cancel_close.get_future().share();
+    auto during_close = providers[0](challenge);
+    drain_tasks(credential_queue);
+    natives[0]->credential_cancel = [&](uint64_t id) {
+      assert(id == 73); cancel_close.set_value();
+    };
+    natives[0]->fail_close = true;
+    credential_sessions->dispatch(request(csf::Method::close, first, 5), [&](csf::Reply value) {
+      assert(!value.success && value.error_code == CITIZENSDK_ERROR_STORAGE);
+    });
+    assert(!during_close.get());
+    drain_tasks(credential_queue);
+    assert(credential_sessions->session_count() == 2);
+    natives[0]->fail_close = false;
+    credential_sessions->dispatch(request(csf::Method::close, first, 6), [&](csf::Reply value) {
+      assert(value.success);
+    });
+
+    // 没有事件通道就没有可交付的输入交互，实际提供者结果必须取消。
+    credential_sessions->cancel_events();
+    std::promise<void> never_cancelled;
+    challenge.host_operation_id = 74;
+    challenge.cancelled = never_cancelled.get_future().share();
+    auto without_sink = providers[1](challenge);
+    drain_tasks(credential_queue);
+    assert(!without_sink.get());
+    credential_sessions->dispatch(request(csf::Method::close, second, 2), [&](csf::Reply value) {
+      assert(value.success);
+    });
+    assert(credential_sessions->session_count() == 0);
+  }
+
 
   {
     // 正式 Sessions 状态机：QR-only 不进入钱包或 Core 异步请求工厂；

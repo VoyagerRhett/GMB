@@ -58,6 +58,7 @@ pub use host_providers::{
     HostCompletionKind, HostDispatchOutcome, HostOperationTracker,
 };
 pub use qr_abi::*;
+pub use wallet_abi::{citizensdk_encode_signing_payload, CitizenSdkPrivateKeyReceiverV1};
 
 use error::{clear_last_error, last_error, set_last_error, FfiError, FfiResult};
 use ownership::ResultPayload;

@@ -12,7 +12,6 @@ import 'package:citizenapp/citizen/institution/institution_role_models.dart';
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/citizen/shared/institution_info.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
@@ -264,7 +263,7 @@ class _AdminTile extends StatelessWidget {
   Future<void> _startActivation(BuildContext context) async {
     // 检查是否为冷钱包（热钱包不允许激活）
     final wallets =
-        (await context.read<CitizenSdk>().wallet.getState()).accounts;
+        (await context.read<CitizenSdk>().wallet.getState().result).accounts;
     final wallet = wallets.where((w) {
       return w.accountId == accountId;
     }).firstOrNull;
@@ -287,11 +286,11 @@ class _AdminTile extends StatelessWidget {
     if (!context.mounted) return;
     final sdk = context.read<CitizenSdk>();
 
-    // App 构造业务 payload；SDK 负责冷热账户签名与 QR_V1 会话。
+    // SDK编码原业务字段并负责冷热账户签名与QR_V1会话。
     final activationService = ActivationService(
       adminService: InstitutionAdminService(chain: sdk.chain),
     );
-    final payload = activationService.buildActivationPayload(
+    final payload = await activationService.buildActivationPayload(
       accountId: accountId,
       identity: accountIdentity,
     );
@@ -302,7 +301,7 @@ class _AdminTile extends StatelessWidget {
       context: context,
       accountId: accountId,
       payload: payload,
-      action: QrActions.activateAdmin,
+      action: CitizenQrActions.activateAdmin,
     );
     if (!context.mounted) return;
 

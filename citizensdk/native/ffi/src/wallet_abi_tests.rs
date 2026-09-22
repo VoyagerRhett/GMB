@@ -2,10 +2,35 @@
 #![allow(clippy::expect_used)]
 
 use super::{
+    encode_payload, citizensdk_encode_signing_payload,
     claim_prepared_wallet, copy_pair, lock_prepared_wallets, next_prepared_wallet_handle,
     require_prepared_owner, secret_utf8, u128_from_abi, u128_to_abi, wallet_profile_to_abi,
     wallet_word_count, PreparedWalletSlot,
 };
+
+#[test]
+fn pure_payload_abi_rejects_duplicate_fields_and_short_output_without_writes() {
+    assert_eq!(encode_payload(2, br#"{"op_tag":24}"#, &[]).unwrap(), b"GMB\x18");
+    for fields in [br#"{"op_tag":24,"op_tag":25}"#.as_slice(),
+        br#"{"op_tag":24,"title":"not-ui"}"#.as_slice(), br#"{"op_tag":256}"#.as_slice()] {
+        assert_eq!(encode_payload(2, fields, &[]).unwrap_err().code, CitizenSdkErrorCode::InvalidArgument);
+    }
+    assert!(encode_payload(5, b"{}", &[255]).is_err());
+    assert!(encode_payload(6, br#"{"value":"01"}"#, &[]).is_err());
+    assert_eq!(encode_payload(6, br#"{"value":"18446744073709551615"}"#, &[]).unwrap(), [255; 8]);
+    assert!(encode_payload(6, br#"{"value":"18446744073709551616"}"#, &[]).is_err());
+    assert!(encode_payload(2, br#"{"op_tag":24}"#, &[1]).is_err());
+    let fields = br#"{"op_tag":24}"#;
+    let input = CitizenSdkBytesView { data: fields.as_ptr(), len: fields.len() as u64 };
+    let empty = CitizenSdkBytesView { data: std::ptr::null(), len: 0 };
+    let mut required = 0;
+    assert_eq!(unsafe { citizensdk_encode_signing_payload(2, input, empty, std::ptr::null_mut(), 0, &mut required) }, 0);
+    assert_eq!(required, 4);
+    let mut output = [0xa5; 3];
+    assert_eq!(unsafe { citizensdk_encode_signing_payload(2, input, empty, output.as_mut_ptr(), 3, &mut required) },
+        CitizenSdkErrorCode::InvalidArgument.as_i32());
+    assert_eq!(output, [0xa5; 3]);
+}
 use crate::abi::{
     CitizenSdkBytesView, CitizenSdkDefaultAccountChangeInfo, CitizenSdkErrorCode,
     CitizenSdkExternalSignerTransport, CitizenSdkSigningOutcomeInfo,
@@ -17,6 +42,37 @@ use citizen_sdk_contracts::{
     Sr25519Signature, WalletState,
 };
 use std::sync::Arc;
+
+#[test]
+#[cfg(feature = "wallet")]
+fn headless_input_validation_checks_abi_and_returns_only_typed_facts() {
+    use crate::abi::CitizenSdkWalletInputValidationV1;
+    use std::mem::{offset_of, size_of};
+
+    assert_eq!(size_of::<CitizenSdkWalletInputValidationV1>(), 16);
+    assert_eq!(offset_of!(CitizenSdkWalletInputValidationV1, reason), 8);
+    assert_eq!(offset_of!(CitizenSdkWalletInputValidationV1, position), 12);
+    let mut out = CitizenSdkWalletInputValidationV1::default();
+    let input = |bytes: &[u8]| CitizenSdkBytesView { data: bytes.as_ptr(), len: bytes.len() as u64 };
+    unsafe {
+        assert_eq!(super::citizensdk_validate_wallet_input(1, input(b""), 0, &mut out), 0);
+        assert_eq!((out.reason, out.position), (0, u32::MAX));
+        assert_eq!(super::citizensdk_validate_wallet_input(1, input(b"short"), 0, &mut out), 0);
+        assert_eq!((out.reason, out.position), (7, u32::MAX));
+        assert_eq!(super::citizensdk_validate_wallet_input(2, input(&[0xff]), 12, &mut out), 0);
+        assert_eq!((out.reason, out.position), (6, u32::MAX));
+        assert_eq!(super::citizensdk_validate_wallet_input(2, input(&[b'a'; 1025]), 12, &mut out), 0);
+        assert_eq!((out.reason, out.position), (1, u32::MAX));
+        let previous = out;
+        for (kind, count) in [(0, 0), (3, 0), (1, 12), (2, 15)] {
+            assert_eq!(super::citizensdk_validate_wallet_input(kind, input(b""), count, &mut out), CitizenSdkErrorCode::InvalidArgument.as_i32());
+            assert_eq!(out, previous);
+        }
+        assert_eq!(super::citizensdk_validate_wallet_input(1, input(b""), 0, std::ptr::null_mut()), CitizenSdkErrorCode::InvalidArgument.as_i32());
+        out.struct_size = 8;
+        assert_eq!(super::citizensdk_validate_wallet_input(1, input(b""), 0, &mut out), CitizenSdkErrorCode::InvalidArgument.as_i32());
+    }
+}
 
 #[test]
 fn application_key_result_has_one_exact_secret_copy_surface() {
@@ -712,7 +768,7 @@ fn wallet_state_projection_is_globally_ordered_and_multi_buffer_copy_is_atomic()
     .expect("统一钱包状态");
     let result = ownership::insert(OwnedResult::success(
         0,
-        ResultPayload::WalletState(Box::new(state)),
+        ResultPayload::WalletState(Box::new(citizen_sdk_engine::WalletStateSnapshot::from_state(&state).unwrap())),
     ))
     .expect("钱包状态 result");
 
@@ -729,6 +785,12 @@ fn wallet_state_projection_is_globally_ordered_and_multi_buffer_copy_is_atomic()
         assert_eq!(state_info.account_count, 1);
         assert_eq!(state_info.has_default_account, 1);
         assert_eq!(state_info.default_account_id.bytes, *account_id.as_bytes());
+        let mut initialization = 99;
+        let mut cleanup = 99;
+        assert_eq!(super::citizensdk_wallet_state_get_initialization(result, &mut initialization, &mut cleanup), 0);
+        assert_eq!((initialization, cleanup), (1, 0));
+        assert_eq!(super::citizensdk_wallet_state_get_initialization(result, &mut initialization, std::ptr::null_mut()), CitizenSdkErrorCode::InvalidArgument.as_i32());
+        assert_eq!(initialization, 1);
 
         assert_eq!(
             super::citizensdk_result_get_wallet_state_account(

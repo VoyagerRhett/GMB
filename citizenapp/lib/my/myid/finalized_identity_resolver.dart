@@ -46,7 +46,7 @@ class FinalizedIdentityResolver {
   ///
   /// 链读异常**不吞**(上抛给调用方 fail-closed,绝不静默降级成访客/未注册)。
   Future<FinalizedIdentity?> resolve() async {
-    final account = (await _wallet.getState()).defaultAccount;
+    final account = (await _wallet.getState().result).defaultAccount;
     if (account == null) return null;
     final snapshot = await _chainReader.readByAccountId(account.accountId);
     return FinalizedIdentity(

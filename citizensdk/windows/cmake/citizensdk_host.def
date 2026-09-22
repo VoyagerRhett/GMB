@@ -2,17 +2,12 @@ LIBRARY citizensdk_host
 EXPORTS
   citizensdk_host_abi_version
   citizensdk_host_abandon
-  citizensdk_host_scan_qr
-  citizensdk_host_sign_qr_request
-  citizensdk_host_cancel_wallet_flow
   citizensdk_host_config_size
   citizensdk_host_create
   citizensdk_host_create_with_modules
   citizensdk_host_create_sdk
   citizensdk_host_destroy
   citizensdk_host_last_error_copy
-  citizensdk_host_present_wallet_flow
-  citizensdk_host_view_account_private_key
   citizensdk_host_sdk
   citizensdk_host_set_event_callback
   citizensdk_host_set_parent_window
@@ -20,3 +15,8 @@ EXPORTS
   citizensdk_qr_image_decode_luminance
   citizensdk_qr_image_encode_text
   citizensdk_qr_image_zxing_version
+  citizensdk_host_set_credential_provider
+  citizensdk_host_respond_credential
+  citizensdk_host_cancel_credential
+  citizensdk_qr_image_decode_luminance_all
+  citizensdk_host_submit_request

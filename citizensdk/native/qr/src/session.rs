@@ -3,7 +3,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use citizen_sdk_contracts::{
     apply_signing_transform, ChainSigner, SigningTransform, Sr25519PublicKey, Sr25519Signature,
 };
@@ -143,19 +142,12 @@ impl<C: QrClock> QrSessionStore<C> {
                 "同一实例的有效二维码签名会话超过上限",
             ));
         }
-        let mut entropy = [0_u8; 16];
-        getrandom::fill(&mut entropy).map_err(|_| {
-            QrError::new(
-                QrErrorCode::EntropyUnavailable,
-                "无法生成加密安全的 request_id",
-            )
-        })?;
-        let request_id = URL_SAFE_NO_PAD.encode(entropy);
+        let request_id = crate::codec::new_request_id("")?;
         let request = SignRequest {
             request_id: request_id.clone(),
             expires_at,
             action,
-            signer_public_key,
+            signer_public_key: Some(signer_public_key),
             review_payload,
         };
         transform
@@ -176,8 +168,9 @@ impl<C: QrClock> QrSessionStore<C> {
     /// 核对关联、账户、期限和实际 sr25519 签名后原子消费响应。
     ///
     /// 无效签名绝不改变会话状态；同一请求只有首次有效响应可以成功。
-    pub async fn verify_and_consume_response(
-        &mut self,
+    /// 只验证原会话，不消费；预检与最终消费共用同一账户、期限和transform校验。
+    pub async fn verify_response(
+        &self,
         signer: &dyn ChainSigner,
         response: &SignResponse,
     ) -> Result<(SignRequest, Sr25519Signature), QrError> {
@@ -190,12 +183,14 @@ impl<C: QrClock> QrSessionStore<C> {
                 "签名请求已经消费",
             ));
         }
-        if session.request.expires_at <= self.clock.now_epoch_seconds()
+        let now = self.clock.now_epoch_seconds();
+        if now == 0 { return Err(QrError::new(QrErrorCode::ClockUnavailable, "系统时钟不可用")); }
+        if session.request.expires_at <= now
             || response.expires_at != session.request.expires_at
         {
             return Err(QrError::new(QrErrorCode::Expired, "签名响应已经过期"));
         }
-        if response.signer_public_key != session.request.signer_public_key {
+        if Some(response.signer_public_key) != session.request.signer_public_key {
             return Err(QrError::new(
                 QrErrorCode::MismatchedAccount,
                 "签名响应账户与请求不一致",
@@ -219,11 +214,21 @@ impl<C: QrClock> QrSessionStore<C> {
                 "签名响应无法通过 sr25519 验证",
             ));
         }
-        if self.clock.now_epoch_seconds() == 0
-            || request.expires_at <= self.clock.now_epoch_seconds()
-        {
+        let verified_at = self.clock.now_epoch_seconds();
+        if verified_at == 0 { return Err(QrError::new(QrErrorCode::ClockUnavailable, "系统时钟不可用")); }
+        if request.expires_at <= verified_at {
             return Err(QrError::new(QrErrorCode::Expired, "验签完成时请求已过期"));
         }
+        Ok((request, response.signature))
+    }
+
+    /// 预检不是可复用授权：每次消费重新执行同一校验，再单次标记消费。
+    pub async fn verify_and_consume_response(
+        &mut self,
+        signer: &dyn ChainSigner,
+        response: &SignResponse,
+    ) -> Result<(SignRequest, Sr25519Signature), QrError> {
+        let verified = self.verify_response(signer, response).await?;
         let session = self.sessions.get_mut(&response.request_id).ok_or_else(|| {
             QrError::new(QrErrorCode::MismatchedRequest, "签名响应没有对应的本地请求")
         })?;
@@ -234,11 +239,18 @@ impl<C: QrClock> QrSessionStore<C> {
             ));
         }
         session.consumed = true;
-        Ok((request, response.signature))
+        Ok(verified)
     }
 
     pub fn cancel(&mut self, request_id: &str) -> bool {
         self.sessions.remove(request_id).is_some()
+    }
+
+    /// 重扫依据本地原请求期限，而不是错误回扫自己声明的期限；不在查询中消费。
+    pub fn is_pending(&self, request_id: &str) -> Result<bool, QrError> {
+        let now = self.clock.now_epoch_seconds();
+        if now == 0 { return Err(QrError::new(QrErrorCode::ClockUnavailable, "系统时钟不可用")); }
+        Ok(self.sessions.get(request_id).is_some_and(|session| !session.consumed && session.request.expires_at > now))
     }
 }
 
@@ -309,6 +321,57 @@ mod tests {
     }
 
     #[test]
+    fn wrong_response_expiry_and_signature_leave_the_original_session_retryable() {
+        futures_executor::block_on(async {
+            let mut sessions = QrSessionStore::new(FixedClock(10));
+            let request = sessions.create(0x0400, Sr25519PublicKey::from_bytes([2; 32]), vec![4, 0, 3], 30).unwrap();
+            let mut response = SignResponse {
+                current_account: None,
+                request_id: request.request_id.clone(), expires_at: request.expires_at + 1,
+                signer_public_key: request.require_signer().unwrap(), signature: Sr25519Signature::from_bytes([4; 64]),
+            };
+            assert_eq!(sessions.verify_and_consume_response(&FixedSigner(true), &response).await.unwrap_err().code(), QrErrorCode::Expired);
+            assert!(sessions.is_pending(&request.request_id).unwrap());
+            response.expires_at = request.expires_at;
+            assert_eq!(sessions.verify_and_consume_response(&FixedSigner(false), &response).await.unwrap_err().code(), QrErrorCode::InvalidSignature);
+            assert!(sessions.is_pending(&request.request_id).unwrap());
+            sessions.clock.0 = request.expires_at;
+            assert!(!sessions.is_pending(&request.request_id).unwrap());
+            sessions.clock.0 = 0;
+            assert_eq!(sessions.is_pending(&request.request_id).unwrap_err().code(), QrErrorCode::ClockUnavailable);
+        });
+    }
+
+    #[test]
+    fn response_preflight_is_repeatable_and_cannot_override_cancel_expiry_or_consumption() {
+        futures_executor::block_on(async {
+            let mut sessions = QrSessionStore::new(FixedClock(10));
+            let request = sessions.create(0x0400, Sr25519PublicKey::from_bytes([2; 32]), vec![4, 0, 3], 30).unwrap();
+            let response = SignResponse { current_account: None, request_id: request.request_id.clone(),
+                expires_at: request.expires_at, signer_public_key: request.require_signer().unwrap(),
+                signature: Sr25519Signature::from_bytes([4; 64]) };
+            for _ in 0..2 {
+                assert!(sessions.verify_response(&FixedSigner(true), &response).await.is_ok());
+                assert!(sessions.is_pending(&request.request_id).unwrap());
+            }
+            assert_eq!(sessions.verify_response(&FixedSigner(false), &response).await.unwrap_err().code(), QrErrorCode::InvalidSignature);
+            let mut wrong = response.clone();
+            wrong.signer_public_key = Sr25519PublicKey::from_bytes([3; 32]);
+            assert_eq!(sessions.verify_response(&FixedSigner(true), &wrong).await.unwrap_err().code(), QrErrorCode::MismatchedAccount);
+            wrong = response.clone();
+            wrong.request_id = "another-request".into();
+            assert_eq!(sessions.verify_response(&FixedSigner(true), &wrong).await.unwrap_err().code(), QrErrorCode::MismatchedRequest);
+            sessions.clock.0 = request.expires_at;
+            assert_eq!(sessions.verify_and_consume_response(&FixedSigner(true), &response).await.unwrap_err().code(), QrErrorCode::Expired);
+            sessions.clock.0 = 10;
+            assert!(sessions.verify_and_consume_response(&FixedSigner(true), &response).await.is_ok());
+            assert_eq!(sessions.verify_response(&FixedSigner(true), &response).await.unwrap_err().code(), QrErrorCode::AlreadyConsumed);
+            assert!(sessions.cancel(&request.request_id));
+            assert_eq!(sessions.verify_response(&FixedSigner(true), &response).await.unwrap_err().code(), QrErrorCode::MismatchedRequest);
+        });
+    }
+
+    #[test]
     fn response_is_verified_bound_and_consumed_once() {
         futures_executor::block_on(async {
             let mut sessions = QrSessionStore::new(FixedClock(10));
@@ -321,9 +384,10 @@ mod tests {
                 )
                 .unwrap();
             let response = SignResponse {
+                current_account: None,
                 request_id: request.request_id.clone(),
                 expires_at: request.expires_at,
-                signer_public_key: request.signer_public_key,
+                signer_public_key: request.require_signer().unwrap(),
                 signature: Sr25519Signature::from_bytes([4; 64]),
             };
             assert!(sessions
@@ -354,9 +418,10 @@ mod tests {
                 )
                 .unwrap();
             let response = SignResponse {
+                current_account: None,
                 request_id: request.request_id.clone(),
                 expires_at: request.expires_at,
-                signer_public_key: request.signer_public_key,
+                signer_public_key: request.require_signer().unwrap(),
                 signature: Sr25519Signature::from_bytes([4; 64]),
             };
             assert_eq!(

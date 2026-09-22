@@ -10,6 +10,32 @@ import FlutterMacOS
 #endif
 
 final class CitizenSDKFlutterCodecTests: XCTestCase {
+    func testNonConsumingResponseValidationHasExactOwnedFields() throws {
+        guard case let .qr(method, _, _, fields) = try CitizenSdkFlutterCodec.decode(
+            method: "qrValidateSignResponse", arguments: [2, "sdk", 1, "request", "{}"])
+            else { return XCTFail("QR request expected") }
+        XCTAssertEqual(method, "qrValidateSignResponse")
+        XCTAssertEqual(fields.count, 2)
+        let rejected: [[Any]] = [[2, "sdk", 2, "", "{}"], [2, "sdk", 2, "request", "{}", 100],
+                                  [2, "sdk", 2, String(repeating: "x", count: 129), "{}"]]
+        for arguments in rejected {
+            XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "qrValidateSignResponse", arguments: arguments))
+        }
+    }
+
+    func testEncodingMethodsHaveExactStatelessAndSessionShapes() throws {
+        let bytes = FlutterStandardTypedData(bytes: Data())
+        let request = try CitizenSdkFlutterCodec.decode(method: "encodeSigningPayload", arguments: [2, 1, "{\"op_tag\":16}", bytes])
+        guard case let .encodePayload(kind, _, payload) = request else { return XCTFail("payload request") }
+        XCTAssertEqual(kind, 1); XCTAssertTrue(payload.isEmpty)
+        XCTAssertNil(request.sessionID); XCTAssertNil(request.sequence)
+        XCTAssertNoThrow(try CitizenSdkFlutterCodec.decode(method: "qrEncodeDocument", arguments: [2, "s", 1, "{}"]))
+        XCTAssertNoThrow(try CitizenSdkFlutterCodec.decode(method: "qrPrepareAccountAuthorization", arguments: [2, "s", 2, 10, bytes, ""]))
+        XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "encodeSigningPayload", arguments: [2, 7, "{}", bytes]))
+        XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "encodeSigningPayload", arguments: [1, 1, "{}", bytes]))
+        XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "qrPrepareAccountAuthorization", arguments: [2, "s", 3, 10,
+            FlutterStandardTypedData(bytes: Data(count: 1921)), ""]))
+    }
     func testQrUiRoutesRejectInjectedClockSignatureAndLegacyMethods() throws {
         guard case let .qr(method, _, _, fields) = try CitizenSdkFlutterCodec.decode(method: "qrScan", arguments: [1, "session", 1]) else {
             return XCTFail("扫码必须走唯一会话 QR 请求")
@@ -125,6 +151,9 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
     }
 
     func testHistoryInvalidationHasNoPayload() throws {
+        XCTAssertEqual(try CitizenSdkFlutterCodec.event(session: "session", sequence: 7, type: "walletChanged", payload: [])[3] as? String, "walletChanged")
+        XCTAssertThrowsError(try CitizenSdkFlutterCodec.event(session: "session", sequence: 7, type: "walletChanged", payload: [1]))
+        XCTAssertThrowsError(try CitizenSdkFlutterCodec.event(session: "session", sequence: 0, type: "walletChanged", payload: []))
         let event = try CitizenSdkFlutterCodec.event(session: "session", sequence: 7, type: "historyChanged", payload: [])
         XCTAssertEqual(event[3] as? String, "historyChanged")
         XCTAssertThrowsError(try CitizenSdkFlutterCodec.event(session: "session", sequence: 7, type: "historyChanged", payload: [1]))

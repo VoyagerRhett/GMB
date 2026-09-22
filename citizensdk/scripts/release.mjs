@@ -415,7 +415,7 @@ const MOBILE_BINDING_SOURCE_FILES = Object.freeze({
   'android/native/src/main/kotlin/org/citizen/sdk/ui/CitizenSdkRecoveryContent.kt': '3e2a6df4b7efadb3f48679a3a333f6e5c418b72dffc24ee547982f81c7fabc67',
   'android/native/src/main/kotlin/org/citizen/sdk/ui/CitizenSdkWalletFlowActivity.kt': 'f18bffed5e1e3d01fa5af32010b0f98e9b8422f32cf9bf54b3f273f4135b32d6',
   'android/native/src/main/kotlin/org/citizen/sdk/ui/CitizenSdkWalletFlowContract.kt': '3d8192a7b319770c8481bb1a3dc6484743cb90ed0a5ab453f20aaa2022ebea80',
-  'android/native/src/main/kotlin/org/citizen/sdk/ui/CitizenSdkWalletFlowCoordinator.kt': '3145e0f4a1e4ed1f04e8c8e32fd47d8f967466540c2a0024a82d9b9f5b90d903',
+  'android/native/src/main/kotlin/org/citizen/sdk/ui/CitizenSdkWalletFlowCoordinator.kt': 'a33570297fc5315c6953a5f8a3100e7d8814a84207cf705b751e2a247894a63c',
   'android/settings.gradle': '8c640faa6535ad6f80efd22154ccc50332ae9c77e2b8a0a69419afbfcffe9a8b',
   'android/src/main/AndroidManifest.xml': 'a89f063492bdb6f248de2f760ccb88bdfa5c769bd6c967c4366a8a7700286ca2',
   'android/src/main/kotlin/org/citizen/sdk/CitizenSdkFlutterCodec.kt': 'a9c6d943d12612b22858915bc9548c76680eaaf578e5b3a8cd253e4112f43789',
@@ -4547,62 +4547,14 @@ function readAppleMachO(bytes, label) {
   return { build, identity, symbols };
 }
 
-// 私有跨库链接闭集与公开产品头分开核对。禁止用前缀允许集扩大导出面。
-export const CITIZENSDK_INTERNAL_SYMBOLS = Object.freeze([
-  'citizensdk_internal_private_key_view_cancel',
-  'citizensdk_internal_private_key_view_finish',
-  'citizensdk_internal_private_key_view_open',
-  'citizensdk_internal_private_key_view_reveal',
-]);
+// 显式私钥receiver已归公开Core头；不再保留仅供SDK窗口的私有导出。
+export const CITIZENSDK_INTERNAL_SYMBOLS = Object.freeze([]);
 
-/** 仅生成到构建缓存目录；该声明及模块不能安装给SDK消费者。 */
+/** 构建期内部模块仍复用公开Core头及独立二维码图像头，不复制公开类型声明。 */
 export function citizenSdkInternalHeader() {
   return `#ifndef CITIZENSDK_INTERNAL_H
 #define CITIZENSDK_INTERNAL_H
 #include "citizensdk.h"
-#include <stddef.h>
-#ifdef __cplusplus
-extern "C" {
-#endif
-/* SDK内部借用合同：display仅在回调期间借用32字节，不得等待UI或反调SDK。
- * settled是阶段通知而非终态；context必须保留到普通request真实结束。
- * 此头不属于公开API，不能安装、公开透传或当作同进程安全隔离。 */
-typedef struct {
-  uint32_t struct_size;
-  uint32_t abi_version;
-  void *context;
-  int32_t (*display)(void *context, uint64_t view_id,
-                     citizensdk_bytes_view_t private_key);
-  void (*settled)(void *context, uint64_t view_id, int32_t error_code);
-  /* 在真实unwrap派发前只登记准确认证操作；拒绝时不调用设备金库。 */
-  int32_t (*authorizing)(void *context, uint64_t view_id, uint64_t host_operation_id);
-} citizensdk_internal_private_key_view_v1_t;
-CITIZENSDK_API int32_t citizensdk_internal_private_key_view_open(
-    citizensdk_handle_t handle, const citizensdk_account_id_t *account_id,
-    const citizensdk_internal_private_key_view_v1_t *view,
-    uint64_t *out_view_id, citizensdk_request_id_t *out_request_id);
-CITIZENSDK_API int32_t citizensdk_internal_private_key_view_reveal(
-    citizensdk_handle_t handle, uint64_t view_id);
-CITIZENSDK_API int32_t citizensdk_internal_private_key_view_cancel(
-    citizensdk_handle_t handle, uint64_t view_id);
-/* finish只确认原生已清屏/清零，不允许提前释放仍在认证中的上下文。 */
-CITIZENSDK_API int32_t citizensdk_internal_private_key_view_finish(
-    citizensdk_handle_t handle, uint64_t view_id);
-#ifdef __cplusplus
-}
-#define CITIZENSDK_INTERNAL_ASSERT static_assert
-#else
-#define CITIZENSDK_INTERNAL_ASSERT _Static_assert
-#endif
-CITIZENSDK_INTERNAL_ASSERT(sizeof(void *) == 8, "64-bit SDK host required");
-CITIZENSDK_INTERNAL_ASSERT(sizeof(citizensdk_internal_private_key_view_v1_t) == 40, "private view size");
-CITIZENSDK_INTERNAL_ASSERT(offsetof(citizensdk_internal_private_key_view_v1_t, struct_size) == 0, "struct_size offset");
-CITIZENSDK_INTERNAL_ASSERT(offsetof(citizensdk_internal_private_key_view_v1_t, abi_version) == 4, "abi_version offset");
-CITIZENSDK_INTERNAL_ASSERT(offsetof(citizensdk_internal_private_key_view_v1_t, context) == 8, "context offset");
-CITIZENSDK_INTERNAL_ASSERT(offsetof(citizensdk_internal_private_key_view_v1_t, display) == 16, "display offset");
-CITIZENSDK_INTERNAL_ASSERT(offsetof(citizensdk_internal_private_key_view_v1_t, settled) == 24, "settled offset");
-CITIZENSDK_INTERNAL_ASSERT(offsetof(citizensdk_internal_private_key_view_v1_t, authorizing) == 32, "authorizing offset");
-#undef CITIZENSDK_INTERNAL_ASSERT
 #endif
 `;
 }

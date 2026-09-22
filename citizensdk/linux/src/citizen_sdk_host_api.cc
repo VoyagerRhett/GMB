@@ -1,6 +1,7 @@
 #include "citizen_sdk/citizensdk_host.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <exception>
@@ -14,14 +15,24 @@
 #include <glib.h>
 #include "citizen_sdk_host_bridge.hpp"
 #include "citizen_sdk_input_limits.hpp"
-#include "citizen_sdk_wallet_flow.hpp"
-#include "citizen_sdk_qr_flow.hpp"
 
 namespace citizen_sdk::linux {
 namespace {
 
 thread_local std::string last_error;
 std::mutex &registry_lock() { static auto *value = new std::mutex(); return *value; }
+
+
+/* 捕获一次保有租约，全部路由/取消闭包共享它；终态不提前释放并发取消仍借用的context。 */
+struct HostRequest final {
+  citizensdk_host_request_v1_t callbacks;
+  citizensdk_handle_t core;
+  citizensdk_request_id_t request_id{};
+  std::atomic<bool> finished{false};
+  HostRequest(const citizensdk_host_request_v1_t &value, citizensdk_handle_t handle)
+      : callbacks(value), core(handle) { callbacks.retain(callbacks.context); }
+  ~HostRequest() { callbacks.release(callbacks.context); }
+};
 
 struct HostEntry final {
   std::shared_ptr<HostBridge> host;
@@ -326,6 +337,69 @@ citizensdk_error_code_t citizensdk_host_set_event_callback(
   }
 }
 
+
+citizensdk_error_code_t citizensdk_host_submit_request(
+    citizensdk_host_handle_t handle, const citizensdk_host_request_v1_t *request,
+    citizensdk_request_id_t *out_request_id) {
+  using namespace citizen_sdk::linux;
+  if (out_request_id == nullptr) return expose(CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  *out_request_id = 0;
+  if (request == nullptr || request->struct_size != sizeof(*request) ||
+      request->abi_version != CITIZENSDK_HOST_ABI_VERSION ||
+      request->accept == nullptr || request->complete == nullptr ||
+      request->retain == nullptr || request->release == nullptr)
+    return expose(CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  auto host = acquire_host(handle);
+  if (!host) return expose(CITIZENSDK_ERROR_INVALID_HANDLE);
+  try {
+    const auto core = host->public_sdk();
+    if (core == 0) return expose(CITIZENSDK_ERROR_INVALID_STATE);
+    auto state = std::make_shared<HostRequest>(*request, core);
+    const auto code = host->submit_private(
+        [state](citizensdk_request_id_t *out) {
+          return state->callbacks.accept(state->callbacks.context, state->core, out);
+        },
+        [state](citizensdk_result_handle_t result) noexcept {
+          state->finished.store(true);
+          // 原Core结果所有权转交一次；接收者必须按其真实种类释放或保有。
+          state->callbacks.complete(state->callbacks.context, state->request_id, result);
+        },
+        &state->request_id,
+        [state] {
+          if (!state->finished.load() && state->callbacks.cancel != nullptr)
+            state->callbacks.cancel(state->callbacks.context, state->core);
+        });
+    *out_request_id = state->request_id;
+    return expose(code);
+  } catch (...) { return expose(map_exception()); }
+}
+
+citizensdk_error_code_t citizensdk_host_set_credential_provider(
+    citizensdk_host_handle_t handle, const citizensdk_credential_provider_v1_t *provider) {
+  using namespace citizen_sdk::linux;
+  auto host = acquire_host(handle);
+  if (!host) return expose(CITIZENSDK_ERROR_INVALID_HANDLE);
+  try { return expose(host->set_credential_provider(provider)); }
+  catch (...) { return expose(map_exception()); }
+}
+citizensdk_error_code_t citizensdk_host_respond_credential(
+    citizensdk_host_handle_t handle, uint64_t host_operation_id,
+    citizensdk_bytes_view_t credential) {
+  using namespace citizen_sdk::linux;
+  auto host = acquire_host(handle);
+  if (!host) return expose(CITIZENSDK_ERROR_INVALID_HANDLE);
+  try { return expose(host->respond_credential(host_operation_id, credential)); }
+  catch (...) { return expose(map_exception()); }
+}
+citizensdk_error_code_t citizensdk_host_cancel_credential(
+    citizensdk_host_handle_t handle, uint64_t host_operation_id) {
+  using namespace citizen_sdk::linux;
+  auto host = acquire_host(handle);
+  if (!host) return expose(CITIZENSDK_ERROR_INVALID_HANDLE);
+  try { return expose(host->cancel_credential(host_operation_id)); }
+  catch (...) { return expose(map_exception()); }
+}
+
 citizensdk_error_code_t citizensdk_host_set_parent_window(
     citizensdk_host_handle_t host_handle, void *gtk_parent_window) {
   using namespace citizen_sdk::linux;
@@ -343,65 +417,6 @@ citizensdk_error_code_t citizensdk_host_vault_availability(
   if (!host) return expose(CITIZENSDK_ERROR_INVALID_HANDLE);
   *out_availability = host->vault_availability();
   return expose(CITIZENSDK_OK);
-}
-
-citizensdk_error_code_t citizensdk_host_present_wallet_flow(
-    citizensdk_host_handle_t host_handle,
-    const citizensdk_wallet_flow_request_v1_t *request, void *context,
-    citizensdk_wallet_flow_completion_v1_t completion,
-    citizensdk_wallet_flow_handle_t *out_flow) {
-  using namespace citizen_sdk::linux;
-  if (request == nullptr) return expose(CITIZENSDK_ERROR_INVALID_ARGUMENT);
-  auto host = acquire_host(host_handle);
-  if (!host) return expose(CITIZENSDK_ERROR_INVALID_HANDLE);
-  return expose(present_wallet_flow(host.entry()->host, *request, context,
-                                    completion, out_flow));
-}
-
-citizensdk_error_code_t citizensdk_host_view_account_private_key(
-    citizensdk_host_handle_t host_handle, const citizensdk_account_id_t *account_id,
-    void *context, citizensdk_wallet_flow_completion_v1_t completion,
-    citizensdk_wallet_flow_handle_t *out_flow) {
-  using namespace citizen_sdk::linux;
-  if (out_flow != nullptr) *out_flow = 0;
-  if (account_id == nullptr || completion == nullptr || out_flow == nullptr)
-    return expose(CITIZENSDK_ERROR_INVALID_ARGUMENT);
-  auto host = acquire_host(host_handle);
-  if (!host) return expose(CITIZENSDK_ERROR_INVALID_HANDLE);
-  return expose(view_account_private_key(host.entry()->host, *account_id,
-                                          context, completion, out_flow));
-}
-
-citizensdk_error_code_t citizensdk_host_scan_qr(
-    citizensdk_host_handle_t host_handle, void *context,
-    citizensdk_qr_completion_v1_t completion, citizensdk_wallet_flow_handle_t *out_flow) {
-  using namespace citizen_sdk::linux;
-  if (out_flow != nullptr) *out_flow = 0;
-  auto host = acquire_host(host_handle);
-  if (!host) return expose(CITIZENSDK_ERROR_INVALID_HANDLE);
-  return expose(present_qr_flow(host.entry()->host, {}, context, completion, out_flow));
-}
-citizensdk_error_code_t citizensdk_host_sign_qr_request(
-    citizensdk_host_handle_t host_handle, citizensdk_bytes_view_t sign_request,
-    void *context, citizensdk_qr_completion_v1_t completion,
-    citizensdk_wallet_flow_handle_t *out_flow) {
-  using namespace citizen_sdk::linux;
-  if (out_flow != nullptr) *out_flow = 0;
-  auto host = acquire_host(host_handle);
-  if (!host) return expose(CITIZENSDK_ERROR_INVALID_HANDLE);
-  try {
-    return expose(present_qr_flow(host.entry()->host,
-        required_utf8(sign_request, 2331, "二维码签名请求必须为有界 UTF-8"),
-        context, completion, out_flow));
-  } catch (...) { return expose(map_exception()); }
-}
-
-citizensdk_error_code_t citizensdk_host_cancel_wallet_flow(
-    citizensdk_host_handle_t host_handle, citizensdk_wallet_flow_handle_t flow) {
-  using namespace citizen_sdk::linux;
-  auto host = acquire_host(host_handle);
-  if (!host) return expose(CITIZENSDK_ERROR_INVALID_HANDLE);
-  return expose(cancel_wallet_flow(host.entry()->host, flow));
 }
 
 citizensdk_error_code_t citizensdk_host_destroy(

@@ -34,15 +34,9 @@ import 'package:citizenapp/notifications/app_push_service.dart';
 import 'package:citizenapp/notifications/app_push_token.dart';
 import 'package:citizenapp/8964/pages/square_turnstile_page.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
 import 'package:citizenapp/security/local_data_key.dart';
 import 'package:citizenapp/security/account_data_key_provision.dart';
 import 'package:citizenapp/security/account_security_service.dart';
-import 'package:citizenapp/qr/bodies/account_data_key_response_body.dart';
-import 'package:citizenapp/qr/envelope.dart';
-import 'package:citizenapp/signer/app_business_qr_codec.dart';
-import 'package:citizenapp/signer/signing.dart'
-    show kGmbSignDomain, kOpSignSquareDeviceBind;
 import 'package:citizenapp/wallet/wallet_gate.dart';
 
 import 'ui/app_theme.dart';
@@ -365,7 +359,7 @@ Future<String> _signColdDeviceBinding({
   required String devicePublicKey,
   required int issuedAtMillis,
 }) async {
-  final account = (await wallet.getState()).defaultAccount;
+  final account = (await wallet.getState().result).defaultAccount;
   if (account == null ||
       account.signMode != CitizenWalletSignMode.cold ||
       account.accountId != binding.accountId ||
@@ -384,12 +378,12 @@ Future<String> _signColdDeviceBinding({
     context: context,
     accountId: binding.accountId,
     payload: payload,
-    action: QrActions.squareDeviceBind,
+    action: CitizenQrActions.squareDeviceBind,
     transform: CitizenSigningTransform.blake2Domain(
       Uint8List.fromList(<int>[...kGmbSignDomain, kOpSignSquareDeviceBind]),
     ),
   );
-  final current = (await wallet.getState()).defaultAccount;
+  final current = (await wallet.getState().result).defaultAccount;
   if (current == null ||
       current.signMode != CitizenWalletSignMode.cold ||
       current.accountId != binding.accountId ||
@@ -409,7 +403,7 @@ Future<List<Uint8List>> _provideColdAccountDataKeys({
   required AccountDataBinding binding,
   required List<({LocalKeyPurpose purpose, String? context})> requests,
 }) async {
-  final account = (await wallet.getState()).defaultAccount;
+  final account = (await wallet.getState().result).defaultAccount;
   if (account == null ||
       account.signMode != CitizenWalletSignMode.cold ||
       account.accountId != binding.accountId) {
@@ -426,38 +420,38 @@ Future<List<Uint8List>> _provideColdAccountDataKeys({
     expiresAt: now + 120,
   );
   try {
-    final signer = AppBusinessQrCodec();
-    final request = signer.buildRequest(
-      requestId: AppBusinessQrCodec.generateRequestId(prefix: 'data-key-'),
-      signerPublicKey: binding.accountId,
-      payloadHex: '0x${_lowerHex(session.payload)}',
-      action: QrActions.accountDataKeyProvision,
-      nowEpochSeconds: now,
-      ttlSeconds: 120,
+    final request = await navigator.context.read<CitizenSdk>().qr.encodeDocument(
+      CitizenQrContent.signRequest(
+        requestIdPrefix: 'data-key-',
+        signerAccountId: binding.accountId,
+        reviewPayload: session.payload,
+        action: CitizenQrActions.accountDataKeyProvision,
+        expiresAt: BigInt.from(session.expiresAt),
+      ),
     );
-    final response = await navigator
-        .push<QrEnvelope<AccountDataKeyResponseBody>>(
-          MaterialPageRoute(
-            builder: (_) => QrSignSessionPage(
-              request: request,
-              requestJson: signer.encodeRequest(request),
-              expectedSignerPublicKey: binding.accountId,
-              responseKind: QrKind.accountDataKeyResponse,
-            ),
-          ),
-        );
+    if (!navigator.mounted) throw const AccountSecurityException('当前页面无法发起冷钱包用途钥请求');
+    final response = await navigator.push<CitizenQrDocument>(
+      MaterialPageRoute(
+        builder: (_) => QrSignSessionPage(
+          request: request,
+          requestJson: request.canonicalText,
+          expectedSignerPublicKey: binding.accountId,
+          responseKind: CitizenQrKind.accountDataKeyResponse,
+        ),
+      ),
+    );
     if (response == null) {
       throw const AccountSecurityException('冷钱包用途钥提供已取消');
     }
-    final current = (await wallet.getState()).defaultAccount;
+    final current = (await wallet.getState().result).defaultAccount;
     if (current == null ||
         current.signMode != CitizenWalletSignMode.cold ||
         current.accountId != binding.accountId ||
-        response.id != request.id ||
+        response.requestId != request.requestId ||
         response.expiresAt != request.expiresAt) {
       throw const AccountSecurityException('冷钱包用途钥响应会话已失效');
     }
-    return await session.open(response.body);
+    return await session.open(response);
   } on AccountDataKeyException catch (error) {
     throw AccountSecurityException(error.message);
   } finally {

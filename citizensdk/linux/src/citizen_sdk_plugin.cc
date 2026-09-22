@@ -52,7 +52,7 @@ struct PendingReply final {
       : session(request.session.empty()
                     ? std::nullopt
                     : std::optional<std::string>(request.session)),
-sequence(request.method == Method::open || request.method == Method::verify_signature
+sequence(request.method == Method::open || request.method == Method::verify_signature || request.method == Method::encode_signing_payload
                      ? std::nullopt
                      : std::optional<int64_t>(request.sequence)),
         method(method_name(request.method)) {

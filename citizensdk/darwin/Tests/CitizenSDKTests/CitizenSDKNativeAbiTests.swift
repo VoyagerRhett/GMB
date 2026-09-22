@@ -3,6 +3,16 @@ import XCTest
 @testable import CitizenSDK
 
 final class CitizenSDKNativeAbiTests: XCTestCase {
+    func testOperationIdentitiesAreCanonicalDecimalAndNeverWrap() throws {
+        let identities = CitizenSDKOperationIdentifiers()
+        XCTAssertEqual(try identities.allocate(), "1")
+        XCTAssertEqual(try identities.allocate(), "2")
+        let exhausted = CitizenSDKOperationIdentifiers(next: UInt64.max)
+        XCTAssertEqual(try exhausted.allocate(), String(UInt64.max))
+        XCTAssertThrowsError(try exhausted.allocate())
+        XCTAssertThrowsError(try exhausted.allocate())
+    }
+
     func testQrOnlyRoundTripRequiresNoWalletVaultOrChain() throws {
         let sdk = try CitizenSdk.open(modules: .qr)
         defer { try? sdk.close() }

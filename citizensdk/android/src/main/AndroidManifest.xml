@@ -4,18 +4,5 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
-    <application>
-        <activity android:name="org.citizen.sdk.ui.CitizenSdkQrActivity"
-            android:exported="false" android:excludeFromRecents="true"
-            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
-        <!-- SDK-owned recovery input and backup UI. It is never externally
-             addressable and marks its own window FLAG_SECURE before rendering. -->
-        <activity
-            android:name="org.citizen.sdk.ui.CitizenSdkWalletFlowActivity"
-            android:excludeFromRecents="true"
-            android:exported="false"
-            android:noHistory="true"
-            android:screenOrientation="portrait"
-            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
-    </application>
+    <!-- Flutter预览与敏感页面由宿主提供，SDK不注册替代界面。 -->
 </manifest>

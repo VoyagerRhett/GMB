@@ -11,8 +11,9 @@ use citizen_sdk_contracts::{
     FinalizedAccountBalance, Hash32, PreparedTransactionSummary, RuntimeContext, SecretBuffer,
     SigningCompletion, Sr25519Signature, TransactionExecutionCompleted, TransactionExecutionId,
     TransactionHistoryPage, VerifiedBlockBody, VerifiedBlockHeader, VerifiedBlockRef,
-    WalletAccount, WalletProfile, WalletState,
+    WalletAccount, WalletProfile,
 };
+use citizen_sdk_engine::WalletStateSnapshot;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ExternalSigningPending {
@@ -94,7 +95,7 @@ pub enum ResultPayload {
     QrReview(std::sync::Arc<crate::qr_abi::QrReviewResult>),
     #[cfg(feature = "qr")]
     QrSigned(String),
-    WalletState(Box<WalletState>),
+    WalletState(Box<WalletStateSnapshot>),
     SigningOutcome(SigningOutcomePayload),
     DefaultAccountChange(DefaultAccountChangePayload),
     ChainSyncStatus(ChainSyncStatus),

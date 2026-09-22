@@ -744,6 +744,15 @@ impl NativeRuntime {
             .send(CitizenSdkEventType::HistoryChanged, 0, 0, 0)
     }
 
+    /// 和请求完成事件分别预留容量；接纳失败或作业未执行时由所有者析构归还。
+    pub(crate) fn reserve_wallet_changed(&self) -> FfiResult<CompletionEventReservation> {
+        self.dispatcher.reserve_completion()
+    }
+
+    pub(crate) fn publish_wallet_changed(&self, reservation: CompletionEventReservation) -> FfiResult<()> {
+        self.dispatcher.send_reserved_wallet_changed(reservation)
+    }
+
     pub(crate) fn publish_finalized_block_changed(
         &self,
         finalized: citizen_sdk_contracts::FinalizedBlockRef,

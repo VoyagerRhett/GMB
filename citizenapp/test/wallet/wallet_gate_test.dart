@@ -122,6 +122,8 @@ void main() {
 
 CitizenWalletState _state(List<CitizenWalletStateAccount> accounts) =>
     CitizenWalletState(
+      initializationState: accounts.isEmpty ? CitizenWalletInitializationState.empty : CitizenWalletInitializationState.ready,
+      cleanupPending: false,
       revision: BigInt.one,
       hotProfile: null,
       accounts: accounts,

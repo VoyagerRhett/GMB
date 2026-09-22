@@ -166,7 +166,11 @@ void validate_profile(const Value &value) {
 }
 
 void validate_wallet_state(const Value &value) {
-  const auto &state = semantic_tuple(value, 3); (void)u64_text(state[0]);
+  const auto &state = semantic_tuple(value, 5); (void)u64_text(state[0]);
+  const auto initialization = integer(state[3]);
+  const auto *cleanup = std::get_if<bool>(&state[4].data);
+  require(initialization >= 0 && initialization <= 2 && cleanup != nullptr,
+          CITIZENSDK_ERROR_INTEGRITY, "Wallet initialization flags are invalid");
   validate_profile(state[1]);
   const auto *accounts = std::get_if<Value::List>(&state[2].data);
   require(accounts != nullptr && accounts->size() <= 3980,
@@ -308,6 +312,9 @@ constexpr const char *kMethods[] = {
     "qrParse", "qrCreateSignRequest",
     "qrConsumeSignResponse", "qrCancelSignRequest", "qrEncodeAccountId",
     "qrDecodeLuminance", "qrEncode", "qrScan", "signQrRequest",
+    "respondCredential", "cancelCredential",
+    "qrEncodeDocument", "qrPrepareAccountAuthorization", "encodeSigningPayload",
+    "qrValidateSignResponse",
 };
 static_assert(std::size(kMethods) == 67);
 
@@ -793,12 +800,30 @@ DecodedRequest decode_request(const std::string &name, FlValue *arguments) {
   const auto count = fl_value_get_length(arguments);
   require(count >= 1 && count <= 10, CITIZENSDK_ERROR_INVALID_ARGUMENT,
           "Invalid request tuple length");
-  const Value root = from_fl_value(arguments);
+  Value root = from_fl_value(arguments);
   const auto &fields = std::get<Value::List>(root.data);
+  struct CredentialInputGuard final {
+    Value::Bytes *bytes{};
+    ~CredentialInputGuard() {
+      if (bytes == nullptr) return;
+      volatile uint8_t *data = bytes->data();
+      for (std::size_t i = 0; i < bytes->size(); ++i) data[i] = 0;
+    }
+  } credential_guard;
+  if (result.method == Method::respond_credential) {
+    auto &owned_fields = std::get<Value::List>(root.data);
+    if (owned_fields.size() > 4)
+      credential_guard.bytes = std::get_if<Value::Bytes>(&owned_fields[4].data);
+  }
+
   require(integer(fields[0]) == kProtocolVersion, CITIZENSDK_ERROR_UNSUPPORTED,
           "Unsupported protocol version");
   if (result.method == Method::open) {
-    (void)list(root, 2);
+    (void)list(root, 3);
+    const auto *has_provider = std::get_if<bool>(&fields[2].data);
+    require(has_provider != nullptr, CITIZENSDK_ERROR_INVALID_ARGUMENT,
+            "credential provider presence must be boolean");
+    result.has_credential_provider = *has_provider;
     const auto modules = integer(fields[1]);
     require(modules > 0 && modules <= UINT32_MAX, CITIZENSDK_ERROR_INVALID_ARGUMENT,
             "modules must be a nonzero uint32");
@@ -806,6 +831,18 @@ DecodedRequest decode_request(const std::string &name, FlValue *arguments) {
     return result;
   }
   // 纯验签在解析 session 前单独解码，只接受 [版本, 账户, 签名, 消息]。
+  if (result.method == Method::encode_signing_payload) {
+    (void)list(root, 4);
+    const auto kind = integer(fields[1]);
+    require(kind >= 1 && kind <= 6, CITIZENSDK_ERROR_INVALID_ARGUMENT, "Invalid payload kind");
+    result.payload_kind = static_cast<uint32_t>(kind);
+    result.input_json = string(fields[2], 2, 4096);
+    const auto *payload = std::get_if<Value::Bytes>(&fields[3].data);
+    require(result.input_json.size() <= 4096 && payload != nullptr && payload->size() <= kMaximumBytes,
+            CITIZENSDK_ERROR_INVALID_ARGUMENT, "Payload input exceeds boundary");
+    result.payload = *payload;
+    return result;
+  }
   if (result.method == Method::verify_signature) {
     (void)list(root, 4); result.account_id = account(fields[1]);
     const auto *signature = std::get_if<Value::Bytes>(&fields[2].data);
@@ -824,6 +861,35 @@ DecodedRequest decode_request(const std::string &name, FlValue *arguments) {
     require(result.sequence > 0, CITIZENSDK_ERROR_INVALID_ARGUMENT,
             "requestSequence must be positive");
     switch (result.method) {
+      case Method::qr_encode_document:
+        (void)list(root, 4); result.input_json = string(fields[3], 1, 65536);
+        require(result.input_json.size() <= 65536, CITIZENSDK_ERROR_INVALID_ARGUMENT, "QR content exceeds boundary");
+        break;
+      case Method::qr_prepare_account_authorization: {
+        (void)list(root, 6); const auto action = integer(fields[3]);
+        require(action >= 0 && static_cast<uint64_t>(action) <= UINT32_MAX,
+                CITIZENSDK_ERROR_INVALID_ARGUMENT, "action must be uint32");
+        result.qr_action = static_cast<uint32_t>(action);
+        const auto *payload = std::get_if<Value::Bytes>(&fields[4].data);
+        require(payload != nullptr && payload->size() <= 1920, CITIZENSDK_ERROR_INVALID_ARGUMENT, "Authorization payload exceeds boundary");
+        result.payload = *payload; result.account_id_text = string(fields[5], 0, 1024);
+        require(result.account_id_text.size() <= 1024, CITIZENSDK_ERROR_INVALID_ARGUMENT, "Account input exceeds boundary");
+        break;
+      }
+      case Method::respond_credential: case Method::cancel_credential: {
+        (void)list(root, result.method == Method::respond_credential ? 5 : 4);
+        result.host_operation_id = request_u64(fields[3], "hostOperationId must be uint64");
+        require(result.host_operation_id != 0, CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                "hostOperationId must be nonzero");
+        if (result.method == Method::respond_credential && !null_value(fields[4])) {
+          fields[4].mark_sensitive();
+          const auto *credential = std::get_if<Value::Bytes>(&fields[4].data);
+          require(credential != nullptr && credential->size() <= 1024,
+                  CITIZENSDK_ERROR_INVALID_ARGUMENT, "Credential byte boundary is invalid");
+          result.credential.emplace(*credential);
+        }
+        break;
+      }
       case Method::start: case Method::stop: case Method::close:
       case Method::get_capabilities: case Method::get_finalized_head:
       case Method::get_sync_status: case Method::get_best_head:
@@ -1164,6 +1230,14 @@ DecodedRequest decode_request(const std::string &name, FlValue *arguments) {
         result.qr_action = static_cast<uint16_t>(action); result.account_id = account(fields[4]);
         result.payload = *payload; result.qr_ttl = static_cast<uint64_t>(ttl); break;
       }
+      case Method::qr_validate_sign_response: {
+        (void)list(root, 5);
+        result.qr_request_id = string(fields[3], 1, 128);
+        result.qr_text = string(fields[4], 1, 2331);
+        require(result.qr_request_id.size() <= 128 && result.qr_text.size() <= 2331,
+                CITIZENSDK_ERROR_INVALID_ARGUMENT, "QR preflight input exceeds UTF-8 boundary");
+        break;
+      }
       case Method::qr_cancel_sign_request: {
         (void)list(root, 4); result.qr_request_id = string(fields[3], 16, 128); break;
       }
@@ -1188,7 +1262,7 @@ DecodedRequest decode_request(const std::string &name, FlValue *arguments) {
                 CITIZENSDK_ERROR_INVALID_ARGUMENT, "Invalid QR image fields");
         result.qr_scale = static_cast<uint32_t>(scale); break;
       }
-      case Method::open: case Method::verify_signature:
+      case Method::open: case Method::verify_signature: case Method::encode_signing_payload:
         fail(CITIZENSDK_ERROR_INVALID_STATE, "Stateless method cannot be a session request");
     }
   } catch (const ContractFailure &error) {
@@ -1223,15 +1297,26 @@ Value response(const std::string &session, int64_t sequence, Value value) {
 }
 Value event(const std::string &session, int64_t sequence,
             const std::string &type, Value payload) {
-  if (type == "historyChanged") (void)list(payload, 0);
+  if (type == "credentialRequest" || type == "credentialCancelled") {
+    const auto &fields = list(payload, type == "credentialRequest" ? 3 : 1);
+    require(u64_text(fields[0]) != 0, CITIZENSDK_ERROR_INTEGRITY, "Invalid credential identity");
+    if (type == "credentialRequest") {
+      const auto purpose = semantic_text(fields[1]);
+      require(purpose == "create" || purpose == "unlock",
+              CITIZENSDK_ERROR_INTEGRITY, "Invalid credential purpose");
+      if (!null_value(fields[2])) (void)account(fields[2]);
+    }
+  }
+  if (type == "historyChanged" || type == "walletChanged") (void)list(payload, 0);
   if (type == "finalizedBlockChanged") {
     const auto &items = list(payload, 1);
     require(semantic_block(items[0]).finalized, CITIZENSDK_ERROR_INTEGRITY,
             "Finalized event must carry one finalized block");
   }
-  require(sequence > 0 && (type == "historyChanged" || type == "lifecycleChanged" ||
+  require(sequence > 0 && (type == "historyChanged" || type == "walletChanged" || type == "lifecycleChanged" ||
                           type == "capabilitiesChanged" ||
-                          type == "finalizedBlockChanged"),
+                          type == "finalizedBlockChanged" || type == "credentialRequest" ||
+                          type == "credentialCancelled"),
           CITIZENSDK_ERROR_INTEGRITY, "Invalid event envelope");
   (void)response(session, sequence, payload);
   return tuple({Value::integer(kProtocolVersion), Value::string(session), Value::integer(sequence),
@@ -1242,7 +1327,7 @@ Value error_details(citizensdk_error_code_t code, const std::string &message,
                     const std::string &method, citizensdk_failure_stage_t stage) {
   if (stage == 0) stage = flutter_default_failure_stage(code);
   bool known_method = false;
-  for (std::size_t index = 0; index <= static_cast<std::size_t>(Method::sign_qr_request); ++index)
+  for (std::size_t index = 0; index <= static_cast<std::size_t>(Method::encode_signing_payload); ++index)
     known_method = known_method || method == method_name(static_cast<Method>(index));
   require(code >= 1 && code <= 22 && stage >= 1 && stage <= 8 && known_method &&
               (!sequence || *sequence > 0) && valid_utf8(message),
@@ -1463,8 +1548,14 @@ Value wallet_state(citizensdk_result_handle_t result) {
         Value::string(std::to_string(profile_info.created_at_millis)), hex(profile_info.master_account_id.bytes),
         hex(profile_info.active_account_id.bytes), Value::list(std::move(hot_accounts))});
   }
+  uint32_t initialization = 0;
+  uint8_t cleanup = 0;
+  check_code(citizensdk_wallet_state_get_initialization(result, &initialization, &cleanup));
+  require(initialization <= 2 && cleanup <= 1 &&
+          ((initialization == 1) == !accounts.empty()) && !(initialization == 0 && cleanup != 0),
+          CITIZENSDK_ERROR_INTEGRITY, "Core wallet initialization flags disagree with catalog");
   return tuple({Value::string(std::to_string(state.revision)), std::move(profile_value),
-                Value::list(std::move(accounts))});
+                Value::list(std::move(accounts)), Value::integer(initialization), Value::boolean(cleanup != 0)});
 }
 
 Value balance(const citizensdk_account_balance_info_t &value) {
@@ -1953,7 +2044,7 @@ Value copy_public_result(Method method, citizensdk_result_handle_t result) {
       (void)inspect_result(result, CITIZENSDK_RESULT_APPLICATION_KEY);
       Value::Bytes bytes(32);
       check_code(citizensdk_result_get_application_key(result, bytes.data()));
-      return checked(tuple({Value::bytes(std::move(bytes))}));
+      return checked(tuple({Value::sensitive_bytes(std::move(bytes))}));
     }
     case Method::begin_signing: case Method::consume_external_signature:
       (void)inspect_result(result, CITIZENSDK_RESULT_SIGNING_OUTCOME);
@@ -1979,9 +2070,11 @@ Value copy_public_result(Method method, citizensdk_result_handle_t result) {
     case Method::open: case Method::close: case Method::get_capabilities: case Method::get_genesis_hash:
     case Method::qr_parse: case Method::qr_create_sign_request:
     case Method::qr_scan: case Method::sign_qr_request:
-    case Method::qr_consume_sign_response: case Method::qr_cancel_sign_request:
+    case Method::qr_validate_sign_response: case Method::qr_consume_sign_response: case Method::qr_cancel_sign_request:
     case Method::qr_encode_account_id:
     case Method::qr_decode_luminance: case Method::qr_encode:
+    case Method::respond_credential: case Method::cancel_credential:
+    case Method::qr_encode_document: case Method::qr_prepare_account_authorization: case Method::encode_signing_payload:
       fail(CITIZENSDK_ERROR_INVALID_STATE, "This method has no borrowed Core result");
   }
   fail(CITIZENSDK_ERROR_UNSUPPORTED, "Unsupported result method");
@@ -1999,6 +2092,17 @@ void validate_account_balances(const DecodedRequest &request, const Value &value
 }
 
 void validate_public_value(Method method, const Value &value) {
+  if (method == Method::qr_validate_sign_response) { (void)semantic_tuple(value, 0); return; }
+  if (method == Method::qr_encode_document || method == Method::qr_prepare_account_authorization) {
+    const auto &fields = semantic_tuple(value, 1);
+    const auto &json = string(fields[0], 1, 65536);
+    require(json.size() <= 65536, CITIZENSDK_ERROR_INTEGRITY, "Core projection exceeds boundary");
+    return;
+  }
+  if (method == Method::respond_credential || method == Method::cancel_credential) {
+    (void)semantic_tuple(value, 0);
+    return;
+  }
   if (method >= Method::qr_parse && method <= Method::sign_qr_request) {
     const auto &fields = semantic_tuple(value, method == Method::qr_encode ? 3 : 1);
     if (method == Method::qr_consume_sign_response) {
@@ -2036,6 +2140,9 @@ void validate_public_value(Method method, const Value &value) {
     const auto &fields = semantic_tuple(value, 1);
     const auto &item = fields[0];
     switch (method) {
+      case Method::respond_credential: case Method::cancel_credential:
+        return;
+
       case Method::get_finalized_head:
         require(semantic_block(item).finalized, CITIZENSDK_ERROR_INTEGRITY,
                 "Finalized head must reference a finalized block"); return;
@@ -2312,9 +2419,10 @@ void validate_public_value(Method method, const Value &value) {
       case Method::import_state:
       case Method::qr_parse: case Method::qr_create_sign_request:
       case Method::qr_scan: case Method::sign_qr_request:
-      case Method::qr_consume_sign_response: case Method::qr_cancel_sign_request:
+      case Method::qr_validate_sign_response: case Method::qr_consume_sign_response: case Method::qr_cancel_sign_request:
       case Method::qr_encode_account_id:
       case Method::qr_decode_luminance: case Method::qr_encode:
+      case Method::qr_encode_document: case Method::qr_prepare_account_authorization: case Method::encode_signing_payload:
         fail(CITIZENSDK_ERROR_INVALID_STATE, "This method uses its dedicated lifecycle/capability encoder");
     }
   } catch (const ContractFailure &error) {

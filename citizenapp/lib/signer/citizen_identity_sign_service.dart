@@ -5,9 +5,6 @@ import 'dart:typed_data';
 import 'package:flutter/widgets.dart' show BuildContext;
 import 'package:citizenapp/my/myid/voting_identity_payload.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
-import 'package:citizenapp/signer/app_business_qr_codec.dart';
-import 'package:citizenapp/security/device_subkey.dart' show bytesToHex;
 
 class CitizenIdentitySignException implements Exception {
   const CitizenIdentitySignException(this.message);
@@ -25,7 +22,7 @@ class CitizenIdentitySignPrep {
     required this.account,
   });
 
-  final SignRequestEnvelope request;
+  final CitizenQrDocument request;
   final String actionLabel;
   final VotingIdentityConsentPayload decoded;
   final CitizenWalletStateAccount account;
@@ -33,42 +30,39 @@ class CitizenIdentitySignPrep {
 
 /// 公民签名统一服务：完整解码、请求/载荷/本机钱包三方公钥一致后才允许签名。
 class CitizenIdentitySignService {
-  CitizenIdentitySignService({AppBusinessQrCodec? signer})
-      : _signer = signer ?? AppBusinessQrCodec();
-  final AppBusinessQrCodec _signer;
+  CitizenIdentitySignService({required CitizenQr qr}) : _qr = qr;
+  final CitizenQr _qr;
 
   Future<CitizenIdentitySignPrep> prepare(
     String raw,
     CitizenSdkWallet wallet, {
     CitizenWalletStateAccount? requiredAccount,
   }) async {
-    final SignRequestEnvelope request;
+    final CitizenQrDocument request;
     try {
-      request = _signer.parseRequest(raw);
-    } on AppBusinessQrException catch (error) {
+      request = (await _qr.parseForPurpose(raw, CitizenQrScanPurpose.signingRequest)).document;
+    } on CitizenSdkException catch (error) {
       throw CitizenIdentitySignException(error.message);
     }
-    if (request.body.action != QrActions.citizenIdentity) {
+    if (request.action != CitizenQrActions.citizenIdentity) {
       throw const CitizenIdentitySignException('该二维码不是公民签名确认请求');
     }
-    final actionLabel = QrActions.actionLabelForCode(request.body.action);
-    if (actionLabel == null) {
-      throw const CitizenIdentitySignException('未登记的签名动作，已拒绝签名');
-    }
+    // 原确认页文案归App所有；协议与期限只由SDK验证。
+    const actionLabel = '公民签名确认';
     final decoded = VotingIdentityConsentPayload.decode(
-      Uint8List.fromList(request.body.payloadBytes),
+      Uint8List.fromList(request.reviewPayload!),
     );
     if (decoded == null) {
       throw const CitizenIdentitySignException('签名内容无法完整中文展示，已拒绝签名');
     }
-    final requestPublicKey = _normalizeHex(request.body.signerPublicKeyHex);
+    final requestPublicKey = _normalizeHex(request.signerAccountId!);
     if (_normalizeHex(decoded.accountId) != requestPublicKey) {
       throw const CitizenIdentitySignException('身份载荷钱包与签名请求不一致');
     }
     final account = requiredAccount ??
         _findAccount(
-          await wallet.getState(),
-          request.body.signerPublicKeyHex.toLowerCase(),
+          await wallet.getState().result,
+          request.signerAccountId!.toLowerCase(),
         );
     if (account == null ||
         _normalizeHex(account.accountId) != requestPublicKey) {
@@ -87,21 +81,22 @@ class CitizenIdentitySignService {
     CitizenSigning signing,
     BuildContext? context,
   ) async {
-    final bytes = AppBusinessQrCodec.signingBytesForHex(
-      payloadHex: prep.request.body.payloadHex,
-      action: prep.request.body.action,
-    );
+    final bytes = await CitizenSigning.encodePayload(CitizenSigningPayload.message(
+      opTag: kOpSignCitizenIdentity, scalePayload: prep.request.reviewPayload!,
+    ));
     final signature = await signCitizenPayload(
       signing: signing,
       context: context,
       accountId: prep.account.accountId,
       payload: bytes,
-      action: prep.request.body.action,
+      action: prep.request.action!,
     );
-    return _signer.encodeResponse(_signer.buildResponse(
-      request: prep.request,
-      signatureHex: '0x${bytesToHex(signature)}',
-    ));
+    return (await _qr.encodeDocument(CitizenQrContent.signResponse(
+      requestId: prep.request.requestId!,
+      expiresAt: BigInt.from(prep.request.expiresAt!),
+      signerAccountId: prep.account.accountId,
+      signature: signature,
+    ))).canonicalText;
   }
 
   static String _normalizeHex(String value) {

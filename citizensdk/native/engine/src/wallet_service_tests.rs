@@ -866,7 +866,7 @@ fn hot_wallet_changes_preserve_cold_accounts_and_cross_mode_duplicates_fail() {
             .service
             .add_accounts(&mnemonic, "", &[1])
             .await
-            .unwrap()[0]
+            .unwrap().account_by_index(1).unwrap()
             .account_id();
         assert_eq!(
             harness.profiles.snapshot().ordered_account_ids(),
@@ -986,8 +986,8 @@ fn every_supported_word_count_round_trips_backup_import_accounts_and_deletion() 
                     .await
                     .unwrap();
                 assert_eq!(
-                    accounts
-                        .iter()
+                    accounts.accounts()
+                        .iter().filter(|account| account.index() != 0)
                         .map(|account| account.index())
                         .collect::<Vec<_>>(),
                     vec![1, 1989]
@@ -1001,7 +1001,7 @@ fn every_supported_word_count_round_trips_backup_import_accounts_and_deletion() 
                 assert_eq!(restored.profiles.snapshot(), before);
                 restored
                     .service
-                    .delete_account(accounts[0].account_id())
+                    .delete_account(accounts.account_by_index(1).unwrap().account_id())
                     .await
                     .unwrap();
                 restored.service.delete_wallet().await.unwrap();
@@ -1048,13 +1048,13 @@ fn create_add_accounts_usability_and_local_signing_form_one_complete_lifecycle()
             .await
             .expect("追加账户按 index 排序");
         assert_eq!(
-            added
-                .iter()
+            added.accounts()
+                .iter().filter(|account| account.index() != 0)
                 .map(|account| account.index())
                 .collect::<Vec<_>>(),
             vec![1, 2]
         );
-        let child_one = added[0].account_id();
+        let child_one = added.account_by_index(1).unwrap().account_id();
         let active = harness
             .service
             .set_active_account(child_one)
@@ -1417,7 +1417,8 @@ fn incomplete_create_never_exposes_the_uncommitted_target_profile() {
         let visible = harness.service.state().await.unwrap();
         assert!(visible.profile().is_none());
         assert!(visible.ordered_account_ids().is_empty());
-        assert!(visible.provisioning().is_none());
+        assert_eq!(visible.initialization_state(), crate::WalletInitializationState::Recovering);
+        assert!(!visible.cleanup_pending());
         assert_eq!(harness.service.usable_profile().await.unwrap(), None);
         assert_contract_code(
             harness
@@ -1427,6 +1428,97 @@ fn incomplete_create_never_exposes_the_uncommitted_target_profile() {
                 .expect_err("未完成 create 的目标 profile 不得进入签名路径"),
             ContractErrorCode::NotFound,
         );
+    });
+}
+
+#[test]
+fn signed_deletion_authorizes_account_zero_but_plain_wipe_does_not_open_a_secret() {
+    block_on(async {
+        let signed = Harness::new();
+        signed.service.import(&known_mnemonic(), "").await.unwrap();
+        let before = signed.vault.open_calls.load(Ordering::SeqCst);
+        signed.service.sign_and_delete_wallet().await.unwrap();
+        assert_eq!(signed.vault.open_calls.load(Ordering::SeqCst), before + 1);
+        assert!(signed.service.profile().await.unwrap().is_none());
+
+        let wipe = Harness::new();
+        let profile = wipe.service.import(&known_mnemonic(), "").await.unwrap();
+        wipe.vault.wallet_keys.lock().unwrap().remove(&(profile.wallet_index(), profile.generation()));
+        let before = wipe.profiles.snapshot();
+        assert_contract_code(wipe.service.sign_and_delete_wallet().await.unwrap_err(), ContractErrorCode::KeyInvalidated);
+        assert_eq!(wipe.profiles.snapshot(), before);
+        assert_eq!(wipe.vault.delete_wallet_calls.load(Ordering::SeqCst), 0);
+        let opens = wipe.vault.open_calls.load(Ordering::SeqCst);
+        wipe.service.delete_wallet().await.unwrap();
+        assert_eq!(wipe.vault.open_calls.load(Ordering::SeqCst), opens);
+        assert!(wipe.service.profile().await.unwrap().is_none());
+    });
+}
+
+#[test]
+fn signed_deletion_does_not_remove_a_snapshot_changed_during_authorization() {
+    block_on(async {
+        let harness = Harness::new();
+        let profile = harness.service.import(&known_mnemonic(), "").await.unwrap();
+        let (entered, waiting) = futures::channel::oneshot::channel();
+        let (release, gate) = futures::channel::oneshot::channel();
+        *harness.vault.open_entered.lock().unwrap() = Some(entered);
+        *harness.vault.open_gate.lock().unwrap() = Some(gate);
+        let change = async {
+            waiting.await.unwrap();
+            let before = harness.profiles.snapshot();
+            let renamed = profile.try_with_account_name(profile.master_account_id(), "合成并发改名").unwrap();
+            *harness.profiles.state.lock().unwrap() = WalletState::try_from_parts(
+                before.revision() + 1, Some(renamed), None, None, Vec::new(),
+            ).unwrap();
+            release.send(()).unwrap();
+        };
+        let (result, ()) = join!(harness.service.sign_and_delete_wallet(), change);
+        assert_contract_code(result.unwrap_err(), ContractErrorCode::Conflict);
+        assert!(harness.service.profile().await.unwrap().is_some());
+        assert_eq!(harness.vault.delete_wallet_calls.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
+fn headless_next_account_is_atomic_and_does_not_reuse_a_deleted_hole() {
+    block_on(async {
+        let harness = Harness::new();
+        let mnemonic = known_mnemonic();
+        harness.service.import(&mnemonic, "").await.unwrap();
+        let (first, second) = futures::join!(
+            harness.service.add_next_account(&mnemonic, ""),
+            harness.service.add_next_account(&mnemonic, ""),
+        );
+        let mut counts = [first.unwrap().accounts().len(), second.unwrap().accounts().len()];
+        counts.sort();
+        assert_eq!(counts, [2, 3]);
+        let profile = harness.service.profile().await.unwrap().unwrap();
+        harness.service.delete_account(profile.account_by_index(1).unwrap().account_id()).await.unwrap();
+        let profile = harness.service.add_next_account(&mnemonic, "").await.unwrap();
+        assert!(profile.account_by_index(1).is_none());
+        assert!(profile.account_by_index(3).is_some());
+        let before = harness.profiles.snapshot();
+        assert!(harness.service.add_next_account(&mnemonic, "wrong!").await.is_err());
+        assert_eq!(harness.profiles.snapshot(), before);
+        harness.service.add_accounts(&mnemonic, "", &[1989]).await.unwrap();
+        let before = harness.profiles.snapshot();
+        assert!(harness.service.add_next_account(&mnemonic, "").await.is_err());
+        assert_eq!(harness.profiles.snapshot(), before);
+    });
+}
+
+#[test]
+fn headless_initialization_is_empty_or_ready_without_touching_hot_secrets() {
+    block_on(async {
+        let harness = Harness::new();
+        assert_eq!(harness.service.state().await.unwrap().initialization_state(), crate::WalletInitializationState::Empty);
+        let before = harness.vault.open_calls.load(Ordering::SeqCst);
+        harness.service.import_cold_account(AccountId32::from_bytes([0x74; 32]), "合成冷账户").await.unwrap();
+        let snapshot = harness.service.state().await.unwrap();
+        assert_eq!(snapshot.initialization_state(), crate::WalletInitializationState::Ready);
+        assert!(!snapshot.cleanup_pending());
+        assert_eq!(harness.vault.open_calls.load(Ordering::SeqCst), before);
     });
 }
 
@@ -1507,7 +1599,7 @@ fn concurrent_instances_loser_never_deletes_the_winner_wallet() {
 }
 
 #[test]
-fn prepared_creation_is_storage_free_until_backup_confirmation() {
+fn prepared_creation_is_storage_free_until_explicit_commit() {
     block_on(async {
         let harness = Harness::new();
         let prepared = harness
@@ -1603,8 +1695,8 @@ fn child_anchor_and_whole_wallet_deletion_honor_exact_ownership() {
             .add_accounts(&mnemonic, "", &[1, 2])
             .await
             .unwrap();
-        let child_one = added[0].clone();
-        let child_two = added[1].clone();
+        let child_one = added.account_by_index(1).unwrap().clone();
+        let child_two = added.account_by_index(2).unwrap().clone();
         harness
             .service
             .set_active_account(child_one.account_id())

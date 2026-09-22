@@ -1,107 +1,64 @@
+import 'dart:async';
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:citizenapp/qr/scanner/scanner.dart';
+import '../../support/fake_citizen_sdk.dart';
+
+/// 原控制器的生命周期回归现在验证SDK资源接线；不再构造App扫码后台或影子识别器。
+Widget _view(TestCitizenQr qr, {ValueChanged<String>? value}) => Directionality(
+  textDirection: TextDirection.ltr,
+  child: ScannerView(qr: qr, purpose: CitizenQrScanPurpose.generalScan, onRawValue: value ?? (_) {}),
+);
 
 void main() {
-  test('同一次扫描只领取第一个非空原文，重置后才能再次领取', () {
-    final controller = ScannerController(backend: FakeScannerBackend());
-    expect(controller.claimFirst([null, '', 'first', 'second']), 'first');
-    expect(controller.claimFirst(['repeated']), isNull);
-    controller.resetDetection();
-    expect(controller.claimFirst(['next']), 'next');
+  testWidgets('打开尚未完成便退出，迟到摄像资源必须关闭且不展示', (tester) async {
+    final opening = Completer<CitizenQrCapture>();
+    final capture = TestCitizenQrCapture();
+    final qr = TestCitizenQr()..captureFactory = (_) => opening.future;
+    final values = <String>[];
+    await tester.pumpWidget(_view(qr, value: values.add));
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox());
+    opening.complete(capture);
+    await tester.pump();
+    expect(capture.closeCalls, 1);
+    expect(capture.closed, isTrue);
+    expect(values, isEmpty);
+    expect(find.byType(Texture), findsNothing);
   });
 
-  test('图片识别复用单次门控并把无二维码映射为统一错误', () async {
-    final backend = FakeScannerBackend()..imageValues = ['image-qr'];
-    final controller = ScannerController(backend: backend);
-    expect(await controller.scanImage('/tmp/qr.png'), 'image-qr');
-
-    controller.resetDetection();
-    backend.imageValues = const [];
-    await expectLater(
-      controller.scanImage('/tmp/empty.png'),
-      throwsA(
-        isA<ScannerFailure>().having(
-          (failure) => failure.kind,
-          'kind',
-          ScannerFailureKind.noQrCode,
-        ),
-      ),
-    );
+  testWidgets('dispose不伪造SDK排空，close未完成时资源仍是未关闭', (tester) async {
+    final barrier = Completer<void>();
+    final capture = TestCitizenQrCapture()..closeBarrier = barrier;
+    final qr = TestCitizenQr()..captureFactory = (_) async => capture;
+    await tester.pumpWidget(_view(qr));
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+    expect(capture.closeCalls, 1);
+    expect(capture.closed, isFalse);
+    barrier.complete();
+    await tester.pump();
+    expect(capture.closed, isTrue);
   });
 
-  test('生命周期与设备错误统一经控制器转发', () async {
-    final backend = FakeScannerBackend();
-    final controller = ScannerController(backend: backend);
-    await controller.start();
-    await controller.start();
-    await controller.stop();
-    await controller.stop();
-    await controller.toggleTorch();
-    expect(
-      (backend.startCount, backend.stopCount, backend.torchCount),
-      (1, 1, 1),
-    );
-
-    backend.startError = StateError('camera permission denied');
-    await expectLater(
-      controller.start(),
-      throwsA(
-        isA<ScannerFailure>().having(
-          (failure) => failure.kind,
-          'kind',
-          ScannerFailureKind.permissionDenied,
-        ),
-      ),
-    );
+  testWidgets('更换SDK前先关闭前一个预览，不向新页面交付旧流', (tester) async {
+    final first = TestCitizenQrCapture();
+    final second = TestCitizenQrCapture();
+    final oldQr = TestCitizenQr()..captureFactory = (_) async => first;
+    final newQr = TestCitizenQr()..captureFactory = (_) async {
+      expect(first.closed, isTrue);
+      return second;
+    };
+    await tester.pumpWidget(_view(oldQr));
+    await tester.pump();
+    await tester.pumpWidget(_view(newQr));
+    await tester.pump();
+    expect(first.closeCalls, 1);
+    expect(second.closed, isFalse);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+    expect(second.closeCalls, 1);
   });
-
-  test('释放幂等，释放后拒绝继续操作', () async {
-    final backend = FakeScannerBackend();
-    final controller = ScannerController(backend: backend);
-    await controller.dispose();
-    await controller.dispose();
-    expect(backend.disposeCount, 1);
-    expect(
-      controller.resetDetection,
-      throwsA(
-        isA<ScannerFailure>().having(
-          (failure) => failure.kind,
-          'kind',
-          ScannerFailureKind.disposed,
-        ),
-      ),
-    );
-  });
-}
-
-final class FakeScannerBackend implements ScannerDeviceBackend {
-  Iterable<String?> imageValues = const [];
-  Object? startError;
-  int startCount = 0;
-  int stopCount = 0;
-  int torchCount = 0;
-  int disposeCount = 0;
-
-  @override
-  Future<Iterable<String?>> analyzeImage(String imagePath) async => imageValues;
-
-  @override
-  Widget buildPreview({required ScannerCandidatesCallback onCandidates}) =>
-      const SizedBox.shrink();
-
-  @override
-  Future<void> dispose() async => disposeCount += 1;
-
-  @override
-  Future<void> start() async {
-    startCount += 1;
-    if (startError case final Object error) throw error;
-  }
-
-  @override
-  Future<void> stop() async => stopCount += 1;
-
-  @override
-  Future<void> toggleTorch() async => torchCount += 1;
 }

@@ -4,8 +4,8 @@
 
 namespace citizen_sdk::linux {
 
-SecretVault::SecretVault(SecureStore &secure_store, GtkParentRef &parent)
-    : secure_store_(secure_store), user_auth_(parent) {}
+SecretVault::SecretVault(SecureStore &secure_store)
+    : secure_store_(secure_store) {}
 
 citizensdk_host_vault_availability_t SecretVault::availability() const noexcept {
   const TpmAvailability tpm = tpm_.availability();
@@ -22,13 +22,13 @@ citizensdk_host_vault_availability_t SecretVault::availability() const noexcept 
 }
 
 void SecretVault::ensure_wallet_kek(
-    const WalletKey &key, const std::array<uint8_t, 16> &operation_id) {
+    uint64_t host_operation_id, const WalletKey &key, const std::array<uint8_t, 16> &operation_id) {
   std::lock_guard<std::recursive_mutex> guard(generation_lock_);
   require(key.wallet_index == 0, CITIZENSDK_ERROR_INVALID_ARGUMENT,
           "only CitizenSDK wallet index 0 is supported");
   if (availability() != CITIZENSDK_HOST_VAULT_AVAILABLE) {
     throw HostError(CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED,
-                    "TPM 2.0 and SDK-owned user authentication are required");
+                    "TPM 2.0 and a credential provider are required");
   }
   if (!secure_store_.ensure_generation(key, operation_id)) {
     throw HostError(CITIZENSDK_ERROR_KEY_INVALIDATED,
@@ -43,7 +43,7 @@ void SecretVault::ensure_wallet_kek(
     }
     return;
   }
-  AuthenticationResult authentication = user_auth_.create_vault_password();
+  AuthenticationResult authentication = user_auth_.create_vault_password(host_operation_id);
   if (authentication.code != CITIZENSDK_OK) {
     throw HostError(authentication.code,
                     "CitizenSDK device-vault password creation was cancelled");
@@ -76,12 +76,12 @@ bool SecretVault::has_wallet_kek(const WalletKey &key) {
 }
 
 Bytes SecretVault::wrap_dek(
-    const WalletKey &key, const std::array<uint8_t, 16> &operation_id,
+    uint64_t host_operation_id, const WalletKey &key, const std::array<uint8_t, 16> &operation_id,
     const uint8_t plaintext_dek[32]) {
   std::lock_guard<std::recursive_mutex> guard(generation_lock_);
   require(plaintext_dek != nullptr, CITIZENSDK_ERROR_INVALID_ARGUMENT,
           "wallet DEK must be an exact Rust-owned 32-byte view");
-  ensure_wallet_kek(key, operation_id);
+  ensure_wallet_kek(host_operation_id, key, operation_id);
   const auto object = secure_store_.load_vault_object(key);
   if (!object) {
     throw HostError(CITIZENSDK_ERROR_KEY_INVALIDATED,
@@ -119,9 +119,8 @@ void SecretVault::unwrap_dek(uint64_t host_operation_id, const WalletKey &key,
       throw HostError(authentication.code,
                       "CitizenSDK device-vault unlock was cancelled");
     }
-    // Authentication can take minutes. Re-read both the tombstone and the
-    // exact TPM blob identity before using the password, so retirement or
-    // replacement during the prompt cannot authorize stale key material.
+    // 宿主凭据等待期间可能发生退休或替换；取得字节后必须重新核对
+    // 持久墓碑及准确TPM对象身份，不能用已失效代际的凭据继续解密。
     if (!secure_store_.vault_object_is_active(key, *object)) {
       throw HostError(CITIZENSDK_ERROR_KEY_INVALIDATED,
                       "wallet TPM object was retired while authenticating");
@@ -151,6 +150,21 @@ void SecretVault::retire_wallet_kek(
   secure_store_.delete_vault_object(key);
 }
 
-bool SecretVault::idle() const noexcept { return operations_.empty(); }
+bool SecretVault::idle() const noexcept { return operations_.empty() && user_auth_.idle(); }
+
+citizensdk_error_code_t SecretVault::set_credential_provider(
+    const citizensdk_credential_provider_v1_t *provider) {
+  return user_auth_.configure(provider);
+}
+citizensdk_error_code_t SecretVault::respond_credential(
+    uint64_t host_operation_id, citizensdk_bytes_view_t credential) {
+  return user_auth_.respond(host_operation_id, credential);
+}
+citizensdk_error_code_t SecretVault::cancel_credential(uint64_t host_operation_id) {
+  return user_auth_.cancel(host_operation_id);
+}
+void SecretVault::cancel_credentials() {
+  user_auth_.cancel_all();
+}
 
 }  // namespace citizen_sdk::linux

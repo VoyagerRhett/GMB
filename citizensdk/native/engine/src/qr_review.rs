@@ -94,6 +94,7 @@ pub(crate) async fn review_request(
     client: &dyn VerifiedChainClient,
     request: SignRequest,
 ) -> Result<QrReview, EngineError> {
+    request.require_signer().map_err(|_| decode("链扫码审阅必须有明确签名账户"))?;
     let identity = verified_identity(client).await?;
     let finalized = client.get_finalized_head().await?;
     let context = client.get_finalized_runtime_context_at(finalized).await?;

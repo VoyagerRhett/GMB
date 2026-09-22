@@ -39,6 +39,14 @@ CITIZENSDK_API citizensdk_error_code_t citizensdk_create_with_modules(
  * account is 32 bytes, signature exactly 64 bytes and message at most 16 MiB.
  * On OK out_valid is 0 or 1; malformed encodings return INVALID_ARGUMENT.
  * No output is written on error. Excluded signing builds return UNSUPPORTED. */
+/* 纯载荷编码：kind 1=消息摘要、2=二进制前缀、3=管理员激活、4=管理员解密、
+ * 5=SCALE字符串、6=u64小端。fields_json最多4096字节，大载荷单独传入。
+ * 无实例、无设备认证；buffer=NULL/capacity=0仅查询长度，不输出秘密。 */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_encode_signing_payload(
+    uint32_t payload_kind, citizensdk_bytes_view_t fields_json,
+    citizensdk_bytes_view_t payload_bytes, uint8_t *buffer, uint64_t capacity,
+    uint64_t *out_required);
+
 CITIZENSDK_API citizensdk_error_code_t citizensdk_verify_signature(
     const citizensdk_account_id_t *account_id,
     citizensdk_bytes_view_t signature, citizensdk_bytes_view_t message,
@@ -77,12 +85,25 @@ CITIZENSDK_API citizensdk_error_code_t citizensdk_result_copy_qr(
     uint8_t *output, uint64_t output_capacity, uint64_t *out_required);
 /* Pure verification needs QR only. Writes exactly 64 bytes only after the
  * response binds to this instance's request and atomically consumes it. */
+/* 只验签同实例真实会话，不消费、不提交；后续消费仍复核全部条件。 */
+CITIZENSDK_API int32_t citizensdk_qr_validate_sign_response(
+    citizensdk_handle_t handle, citizensdk_bytes_view_t session_id,
+    citizensdk_bytes_view_t sign_response);
 CITIZENSDK_API citizensdk_error_code_t citizensdk_qr_consume_sign_response(
     citizensdk_handle_t handle, citizensdk_bytes_view_t sign_response,
     uint8_t *out_signature);
 CITIZENSDK_API citizensdk_error_code_t citizensdk_qr_cancel_sign_request(
     citizensdk_handle_t handle, citizensdk_bytes_view_t request_id,
     uint8_t *out_cancelled);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_qr_encode_document(
+    citizensdk_handle_t handle, citizensdk_bytes_view_t input_json,
+    uint8_t *buffer, uint64_t capacity, uint64_t *out_required);
+/* 原授权模板准备结果含reason及公开事实；不代表链上资格或签名授权成功。 */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_qr_prepare_account_authorization(
+    citizensdk_handle_t handle, uint32_t action, citizensdk_bytes_view_t payload,
+    citizensdk_bytes_view_t account_id_utf8, uint8_t *buffer, uint64_t capacity,
+    uint64_t *out_required);
+
 CITIZENSDK_API citizensdk_error_code_t citizensdk_qr_encode_account_id(
     citizensdk_handle_t handle, const citizensdk_account_id_t *account_id,
     uint8_t *output, uint64_t output_capacity, uint64_t *out_required);
@@ -238,7 +259,16 @@ CITIZENSDK_API citizensdk_error_code_t citizensdk_get_account_nonce(
 CITIZENSDK_API citizensdk_error_code_t citizensdk_get_best_fee_snapshot(
     citizensdk_handle_t handle, citizensdk_request_id_t *out_request_id);
 
-/* SDK 安全界面的同步纯校验，不需要已启动实例，不写钱包或金库。
+/* 无UI同步校验：input_kind为PASSWORD或MNEMONIC；密码的word_count须为0，
+ * 助记词须为12/18/24。校验无效也返回OK与原因/位置；ABI参数错误返回错误码。
+ * 输入最多1024字节，不保存或回显；position不适用时为UINT32_MAX。
+ * out_validation须预置完整struct_size/abi_version。 */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_validate_wallet_input(
+    uint32_t input_kind, citizensdk_bytes_view_t input,
+    citizensdk_wallet_word_count_t word_count,
+    citizensdk_wallet_input_validation_v1_t *out_validation);
+
+/* SDK 同步纯校验，不需要已启动实例，不写钱包或金库。
  * 输入为最多 1024 字节的 UTF-8，不含 NUL 终止符；不返回密码或助记词。
  * 空密码有效；非空原文及 NFKD 后按同一派生规则校验。
  * 助记词必须匹配显式选择的 12、18 或 24 词及 English BIP-39 checksum。
@@ -265,6 +295,24 @@ CITIZENSDK_API citizensdk_error_code_t citizensdk_get_wallet_profile(
  * unauthorised default-account mutation. */
 CITIZENSDK_API citizensdk_error_code_t citizensdk_get_wallet_state(
     citizensdk_handle_t handle, citizensdk_request_id_t *out_request_id);
+/* open只接纳资源；reveal在真实授权后最多交付一次。
+ * cancel撤销迟到交付；finish在宿主清屏/清理副本后请求关闭。
+ * 普通request只有在finish及准备/认证/回调均排空后结束，不能提前释放context。 */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_private_key_open(
+    citizensdk_handle_t handle, const citizensdk_account_id_t *account_id,
+    const citizensdk_private_key_receiver_v1_t *receiver,
+    uint64_t *out_secret_id, citizensdk_request_id_t *out_request_id);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_private_key_reveal(
+    citizensdk_handle_t handle, uint64_t secret_id);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_private_key_cancel(
+    citizensdk_handle_t handle, uint64_t secret_id);
+CITIZENSDK_API citizensdk_error_code_t citizensdk_private_key_finish(
+    citizensdk_handle_t handle, uint64_t secret_id);
+/* 同一result中的初始化事实：EMPTY=0、READY=1、RECOVERING=2。
+ * cleanup_pending为0/1；错误不写输出，不扩长原wallet_state_info结构。 */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_wallet_state_get_initialization(
+    citizensdk_result_handle_t result, uint32_t *out_initialization_state,
+    uint8_t *out_cleanup_pending);
 CITIZENSDK_API citizensdk_error_code_t citizensdk_import_cold_account_id(
     citizensdk_handle_t handle, const citizensdk_account_id_t *account_id,
     citizensdk_bytes_view_t name, citizensdk_request_id_t *out_request_id);
@@ -340,6 +388,10 @@ CITIZENSDK_API citizensdk_error_code_t citizensdk_add_wallet_accounts(
     citizensdk_handle_t handle, citizensdk_bytes_view_t mnemonic,
     citizensdk_bytes_view_t password, const uint32_t *indices,
     uint32_t index_count, citizensdk_request_id_t *out_request_id);
+/* 显式下一编号与指定追加均返回本次提交的WALLET_PROFILE，不能用空indices表示。 */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_add_next_wallet_account(
+    citizensdk_handle_t handle, citizensdk_bytes_view_t mnemonic,
+    citizensdk_bytes_view_t password, citizensdk_request_id_t *out_request_id);
 CITIZENSDK_API citizensdk_error_code_t citizensdk_set_active_wallet_account(
     citizensdk_handle_t handle, const citizensdk_account_id_t *account_id,
     citizensdk_request_id_t *out_request_id);
@@ -351,6 +403,9 @@ CITIZENSDK_API citizensdk_error_code_t citizensdk_delete_wallet_account(
     citizensdk_handle_t handle, const citizensdk_account_id_t *account_id,
     citizensdk_request_id_t *out_request_id);
 CITIZENSDK_API citizensdk_error_code_t citizensdk_delete_wallet(
+    citizensdk_handle_t handle, citizensdk_request_id_t *out_request_id);
+/* 签名删除在同一钱包代际内完成认证/签名/验签；不改变原delete擦除入口。 */
+CITIZENSDK_API citizensdk_error_code_t citizensdk_sign_and_delete_wallet(
     citizensdk_handle_t handle, citizensdk_request_id_t *out_request_id);
 CITIZENSDK_API citizensdk_error_code_t citizensdk_reconcile_wallet_cleanup(
     citizensdk_handle_t handle, citizensdk_request_id_t *out_request_id);

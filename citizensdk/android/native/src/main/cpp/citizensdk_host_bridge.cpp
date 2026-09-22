@@ -954,6 +954,11 @@ void CitizenSdkHostBridge::dispatch_event(const citizensdk_event_t &event) {
              event.capability_revision == 0 && event.reserved == 0) {
     jmethodID method = env->GetMethodID(type, "onNativeHistoryChanged", "(J)V");
     if (method != nullptr) env->CallVoidMethod(native_owner_, method, static_cast<jlong>(event.sequence));
+  } else if (event.event_type == CITIZENSDK_EVENT_WALLET_CHANGED &&
+             event.request_id == 0 && event.result == 0 &&
+             event.capability_revision == 0 && event.reserved == 0) {
+    jmethodID method = env->GetMethodID(type, "onNativeWalletChanged", "(J)V");
+    if (method != nullptr) env->CallVoidMethod(native_owner_, method, static_cast<jlong>(event.sequence));
   } else if (event.event_type == CITIZENSDK_EVENT_FINALIZED_BLOCK_CHANGED) {
     if (event.request_id == 0 && event.result != 0 &&
         event.capability_revision == 0 && event.reserved == 0) {

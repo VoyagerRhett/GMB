@@ -2,10 +2,7 @@ import 'package:citizen_sdk/citizen_sdk.dart';
 
 import 'package:flutter/widgets.dart' show BuildContext;
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
-import 'package:citizenapp/signer/app_business_qr_codec.dart';
 import 'package:citizenapp/signer/square_action_payload.dart';
-import 'package:citizenapp/security/device_subkey.dart' show bytesToHex;
 
 enum SquareActionSignError { invalidRequest, undecodable, accountNotLocal }
 
@@ -28,7 +25,7 @@ class SquareActionSignPrep {
     required this.account,
   });
 
-  final SignRequestEnvelope request;
+  final CitizenQrDocument request;
   final String actionLabel;
   final SquareActionPayload decoded;
   final CitizenWalletStateAccount account;
@@ -36,13 +33,12 @@ class SquareActionSignPrep {
 
 /// 广场账户动作「签名响应方」（官网无私钥，CitizenApp 扫一扫代签）。
 ///
-/// 流程：扫 signRequest → 解析/两色解码 → 按 QR `u` 定位 accountId 钱包（拒本机没有/冷钱包）
+/// 流程：扫 signRequest → 解析/两色解码 → 按 QR `u` 定位 accountId 钱包（拒本机没有的账户）
 /// → 用户核对动作 → **accountId 主钥**对 signing_message(0x1D) 签名（生物识别）→ 出 signResponse。
 class SquareActionSignService {
-  SquareActionSignService({AppBusinessQrCodec? signer})
-    : _signer = signer ?? AppBusinessQrCodec();
+  SquareActionSignService({required CitizenQr qr}) : _qr = qr;
 
-  final AppBusinessQrCodec _signer;
+  final CitizenQr _qr;
 
   /// 解析 + 两色解码 + 定位钱包（不签名、不弹生物识别）。失败抛 [SquareActionSignException]。
   Future<SquareActionSignPrep> prepare(
@@ -50,18 +46,24 @@ class SquareActionSignService {
     CitizenSdkWallet wallet, {
     CitizenWalletStateAccount? requiredAccount,
   }) async {
-    final SignRequestEnvelope request;
+    final CitizenQrDocument request;
     try {
-      request = _signer.parseRequest(raw);
-    } on AppBusinessQrException catch (e) {
+      request = (await _qr.parseForPurpose(raw, CitizenQrScanPurpose.signingRequest)).document;
+    } on CitizenSdkException catch (e) {
       throw SquareActionSignException(
         SquareActionSignError.invalidRequest,
         e.message,
       );
     }
-    final body = request.body;
-    final actionLabel = QrActions.actionLabelForCode(body.action)!;
-    final decoded = decodeSquareActionPayload(body.payloadHex);
+    if (request.action != CitizenQrActions.squareAccountAction) {
+      throw const SquareActionSignException(
+        SquareActionSignError.invalidRequest, '该动作不属于 CitizenApp 业务二维码',
+      );
+    }
+    const actionLabel = '广场账户动作签名';
+    final decoded = decodeSquareActionPayload(
+      '0x${request.reviewPayload!.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join()}',
+    );
     final reviewFields = decoded?.reviewFields;
     if (decoded == null || reviewFields == null) {
       throw const SquareActionSignException(
@@ -69,10 +71,10 @@ class SquareActionSignService {
         '签名内容无法完整中文展示，已拒绝签名',
       );
     }
-    final requestAccountId = body.signerPublicKeyHex.toLowerCase();
+    final requestAccountId = request.signerAccountId!.toLowerCase();
     final account =
         requiredAccount ??
-        _findAccount(await wallet.getState(), requestAccountId);
+        _findAccount(await wallet.getState().result, requestAccountId);
     if (account == null ||
         _normalizeHex(account.accountId) != _normalizeHex(requestAccountId)) {
       throw const SquareActionSignException(
@@ -94,22 +96,22 @@ class SquareActionSignService {
     CitizenSigning signing,
     BuildContext? context,
   ) async {
-    final signBytes = AppBusinessQrCodec.signingBytesForHex(
-      payloadHex: prep.request.body.payloadHex,
-      action: prep.request.body.action,
-    );
+    final signBytes = await CitizenSigning.encodePayload(CitizenSigningPayload.message(
+      opTag: kOpSignSquareAction, scalePayload: prep.request.reviewPayload!,
+    ));
     final signature = await signCitizenPayload(
       signing: signing,
       context: context,
       accountId: prep.account.accountId,
       payload: signBytes,
-      action: prep.request.body.action,
+      action: prep.request.action!,
     );
-    final response = _signer.buildResponse(
-      request: prep.request,
-      signatureHex: '0x${bytesToHex(signature)}',
-    );
-    return _signer.encodeResponse(response);
+    return (await _qr.encodeDocument(CitizenQrContent.signResponse(
+      requestId: prep.request.requestId!,
+      expiresAt: BigInt.from(prep.request.expiresAt!),
+      signerAccountId: prep.account.accountId,
+      signature: signature,
+    ))).canonicalText;
   }
 
   static String _normalizeHex(String hex) {

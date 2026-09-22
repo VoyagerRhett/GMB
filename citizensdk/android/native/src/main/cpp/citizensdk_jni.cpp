@@ -300,6 +300,13 @@ bool write_wallet_state(citizensdk_result_handle_t result,
     payload->u64(account.created_at_millis);
     payload->u8(account.is_default == 0 ? 0 : 1);
   }
+  uint32_t initialization = 0;
+  uint8_t cleanup = 0;
+  if (citizensdk_wallet_state_get_initialization(result, &initialization, &cleanup) != kOk ||
+      initialization > 2 || cleanup > 1 ||
+      ((initialization == 1) != (state.account_count != 0)) || (initialization == 0 && cleanup != 0)) return false;
+  payload->u32(initialization);
+  payload->u8(cleanup);
   return true;
 }
 
@@ -905,7 +912,7 @@ jlongArray native_open_private_key_view(JNIEnv *env, jobject, jlong raw,
   auto output = env->NewLongArray(3);
   if (output == nullptr) return nullptr;
   auto type = env->GetObjectClass(owner);
-  auto display = env->GetMethodID(type, "display", "(JLjava/nio/ByteBuffer;)I");
+  auto display = env->GetMethodID(type, "receive", "(JLjava/nio/ByteBuffer;)I");
   auto settled = env->GetMethodID(type, "settled", "(JI)V");
   auto authorizing = env->GetMethodID(type, "authorizing", "(JJ)I");
   env->DeleteLocalRef(type);
@@ -913,13 +920,13 @@ jlongArray native_open_private_key_view(JNIEnv *env, jobject, jlong raw,
   auto context = std::unique_ptr<PrivateKeyViewContext>(new (std::nothrow) PrivateKeyViewContext{
       bridge->vm(), env->NewGlobalRef(owner), display, settled, authorizing});
   if (!context || context->owner == nullptr) return nullptr;
-  citizensdk_internal_private_key_view_v1_t view{};
+  citizensdk_private_key_receiver_v1_t view{};
   view.struct_size = sizeof(view); view.abi_version = 1; view.context = context.get();
-  view.display = private_key_display; view.settled = private_key_settled;
+  view.receive = private_key_display; view.settled = private_key_settled;
   view.authorizing = private_key_authorizing;
   uint64_t view_id = 0;
   citizensdk_request_id_t request_id = 0;
-  const int32_t code = citizensdk_internal_private_key_view_open(
+  const int32_t code = citizensdk_private_key_open(
       bridge->handle(), &value, &view, &view_id, &request_id);
   if (code != CITIZENSDK_OK) {
     env->DeleteGlobalRef(context->owner);
@@ -935,19 +942,19 @@ jlongArray native_open_private_key_view(JNIEnv *env, jobject, jlong raw,
 void native_reveal_private_key_view(JNIEnv *env, jobject, jlong raw, jlong view_id) {
   auto bridge = bridge_from(env, raw);
   if (!bridge) return;
-  const int32_t code = citizensdk_internal_private_key_view_reveal(bridge->handle(), view_id);
+  const int32_t code = citizensdk_private_key_reveal(bridge->handle(), view_id);
   if (code != CITIZENSDK_OK) throw_sdk(env, code, "Private key view reveal failed");
 }
 void native_cancel_private_key_view(JNIEnv *env, jobject, jlong raw, jlong view_id) {
   auto bridge = bridge_from(env, raw);
   if (!bridge) return;
-  const int32_t code = citizensdk_internal_private_key_view_cancel(bridge->handle(), view_id);
+  const int32_t code = citizensdk_private_key_cancel(bridge->handle(), view_id);
   if (code != CITIZENSDK_OK) throw_sdk(env, code, "Private key view cancellation failed");
 }
 void native_finish_private_key_view(JNIEnv *env, jobject, jlong raw, jlong view_id) {
   auto bridge = bridge_from(env, raw);
   if (!bridge) return;
-  const int32_t code = citizensdk_internal_private_key_view_finish(bridge->handle(), view_id);
+  const int32_t code = citizensdk_private_key_finish(bridge->handle(), view_id);
   if (code != CITIZENSDK_OK) throw_sdk(env, code, "Private key view finish failed");
 }
 void native_release_private_key_view_context(JNIEnv *env, jobject, jlong raw) {
@@ -990,6 +997,14 @@ jlong native_delete_wallet(JNIEnv *env, jobject, jlong raw) {
   auto bridge = bridge_from(env, raw);
   return bridge == nullptr ? 0 : begin_request(env, bridge, [](auto handle, auto *out) {
     return citizensdk_delete_wallet(handle, out);
+  });
+}
+
+// 普通清除与用户主动“签名并删除”共用 Core 清理，仅后者要求真实授权签名。
+jlong native_sign_and_delete_wallet(JNIEnv *env, jobject, jlong raw) {
+  auto bridge = bridge_from(env, raw);
+  return bridge == nullptr ? 0 : begin_request(env, bridge, [](auto handle, auto *out) {
+    return citizensdk_sign_and_delete_wallet(handle, out);
   });
 }
 
@@ -1287,16 +1302,20 @@ void wallet_input_error(JNIEnv *env, int32_t code) {
   throw_sdk(env, code, "Wallet input validation failed");
 }
 
-void native_validate_password(JNIEnv *env, jobject, jbyteArray input) {
+jintArray native_validate_wallet_input(JNIEnv *env, jobject, jint kind,
+                                       jbyteArray input, jint words) {
   SensitiveBytes bytes;
-  if (!take_wallet_secret(env, input, bytes.out())) return;
-  wallet_input_error(env, citizensdk_validate_wallet_password(view(bytes.value())));
-}
-
-void native_validate_mnemonic(JNIEnv *env, jobject, jbyteArray input, jint words) {
-  SensitiveBytes bytes;
-  if (!take_wallet_secret(env, input, bytes.out())) return;
-  wallet_input_error(env, citizensdk_validate_wallet_mnemonic(view(bytes.value()), static_cast<uint32_t>(words)));
+  if (!take_wallet_secret(env, input, bytes.out())) return nullptr;
+  auto validation = info_value<citizensdk_wallet_input_validation_v1_t>();
+  const auto code = citizensdk_validate_wallet_input(
+      static_cast<uint32_t>(kind), view(bytes.value()),
+      static_cast<uint32_t>(words), &validation);
+  if (code != kOk) { wallet_input_error(env, code); return nullptr; }
+  const jint values[] = {static_cast<jint>(validation.reason),
+      validation.position == UINT32_MAX ? -1 : static_cast<jint>(validation.position)};
+  auto result = env->NewIntArray(2);
+  if (result != nullptr) env->SetIntArrayRegion(result, 0, 2, values);
+  return result;
 }
 
 jbyteArray native_word_suggestions(JNIEnv *env, jobject, jbyteArray input) {
@@ -1358,6 +1377,20 @@ jlong native_add_accounts(JNIEnv *env, jobject, jlong raw,
             handle, view(mnemonic.value()), view(password.value()), indices.data(),
             static_cast<uint32_t>(indices.size()), out);
       });
+}
+
+jlong native_add_next_account(JNIEnv *env, jobject, jlong raw,
+                              jbyteArray mnemonic_bytes, jbyteArray password_bytes) {
+  auto bridge = bridge_from(env, raw);
+  SensitiveBytes mnemonic;
+  SensitiveBytes password;
+  if (bridge == nullptr ||
+      !take_wallet_secret(env, mnemonic_bytes, mnemonic.out()) ||
+      !take_wallet_secret(env, password_bytes, password.out())) return 0;
+  return begin_request(env, bridge, [&mnemonic, &password](auto handle, auto *out) {
+    return citizensdk_add_next_wallet_account(
+        handle, view(mnemonic.value()), view(password.value()), out);
+  });
 }
 
 jbyteArray native_copy_prepared(JNIEnv *env, jobject, jlong raw, jlong token) {
@@ -1469,6 +1502,47 @@ bool qr_input(JNIEnv *env, jbyteArray source, size_t maximum,
   return true;
 }
 
+jbyteArray native_encode_signing_payload(JNIEnv *env, jclass, jint kind,
+    jbyteArray fields_bytes, jbyteArray payload_bytes) {
+  std::vector<uint8_t> fields, payload;
+  if (kind < 1 || kind > 6 || fields_bytes == nullptr || payload_bytes == nullptr ||
+      env->GetArrayLength(fields_bytes) > 4096 || env->GetArrayLength(payload_bytes) > 16 * 1024 * 1024) {
+    throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT, "Payload input boundary is invalid");
+    return nullptr;
+  }
+  if (!take_bytes(env, fields_bytes, &fields) || !take_bytes(env, payload_bytes, &payload)) return nullptr;
+  // 复用同一变长结果复制路径；纯编码没有Host/Core实例租约。
+  return qr_core_bytes(env, nullptr, [&](uint8_t *out, uint64_t capacity, uint64_t *required) {
+    return citizensdk_encode_signing_payload(static_cast<uint32_t>(kind), view(fields), view(payload), out, capacity, required);
+  }, 0, 16 * 1024 * 1024);
+}
+
+jbyteArray native_qr_encode_document(JNIEnv *env, jobject, jlong raw, jbyteArray input_bytes) {
+  auto bridge = bridge_from(env, raw);
+  std::vector<uint8_t> input;
+  if (!bridge || !qr_input(env, input_bytes, 65536, &input, "QR content boundary is invalid")) return nullptr;
+  return qr_core_bytes(env, bridge, [&](uint8_t *out, uint64_t capacity, uint64_t *required) {
+    return citizensdk_qr_encode_document(bridge->handle(), view(input), out, capacity, required);
+  }, 0, 65536);
+}
+
+jbyteArray native_qr_prepare_account_authorization(JNIEnv *env, jobject, jlong raw,
+    jint action, jbyteArray payload_bytes, jbyteArray account_bytes) {
+  auto bridge = bridge_from(env, raw);
+  std::vector<uint8_t> payload, account;
+  if (!bridge) return nullptr;
+  if (payload_bytes == nullptr || account_bytes == nullptr ||
+      env->GetArrayLength(payload_bytes) > 1920 || env->GetArrayLength(account_bytes) > 1024) {
+    throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT, "Authorization input boundary is invalid");
+    return nullptr;
+  }
+  if (!take_bytes(env, payload_bytes, &payload) || !take_bytes(env, account_bytes, &account)) return nullptr;
+  return qr_core_bytes(env, bridge, [&](uint8_t *out, uint64_t capacity, uint64_t *required) {
+    return citizensdk_qr_prepare_account_authorization(bridge->handle(), static_cast<uint32_t>(action),
+        view(payload), view(account), out, capacity, required);
+  }, 0, 65536);
+}
+
 jbyteArray native_qr_parse(JNIEnv *env, jobject, jlong raw, jbyteArray text_bytes) {
   auto bridge = bridge_from(env, raw);
   std::vector<uint8_t> text;
@@ -1523,6 +1597,16 @@ void native_release_qr_review(JNIEnv *env, jobject, jlong raw, jlong token) {
   if (bridge && token > 0) bridge->release_qr_review(static_cast<uint64_t>(token));
 }
 
+// 非消费预检只调用同一Core验证，不把宿主布尔结果视为验签。
+void native_qr_validate_response(JNIEnv *env, jobject, jlong raw, jbyteArray session_bytes, jbyteArray text_bytes) {
+  auto bridge = bridge_from(env, raw);
+  std::vector<uint8_t> session, text;
+  if (!bridge || !qr_input(env, session_bytes, 128, &session, "QR session ID is invalid") ||
+      !qr_input(env, text_bytes, kMaxQrTextBytes, &text, "QR response is invalid")) return;
+  const auto code = citizensdk_qr_validate_sign_response(bridge->handle(), view(session), view(text));
+  if (code != kOk) throw_sdk(env, code, "QR response preflight failed");
+}
+
 jbyteArray native_qr_consume_response(JNIEnv *env, jobject, jlong raw, jbyteArray text_bytes) {
   auto bridge = bridge_from(env, raw);
   std::vector<uint8_t> text;
@@ -1572,7 +1656,7 @@ citizensdk_error_code_t qr_image_error(citizensdk_qr_image_status_t status) {
 }
 
 jbyteArray native_qr_decode_luminance(JNIEnv *env, jobject, jlong raw,
-    jbyteArray data_bytes, jint width, jint height, jint stride) {
+    jbyteArray data_bytes, jint width, jint height, jint stride, jboolean all) {
   auto bridge = bridge_from(env, raw);
   std::vector<uint8_t> data;
   if (!bridge || width <= 0 || height <= 0 || stride <= 0 ||
@@ -1580,14 +1664,16 @@ jbyteArray native_qr_decode_luminance(JNIEnv *env, jobject, jlong raw,
       env->GetArrayLength(data_bytes) > static_cast<jsize>(kMaxQrImageBytes) ||
       !take_bytes(env, data_bytes, &data)) return nullptr;
   size_t required = 0;
-  auto status = citizensdk_qr_image_decode_luminance(data.data(), data.size(),
+  const auto decode = all == JNI_TRUE ? citizensdk_qr_image_decode_luminance_all : citizensdk_qr_image_decode_luminance;
+  const size_t maximum = all == JNI_TRUE ? 4 + 64 * (4 + kMaxQrTextBytes) : kMaxQrTextBytes;
+  auto status = decode(data.data(), data.size(),
       static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(stride),
       nullptr, 0, &required);
-  if (status != CITIZENSDK_QR_IMAGE_BUFFER_TOO_SMALL || required == 0 || required > kMaxQrTextBytes) {
+  if (status != CITIZENSDK_QR_IMAGE_BUFFER_TOO_SMALL || required == 0 || required > maximum) {
     throw_sdk(env, qr_image_error(status), "ZXing-C++ QR decode failed"); return nullptr;
   }
   std::vector<uint8_t> output(required);
-  status = citizensdk_qr_image_decode_luminance(data.data(), data.size(),
+  status = decode(data.data(), data.size(),
       static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(stride),
       output.data(), output.size(), &required);
   if (status != CITIZENSDK_QR_IMAGE_OK) {
@@ -1645,6 +1731,7 @@ void native_complete_unwrap(JNIEnv *env, jclass, jlong raw,
 const JNINativeMethod kMethods[] = {
     {const_cast<char *>("validateModules"), const_cast<char *>("(I)V"), reinterpret_cast<void *>(native_validate_modules)},
     {const_cast<char *>("verifySignature"), const_cast<char *>("([B[B[B)Z"), reinterpret_cast<void *>(native_verify)},
+    {const_cast<char *>("encodeSigningPayload"), const_cast<char *>("(I[B[B)[B"), reinterpret_cast<void *>(native_encode_signing_payload)},
     {const_cast<char *>("nativeCreate"),
      const_cast<char *>("(Lorg/citizen/sdk/internal/CitizenSdkHostServices;[B[B[BI)J"),
      reinterpret_cast<void *>(native_create)},
@@ -1682,7 +1769,7 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char *>("nativeReorderWalletAccounts"), const_cast<char *>("(JJ[BI)J"), reinterpret_cast<void *>(native_reorder_wallet)},
     {const_cast<char *>("nativeRenameAccount"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_rename_any)},
     {const_cast<char *>("nativeDeleteAccount"), const_cast<char *>("(J[B)J"), reinterpret_cast<void *>(native_delete_any)},
-    {const_cast<char *>("nativeOpenPrivateKeyView"), const_cast<char *>("(J[BLorg/citizen/sdk/ui/CitizenSdkPrivateKeyDisplayBuffer;)[J"), reinterpret_cast<void *>(native_open_private_key_view)},
+    {const_cast<char *>("nativeOpenPrivateKeyView"), const_cast<char *>("(J[BLorg/citizen/sdk/CitizenSdkPrivateKeyReceiver;)[J"), reinterpret_cast<void *>(native_open_private_key_view)},
     {const_cast<char *>("nativeRevealPrivateKeyView"), const_cast<char *>("(JJ)V"), reinterpret_cast<void *>(native_reveal_private_key_view)},
     {const_cast<char *>("nativeCancelPrivateKeyView"), const_cast<char *>("(JJ)V"), reinterpret_cast<void *>(native_cancel_private_key_view)},
     {const_cast<char *>("nativeFinishPrivateKeyView"), const_cast<char *>("(JJ)V"), reinterpret_cast<void *>(native_finish_private_key_view)},
@@ -1691,6 +1778,7 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char *>("nativeRenameWalletAccount"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_rename)},
     {const_cast<char *>("nativeDeleteWalletAccount"), const_cast<char *>("(J[B)J"), reinterpret_cast<void *>(native_delete_account)},
     {const_cast<char *>("nativeDeleteWallet"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_delete_wallet)},
+    {const_cast<char *>("nativeSignAndDeleteWallet"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_sign_and_delete_wallet)},
     {const_cast<char *>("nativeReconcileWalletCleanup"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_reconcile)},
     {const_cast<char *>("nativeSignWalletPayload"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_sign)},
     {const_cast<char *>("nativeDeriveApplicationKey"), const_cast<char *>("(J[B[B[B)J"), reinterpret_cast<void *>(native_derive_application_key)},
@@ -1700,14 +1788,17 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char *>("nativeBeginDefaultAccountChange"), const_cast<char *>("(JJ[BIJ)J"), reinterpret_cast<void *>(native_begin_default_account_change)},
     {const_cast<char *>("nativeConsumeDefaultAccountChange"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_consume_default_account_change)},
     {const_cast<char *>("nativeQrParse"), const_cast<char *>("(J[B)[B"), reinterpret_cast<void *>(native_qr_parse)},
+    {const_cast<char *>("nativeQrEncodeDocument"), const_cast<char *>("(J[B)[B"), reinterpret_cast<void *>(native_qr_encode_document)},
+    {const_cast<char *>("nativeQrPrepareAccountAuthorization"), const_cast<char *>("(JI[B[B)[B"), reinterpret_cast<void *>(native_qr_prepare_account_authorization)},
     {const_cast<char *>("nativeQrCreateSignRequest"), const_cast<char *>("(JI[B[BJ)[B"), reinterpret_cast<void *>(native_qr_create_request)},
     {const_cast<char *>("nativeReviewQrSignRequest"), const_cast<char *>("(J[B)J"), reinterpret_cast<void *>(native_review_qr_request)},
     {const_cast<char *>("nativeSignQrRequest"), const_cast<char *>("(JJ)J"), reinterpret_cast<void *>(native_sign_qr_request)},
     {const_cast<char *>("nativeReleaseQrReview"), const_cast<char *>("(JJ)V"), reinterpret_cast<void *>(native_release_qr_review)},
+    {const_cast<char *>("nativeQrValidateSignResponse"), const_cast<char *>("(J[B[B)V"), reinterpret_cast<void *>(native_qr_validate_response)},
     {const_cast<char *>("nativeQrConsumeSignResponse"), const_cast<char *>("(J[B)[B"), reinterpret_cast<void *>(native_qr_consume_response)},
     {const_cast<char *>("nativeQrCancelSignRequest"), const_cast<char *>("(J[B)Z"), reinterpret_cast<void *>(native_qr_cancel_request)},
     {const_cast<char *>("nativeQrEncodeAccountId"), const_cast<char *>("(J[B)[B"), reinterpret_cast<void *>(native_qr_encode_account)},
-    {const_cast<char *>("nativeQrDecodeLuminance"), const_cast<char *>("(J[BIII)[B"), reinterpret_cast<void *>(native_qr_decode_luminance)},
+    {const_cast<char *>("nativeQrDecodeLuminance"), const_cast<char *>("(J[BIIIZ)[B"), reinterpret_cast<void *>(native_qr_decode_luminance)},
     {const_cast<char *>("nativeQrEncode"), const_cast<char *>("(J[BI)[B"), reinterpret_cast<void *>(native_qr_encode_image)},
     {const_cast<char *>("nativePrepareTransaction"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_prepare_transaction)},
     {const_cast<char *>("nativeReleasePreparedTransaction"), const_cast<char *>("(JJ)V"), reinterpret_cast<void *>(native_release_prepared_transaction)},
@@ -1717,11 +1808,11 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char *>("nativeGetTransactionHistory"), const_cast<char *>("(J[BI)J"), reinterpret_cast<void *>(native_get_transaction_history)},
     {const_cast<char *>("nativeSyncTransactionHistory"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_sync_transaction_history)},
     {const_cast<char *>("nativePrepareWalletCreation"), const_cast<char *>("(JI[B)J"), reinterpret_cast<void *>(native_prepare)},
-    {const_cast<char *>("nativeValidateWalletPassword"), const_cast<char *>("([B)V"), reinterpret_cast<void *>(native_validate_password)},
-    {const_cast<char *>("nativeValidateWalletMnemonic"), const_cast<char *>("([BI)V"), reinterpret_cast<void *>(native_validate_mnemonic)},
+    {const_cast<char *>("nativeValidateWalletInput"), const_cast<char *>("(I[BI)[I"), reinterpret_cast<void *>(native_validate_wallet_input)},
     {const_cast<char *>("nativeWalletWordSuggestions"), const_cast<char *>("([B)[B"), reinterpret_cast<void *>(native_word_suggestions)},
     {const_cast<char *>("nativeImportWallet"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_import)},
     {const_cast<char *>("nativeAddWalletAccounts"), const_cast<char *>("(J[B[B[I)J"), reinterpret_cast<void *>(native_add_accounts)},
+    {const_cast<char *>("nativeAddNextWalletAccount"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_add_next_account)},
     {const_cast<char *>("nativeCopyPreparedMnemonic"), const_cast<char *>("(JJ)[B"), reinterpret_cast<void *>(native_copy_prepared)},
     {const_cast<char *>("nativeCommitPreparedWallet"), const_cast<char *>("(JJ)J"), reinterpret_cast<void *>(native_commit_prepared)},
     {const_cast<char *>("nativeReleasePreparedWallet"), const_cast<char *>("(JJ)V"), reinterpret_cast<void *>(native_release_prepared)},

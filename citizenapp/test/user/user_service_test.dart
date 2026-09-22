@@ -14,7 +14,6 @@ import 'package:citizenapp/isar/app_isar.dart';
 import 'package:citizenapp/my/myid/current_user_context.dart';
 import 'package:citizenapp/isar/user_isar.dart';
 import 'package:citizenapp/my/user/contact_service.dart';
-import 'package:citizenapp/qr/bodies/user_contact_body.dart';
 import 'package:citizenapp/qr/pages/qr_scan_page.dart';
 import 'package:citizenapp/security/local_cipher.dart';
 import 'package:isar_community/isar.dart';
@@ -560,7 +559,8 @@ void main() {
       final service = createService();
 
       final result = await addUserQrContact(
-        body: UserContactBody(
+        body: CitizenQrDocument(
+          kind: CitizenQrKind.userContact, canonicalText: 'synthetic-user-code', scanPurposeMask: 198,
           cidNumber: _contactCidNumber,
           accountId: UserContactService.accountIdFromSs58(_contactA),
         ),
@@ -583,7 +583,8 @@ void main() {
 
       await expectLater(
         addUserQrContact(
-          body: UserContactBody(
+          body: CitizenQrDocument(
+          kind: CitizenQrKind.userContact, canonicalText: 'synthetic-user-code', scanPurposeMask: 198,
             cidNumber: _contactCidNumber,
             accountId: UserContactService.accountIdFromSs58(_contactA),
           ),

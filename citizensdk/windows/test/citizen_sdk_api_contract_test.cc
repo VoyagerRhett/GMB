@@ -1,5 +1,9 @@
 // 冻结 Windows Host 自有薄 ABI；根产品 ABI 仍是唯一 Core 合同。
 #include <cassert>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -28,6 +32,14 @@ int main() {
   static_assert(CITIZENSDK_ABI_VERSION == 1);
   static_assert(CITIZENSDK_CAPABILITY_COUNT == 10);
   static_assert(CITIZENSDK_HOST_ABI_VERSION == 1);
+  static_assert(std::is_standard_layout_v<citizensdk_host_request_v1_t>);
+  static_assert(sizeof(citizensdk_host_request_v1_t) == 56);
+  static_assert(offsetof(citizensdk_host_request_v1_t, context) == 8);
+  static_assert(offsetof(citizensdk_host_request_v1_t, accept) == 16);
+  static_assert(offsetof(citizensdk_host_request_v1_t, complete) == 24);
+  static_assert(offsetof(citizensdk_host_request_v1_t, cancel) == 32);
+  static_assert(offsetof(citizensdk_host_request_v1_t, retain) == 40);
+  static_assert(offsetof(citizensdk_host_request_v1_t, release) == 48);
   static_assert(sizeof(citizensdk_handle_t) == sizeof(uint64_t));
   static_assert(sizeof(citizensdk_host_handle_t) == sizeof(uint64_t));
   static_assert(sizeof(citizensdk_wallet_flow_handle_t) == sizeof(uint64_t));
@@ -96,6 +108,10 @@ int main() {
     functions.insert((*iterator)[1].str());
   }
   const std::set<std::string> expected{
+      "citizensdk_host_submit_request",
+      "citizensdk_host_set_credential_provider",
+      "citizensdk_host_respond_credential",
+      "citizensdk_host_cancel_credential",
       "citizensdk_host_abi_version",
       "citizensdk_host_abandon",
       "citizensdk_host_cancel_wallet_flow",
@@ -347,5 +363,70 @@ int main() {
   }
   cpp_host.close();
   assert(cpp_host.host_handle() == 0);
+
+  // 实际QR-only Core请求经过Host薄接纳桥；不读取真实钱包、链资产或设备金库。
+  {
+    struct Probe {
+      std::atomic<unsigned> retains{0}, releases{0}, completions{0}, cancellations{0};
+      std::atomic<citizensdk_request_id_t> delivered{0};
+      std::mutex mutex;
+      std::condition_variable changed;
+    } probe;
+    // 视图不能借用临时字符串；命名空间在本组全部调用期间保持存活。
+    const std::string request_namespace = "org.citizen.requestfixture";
+    invalid.application_id_utf8 = view(request_namespace);
+    invalid.asset_root_utf8 = {nullptr, 0};
+    invalid.enable_wallet = 0;
+    assert(citizensdk_host_create_with_modules(&invalid, CITIZENSDK_MODULE_QR, &host) == CITIZENSDK_OK);
+    assert(citizensdk_host_create_sdk(host, &sdk) == CITIZENSDK_OK);
+    citizensdk_host_request_v1_t callbacks{
+      sizeof(callbacks), CITIZENSDK_HOST_ABI_VERSION, &probe,
+      +[](void *, citizensdk_handle_t core, citizensdk_request_id_t *out) {
+        return citizensdk_refresh_capabilities(core, out);
+      },
+      +[](void *raw, citizensdk_request_id_t request, citizensdk_result_handle_t result) {
+        auto &state = *static_cast<Probe *>(raw);
+        citizensdk_result_info_t info{};
+        info.struct_size = sizeof(info); info.abi_version = CITIZENSDK_ABI_VERSION;
+        assert(citizensdk_result_get_info(result, &info) == CITIZENSDK_OK);
+        assert(info.error_code == CITIZENSDK_OK);
+        assert(citizensdk_result_release(result) == CITIZENSDK_OK);
+        state.delivered.store(request);
+        ++state.completions;
+      },
+      +[](void *raw, citizensdk_handle_t) { ++static_cast<Probe *>(raw)->cancellations; },
+      +[](void *raw) { ++static_cast<Probe *>(raw)->retains; },
+      +[](void *raw) {
+        auto &state = *static_cast<Probe *>(raw);
+        { std::lock_guard<std::mutex> guard(state.mutex); ++state.releases; }
+        state.changed.notify_all();
+      }};
+    citizensdk_request_id_t request = 99;
+    auto malformed = callbacks; malformed.struct_size = 0;
+    assert(citizensdk_host_submit_request(host, &malformed, &request) == CITIZENSDK_ERROR_INVALID_ARGUMENT);
+    assert(request == 0 && probe.retains == 0);
+    assert(citizensdk_host_submit_request(0, &callbacks, &request) == CITIZENSDK_ERROR_INVALID_HANDLE);
+    assert(request == 0 && probe.retains == 0);
+    assert(citizensdk_host_submit_request(host, &callbacks, &request) == CITIZENSDK_OK && request != 0);
+    {
+      std::unique_lock<std::mutex> guard(probe.mutex);
+      assert(probe.changed.wait_for(guard, std::chrono::seconds(5), [&] { return probe.releases == 1; }));
+    }
+    assert(probe.retains == 1 && probe.completions == 1 && probe.delivered == request);
+    callbacks.accept = +[](void *, citizensdk_handle_t, citizensdk_request_id_t *out) {
+      *out = 0; return CITIZENSDK_ERROR_INVALID_ARGUMENT;
+    };
+    assert(citizensdk_host_submit_request(host, &callbacks, &request) == CITIZENSDK_ERROR_INVALID_ARGUMENT);
+    assert(request == 0 && probe.retains == 2 && probe.releases == 2 && probe.completions == 1);
+    // 回调release完成不等于Core派发栈已退出；关闭只重试真实BUSY。
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    auto closed = citizensdk_host_destroy(host);
+    while (closed == CITIZENSDK_ERROR_BUSY && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      closed = citizensdk_host_destroy(host);
+    }
+    assert(closed == CITIZENSDK_OK);
+  }
+
   return 0;
 }

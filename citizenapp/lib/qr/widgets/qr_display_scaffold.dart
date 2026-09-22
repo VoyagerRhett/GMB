@@ -1,9 +1,12 @@
 import 'dart:ui' as ui;
+import 'dart:async';
+import 'dart:typed_data';
+import 'package:citizen_sdk/citizen_sdk.dart';
+import 'package:provider/provider.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
-import 'package:qr_flutter/qr_flutter.dart';
 import 'package:saver_gallery/saver_gallery.dart';
 
 import 'package:citizenapp/ui/app_theme.dart';
@@ -120,18 +123,9 @@ class _QrDisplayScaffoldState extends State<QrDisplayScaffold> {
             child: Container(
               color: Colors.white,
               padding: EdgeInsets.all(AppLayout.scaled(context, 12)),
-              child: QrImageView(
+              child: AppQrImage(
                 data: widget.qrData,
-                version: QrVersions.auto,
                 size: AppLayout.scaled(context, 240),
-                eyeStyle: const QrEyeStyle(
-                  eyeShape: QrEyeShape.square,
-                  color: Colors.black,
-                ),
-                dataModuleStyle: const QrDataModuleStyle(
-                  dataModuleShape: QrDataModuleShape.square,
-                  color: Colors.black,
-                ),
               ),
             ),
           ),
@@ -188,4 +182,101 @@ class _QrDisplayScaffoldState extends State<QrDisplayScaffold> {
       ),
     );
   }
+}
+
+
+/// 只显示SDK生成的像素；沿用原方形码、尺寸、颜色和10px内边距，不在App编码QR。
+class AppQrImage extends StatefulWidget {
+  const AppQrImage({super.key, required this.data, required this.size,
+    this.color = Colors.black, this.errorStateBuilder, this.qr});
+  final String data;
+  final double size;
+  final Color color;
+  final Widget Function(BuildContext, Object?)? errorStateBuilder;
+  final CitizenQr? qr;
+  @override State<AppQrImage> createState() => _AppQrImageState();
+}
+
+class _AppQrImageState extends State<AppQrImage> {
+  ui.Image? _image;
+  Object? _error;
+  CitizenQr? _qr;
+  int _generation = 0;
+
+  @override void didChangeDependencies() {
+    super.didChangeDependencies();
+    final qr = widget.qr ?? context.read<CitizenSdk>().qr;
+    if (!identical(qr, _qr)) { _qr = qr; unawaited(_load(qr)); }
+  }
+
+  @override void didUpdateWidget(covariant AppQrImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.data != widget.data || !identical(oldWidget.qr, widget.qr)) {
+      _qr = widget.qr ?? context.read<CitizenSdk>().qr;
+      unawaited(_load(_qr!));
+    }
+  }
+
+  Future<void> _load(CitizenQr qr) async {
+    final generation = ++_generation;
+    _image?.dispose();
+    _image = null;
+    _error = null;
+    try {
+      final pixels = await qr.encode(widget.data, scale: 1);
+      if (!mounted || generation != _generation) return;
+      if (pixels.width <= 8 || pixels.height <= 8 ||
+          pixels.width != pixels.height || pixels.luminance.length != pixels.width * pixels.height) {
+        throw const CitizenSdkException(code: CitizenSdkErrorCode.integrity, message: '二维码图像尺寸无效');
+      }
+      // 灰度只转换成显示透明度；模块选择、纠错、掩码与协议均已由SDK完成。
+      final rgba = Uint8List(pixels.width * pixels.height * 4);
+      for (var i = 0; i < pixels.luminance.length; i++) {
+        rgba[i * 4 + 3] = 255 - pixels.luminance[i];
+      }
+      final decoded = Completer<ui.Image>();
+      ui.decodeImageFromPixels(rgba, pixels.width, pixels.height, ui.PixelFormat.rgba8888, decoded.complete);
+      final image = await decoded.future;
+      if (!mounted || generation != _generation) { image.dispose(); return; }
+      setState(() => _image = image);
+    } catch (error) {
+      if (mounted && generation == _generation) setState(() => _error = error);
+    }
+  }
+
+  @override void dispose() {
+    ++_generation;
+    _image?.dispose();
+    super.dispose();
+  }
+
+  @override Widget build(BuildContext context) {
+    if (_error != null && widget.errorStateBuilder != null) {
+      return widget.errorStateBuilder!(context, _error);
+    }
+    return SizedBox(
+      width: widget.size, height: widget.size,
+      child: Padding(padding: const EdgeInsets.all(10),
+        child: _image == null ? const SizedBox.expand()
+            : CustomPaint(painter: _SdkQrPixels(_image!, widget.color)),
+      ),
+    );
+  }
+}
+
+class _SdkQrPixels extends CustomPainter {
+  const _SdkQrPixels(this.image, this.color);
+  final ui.Image image;
+  final Color color;
+  @override void paint(Canvas canvas, Size size) {
+    // SDK scale=1图像包含标准4模块静区；原控件的10px内边距保留在外层。
+    canvas.drawImageRect(
+      image, Rect.fromLTWH(4, 4, image.width - 8.0, image.height - 8.0),
+      Offset.zero & size,
+      Paint()..filterQuality = FilterQuality.none
+        ..colorFilter = ColorFilter.mode(color, BlendMode.srcIn),
+    );
+  }
+  @override bool shouldRepaint(covariant _SdkQrPixels oldDelegate) =>
+      oldDelegate.image != image || oldDelegate.color != color;
 }

@@ -1,5 +1,4 @@
 #include "citizen_sdk_host_bridge.hpp"
-#include "citizen_sdk_qr_flow.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -207,7 +206,7 @@ citizensdk_error_code_t vault_ensure(void *context, uint64_t operation_id,
     citizensdk_host_id128_t provisioning_id, void *sdk_context,
     citizensdk_host_status_completion_v1_t completion) {
   if (completion == nullptr) return CITIZENSDK_ERROR_INVALID_ARGUMENT;
-  try { host(context).vault_ensure(wallet_key(key), id16(provisioning_id));
+  try { host(context).vault_ensure(operation_id, wallet_key(key), id16(provisioning_id));
     complete_status(operation_id, sdk_context, completion, CITIZENSDK_OK);
     return CITIZENSDK_OK; } catch (...) { return map_exception(); }
 }
@@ -230,7 +229,7 @@ citizensdk_error_code_t vault_wrap(void *context, uint64_t operation_id,
     void *sdk_context, citizensdk_host_bytes_completion_v1_t completion) {
   if (completion == nullptr || plaintext.data == nullptr ||
       plaintext.len != CITIZENSDK_HOST_DEK_BYTES) return CITIZENSDK_ERROR_INVALID_ARGUMENT;
-  try { const Bytes wrapped = host(context).vault_wrap(wallet_key(key),
+  try { const Bytes wrapped = host(context).vault_wrap(operation_id, wallet_key(key),
       id16(provisioning_id), plaintext.data);
     citizensdk_host_bytes_result_v1_t result{};
     result.struct_size = sizeof(result); result.abi_version = 1;
@@ -285,7 +284,7 @@ HostBridge::HostBridge(std::filesystem::path storage_root,
   const auto secure_root = storage_root / application_id / "citizensdk" / "v1" / "secure";
   if ((modules & (CITIZENSDK_MODULE_WALLET | CITIZENSDK_MODULE_SIGNING)) != 0) {
     secure_store_ = std::make_unique<SecureStore>(secure_root);
-    vault_ = std::make_unique<SecretVault>(*secure_store_, parent_window_);
+    vault_ = std::make_unique<SecretVault>(*secure_store_);
   }
   configure_vtables();
 }
@@ -560,8 +559,29 @@ citizensdk_host_vault_availability_t HostBridge::vault_availability() noexcept {
   }
 }
 
+citizensdk_error_code_t HostBridge::set_credential_provider(
+    const citizensdk_credential_provider_v1_t *provider) {
+  std::lock_guard<std::recursive_mutex> guard(call_lock_);
+  // 创建Core后不替换凭据归属；避免请求过程中改宿主、悬空context或改变认证事实。
+  if (sdk_ != 0 || create_in_progress_ || close_in_progress_ || services_retired_)
+    return CITIZENSDK_ERROR_INVALID_STATE;
+  return vault_ ? vault_->set_credential_provider(provider) : CITIZENSDK_ERROR_UNSUPPORTED;
+}
+citizensdk_error_code_t HostBridge::respond_credential(
+    uint64_t host_operation_id, citizensdk_bytes_view_t credential) {
+  return service_call([&] {
+    return vault_ ? vault_->respond_credential(host_operation_id, credential)
+                  : CITIZENSDK_ERROR_UNSUPPORTED;
+  });
+}
+citizensdk_error_code_t HostBridge::cancel_credential(uint64_t host_operation_id) {
+  return service_call([&] {
+    return vault_ ? vault_->cancel_credential(host_operation_id)
+                  : CITIZENSDK_ERROR_UNSUPPORTED;
+  });
+}
+
 citizensdk_error_code_t HostBridge::close() {
-  cancel_host_qr_flows(this);
   bool teardown_started = false;
   const auto cancel_close = [&](citizensdk_error_code_t code) noexcept {
     std::lock_guard<std::recursive_mutex> guard(call_lock_);
@@ -570,6 +590,19 @@ citizensdk_error_code_t HostBridge::close() {
     return code;
   };
   try {
+    // 无UI资源自行结束Core租约；仅发取消请求，不清空真实终态路由。
+    private_requests_.cancel_all();
+    // 回调不持有Host锁；租约防止其他关闭线程在取消期间释放金库。
+    // 已进入单向拆卸的重试不重新接纳服务，也不妨碍原关闭状态机继续收敛。
+    std::unique_ptr<ServiceLease> credential_lease;
+    {
+      std::lock_guard<std::recursive_mutex> guard(call_lock_);
+      if (close_in_progress_ || create_in_progress_) return CITIZENSDK_ERROR_BUSY;
+      if (!teardown_started_ && !services_retired_)
+        credential_lease = std::make_unique<ServiceLease>(*this);
+    }
+    if (credential_lease && vault_) vault_->cancel_credentials();
+    credential_lease.reset();
     citizensdk_handle_t sdk = 0;
     bool subscribed = false;
     bool callback_installed = false;
@@ -676,21 +709,10 @@ citizensdk_error_code_t HostBridge::close() {
   }
 }
 
-uint64_t HostBridge::reserve_wallet_flow() {
-  std::lock_guard<std::recursive_mutex> guard(call_lock_);
-  require(!create_in_progress_ && !close_in_progress_ && !teardown_started_ &&
-              !services_retired_,
-          CITIZENSDK_ERROR_INVALID_STATE,
-          "CitizenSDK Host cannot start a wallet flow while closing");
-  require(std::this_thread::get_id() == ui_thread_, CITIZENSDK_ERROR_BUSY,
-          "CitizenSDK wallet UI must be presented on its GTK owner thread");
-  return lifecycle_.reserve_wallet_flow();
-}
-void HostBridge::finish_wallet_flow(uint64_t token) noexcept { lifecycle_.finish_wallet_flow(token); }
-
 citizensdk_error_code_t HostBridge::submit_private(
     const std::function<citizensdk_error_code_t(citizensdk_request_id_t *)> &accept,
-    RequestRouter::Handler handler, citizensdk_request_id_t *out_request) {
+    RequestRouter::Handler handler, citizensdk_request_id_t *out_request,
+    RequestRouter::Cancellation cancel) {
   if (!accept || !handler || out_request == nullptr) {
     return CITIZENSDK_ERROR_INVALID_ARGUMENT;
   }
@@ -704,7 +726,7 @@ citizensdk_error_code_t HostBridge::submit_private(
     }
   }
   try {
-    private_requests_.prime(std::move(handler));
+    private_requests_.prime(std::move(handler), std::move(cancel));
     try {
       completion_admission_.begin();
     } catch (...) {
@@ -731,8 +753,9 @@ citizensdk_error_code_t HostBridge::submit_private(
   // non-allocating, so every accepted result—including a successful prepared
   // wallet hidden inside an error-returning acceptance—has a cleanup owner.
   private_requests_.bind(request);
-  completion_admission_.publish_route();
+  // 发布屏障前写出真实编号，早到终态回调可安全观察已绑定请求。
   *out_request = request;
+  completion_admission_.publish_route();
   return code;
 }
 
@@ -794,11 +817,11 @@ HostRecord HostBridge::secret_cas(const SecretIdentity &identity,
   });
 }
 void HostBridge::vault_ensure(
-    const WalletKey &key, const std::array<uint8_t, 16> &operation_id) {
+    uint64_t host_operation_id, const WalletKey &key, const std::array<uint8_t, 16> &operation_id) {
   service_call([&] {
     require(vault_ != nullptr, CITIZENSDK_ERROR_UNSUPPORTED,
             "wallet host is disabled");
-    vault_->ensure_wallet_kek(key, operation_id);
+    vault_->ensure_wallet_kek(host_operation_id, key, operation_id);
   });
 }
 bool HostBridge::vault_has(const WalletKey &key) {
@@ -809,12 +832,12 @@ bool HostBridge::vault_has(const WalletKey &key) {
   });
 }
 Bytes HostBridge::vault_wrap(
-    const WalletKey &key, const std::array<uint8_t, 16> &operation_id,
+    uint64_t host_operation_id, const WalletKey &key, const std::array<uint8_t, 16> &operation_id,
     const uint8_t plaintext_dek[32]) {
   return service_call([&] {
     require(vault_ != nullptr, CITIZENSDK_ERROR_UNSUPPORTED,
             "wallet host is disabled");
-    return vault_->wrap_dek(key, operation_id, plaintext_dek);
+    return vault_->wrap_dek(host_operation_id, key, operation_id, plaintext_dek);
   });
 }
 void HostBridge::vault_unwrap(uint64_t host_operation_id, const WalletKey &key,

@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:citizenapp/log/app_log.dart';
+import 'package:citizenapp/my/util/screenshot_guard.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/isar/wallet_isar.dart';
@@ -18,6 +19,9 @@ import 'package:citizenapp/my/util/amount_format.dart';
 import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/wallet/pages/account_detail_page.dart';
+import 'package:citizenapp/wallet/pages/create_wallet_flow.dart';
+import 'package:citizenapp/wallet/widgets/add_account_sheet.dart';
+import 'package:citizenapp/qr/pages/qr_scan_page.dart';
 import 'package:citizenapp/wallet/widgets/wallet_action_card.dart';
 import 'package:citizenapp/wallet/widgets/wallet_identity_card.dart';
 import 'package:citizenapp/wallet/widgets/wallet_onchain_balance_card.dart';
@@ -70,6 +74,8 @@ class _WalletTabState extends State<WalletTab> {
   String? _identityAccountId;
   bool _mutationInProgress = false;
   int _loadGeneration = 0;
+  CitizenSdk? _observedSdk;
+  StreamSubscription<CitizenSdkEvent>? _walletEvents;
 
   bool get _isSelectionMode => widget.selectForTrade;
   CitizenSdkWallet get _wallet => context.read<CitizenSdk>().wallet;
@@ -112,6 +118,16 @@ class _WalletTabState extends State<WalletTab> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final sdk = context.read<CitizenSdk>();
+    if (!identical(sdk, _observedSdk)) {
+      unawaited(_walletEvents?.cancel());
+      _observedSdk = sdk;
+      _walletEvents = sdk.events.listen((event) {
+        if (event is CitizenSdkWalletChanged && mounted && !_mutationInProgress) {
+          unawaited(_reload());
+        }
+      });
+    }
     final next = _accountSecurity;
     if (identical(next, _security)) return;
     _security?.revision.removeListener(_onSecurityRevision);
@@ -122,6 +138,7 @@ class _WalletTabState extends State<WalletTab> {
   @override
   void dispose() {
     _security?.revision.removeListener(_onSecurityRevision);
+    unawaited(_walletEvents?.cancel());
     super.dispose();
   }
 
@@ -138,7 +155,7 @@ class _WalletTabState extends State<WalletTab> {
       });
     }
     try {
-      final state = await _wallet.getState();
+      final state = await _wallet.getState().result;
       if (!mounted || generation != _loadGeneration) return;
       setState(() {
         _state = state;
@@ -244,35 +261,41 @@ class _WalletTabState extends State<WalletTab> {
     BigInt revision,
   ) async {
     final ids = target.map((account) => account.accountId).toList();
+    final signing = context.read<CitizenSdk>().signing;
     if (before.first.accountId == target.first.accountId) {
       await _wallet.reorderAccountsWithoutDefaultChange(
         expectedRevision: revision,
         accountIds: ids,
-      );
+      ).result;
       return;
     }
     final outcome = await _wallet.beginDefaultAccountChange(
       expectedRevision: revision,
       accountIds: ids,
       ttlSeconds: 90,
-    );
+    ).result;
     if (outcome is CitizenDefaultAccountChangeCompleted) return;
     final pending = outcome as CitizenDefaultAccountChangePending;
-    if (!mounted) {
-      throw const AccountSecurityException('页面已关闭');
+    try {
+      if (!mounted) {
+        throw const AccountSecurityException('页面已关闭');
+      }
+      final response = await showCitizenSdkQrResponse(
+        context,
+        request: pending.transportRequest,
+        expiresAt: pending.expiresAt,
+      );
+      if (response == null) {
+        throw const AccountSecurityException('已取消默认账户切换');
+      }
+      await _wallet.consumeDefaultAccountChange(
+        sessionId: pending.sessionId,
+        response: response,
+      ).result;
+    } finally {
+      // 原UI退出后不遗留默认账户授权会话，成功消费后的取消为幂等空操作。
+      await signing.cancel(pending.sessionId);
     }
-    final response = await showCitizenSdkQrResponse(
-      context,
-      request: pending.transportRequest,
-      expiresAt: pending.expiresAt,
-    );
-    if (response == null) {
-      throw const AccountSecurityException('已取消默认账户切换');
-    }
-    await _wallet.consumeDefaultAccountChange(
-      sessionId: pending.sessionId,
-      response: response,
-    );
   }
 
   Future<void> _renameAccount(CitizenWalletStateAccount account) async {
@@ -308,7 +331,7 @@ class _WalletTabState extends State<WalletTab> {
       return;
     }
     try {
-      await _wallet.renameAccount(accountId: account.accountId, name: name);
+      await _wallet.renameAccount(accountId: account.accountId, name: name).result;
       await _reload();
     } catch (error) {
       if (!mounted) return;
@@ -320,23 +343,18 @@ class _WalletTabState extends State<WalletTab> {
 
   Future<void> _deleteAccount(CitizenWalletStateAccount account) async {
     if (_mutationInProgress) return;
-    final deletingWholeWallet =
-        account.signMode == CitizenWalletSignMode.hot &&
-        account.accountIndex == 0;
+    final deletingWholeWallet = account.signMode == CitizenWalletSignMode.hot && account.accountIndex == 0;
     final targets = deletingWholeWallet
-        ? _accounts
-              .where((value) => value.signMode == CitizenWalletSignMode.hot)
-              .toList(growable: false)
+        ? _accounts.where((value) => value.signMode == CitizenWalletSignMode.hot).toList(growable: false)
         : <CitizenWalletStateAccount>[account];
+    if (deletingWholeWallet) {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: Text(deletingWholeWallet ? '删除钱包' : '删除账户'),
+        title: const Text('删除钱包'),
         content: Text(
-          deletingWholeWallet
-              ? '删除「${account.name}」会从本设备移除该钱包下全部 ${targets.length} 个账户、'
-                    '私钥、交易记录和清算行缓存。\n\n请确认已经备份助记词，此操作无法撤销。'
-              : '确认删除账户「${account.name}」？此操作无法撤销。',
+          '删除「${account.name}」会从本设备移除该钱包下全部 ${targets.length} 个账户、'
+          '私钥、交易记录和清算行缓存。\n\n请确认已经备份助记词，此操作无法撤销。',
         ),
         actions: [
           TextButton(
@@ -346,53 +364,115 @@ class _WalletTabState extends State<WalletTab> {
           FilledButton(
             style: FilledButton.styleFrom(backgroundColor: AppTheme.danger),
             onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('签名并删除'),
+          ),
+        ],
+      ),
+    );
+      if (confirmed != true || !mounted) return;
+    } else if (account.signMode == CitizenWalletSignMode.cold) {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除钱包'),
+        content: Text('确认删除「${account.name}」？此操作无法撤销。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: AppTheme.danger),
+            onPressed: () => Navigator.of(context).pop(true),
             child: const Text('删除'),
           ),
         ],
       ),
     );
-    if (confirmed != true || !mounted) return;
+      if (confirmed != true || !mounted) return;
+    }
+    // 原非0热账户直接删除；这里不增加原交互没有的确认弹窗。
+    if (!mounted) return;
+    final sdkWallet = _wallet;
+    final security = _accountSecurity;
+    final messenger = ScaffoldMessenger.of(context);
     setState(() => _mutationInProgress = true);
+    Object? error;
+    bool? removed;
+    var cleanupPending = false;
     try {
-      await _accountSecurity.prepareAccountCleanup(
-        accounts: targets,
-        deleteWalletWideKey: deletingWholeWallet,
-      );
+      // 跨App业务域清理仍调用现有服务，本步不恢复WalletManager或复制SDK删除实现。
+      await security.prepareAccountCleanup(accounts: targets, deleteWalletWideKey: deletingWholeWallet);
       try {
         if (deletingWholeWallet) {
-          await _wallet.delete();
-          await _wallet.reconcileCleanup();
+          await sdkWallet.signAndDelete().result;
         } else {
-          await _wallet.deleteAccount(account.accountId);
+          await sdkWallet.deleteAccount(account.accountId).result;
         }
-      } catch (_) {
-        await _accountSecurity.cancelAccountCleanup();
-        rethrow;
+        removed = true;
+      } catch (failure) {
+        error = failure;
+        try {
+          final state = await sdkWallet.getState().result;
+          final ids = state.accounts.map((value) => value.accountId).toSet();
+          removed = targets.every((value) => !ids.contains(value.accountId));
+          cleanupPending = state.cleanupPending;
+        } catch (loadFailure) {
+          _loadError = loadFailure;
+        }
       }
-      await _accountSecurity.reconcileAccountCleanup();
-      for (final target in targets) {
-        await ClearingBankPrefs.clear(target.accountId);
+      if (removed == true) {
+        try {
+          await security.reconcileAccountCleanup();
+          for (final target in targets) { await ClearingBankPrefs.clear(target.accountId); }
+          security.notifyDefaultAccountChanged();
+        } catch (failure) { error ??= failure; }
+      } else if (removed == false) {
+        await security.cancelAccountCleanup();
       }
-      _accountSecurity.notifyDefaultAccountChanged();
+      // 读取失败不是“没有删除”，也不能据此撤销尚待确认的清理意图。
+      if (!mounted) return;
       await _reload();
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            deletingWholeWallet
-                ? '已删除钱包「${account.name}」'
-                : '已删除账户「${account.name}」',
-          ),
-        ),
-      );
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('删除未完成：${_errorMessage(error)}')));
+      final factLabel = deletingWholeWallet || account.signMode == CitizenWalletSignMode.cold
+          ? '钱包「${account.name}」' : '账户「${account.name}」';
+      final successMessage = deletingWholeWallet ? '已删除钱包「${account.name}」'
+          : account.signMode == CitizenWalletSignMode.cold ? '已删除「${account.name}」' : '已删除账户「${account.name}」';
+      _showDeleteOutcome(messenger: messenger, factLabel: factLabel, successMessage: successMessage,
+          error: error, factRemoved: removed, cleanupPending: cleanupPending);
+    } catch (failure) {
+      if (mounted) _showDeleteOutcome(messenger: messenger, factLabel: '账户「${account.name}」',
+          successMessage: '', error: failure, factRemoved: removed, cleanupPending: cleanupPending);
     } finally {
       if (mounted) setState(() => _mutationInProgress = false);
     }
+  }
+
+  void _showDeleteOutcome({
+    required ScaffoldMessengerState messenger,
+    required String factLabel,
+    required String successMessage,
+    required Object? error,
+    required bool? factRemoved,
+    required bool cleanupPending,
+  }) {
+    late final String message;
+    if (factRemoved == null) {
+      final loadMessage = walletLocalStoreErrorMessage(_loadError);
+      message = error == null
+          ? '删除结果暂时无法确认：$loadMessage，请重试刷新'
+          : '删除出现异常且本地事实暂时无法确认：$error；$loadMessage';
+    } else if (error == null) {
+      message = factRemoved ? successMessage : '删除未完成：$factLabel仍存在';
+    } else if (!factRemoved) {
+      message = '删除未完成：$error';
+    } else if (cleanupPending) {
+      message = '$factLabel事实已移除，但本机安全清理未完成：'
+          '${_errorMessage(error)}';
+    } else {
+      message = '$factLabel事实已移除，但后续本机清理未完成：$error';
+    }
+    messenger.showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _openAccountDetail(CitizenWalletStateAccount account) async {
@@ -409,10 +489,10 @@ class _WalletTabState extends State<WalletTab> {
   Future<void> _openImportColdWalletPage() async {
     if (_mutationInProgress) return;
     try {
-      await _wallet.importColdAccountWithUi(
-        walletColdAccountText:
-            '私钥保存在 公民钱包 签名设备上，签名请通过 公民钱包 扫码完成。',
+      final imported = await Navigator.of(context).push<bool>(
+        MaterialPageRoute(builder: (_) => const ImportColdWalletPage()),
       );
+      if (imported != true) return;
       if (!mounted) return;
       _accountSecurity.notifyDefaultAccountChanged();
       await _reload();
@@ -489,28 +569,16 @@ class _WalletTabState extends State<WalletTab> {
     if (_mutationInProgress) return;
     final profile = _state?.hotProfile;
     if (profile == null) return;
-    final maximum = profile.accounts
-        .map((account) => account.index)
-        .fold<int>(0, (left, right) => left > right ? left : right);
-    final initial = next ? maximum + 1 : 1;
-    try {
-      await _wallet.addAccounts(<int>[initial]);
-      _accountSecurity.notifyDefaultAccountChanged();
-      await _reload();
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('已添加账户')));
-    } catch (error) {
-      if (!mounted ||
-          error is CitizenSdkException &&
-              error.code == CitizenSdkErrorCode.cancelled) {
-        return;
-      }
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('添加账户失败：${_errorMessage(error)}')));
-    }
+    final added = await showAddAccountSheet(
+      context,
+      masterId: profile.masterAccountId,
+      mode: next ? AddAccountMode.next : AddAccountMode.specify,
+    );
+    if (added != true || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    await _reload();
+    if (!mounted) return;
+    messenger.showSnackBar(const SnackBar(content: Text('已添加账户')));
   }
 
   Widget _buildEmptyWalletChoices() =>
@@ -1290,7 +1358,13 @@ class WalletDetailPage extends StatefulWidget {
 }
 
 class _WalletDetailPageState extends State<WalletDetailPage>
-    with TxAutoRefreshMixin<WalletDetailPage> {
+    with TxAutoRefreshMixin<WalletDetailPage>, WidgetsBindingObserver {
+  bool _screenshotGuardActive = false;
+  bool _privateOpening = false;
+  bool _privateRevoked = false;
+  CitizenSdkPrivateKey? _privateKeyResource;
+  DialogRoute<void>? _privateKeyRoute;
+  VoidCallback? _clearPrivateText;
   List<LocalTxEntity> _recentRecords = const [];
 
   /// 外层下拉刷新通过此 key 触发链上余额卡的 refresh()。
@@ -1325,6 +1399,11 @@ class _WalletDetailPageState extends State<WalletDetailPage>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _privateRevoked = true;
+    scheduleMicrotask(_dismissPrivateDisplay);
+    final resource = _privateKeyResource;
+    if (resource != null) unawaited(resource.close().catchError((Object _) {}));
     unawaited(
       stopTxAutoRefresh().catchError((Object error, StackTrace stackTrace) {
         AppLog.d('[Wallet] 交易 watcher 停止失败: $error\n$stackTrace');
@@ -1336,6 +1415,7 @@ class _WalletDetailPageState extends State<WalletDetailPage>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadRecentRecords();
     startTxAutoRefresh(widget.wallet.accountId);
   }
@@ -1372,9 +1452,142 @@ class _WalletDetailPageState extends State<WalletDetailPage>
           context,
         ).showSnackBar(const SnackBar(content: Text('暂未上线，敬请期待')));
       case 'seed':
-        await context.read<CitizenSdk>().wallet.viewAccountPrivateKey(
-          widget.wallet.accountId,
-        );
+        await _revealSecret('私钥');
+    }
+  }
+
+  Future<void> _revealSecret(String label) async {
+    if (_privateOpening || _privateKeyResource != null || !mounted) return;
+    _privateOpening = true;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('查看$label'),
+        content: Text('$label是核心机密信息，泄露将导致资产被盗。\n\n确认要查看吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            style: TextButton.styleFrom(foregroundColor: AppTheme.danger),
+            child: const Text('查看'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) { _privateOpening = false; return; }
+    _privateRevoked = false;
+    CitizenSdkPrivateKey? resource;
+    String? value;
+
+    try {
+      resource = await context.read<CitizenSdk>().wallet.openPrivateKey(widget.wallet.accountId);
+      final owned = resource;
+      _privateKeyResource = owned;
+      _clearPrivateText = () { value = null; };
+      unawaited(owned.closed.then<void>((_) {
+        if (identical(_privateKeyResource, owned)) {
+          _privateRevoked = true;
+          _dismissPrivateDisplay();
+          unawaited(_releasePrivateGuard());
+          _privateKeyResource = null;
+        }
+      }));
+      if (!mounted) return;
+      if (!_screenshotGuardActive) {
+        _screenshotGuardActive = true;
+        await ScreenshotGuard.enable();
+        if (!mounted) return;
+      }
+      if (_privateRevoked) return;
+      final bytes = await resource.reveal();
+      if (!mounted || _privateRevoked) return;
+      value = '0x${bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join()}';
+      final navigator = Navigator.of(context, rootNavigator: true);
+      final dialog = DialogRoute<void>(
+        context: context,
+        themes: InheritedTheme.capture(from: context, to: navigator.context),
+        traversalEdgeBehavior: TraversalEdgeBehavior.closedLoop,
+        builder: (_) => AlertDialog(
+          title: Text(label),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: EdgeInsets.all(AppLayout.scaledValue(12)),
+                decoration: AppTheme.bannerDecoration(AppTheme.danger),
+                child: Text(
+                  value ?? '无数据',
+                  style: TextStyle(
+                      fontSize: AppLayout.scaledValue(14),
+                      fontFamily: 'monospace'),
+                ),
+              ),
+              SizedBox(height: AppLayout.scaledValue(8)),
+              Text(
+                '请手抄备份，不支持复制',
+                style: TextStyle(
+                    color: AppTheme.danger,
+                    fontSize: AppLayout.scaledValue(12)),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('关闭'),
+            ),
+          ],
+        ),
+      );
+      _privateKeyRoute = dialog;
+      await navigator.push(dialog);
+      await dialog.completed;
+    } on CitizenSdkException catch (e) {
+      if (!mounted || _privateRevoked || e.code == CitizenSdkErrorCode.cancelled) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('验证失败：${e.message}')));
+    } finally {
+      _dismissPrivateDisplay();
+      value = null;
+      _clearPrivateText = null;
+      var drained = false;
+      try {
+        await resource?.close();
+        drained = true;
+        await _releasePrivateGuard();
+      } finally {
+        if (drained && identical(_privateKeyResource, resource)) _privateKeyResource = null;
+        _privateOpening = false;
+      }
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) return;
+    if (state == AppLifecycleState.inactive && _privateKeyRoute == null) return;
+    _privateRevoked = true;
+    _dismissPrivateDisplay();
+    final resource = _privateKeyResource;
+    if (resource != null) unawaited(resource.close().catchError((Object _) {}));
+  }
+
+  void _dismissPrivateDisplay() {
+    final route = _privateKeyRoute;
+    _privateKeyRoute = null;
+    if (route != null && route.isActive) route.navigator?.removeRoute(route);
+    _clearPrivateText?.call();
+  }
+
+  Future<void> _releasePrivateGuard() async {
+    if (_screenshotGuardActive) {
+      _screenshotGuardActive = false;
+      await ScreenshotGuard.disable();
     }
   }
 
@@ -1391,7 +1604,7 @@ class _WalletDetailPageState extends State<WalletDetailPage>
       await context.read<CitizenSdk>().wallet.renameAccount(
         accountId: widget.wallet.accountId,
         name: newName,
-      );
+      ).result;
       if (!mounted) return;
     } catch (e) {
       if (mounted) {
@@ -1590,5 +1803,142 @@ class WalletIconRegistry {
       }
     }
     return Icons.account_balance_wallet_outlined;
+  }
+}
+
+/// 导入冷钱包页面：只接受本链 SS58 展示地址，不导入私钥。
+class ImportColdWalletPage extends StatefulWidget {
+  const ImportColdWalletPage({super.key});
+
+  @override
+  State<ImportColdWalletPage> createState() => _ImportColdWalletPageState();
+}
+
+class _ImportColdWalletPageState extends State<ImportColdWalletPage> {
+  final TextEditingController _addressController = TextEditingController();
+  bool _isImporting = false;
+  String? _error;
+
+  Future<void> _scanWalletAddress() async {
+    final raw = await Navigator.of(context).push<String>(
+      MaterialPageRoute(
+        builder: (_) => const QrScanPage(
+          mode: QrScanMode.coldAccountImport,
+          customTitle: '扫描钱包二维码',
+        ),
+      ),
+    );
+    if (!mounted || raw == null || raw.trim().isEmpty) {
+      return;
+    }
+
+    String? address;
+    try {
+      final result = await context.read<CitizenSdk>().qr.parseForPurpose(
+        raw, CitizenQrScanPurpose.coldAccountImport,
+      );
+      address = result.ss58Address;
+    } on CitizenSdkException {
+      address = null;
+    }
+    if (!mounted) return;
+    if (address == null || address.isEmpty) {
+      setState(() {
+        _error = '未识别到可导入的钱包账户地址';
+      });
+      return;
+    }
+
+    setState(() {
+      _addressController.text = address;
+      _addressController.selection = TextSelection.collapsed(
+        offset: address.length,
+      );
+      _error = null;
+    });
+  }
+
+  Future<void> _import() async {
+    setState(() {
+      _error = null;
+      _isImporting = true;
+    });
+    try {
+      await context.read<CitizenSdk>().wallet.importColdAccount(
+        ss58Address: _addressController.text,
+      ).result;
+      if (!mounted) return;
+      Navigator.of(context).pop(true);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = walletOperationErrorMessage(e);
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isImporting = false;
+        });
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _addressController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('导入冷钱包'),
+        actions: [
+          IconButton(
+            tooltip: '扫码填入地址',
+            onPressed: _isImporting ? null : _scanWalletAddress,
+            icon: SvgPicture.asset(
+              'assets/icons/scan-line.svg',
+              width: AppLayout.scaled(context, 22),
+              height: AppLayout.scaled(context, 22),
+            ),
+          ),
+        ],
+      ),
+      body: Padding(
+        padding: EdgeInsets.all(AppLayout.scaled(context, 16)),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('请输入冷钱包账户地址'),
+            SizedBox(height: AppLayout.scaled(context, 8)),
+            Text(
+              '私钥保存在 公民钱包 签名设备上，签名请通过 公民钱包 扫码完成。',
+              style: TextStyle(
+                  color: AppTheme.textSecondary,
+                  fontSize: AppLayout.scaled(context, 13)),
+            ),
+            SizedBox(height: AppLayout.scaled(context, 12)),
+            TextField(
+              controller: _addressController,
+              minLines: 2,
+              maxLines: 3,
+              decoration: const InputDecoration(
+                hintText: '请输入冷钱包账户地址',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            SizedBox(height: AppLayout.scaled(context, 12)),
+            if (_error != null)
+              Text(_error!, style: const TextStyle(color: AppTheme.danger)),
+            FilledButton(
+              onPressed: _isImporting ? null : _import,
+              child: Text(_isImporting ? '导入中...' : '确认导入'),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }

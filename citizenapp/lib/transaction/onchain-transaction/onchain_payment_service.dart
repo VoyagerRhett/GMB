@@ -17,7 +17,7 @@ class OnchainPaymentService {
   final CitizenTransactions _transactions;
 
   Future<CitizenWalletStateAccount?> getCurrentWallet() async =>
-      (await _wallet.getState()).defaultAccount;
+      (await _wallet.getState().result).defaultAccount;
 
   /// 校验 CitizenApp 转账表单、编码 opaque RuntimeCall，然后直接
   /// 交给 CitizenSDK 准备。签名、广播和最终执行不在 App 业务服务内实现。
@@ -40,7 +40,7 @@ class OnchainPaymentService {
       );
     }
 
-    final wallet = (await _wallet.getState()).defaultAccount;
+    final wallet = (await _wallet.getState().result).defaultAccount;
     if (wallet == null) {
       throw const OnchainPaymentException(
         OnchainPaymentErrorCode.walletMissing,

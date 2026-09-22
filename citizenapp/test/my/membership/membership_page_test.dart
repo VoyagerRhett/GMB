@@ -314,11 +314,13 @@ class _RegisteredFinalizedIdentity implements FinalizedIdentityResolver {
 
 class _FakeWallet implements CitizenSdkWallet {
   @override
-  Future<CitizenWalletState> getState() async => CitizenWalletState(
+  CitizenSdkOperation<CitizenWalletState> getState() => testCitizenOperation(() async => CitizenWalletState(
+    initializationState: CitizenWalletInitializationState.ready,
+    cleanupPending: false,
     revision: BigInt.one,
     hotProfile: null,
     accounts: [_identityAccount],
-  );
+  ));
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

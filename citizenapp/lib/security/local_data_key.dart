@@ -436,7 +436,7 @@ abstract final class AccountDataKeyDeriver {
         accountId: binding.accountId,
         salt: salt,
         info: info,
-      );
+      ).result;
     } on CitizenSdkException catch (error) {
       throw AccountDataKeyException(error.message);
     } finally {

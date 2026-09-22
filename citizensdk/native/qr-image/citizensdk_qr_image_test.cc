@@ -114,6 +114,35 @@ int main() {
   }
   CHECK(citizensdk_qr_image_decode_luminance(two.data(), two.size(), two_width,
       height, two_width, nullptr, 0, &decoded_size) == CITIZENSDK_QR_IMAGE_MULTIPLE_CODES);
+  // 同一个识别实现可以投影多码；精确单码入口仍拒绝歧义，不静默改变旧C调用语义。
+  CHECK(citizensdk_qr_image_decode_luminance_all(two.data(), two.size(), two_width,
+      height, two_width, nullptr, 0, &decoded_size) == CITIZENSDK_QR_IMAGE_BUFFER_TOO_SMALL);
+  CHECK(decoded_size == 4 + 2 * (4 + text.size()));
+  std::vector<uint8_t> packed(decoded_size);
+  CHECK(citizensdk_qr_image_decode_luminance_all(two.data(), two.size(), two_width,
+      height, two_width, packed.data(), packed.size(), &decoded_size) == CITIZENSDK_QR_IMAGE_OK);
+  size_t offset = 0;
+  auto read_u32 = [&]() {
+    CHECK(offset + 4 <= packed.size());
+    uint32_t value = 0;
+    for (unsigned index = 0; index < 4; ++index) value |= static_cast<uint32_t>(packed[offset++]) << (index * 8);
+    return value;
+  };
+  CHECK(read_u32() == 2);
+  for (unsigned index = 0; index < 2; ++index) {
+    const auto size = read_u32();
+    CHECK(size == text.size() && offset + size <= packed.size());
+    CHECK(std::string(packed.begin() + offset, packed.begin() + offset + size) == text);
+    offset += size;
+  }
+  CHECK(offset == packed.size());
+  std::vector<uint8_t> insufficient(3, 0xa5);
+  CHECK(citizensdk_qr_image_decode_luminance_all(two.data(), two.size(), two_width,
+      height, two_width, insufficient.data(), insufficient.size(), &decoded_size) == CITIZENSDK_QR_IMAGE_BUFFER_TOO_SMALL);
+  CHECK(std::all_of(insufficient.begin(), insufficient.end(), [](uint8_t value) { return value == 0xa5; }));
+  CHECK(citizensdk_qr_image_decode_luminance_all(blank.data(), blank.size(), 64, 64,
+      64, nullptr, 0, &decoded_size) == CITIZENSDK_QR_IMAGE_NO_CODE);
+  CHECK(decoded_size == 0);
   CHECK(citizensdk_qr_image_decode_luminance(image.data(), image.size(), 4097,
       1, 4097, nullptr, 0, &decoded_size) == CITIZENSDK_QR_IMAGE_INVALID_ARGUMENT);
   CHECK(citizensdk_qr_image_decode_luminance(image.data(), image.size(), width,

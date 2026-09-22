@@ -31,23 +31,26 @@ internal class CitizenSdkHostServices(context: Context, private val modules: Int
     private val secureStore by secureStoreDelegate
     private val vault by vaultDelegate
     private val authenticationGate = Any()
-    private val privateKeyAuthentications = HashMap<Long, Boolean>()
+    private data class PrivateKeyAuthentication(val host: java.lang.ref.WeakReference<FragmentActivity>, var cancelled: Boolean = false)
+    private val privateKeyAuthentications = HashMap<Long, PrivateKeyAuthentication>()
 
-    fun registerPrivateKeyAuthentication(operationId: Long): Int = synchronized(authenticationGate) {
+    fun registerPrivateKeyAuthentication(operationId: Long, activity: FragmentActivity): Int = synchronized(authenticationGate) {
         if (operationId == 0L || privateKeyAuthentications.containsKey(operationId)) {
             return@synchronized CitizenSdkErrorCode.INTEGRITY.value
         }
-        privateKeyAuthentications[operationId] = false
+        privateKeyAuthentications[operationId] = PrivateKeyAuthentication(java.lang.ref.WeakReference(activity))
         CitizenSdkErrorCode.OK.value
     }
     fun isPrivateKeyAuthenticationActive(operationId: Long, activity: FragmentActivity): Boolean {
-        val allowed = synchronized(authenticationGate) { privateKeyAuthentications[operationId] == false }
+        val allowed = synchronized(authenticationGate) {
+            privateKeyAuthentications[operationId]?.let { !it.cancelled && it.host.get() === activity } == true
+        }
         return allowed && vaultDelegate.isInitialized() && vault.isAuthenticationActive(operationId, activity)
     }
     fun cancelPrivateKeyAuthentication(operationId: Long) {
         synchronized(authenticationGate) {
             if (!privateKeyAuthentications.containsKey(operationId)) return
-            privateKeyAuthentications[operationId] = true
+            privateKeyAuthentications[operationId]?.cancelled = true
             if (vaultDelegate.isInitialized()) vault.cancelAuthentication(operationId)
         }
     }
@@ -57,6 +60,7 @@ internal class CitizenSdkHostServices(context: Context, private val modules: Int
     }
 
     fun attachActivity(activity: FragmentActivity) { if (usesSecrets) vault.attachActivity(activity) }
+    fun privateKeyActivity(): FragmentActivity? = if (usesSecrets) vault.currentActivity() else null
     fun detachActivity(activity: FragmentActivity) { if (vaultDelegate.isInitialized()) vault.detachActivity(activity) }
     fun whenActivityReady(callback: () -> Unit): AutoCloseable =
         if (usesSecrets) vault.whenActivityReady(callback) else AutoCloseable {}
@@ -173,10 +177,11 @@ internal class CitizenSdkHostServices(context: Context, private val modules: Int
         plaintextDekOut: ByteBuffer,
     ): Int = try {
         synchronized(authenticationGate) {
-            if (privateKeyAuthentications[hostOperationId] == true) throw CitizenSdkHardwareVault.VaultFailure(
+            val privateRequest = privateKeyAuthentications[hostOperationId]
+            if (privateRequest?.cancelled == true || privateRequest != null && privateRequest.host.get() == null) throw CitizenSdkHardwareVault.VaultFailure(
                 CitizenSdkErrorCode.AUTHENTICATION_CANCELLED, "private key authentication was cancelled",
             )
-            vault.unwrapDek(hostOperationId, privateKeyAuthentications.containsKey(hostOperationId),
+            vault.unwrapDek(hostOperationId, privateRequest != null, privateRequest?.host?.get(),
                 walletIndex, generation, wrappedDek, plaintextDekOut) { errorCode ->
                 CitizenSdkNative.completeVaultUnwrap(nativeBridge, hostOperationId, errorCode)
             }

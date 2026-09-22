@@ -47,11 +47,13 @@ class _FakeWallet implements CitizenSdkWallet {
   final CitizenWalletStateAccount? wallet;
 
   @override
-  Future<CitizenWalletState> getState() async => CitizenWalletState(
+  CitizenSdkOperation<CitizenWalletState> getState() => testCitizenOperation(() async => CitizenWalletState(
+        initializationState: wallet == null ? CitizenWalletInitializationState.empty : CitizenWalletInitializationState.ready,
+        cleanupPending: false,
         revision: BigInt.one,
         hotProfile: null,
         accounts: wallet == null ? const [] : [wallet!],
-      );
+      ));
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

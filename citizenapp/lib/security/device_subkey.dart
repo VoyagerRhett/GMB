@@ -1,8 +1,8 @@
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'dart:convert';
 
 import 'package:flutter/services.dart';
 
-import 'package:citizenapp/signer/signing.dart';
 
 class DeviceSubkeyException implements Exception {
   const DeviceSubkeyException(this.message);
@@ -96,33 +96,33 @@ class DeviceSubkey {
 /// `signing_message(OP_SIGN_SQUARE_DEVICE_BIND,
 /// cid_number ‖ binding_revision ‖ account_id ‖ p256_public_key ‖ issued_at)`
 /// 签名，证明该 P-256 子钥属于 CID 的当前绑定版本。返回 32 字节摘要。
-Uint8List buildDeviceBindingSigningMessage(
+Future<Uint8List> buildDeviceBindingSigningMessage(
   String cidNumber,
   int bindingRevision,
   String accountId,
   String p256PublicKeyHex,
   int issuedAt,
-) {
-  return signingMessage(
+) async {
+  return CitizenSigning.encodePayload(CitizenSigningPayload.message(
     opTag: kOpSignSquareDeviceBind,
-    scalePayload: encodeDeviceBindingPayload(
+    scalePayload: await encodeDeviceBindingPayload(
       cidNumber: cidNumber,
       bindingRevision: bindingRevision,
       accountId: accountId,
       p256PublicKeyHex: p256PublicKeyHex,
       issuedAtMillis: issuedAt,
     ),
-  );
+  ));
 }
 
-/// 设备子钥绑定的唯一 SCALE 载荷；CitizenApp 热签和 CitizenWallet 冷签逐字节共用。
-Uint8List encodeDeviceBindingPayload({
+/// 保留设备绑定字段顺序，各字段编码与摘要只由SDK原语完成；冷热签名使用相同字节。
+Future<Uint8List> encodeDeviceBindingPayload({
   required String cidNumber,
   required int bindingRevision,
   required String accountId,
   required String p256PublicKeyHex,
   required int issuedAtMillis,
-}) {
+}) async {
   final cidLength = utf8.encode(cidNumber).length;
   if (cidLength < 1 ||
       cidLength > 32 ||
@@ -133,11 +133,11 @@ Uint8List encodeDeviceBindingPayload({
     throw const FormatException('设备子钥绑定载荷字段无效');
   }
   return Uint8List.fromList(<int>[
-    ...scaleString(cidNumber),
-    ...u64Le(bindingRevision),
-    ...scaleString(accountId),
-    ...scaleString(p256PublicKeyHex),
-    ...u64Le(issuedAtMillis),
+    ...await CitizenSigning.encodePayload(CitizenSigningPayload.scaleString(cidNumber)),
+    ...await CitizenSigning.encodePayload(CitizenSigningPayload.u64Le(BigInt.from(bindingRevision))),
+    ...await CitizenSigning.encodePayload(CitizenSigningPayload.scaleString(accountId)),
+    ...await CitizenSigning.encodePayload(CitizenSigningPayload.scaleString(p256PublicKeyHex)),
+    ...await CitizenSigning.encodePayload(CitizenSigningPayload.u64Le(BigInt.from(issuedAtMillis))),
   ]);
 }
 

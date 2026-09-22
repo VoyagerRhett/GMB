@@ -447,7 +447,7 @@ class SubscriptionService {
   Future<CitizenWalletStateAccount> _requireSigningAccount(
     String accountId,
   ) async {
-    final account = (await _wallet.getState()).defaultAccount;
+    final account = (await _wallet.getState().result).defaultAccount;
     if (account == null || account.accountId != accountId) {
       throw const SubscriptionException('当前身份与默认钱包账户不一致，已拒绝签名');
     }

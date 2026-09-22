@@ -1,8 +1,8 @@
+import 'package:citizenapp/qr/widgets/qr_display_scaffold.dart' show AppQrImage;
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:qr_flutter/qr_flutter.dart';
 
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/ui/app_theme.dart';
@@ -73,19 +73,11 @@ Future<void> showWalletQrDialog(
                 ),
                 border: Border.all(color: AppTheme.border),
               ),
-              child: QrImageView(
+              child: AppQrImage(
                 key: const ValueKey('wallet-account-qr'),
                 data: qrData,
-                version: QrVersions.auto,
+                color: AppTheme.primaryDark,
                 size: AppLayout.scaled(dialogContext, 240),
-                eyeStyle: const QrEyeStyle(
-                  eyeShape: QrEyeShape.square,
-                  color: AppTheme.primaryDark,
-                ),
-                dataModuleStyle: const QrDataModuleStyle(
-                  dataModuleShape: QrDataModuleShape.square,
-                  color: AppTheme.primaryDark,
-                ),
               ),
             ),
             SizedBox(height: AppLayout.scaled(dialogContext, 12)),

@@ -39,6 +39,15 @@ citizensdk_qr_image_decode_luminance(
     uint32_t row_stride, uint8_t *output, size_t output_capacity,
     size_t *output_size);
 
+/** SDK内部多码结果：小端u32数量，随后逐个小端u32字节长度和UTF-8原文。
+ * 最多64个码，每码最多2331字节；不暴露图像库对象或添加QR_V1字段。
+ * 参数/输出所有权与单码入口相同，未识别返回NO_CODE，失败不部分写输出。 */
+CITIZENSDK_QR_IMAGE_API citizensdk_qr_image_status_t
+citizensdk_qr_image_decode_luminance_all(
+    const uint8_t *data, size_t data_size, uint32_t width, uint32_t height,
+    uint32_t row_stride, uint8_t *output, size_t output_capacity,
+    size_t *output_size);
+
 /**
  * 把 UTF-8 文本编码为纠错等级 M、含 quiet zone 的 QR Code Model 2 亮度图。
  *
