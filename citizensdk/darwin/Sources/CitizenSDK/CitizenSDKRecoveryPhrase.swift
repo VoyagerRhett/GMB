@@ -37,7 +37,7 @@ internal final class CitizenSDKPrivateKeyReceiver: @unchecked Sendable {
 
     func bind(_ id: UInt64) {
         lock.lock(); defer { lock.unlock() }
-        precondition(id != 0 && (viewID == 0 || viewID == id))
+        precondition(!closed && id != 0 && (viewID == 0 || viewID == id))
         viewID = id
     }
 
@@ -85,7 +85,9 @@ internal final class CitizenSDKPrivateKeyReceiver: @unchecked Sendable {
 
     func settled(viewID id: UInt64, code: Int32) {
         lock.lock()
-        guard id != 0, viewID == 0 || viewID == id else { lock.unlock(); return }
+        guard !closed, id != 0, viewID == 0 || viewID == id else { lock.unlock(); return }
+        // 早到通知先绑定同一编号；后续不能把它交给另一资源。
+        if viewID == 0 { viewID = id }
         lastCode = code
         let callback = listener
         lock.unlock()
@@ -138,7 +140,8 @@ public final class CitizenSDKPrivateKey {
             Task { @MainActor [weak self] in self?.settled(code) }
         }
         core.observe { [self] result in
-            Task { @MainActor [self] in finalize(result) }
+            // 结果观察者跨执行器后仍明确保有同一资源，终态只在MainActor收口。
+            Task { @MainActor [self] in self.finalize(result) }
         }
         security = CitizenSDKScreenSecurity { [weak self] change in
             guard let self else { return }
@@ -196,7 +199,7 @@ public final class CitizenSDKPrivateKey {
     }
 
     internal nonisolated func requestClose() {
-        Task { @MainActor [self] in try? await close() }
+        Task { @MainActor [self] in try? await self.close() }
     }
 
     private func settled(_ code: Int32) {

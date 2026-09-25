@@ -8,7 +8,7 @@ final class CitizenSDKApiContractTests: XCTestCase {
         let account = "0x" + String(repeating: "11", count: 32)
         let arguments = "destination: 中文\\u0000\\n\namount: 123"
         let fields: [String: Any] = [
-            "kind": 1, "canonical_text": "{}", "request_id": "test-public-request", "expires_at": 123,
+            "kind": 1, "canonical_text": "{}", "scan_purpose_mask": 66, "request_id": "test-public-request", "expires_at": 123,
             "action": 1024, "signer_account_id": account, "review_payload": "0x0400",
             "pallet_name": "Balances", "call_name": "transfer", "call_arguments": arguments,
             "genesis_hash": account, "spec_version": 7, "transaction_version": 8,
@@ -17,10 +17,12 @@ final class CitizenSDKApiContractTests: XCTestCase {
         let json = String(decoding: try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]), as: UTF8.self)
         let document = try CitizenQRDocument(coreJSON: json)
         XCTAssertEqual(document.kind, 1)
-        let text = try CitizenSDKQrProjection.decode(json).reviewText()
-        for expected in [arguments, "Balances.transfer", "mortal(period=64,phase=1,birth=1)", "0x0400", account, "9", "10"] {
-            XCTAssertTrue(text.contains(expected))
-        }
+        let projection = try CitizenSDKQrProjection.decode(json)
+        XCTAssertEqual(projection.pallet_name, "Balances")
+        XCTAssertEqual(projection.call_name, "transfer")
+        XCTAssertEqual(projection.call_arguments, arguments)
+        XCTAssertEqual(projection.era, "mortal(period=64,phase=1,birth=1)")
+        XCTAssertEqual(projection.nonce, "9"); XCTAssertEqual(projection.tip, "10")
         for invalid in ["{}", "[]", String(repeating: "x", count: 65_537),
                         json.replacingOccurrences(of: "\"expires_at\":123", with: "\"expires_at\":9223372036854775808")] {
             XCTAssertThrowsError(try CitizenQRDocument(coreJSON: invalid)) {
@@ -86,18 +88,17 @@ final class CitizenSDKApiContractTests: XCTestCase {
         XCTAssertFalse(CitizenSDKModules.signing.contains(.wallet))
     }
 
-    func testWalletUIRequiresCoreWalletSelectionBeforeCreatingAWindow() throws {
-        for (supported, enabled) in [(true, false), (false, true), (false, false)] {
-            let status = CitizenCapabilityStatus(name: .walletProfile, reason: .hostDisabled,
-                supported: supported, available: true, enabled: enabled, ready: false)
-            XCTAssertThrowsError(try citizenSDKRequireWalletUI(.init(revision: 1, statuses: [status]))) {
-                XCTAssertEqual(($0 as? CitizenSDKError)?.code, .notReady)
-            }
-        }
-        let enabled = CitizenCapabilityStatus(name: .walletProfile, reason: .none,
-            supported: true, available: true, enabled: true, ready: true)
-        XCTAssertNoThrow(try citizenSDKRequireWalletUI(.init(revision: 1, statuses: [enabled])))
-        XCTAssertThrowsError(try citizenSDKRequireWalletUI(.init(revision: 1, statuses: [])))
+    func testReadOnlyDiagnosticsAreNotSigningAccountsAndKeepOriginalFacts() {
+        let id = Data(repeating: 1, count: 32)
+        let diagnostic = CitizenWalletDiagnostic(walletIndex: 0, walletName: "异常", accountID: id,
+            ss58Address: nil, diagnosticReason: 3, signMode: .hot,
+            cleanupTargets: CitizenWalletCleanupTargets(accountIDs: [id, Data(repeating: 2, count: 32)], deleteWalletWideKey: true))
+        let state = CitizenWalletState(revision: 7, hotProfile: nil, accounts: [], initializationState: 1,
+            cleanupPending: false, activeWalletIndex: 0, diagnostics: [diagnostic])
+        XCTAssertNil(state.defaultAccount); XCTAssertNil(state.hotProfile)
+        XCTAssertEqual(state.diagnostics.first?.cleanupTargets?.accountIDs.count, 2)
+        XCTAssertEqual(state.diagnostics.first?.signMode, .hot)
+        XCTAssertNil(state.diagnostics.first?.ss58Address)
     }
 
     func testHostProjectsOnlySelectedResourceGroupsWithoutOpeningStores() throws {

@@ -82,13 +82,20 @@ void main() {
   });
 
   test('Flutter五种平台注册共用channel、固定方法及无任意RPC/裸extrinsic闭集', () {
-    expect(FlutterCitizenSdkPlatform.methodChannelName, 'citizen/sdk/core/v1');
-    expect(FlutterCitizenSdkPlatform.eventChannelName, 'citizen/sdk/events/v1');
-    expect(CitizenSdkFlutterCodec.methods, hasLength(67));
+    expect(FlutterCitizenSdkPlatform.methodChannelName, 'citizen/sdk/core/v2');
+    expect(FlutterCitizenSdkPlatform.eventChannelName, 'citizen/sdk/events/v2');
+    expect(CitizenSdkFlutterCodec.methods, hasLength(94));
     expect(CitizenSdkFlutterCodec.methods, containsAll(<String>[
-      'initializeWallet',
-      'importColdAccountWithUi',
+      'prepareWalletCreation',
+      'openPrivateKey',
+      'importColdAccountCode',
+      'setActiveWallet',
+      'renameWallet',
+      'inspectWallets', 'releaseWalletInspection', 'repairHotWallet', 'renameDiagnosticWallet', 'deleteDiagnosticWallet',
     ]));
+    for (final removed in ['initializeWallet', 'createWallet', 'importColdAccountWithUi', 'viewAccountPrivateKey', 'qrScan']) {
+      expect(CitizenSdkFlutterCodec.methods, isNot(contains(removed)));
+    }
     expect(isA<CitizenWalletState>(), isNotNull);
     expect(isA<CitizenWalletStateAccount>(), isNotNull);
     expect(isA<CitizenQr>(), isNotNull);
@@ -112,9 +119,9 @@ void main() {
         .setMockMethodCallHandler(core, (call) async {
           final arguments = call.arguments! as List<Object?>;
           if (call.method == 'open') {
-            expect(arguments, const <Object?>[1, CitizenSdkModules.full]);
+            expect(arguments, const <Object?>[2, CitizenSdkModules.full, false]);
             return <Object?>[
-              1,
+              2,
               'session-${++nextSession}',
               0,
               <Object?>['created', 1],
@@ -123,7 +130,7 @@ void main() {
           if (call.method == 'close') {
             closes++;
             return <Object?>[
-              1,
+              2,
               arguments[1],
               arguments[2],
               <Object?>['disposed'],
@@ -206,7 +213,7 @@ void main() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(core, (call) async {
           expect(call.method, 'open');
-          expect(call.arguments, const <Object?>[1, CitizenSdkModules.full]);
+          expect(call.arguments, const <Object?>[2, CitizenSdkModules.full, false]);
           opens++;
           // 所有已开放平台都走官方通道；缺少插件时不得伪造原生 session。
           throw MissingPluginException('CitizenSDK plugin missing');

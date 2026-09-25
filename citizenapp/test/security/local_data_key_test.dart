@@ -1,16 +1,15 @@
 import '../support/fake_citizen_sdk.dart';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:crypto/crypto.dart' hide Hmac;
 import 'package:cryptography/cryptography.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:citizenapp/qr/bodies/account_data_key_response_body.dart';
 import 'package:citizenapp/security/account_data_key_provision.dart';
 import 'package:citizenapp/security/local_cipher.dart';
 import 'package:citizenapp/security/local_data_key.dart';
-import 'package:citizenapp/signer/signing.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 
 class _MemoryStore implements LocalKeyBlobStore {
   final Map<String, String> entries = <String, String>{};
@@ -58,8 +57,64 @@ final class _DerivingWallet implements CitizenSdkWallet {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
+class _CleanupWallet extends TestCitizenSdkWallet {
+  CitizenWalletState state = CitizenWalletState(revision: BigInt.one, hotProfile: null, accounts: const [],
+    initializationState: CitizenWalletInitializationState.recovering, cleanupPending: true);
+  Object? error;
+  @override CitizenSdkOperation<CitizenWalletState> getState() => testCitizenOperation(() {
+    if (error != null) throw error!;
+    return state;
+  });
+}
+class _CleanupSigning implements CitizenSigning {
+  @override dynamic noSuchMethod(Invocation invocation) => throw StateError('清理不应签名');
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  late TestCitizenSdkTransport encodingTransport;
+  late CitizenSdk encodingSdk;
+  setUp(() async {
+    encodingTransport = TestCitizenSdkTransport({}, useCore: true);
+    encodingSdk = await encodingTransport.open();
+  });
+  tearDown(() async {
+    await encodingSdk.close();
+    await encodingTransport.dispose();
+  });
+
+  test('精确清理意图接SDK账户列表，诊断仍在或安全清理未完时不删除意图和设备材料', () async {
+    final store = _MemoryStore(), wallet = _CleanupWallet();
+    final service = AccountSecurityService(wallet: wallet, signing: _CleanupSigning(), blobStore: store,
+      subkeyRegistrar: ({required cidNumber, required bindingRevision, required accountId, required signBinding}) async => throw StateError('不应注册子钥'),
+      coldDeviceBindingSigner: ({required binding, required payload, required signingMessage, required devicePublicKey, required issuedAtMillis}) async => throw StateError('不应冷签'),
+      coldAccountDataKeyProvider: ({required binding, required requests}) async => throw StateError('不应派生'));
+    final ids = ['0x${'01' * 32}', '0x${'02' * 32}'];
+    try {
+      expect(await service.hasPendingAccountCleanup, isFalse);
+      await service.prepareAccountCleanup(accountIds: ids, walletIndexes: {0}, deleteWalletWideKey: true);
+      final before = Map<String, String>.of(store.entries);
+      final pending = jsonDecode(before.values.single) as Map<String, dynamic>;
+      expect(pending['account_ids'], ids);
+      expect(pending['wallet_indices'], [0]);
+      expect(pending['delete_wallet_wide_key'], isTrue);
+      expect(await service.hasPendingAccountCleanup, isTrue);
+      await expectLater(service.reconcileAccountCleanup(), throwsA(isA<AccountSecurityException>()));
+      expect(store.entries, before);
+      wallet.state = CitizenWalletState(revision: BigInt.two, hotProfile: null, accounts: const [],
+        initializationState: CitizenWalletInitializationState.ready, cleanupPending: false,
+        diagnostics: [CitizenWalletDiagnostic(walletIndex: 0, walletName: '异常', accountId: ids.first, ss58Address: null,
+          diagnosticReason: CitizenWalletDiagnosticReason.invalidStructure, signMode: null, cleanupTargets: null)]);
+      await expectLater(service.reconcileAccountCleanup(), throwsA(isA<AccountSecurityException>()));
+      expect(store.entries, before);
+      wallet.error = const CitizenSdkException(code: CitizenSdkErrorCode.storage, message: '合成读取失败');
+      await expectLater(service.reconcileAccountCleanup(), throwsA(isA<CitizenSdkException>()));
+      expect(store.entries, before);
+      await service.cancelAccountCleanup();
+      expect(await service.hasPendingAccountCleanup, isFalse);
+    } finally { service.dispose(); }
+  });
+
   const genesisHash =
       '0x1111111111111111111111111111111111111111111111111111111111111111';
   const cidNumber = 'GD-CTZN1-8F3A2B';
@@ -373,20 +428,20 @@ void main() {
   });
 
   group('冷钱包用途钥加密交付', () {
-    test('共享原语完成派生、0x22 授权、验签和解封', () async {
+    test('真实编码完成0x22授权，显式验签替身隔离加密解封测试', () async {
       final child = Uint8List.fromList(
         List<int>.generate(32, (index) => index + 1),
       );
       const accountId =
           '0x1111111111111111111111111111111111111111111111111111111111111111';
-      const channel = MethodChannel('citizen/sdk/core/v1');
-      final messenger =
-          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-      messenger.setMockMethodCallHandler(channel, (call) async {
-        expect(call.method, 'verifySignature');
-        return <Object?>[1, true];
-      });
-      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      // 本用例隔离验证加密交付；签名仅为合成数据，不声称真实签名通过验签。
+      final verifiedMessages = <Uint8List>[];
+      encodingTransport.handlers['verifySignature'] = (fields) {
+        expect(fields[0], accountId);
+        expect(fields[1], Uint8List(64));
+        verifiedMessages.add(Uint8List.fromList(fields[2]! as Uint8List));
+        return <Object?>[true];
+      };
       const binding = AccountDataBinding(
         genesisHash: genesisHash,
         cidNumber: cidNumber,
@@ -443,13 +498,15 @@ void main() {
           nonce: nonce,
           ciphertext: ciphertext,
         );
-        final message = signingMessage(
+        final message = (await CitizenSigning.encodePayload(CitizenSigningPayload.message(
           opTag: kOpSignAccountDataKeyProvision,
           scalePayload: authorization,
-        );
+        )));
         final signature = Uint8List(64);
-        final body = AccountDataKeyResponseBody.fromBytes(
-          signerPublicKey: List<int>.filled(32, 0x11),
+        final body = CitizenQrDocument(
+          kind: CitizenQrKind.accountDataKeyResponse,
+          canonicalText: 'synthetic-response', scanPurposeMask: 32,
+          signerAccountId: '0x${'11' * 32}',
           signature: signature,
           keyExchangePublicKey: senderPublicKey,
           encryptionNonce: nonce,
@@ -457,6 +514,7 @@ void main() {
         );
 
         final opened = await session.open(body);
+        expect(verifiedMessages.single, message);
         expect(opened, hasLength(2));
         expect(opened[0], keys[0]);
         expect(opened[1], keys[1]);
@@ -467,8 +525,10 @@ void main() {
         final tampered = Uint8List.fromList(ciphertext)..[0] ^= 1;
         expect(
           session.open(
-            AccountDataKeyResponseBody.fromBytes(
-              signerPublicKey: List<int>.filled(32, 0x11),
+            CitizenQrDocument(
+              kind: CitizenQrKind.accountDataKeyResponse,
+              canonicalText: 'synthetic-tampered-response', scanPurposeMask: 32,
+              signerAccountId: '0x${'11' * 32}',
               signature: signature,
               keyExchangePublicKey: senderPublicKey,
               encryptionNonce: nonce,
@@ -479,7 +539,6 @@ void main() {
         );
         plaintext.fillRange(0, plaintext.length, 0);
         senderSecret.fillRange(0, senderSecret.length, 0);
-        message.fillRange(0, message.length, 0);
       } finally {
         for (final key in keys) {
           key.fillRange(0, key.length, 0);
@@ -490,14 +549,14 @@ void main() {
       }
     });
 
-    test('请求用 UTF-8 字节长度编码 CID，重复用途失败关闭', () {
+    test('请求用 UTF-8 字节长度编码 CID，重复用途失败关闭', () async {
       const binding = AccountDataBinding(
         genesisHash: genesisHash,
         cidNumber: '公民-A',
         bindingRevision: 1,
         accountId: firstAccountId,
       );
-      final payload = encodeAccountDataKeyProvisionRequest(
+      final payload = await encodeAccountDataKeyProvisionRequest(
         binding: binding,
         recipientPublicKey: List<int>.filled(32, 1),
         requests: <DataKeyRequest>[
@@ -507,8 +566,8 @@ void main() {
         requestNonce: List<int>.filled(16, 2),
       );
       expect(payload[32], utf8.encode('公民-A').length << 2);
-      expect(
-        () => encodeAccountDataKeyProvisionRequest(
+      await expectLater(
+        encodeAccountDataKeyProvisionRequest(
           binding: binding,
           recipientPublicKey: List<int>.filled(32, 1),
           requests: <DataKeyRequest>[

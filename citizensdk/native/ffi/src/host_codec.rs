@@ -13,14 +13,15 @@ use sha2::{Digest, Sha256};
 
 use crate::abi::CitizenSdkErrorCode;
 use citizen_sdk_contracts::{
-    AccountId32, BlockFinality, ChainDatabaseSnapshot, ChainIdentity, ColdWalletAccount,
+    AccountId32, BlockFinality, ChainDatabaseSnapshot, ChainIdentity,
     DispatchFailure, EncryptedSecretBlobSnapshot, EncryptedSecretBlobState,
     EncryptedSecretEnvelope, ExecutionConclusion, ExportedChainState, FinalizedBlockRef, Hash32,
     Hash32Bytes, HistoryTransactionStatus, ModuleDispatchFailure, RuntimeContext, RuntimeVersion,
     SecretKind, SecretOwner, SecretRef, TransactionExecutionId, TransactionExecutionRecord,
     TransactionHistoryCursor, TransactionHistoryIndex, TransactionHistoryMutation,
-    TransactionHistoryQueryKind, VaultGeneration, VerifiedBlockRef, WalletAccount,
+    TransactionHistoryQueryKind, VaultGeneration, VerifiedBlockRef,
     WalletCleanupPlan, WalletOrigin, WalletProfile, WalletProvisioningPlan, WalletState,
+    WalletRecord, WalletRecordAccount,
     MAX_COLD_WALLET_ACCOUNTS, MAX_PERSISTED_RUNTIME_METADATA_BYTES, MAX_WALLET_ACCOUNT_INDEX,
 };
 
@@ -32,8 +33,8 @@ const HOST_RECORD_DIGEST_OFFSET: usize = 24;
 const HOST_RECORD_DIGEST_LEN: usize = 32;
 const HOST_RECORD_DIGEST_DOMAIN: &[u8] = b"CitizenSDK host record\0";
 const TYPED_PAYLOAD_VERSION: u16 = 1;
-/// 钱包目录加入仅公钥冷账户和统一顺序后直接使用新格式；不读取 v1 热钱包记录。
-const WALLET_TYPED_PAYLOAD_VERSION: u16 = 2;
+/// 钱包名称和付款选择随目录原子保存；只读v3，拒绝旧格式而不迁移或当作空钱包。
+const WALLET_TYPED_PAYLOAD_VERSION: u16 = 3;
 const MAX_CHAIN_ID_BYTES: usize = 128;
 const RUNTIME_CONTEXT_FIXED_TYPED_BYTES: usize = 55;
 const MAX_WALLET_ACCOUNTS: usize = MAX_WALLET_ACCOUNT_INDEX as usize + 1;
@@ -429,11 +430,15 @@ pub fn encode_wallet_state(state: &WalletState) -> Result<Vec<u8>, HostCodecErro
         WALLET_TYPED_PAYLOAD_VERSION,
         |writer| {
             writer.u64(state.revision());
-            encode_optional(writer, state.profile(), encode_wallet_profile)?;
-            writer.count(state.cold_accounts().len(), MAX_COLD_WALLET_ACCOUNTS)?;
-            for account in state.cold_accounts() {
-                encode_cold_wallet_account(writer, account)?;
-            }
+            writer.bool(state.active_wallet_index().is_some());
+            if let Some(wallet_index) = state.active_wallet_index() { writer.u32(wallet_index); }
+            let profile = state.profile().map(WalletRecord::from_profile)
+                .or_else(|| state.diagnostics().iter().find(|record| matches!(record, WalletRecord::Profile { .. })).cloned());
+            encode_optional(writer, profile.as_ref(), encode_profile_record)?;
+            let cold: Vec<_> = state.cold_accounts().iter().map(WalletRecord::from_cold_account)
+                .chain(state.diagnostics().iter().filter(|record| matches!(record, WalletRecord::Account { .. })).cloned()).collect();
+            writer.count(cold.len(), MAX_COLD_WALLET_ACCOUNTS)?;
+            for record in &cold { encode_cold_record(writer, record)?; }
             writer.count(
                 state.ordered_account_ids().len(),
                 MAX_ORDERED_WALLET_ACCOUNTS,
@@ -460,17 +465,32 @@ pub fn decode_wallet_state(encoded: &[u8]) -> Result<WalletState, HostCodecError
         encoded,
         |reader| {
             let revision = reader.u64()?;
-            let profile = decode_optional(reader, decode_wallet_profile)?;
+            let active_wallet_index = if reader.bool()? { Some(reader.u32()?) } else { None };
+            let mut diagnostics = Vec::new();
+            let profile = match decode_optional(reader, decode_profile_record)? {
+                Some(record) if record.diagnostic_reason().is_none() => Some(record.validate_profile_identity()
+                    .map_err(|_| model_integrity("persisted wallet identity is invalid"))?),
+                Some(record) => { diagnostics.push(record); None }
+                None => None,
+            };
             let cold_count = reader.count(MAX_COLD_WALLET_ACCOUNTS)?;
             let mut cold_accounts = Vec::with_capacity(cold_count);
             for _ in 0..cold_count {
-                cold_accounts.push(decode_cold_wallet_account(reader)?);
+                let record = decode_cold_record(reader)?;
+                if record.diagnostic_reason().is_none() {
+                    cold_accounts.push(record.validate_cold_identity().map_err(|_| model_integrity("persisted cold identity is invalid"))?);
+                } else { diagnostics.push(record); }
             }
             let ordered_count = reader.count(MAX_ORDERED_WALLET_ACCOUNTS)?;
             let mut ordered_account_ids = Vec::with_capacity(ordered_count);
             for _ in 0..ordered_count {
                 ordered_account_ids.push(AccountId32::from_bytes(reader.fixed()?));
             }
+            // 沿原有效账户目录投影：只过滤已归属于异常记录的标识；未知或重复顺序仍失败。
+            let unique: std::collections::BTreeSet<_> = ordered_account_ids.iter().copied().collect();
+            if unique.len() != ordered_account_ids.len() { return Err(model_integrity("persisted wallet order is duplicated")); }
+            let invalid: std::collections::BTreeSet<_> = diagnostics.iter().flat_map(WalletRecord::account_ids).collect();
+            ordered_account_ids.retain(|account_id| !invalid.contains(account_id));
             let next_cold_wallet_index = reader.u32()?;
             let provisioning = decode_optional(reader, decode_provisioning_plan)?;
             let cleanup = decode_optional(reader, decode_cleanup_plan)?;
@@ -489,103 +509,101 @@ pub fn decode_wallet_state(encoded: &[u8]) -> Result<WalletState, HostCodecError
                 cleanup,
                 cleanup_queue,
             )
+            .and_then(|state| state.try_with_diagnostics(diagnostics))
+            .and_then(|state| state.try_with_active_wallet(active_wallet_index))
             .map_err(|_| model_integrity("persisted wallet state is invalid"))
         },
     )
 }
 
-fn encode_cold_wallet_account(
-    writer: &mut TypedWriter,
-    account: &ColdWalletAccount,
-) -> Result<(), HostCodecError> {
-    writer.u32(account.wallet_index());
-    writer.fixed(account.account_id().as_bytes());
-    writer.string(account.ss58_address(), MAX_SS58_BYTES)?;
-    writer.string(account.name(), MAX_WALLET_NAME_BYTES)?;
-    writer.u64(account.created_at_millis());
+fn encode_cold_record(writer: &mut TypedWriter, record: &WalletRecord) -> Result<(), HostCodecError> {
+    record.validate_shape().map_err(|_| model_integrity("cold record shape is invalid"))?;
+    let WalletRecord::Account { wallet_index, sign_mode, account_id, ss58_address, name, created_at_millis } = record else {
+        return Err(model_integrity("cold slot has another record kind"));
+    };
+    writer.u32(*wallet_index);
+    writer.string(sign_mode, 32)?;
+    writer.fixed(account_id.as_bytes());
+    writer.string(ss58_address, MAX_SS58_BYTES)?;
+    writer.string(name, MAX_WALLET_NAME_BYTES)?;
+    writer.u64(*created_at_millis);
     Ok(())
 }
 
-fn decode_cold_wallet_account(
-    reader: &mut TypedReader<'_>,
-) -> Result<ColdWalletAccount, HostCodecError> {
-    ColdWalletAccount::try_new(
-        reader.u32()?,
-        AccountId32::from_bytes(reader.fixed()?),
-        reader.string(MAX_SS58_BYTES)?,
-        reader.string(MAX_WALLET_NAME_BYTES)?,
-        reader.u64()?,
-    )
-    .map_err(|_| model_integrity("persisted cold wallet account is invalid"))
+fn decode_cold_record(reader: &mut TypedReader<'_>) -> Result<WalletRecord, HostCodecError> {
+    let record = WalletRecord::Account {
+        wallet_index: reader.u32()?,
+        sign_mode: reader.string(32)?,
+        account_id: AccountId32::from_bytes(reader.fixed()?),
+        ss58_address: reader.string(MAX_SS58_BYTES)?,
+        name: reader.string(MAX_WALLET_NAME_BYTES)?,
+        created_at_millis: reader.u64()?,
+    };
+    record.validate_shape().map_err(|_| model_integrity("cold record shape is invalid"))?;
+    Ok(record)
 }
 
-fn encode_wallet_profile(
-    writer: &mut TypedWriter,
-    profile: &WalletProfile,
-) -> Result<(), HostCodecError> {
-    writer.u32(profile.wallet_index());
-    writer.fixed(profile.generation().as_bytes());
-    writer.fixed(profile.master_account_id().as_bytes());
-    writer.u8(match profile.origin() {
-        WalletOrigin::Created => 1,
-        WalletOrigin::Imported => 2,
-    });
-    writer.u64(profile.created_at_millis());
-    writer.fixed(profile.active_account_id().as_bytes());
-    writer.count(profile.accounts().len(), MAX_WALLET_ACCOUNTS)?;
-    for account in profile.accounts() {
-        writer.u32(account.index());
-        writer.fixed(account.account_id().as_bytes());
-        encode_secret_ref(writer, account.secret_ref());
-        writer.string(account.ss58_address(), MAX_SS58_BYTES)?;
-        writer.string(account.name(), MAX_WALLET_NAME_BYTES)?;
-        writer.u64(account.created_at_millis());
+fn encode_wallet_profile(writer: &mut TypedWriter, profile: &WalletProfile) -> Result<(), HostCodecError> {
+    encode_profile_record(writer, &WalletRecord::from_profile(profile))
+}
+fn encode_profile_record(writer: &mut TypedWriter, record: &WalletRecord) -> Result<(), HostCodecError> {
+    record.validate_shape().map_err(|_| model_integrity("profile record shape is invalid"))?;
+    let WalletRecord::Profile { wallet_index, wallet_name, sign_mode, generation, master_account_id,
+        origin, created_at_millis, active_account_id, accounts } = record else {
+        return Err(model_integrity("profile slot has another record kind"));
+    };
+    writer.u32(*wallet_index);
+    writer.string(wallet_name, MAX_WALLET_NAME_BYTES)?;
+    writer.string(sign_mode, 32)?;
+    writer.fixed(generation.as_bytes());
+    writer.fixed(master_account_id.as_bytes());
+    writer.u8(match origin { WalletOrigin::Created => 1, WalletOrigin::Imported => 2 });
+    writer.u64(*created_at_millis);
+    writer.fixed(active_account_id.as_bytes());
+    writer.count(accounts.len(), MAX_WALLET_ACCOUNTS)?;
+    for account in accounts {
+        writer.u32(account.index);
+        writer.fixed(account.account_id.as_bytes());
+        encode_secret_ref(writer, account.secret_ref);
+        writer.string(&account.ss58_address, MAX_SS58_BYTES)?;
+        writer.string(&account.name, MAX_WALLET_NAME_BYTES)?;
+        writer.u64(account.created_at_millis);
     }
     Ok(())
 }
 
-fn decode_wallet_profile(reader: &mut TypedReader<'_>) -> Result<WalletProfile, HostCodecError> {
+fn decode_profile_record(reader: &mut TypedReader<'_>) -> Result<WalletRecord, HostCodecError> {
     let wallet_index = reader.u32()?;
+    let wallet_name = reader.string(MAX_WALLET_NAME_BYTES)?;
+    let sign_mode = reader.string(32)?;
     let generation = VaultGeneration::from_bytes(reader.fixed()?);
     let master_account_id = AccountId32::from_bytes(reader.fixed()?);
     let origin = match reader.u8()? {
-        1 => WalletOrigin::Created,
-        2 => WalletOrigin::Imported,
+        1 => WalletOrigin::Created, 2 => WalletOrigin::Imported,
         _ => return Err(model_integrity("persisted wallet origin is unknown")),
     };
     let created_at_millis = reader.u64()?;
     let active_account_id = AccountId32::from_bytes(reader.fixed()?);
-    let account_count = reader.count(MAX_WALLET_ACCOUNTS)?;
-    let mut accounts = Vec::with_capacity(account_count);
-    for _ in 0..account_count {
-        let index = reader.u32()?;
-        let account_id = AccountId32::from_bytes(reader.fixed()?);
-        let secret_ref = decode_secret_ref(reader)?;
-        let ss58_address = reader.string(MAX_SS58_BYTES)?;
-        let name = reader.string(MAX_WALLET_NAME_BYTES)?;
-        let account_created_at = reader.u64()?;
-        accounts.push(
-            WalletAccount::try_new(
-                index,
-                account_id,
-                secret_ref,
-                ss58_address,
-                name,
-                account_created_at,
-            )
-            .map_err(|_| model_integrity("persisted wallet account is invalid"))?,
-        );
+    let count = reader.count(MAX_WALLET_ACCOUNTS)?;
+    let mut accounts = Vec::with_capacity(count);
+    for _ in 0..count {
+        accounts.push(WalletRecordAccount {
+            index: reader.u32()?, account_id: AccountId32::from_bytes(reader.fixed()?),
+            secret_ref: decode_secret_ref(reader)?, ss58_address: reader.string(MAX_SS58_BYTES)?,
+            name: reader.string(MAX_WALLET_NAME_BYTES)?, created_at_millis: reader.u64()?,
+        });
     }
-    WalletProfile::try_new(
-        wallet_index,
-        generation,
-        master_account_id,
-        origin,
-        created_at_millis,
-        active_account_id,
-        accounts,
-    )
-    .map_err(|_| model_integrity("persisted wallet profile is invalid"))
+    let record = WalletRecord::Profile { wallet_index, wallet_name, sign_mode, generation,
+        master_account_id, origin, created_at_millis, active_account_id, accounts };
+    record.validate_shape().map_err(|_| model_integrity("profile record shape is invalid"))?;
+    Ok(record)
+}
+
+fn decode_wallet_profile(reader: &mut TypedReader<'_>) -> Result<WalletProfile, HostCodecError> {
+    let record = decode_profile_record(reader)?;
+    // 在途计划的前态不是可展示异常槽；它必须仍是完整可验证的原热钱包所有权。
+    if record.sign_mode() != "hot" { return Err(model_integrity("provisioning profile mode is invalid")); }
+    record.validate_profile_identity().map_err(|_| model_integrity("persisted wallet profile is invalid"))
 }
 
 fn encode_provisioning_plan(
@@ -1235,16 +1253,29 @@ pub fn encode_encrypted_secret_blob_snapshot(
 }
 
 pub fn decode_encrypted_secret_blob_snapshot(
-    expected_secret_ref: SecretRef,
-    encoded: &[u8],
+    expected_secret_ref: SecretRef, encoded: &[u8],
 ) -> Result<EncryptedSecretBlobSnapshot, HostCodecError> {
+    let (secret_ref, snapshot) = decode_encrypted_secret_blob(encoded)?;
+    if secret_ref != expected_secret_ref {
+        return Err(model_integrity("persisted secret blob is bound to another SecretRef"));
+    }
+    Ok(snapshot)
+}
+
+/// 平台存在性查询复用同一完整解码；不让各语言按偏移猜sealed/tombstone状态。
+pub fn encrypted_secret_record_has_secret(
+    account_id: AccountId32, expected_revision: u64, encoded: &[u8],
+) -> Result<bool, HostCodecError> {
+    let (secret_ref, snapshot) = decode_encrypted_secret_blob(encoded)?;
+    if snapshot.revision() != expected_revision {
+        return Err(model_integrity("encrypted record revision does not match storage"));
+    }
+    Ok(secret_ref.account_id() == account_id && snapshot.envelope().is_some())
+}
+
+fn decode_encrypted_secret_blob(encoded: &[u8]) -> Result<(SecretRef, EncryptedSecretBlobSnapshot), HostCodecError> {
     decode_typed(HostRecordDomain::EncryptedSecretBlob, encoded, |reader| {
         let persisted_secret_ref = decode_secret_ref(reader)?;
-        if persisted_secret_ref != expected_secret_ref {
-            return Err(model_integrity(
-                "persisted secret blob is bound to another SecretRef",
-            ));
-        }
         let revision = reader.u64()?;
         let state = match reader.u8()? {
             1 => EncryptedSecretBlobState::Vacant,
@@ -1262,8 +1293,9 @@ pub fn decode_encrypted_secret_blob_snapshot(
             },
             _ => return Err(model_integrity("persisted secret blob state is unknown")),
         };
-        EncryptedSecretBlobSnapshot::try_from_persisted_parts(revision, state)
-            .map_err(|_| model_integrity("persisted secret blob revision is unreachable"))
+        let snapshot = EncryptedSecretBlobSnapshot::try_from_persisted_parts(revision, state)
+            .map_err(|_| model_integrity("persisted secret blob revision is unreachable"))?;
+        Ok((persisted_secret_ref, snapshot))
     })
 }
 

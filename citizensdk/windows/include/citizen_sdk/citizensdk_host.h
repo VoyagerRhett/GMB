@@ -70,6 +70,49 @@ CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_respond_credential(
 CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_cancel_credential(
     citizensdk_host_handle_t host, uint64_t host_operation_id);
 
+
+/* 无UI采集薄绑定：只有真实首帧才产生opened成功；新资源初始暂停。
+ * 像素/文档只在回调期间借用；回调不得阻塞或抛异常，retain/release不得反调Host。
+ * 最后release发生在设备/回调排空和Host服务租约归还之后，不代表取消请求即完成。 */
+typedef struct citizensdk_qr_frame_v1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t width;
+  uint32_t height;
+  uint32_t rotation_degrees;
+  uint32_t reserved;
+  uint64_t generation;
+  citizensdk_bytes_view_t rgba;
+  citizensdk_bytes_view_t luminance;
+} citizensdk_qr_frame_v1_t;
+typedef struct citizensdk_qr_capture_callbacks_v1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  void *context;
+  void (*opened)(void *, uint64_t, citizensdk_error_code_t, uint32_t, uint32_t, uint32_t);
+  void (*frame)(void *, uint64_t, const citizensdk_qr_frame_v1_t *); /* 可空 */
+  void (*document)(void *, uint64_t, uint64_t, citizensdk_bytes_view_t);
+  void (*error)(void *, uint64_t, citizensdk_error_code_t);
+  void (*control)(void *, uint64_t, uint64_t, citizensdk_error_code_t);
+  void (*closed)(void *, uint64_t, citizensdk_error_code_t);
+  void (*retain)(void *);
+  void (*release)(void *);
+} citizensdk_qr_capture_callbacks_v1_t;
+CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_open_qr_capture(
+    citizensdk_host_handle_t host, uint32_t purpose,
+    const citizensdk_qr_capture_callbacks_v1_t *callbacks, uint64_t *out_resource_id);
+/* action: pause=1/resume=2/torch=3/close=4；operation_id非零严格递增。
+ * enabled只用于torch且为0/1，其他action必须为0；接纳后由回调交付真实终态。 */
+CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_control_qr_capture(
+    citizensdk_host_handle_t host, uint64_t resource_id, uint64_t operation_id,
+    uint32_t action, uint8_t enabled);
+/* 有界同步图像能力；调用方不得在UI线程进行重解码。
+ * 输出为u32数量及逐项u32长度/Core文档UTF8，均小端；最多64项/每项64KiB。
+ * NULL/0查询长度；失败不部分写输出；未知图像格式明确unsupported。 */
+CITIZENSDK_HOST_API citizensdk_error_code_t citizensdk_host_decode_qr_image(
+    citizensdk_host_handle_t host, citizensdk_bytes_view_t encoded_image, uint32_t purpose,
+    uint8_t *buffer, uint64_t capacity, uint64_t *out_required);
+
 typedef struct citizensdk_host_config_v1 {
   uint32_t struct_size;
   uint32_t abi_version;

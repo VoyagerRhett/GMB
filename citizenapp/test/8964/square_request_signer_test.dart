@@ -1,3 +1,4 @@
+import '../support/fake_citizen_sdk.dart';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -10,6 +11,7 @@ import 'package:http/testing.dart';
 import 'package:citizenapp/8964/services/square_request_signer.dart';
 
 void main() {
+  TestCitizenSdkHarness();
   test('请求证明剥离同域 API 前缀并生成固定头', () async {
     Uint8List? signedMessage;
     final signature = '0x${List.filled(64, '11').join()}';

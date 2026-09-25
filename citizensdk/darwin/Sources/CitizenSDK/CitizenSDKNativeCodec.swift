@@ -323,7 +323,7 @@ internal enum CitizenSDKNativeCodec {
                       hotAccounts.contains(where: { $0.index == 0 && $0.accountID == master }) else {
                     throw CitizenSDKError(.integrity, "Core wallet state hot profile closure drifted")
                 }
-                hotProfile = CitizenWalletProfile(origin: origin, walletIndex: profileInfo.wallet_index,
+                hotProfile = CitizenWalletProfile(walletName: try walletName(result), origin: origin, walletIndex: profileInfo.wallet_index,
                                                   createdAtMillis: profileInfo.created_at_millis,
                                                   masterAccountID: master,
                                                   activeAccountID: active,
@@ -332,16 +332,63 @@ internal enum CitizenSDKNativeCodec {
             guard hotProfile != nil || accounts.allSatisfy({ $0.signMode == .cold }) else {
                 throw CitizenSDKError(.integrity, "Core exposes hot wallet accounts without a profile")
             }
+            var diagnosticCount: UInt32 = 0
+            try CitizenSDKChecks.requireOK(citizensdk_wallet_state_get_diagnostic_count(result, &diagnosticCount), "诊断数量读取失败")
+            guard diagnosticCount <= 1991 else { throw CitizenSDKError(.integrity, "诊断数量越界") }
+            var walletIndices = Set(accounts.map(\.walletIndex))
+            var accountIDs = Set(accounts.map(\.accountID))
+            let diagnostics = try (0..<diagnosticCount).map { index -> CitizenWalletDiagnostic in
+                var info = citizensdk_wallet_diagnostic_info_v1_t()
+                prepare(&info.struct_size, &info.abi_version, citizensdk_wallet_diagnostic_info_v1_t.self)
+                try CitizenSDKChecks.requireOK(citizensdk_wallet_state_get_diagnostic_at(result, index, &info), "诊断读取失败")
+                let id = fixed(info.account_id.bytes, 32)
+                guard info.has_ss58_address <= 1, info.sign_mode <= 2, (1...3).contains(info.diagnostic_reason),
+                      info.cleanup_account_count <= 1990, info.delete_wallet_wide_key <= 1,
+                      info.cleanup_account_count > 0 || info.delete_wallet_wide_key == 0,
+                      (1...120).contains(info.wallet_name_len), info.ss58_address_len <= 128,
+                      info.has_ss58_address != 0 || info.ss58_address_len == 0,
+                      walletIndices.insert(info.wallet_index).inserted, accountIDs.insert(id).inserted else {
+                    throw CitizenSDKError(.integrity, "诊断事实不一致")
+                }
+                let name = try text(copy(info.wallet_name_len) {
+                    citizensdk_wallet_state_copy_diagnostic_text(result, index, 1, $0, $1, $2)
+                })
+                guard try CitizenSDKInputLimits.accountName(name) == name else { throw CitizenSDKError(.integrity, "诊断名称无效") }
+                let address: String? = info.has_ss58_address == 0 ? nil : try text(copy(info.ss58_address_len) {
+                    citizensdk_wallet_state_copy_diagnostic_text(result, index, 2, $0, $1, $2)
+                })
+                let cleanupIDs = try (0..<info.cleanup_account_count).map { accountIndex -> Data in
+                    var account = citizensdk_account_id_t()
+                    try CitizenSDKChecks.requireOK(citizensdk_wallet_state_get_diagnostic_cleanup_account(result, index, accountIndex, &account),
+                                                   "清理账户目标复制失败")
+                    return fixed(account.bytes, 32)
+                }
+                guard zip(cleanupIDs, cleanupIDs.dropFirst()).allSatisfy({ $0.0.lexicographicallyPrecedes($0.1) }) else {
+                    throw CitizenSDKError(.integrity, "清理账户目标顺序或唯一性无效")
+                }
+                let targets = cleanupIDs.isEmpty ? nil : CitizenWalletCleanupTargets(accountIDs: cleanupIDs, deleteWalletWideKey: info.delete_wallet_wide_key == 1)
+                return CitizenWalletDiagnostic(walletIndex: info.wallet_index, walletName: name, accountID: id,
+                    ss58Address: address, diagnosticReason: info.diagnostic_reason,
+                    signMode: info.sign_mode == 0 ? nil : CitizenWalletSignMode(rawValue: info.sign_mode), cleanupTargets: targets)
+            }
             var initialization: UInt32 = 0
             var cleanup: UInt8 = 0
             try CitizenSDKChecks.requireOK(citizensdk_wallet_state_get_initialization(result, &initialization, &cleanup), "wallet state flags failed")
             guard initialization <= 2, cleanup <= 1,
-                  (initialization == 1) == !accounts.isEmpty,
+                  (initialization == 1) == (!accounts.isEmpty || !diagnostics.isEmpty),
                   !(initialization == 0 && cleanup != 0) else {
                 throw CitizenSDKError(.integrity, "wallet initialization facts disagree with the catalog")
             }
+            var hasSelection: UInt8 = 0
+            var selection: UInt32 = 0
+            try CitizenSDKChecks.requireOK(citizensdk_wallet_state_get_active_wallet(result, &hasSelection, &selection), "wallet selection failed")
+            guard hasSelection <= 1, hasSelection == 1 || selection == 0,
+                  hasSelection == 0 || walletIndices.contains(selection) else {
+                throw CitizenSDKError(.integrity, "wallet selection is outside the catalog")
+            }
             return CitizenWalletState(revision: stateInfo.revision, hotProfile: hotProfile, accounts: accounts,
-                                      initializationState: initialization, cleanupPending: cleanup != 0)
+                                      initializationState: initialization, cleanupPending: cleanup != 0,
+                                      activeWalletIndex: hasSelection == 1 ? selection : nil, diagnostics: diagnostics)
         }
     }
 
@@ -652,6 +699,14 @@ internal enum CitizenSDKNativeCodec {
         return try text(copy(required) { citizensdk_result_copy_error_message(result, $0, $1, $2) })
     }
 
+    /// 名称必须来自同一结果，复制前按公开名称容量限定，不能二次读取当前目录。
+    private static func walletName(_ result: UInt64) throws -> String {
+        var required: UInt64 = 0
+        try CitizenSDKChecks.requireOK(citizensdk_wallet_profile_copy_name(result, nil, 0, &required), "wallet name size query failed")
+        guard (1...120).contains(required) else { throw CitizenSDKError(.integrity, "wallet name size is invalid") }
+        return try text(copy(required) { citizensdk_wallet_profile_copy_name(result, $0, $1, $2) })
+    }
+
     private static func walletProfile(_ result: UInt64) throws -> CitizenWalletProfile? {
         var info = citizensdk_wallet_profile_info_t()
         prepare(&info.struct_size, &info.abi_version, citizensdk_wallet_profile_info_t.self)
@@ -663,7 +718,7 @@ internal enum CitizenSDKNativeCodec {
         }
         let accounts = try walletAccounts(result)
         guard accounts.count == Int(info.account_count) else { throw CitizenSDKError(.integrity, "Core wallet account count drifted") }
-        return CitizenWalletProfile(origin: origin, walletIndex: info.wallet_index,
+        return CitizenWalletProfile(walletName: try walletName(result), origin: origin, walletIndex: info.wallet_index,
                                     createdAtMillis: info.created_at_millis,
                                     masterAccountID: fixed(info.master_account_id.bytes, 32),
                                     activeAccountID: fixed(info.active_account_id.bytes, 32), accounts: accounts)

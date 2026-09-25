@@ -13,23 +13,59 @@ sdk_dir="$(dirname "$script_dir")"
 test_root="${CITIZENSDK_TEST_WORK_DIR:-${TMPDIR:-/tmp}/citizensdk/test}"
 test_smoldot_library="${CITIZENSDK_TEST_SMOLDOT_LIBRARY:-}"
 
-case "$test_root/" in
-  "$sdk_dir/"*) echo 'CitizenSDK 测试缓存禁止位于产品源码树' >&2; exit 1 ;;
-esac
-[[ "$test_root" == /* && "$test_root" != / ]] \
-  || { echo 'CitizenSDK 测试缓存必须是绝对目录' >&2; exit 1; }
+flutter_bin="${FLUTTER:-$(command -v flutter || true)}"
+cargo_bin="${CARGO:-$(command -v cargo || true)}"
+node_bin="${NODE:-$(command -v node || true)}"
+[[ -n "$node_bin" && -x "$node_bin" ]] \
+  || { echo 'CitizenSDK 测试缺少 Node' >&2; exit 1; }
 
+# 首次写入前按真实祖先解析路径；拒绝源码、源码祖先及内部输出符号链接。
+# 只校验调用方给定目录，不识别目录来源，也不清理其它任务或依赖原件。
+test_root="$("$node_bin" - "$sdk_dir" "$test_root" <<'CHECK_OUTPUTS'
+const fs = require('node:fs');
+const path = require('node:path');
+const [sourceInput, input] = process.argv.slice(2);
+const source = fs.realpathSync(sourceInput);
+if (!path.isAbsolute(input) || input.split(path.sep).some(part => part === '.' || part === '..')) {
+  throw new Error('CitizenSDK测试缓存必须是无相对片段的绝对目录');
+}
+let ancestor = path.resolve(input);
+const suffix = [];
+while (!fs.existsSync(ancestor)) {
+  if (fs.lstatSync(ancestor, { throwIfNoEntry: false })) throw new Error('测试目录存在悬空链接');
+  suffix.unshift(path.basename(ancestor));
+  ancestor = path.dirname(ancestor);
+}
+if (!fs.statSync(ancestor).isDirectory()) throw new Error('测试目录祖先不是目录');
+const target = path.join(fs.realpathSync(ancestor), ...suffix);
+if (target === path.parse(target).root || target === source ||
+    target.startsWith(source + path.sep) || source.startsWith(target + path.sep)) {
+  throw new Error('CitizenSDK测试缓存禁止位于产品源码或其祖先');
+}
+for (const name of ['cargo', 'flutter', 'flutter-config', 'release-tmp', 'release-work']) {
+  const child = path.join(target, name);
+  const stat = fs.lstatSync(child, { throwIfNoEntry: false });
+  if (stat && (!stat.isDirectory() || stat.isSymbolicLink())) throw new Error('测试输出必须是独立普通目录');
+}
+process.stdout.write(target);
+CHECK_OUTPUTS
+)" || exit 1
+
+assert_read_only_source() {
+  local name
+  for name in .dart_tool build target android/.kotlin; do
+    [[ ! -e "$sdk_dir/$name" && ! -L "$sdk_dir/$name" ]] \
+      || { echo "CitizenSDK 源码树已存在禁止的生成条目：$name" >&2; return 1; }
+  done
+}
+assert_read_only_source || exit 1
 mkdir -p "$test_root/cargo" "$test_root/flutter" "$test_root/flutter-config" "$test_root/release-tmp"
 export CARGO_TARGET_DIR="$test_root/cargo"
 export XDG_CONFIG_HOME="$test_root/flutter-config"
 
-flutter_bin="${FLUTTER:-$(command -v flutter || true)}"
-cargo_bin="${CARGO:-$(command -v cargo || true)}"
-node_bin="${NODE:-$(command -v node || true)}"
-
 configure_flutter_output() {
   [[ -n "$flutter_bin" && -x "$flutter_bin" ]] \
-    || { echo 'CitizenSDK 测试缺少 Flutter' >&2; exit 1; }
+    || { echo 'CitizenSDK 测试缺少 Flutter' >&2; return 1; }
   "$flutter_bin" config \
     --build-dir=build \
     --no-enable-native-assets \
@@ -37,7 +73,9 @@ configure_flutter_output() {
 }
 
 refresh_flutter_packages() {
-  local flutter_sdk_root dart_bin
+  local project_root="$1" flutter_sdk_root dart_bin
+  [[ -n "$flutter_bin" && -x "$flutter_bin" ]] \
+    || { echo 'CitizenSDK 测试缺少 Flutter' >&2; return 1; }
   flutter_sdk_root="$(cd "$(dirname "$flutter_bin")/.." && pwd -P)"
   dart_bin="$flutter_sdk_root/bin/dart"
   [[ -x "$dart_bin" ]] \
@@ -48,7 +86,7 @@ refresh_flutter_packages() {
     false) ;;
     *) echo 'CitizenSDK测试的CITIZENSDK_OFFLINE只接受true或false' >&2; return 1 ;;
   esac
-  (cd "$sdk_dir" && FLUTTER_ROOT="$flutter_sdk_root" \
+  (cd "$project_root" && FLUTTER_ROOT="$flutter_sdk_root" \
     "$dart_bin" pub get "${pub_get_args[@]}")
 }
 
@@ -61,8 +99,12 @@ prepare_flutter_project() {
     name="${source##*/}"
     case "$name" in
       .dart_tool|build|target) continue ;;
+      pubspec.yaml|pubspec.lock)
+        # Pub的可写工程元数据只复制到本轮视图，绝不经链接改写源码锁。
+        cp "$source" "$project_root/$name" || return 1
+        continue ;;
     esac
-    ln -s "$source" "$project_root/$name"
+    ln -s "$source" "$project_root/$name" || return 1
   done < <(find "$sdk_dir" -mindepth 1 -maxdepth 1 -print0)
   if [[ -n "$test_smoldot_library" ]]; then
     [[ "$test_smoldot_library" == /* && -f "$test_smoldot_library" && ! -L "$test_smoldot_library" ]] \
@@ -71,34 +113,14 @@ prepare_flutter_project() {
       "$sdk_dir"/*) echo 'CitizenSDK Flutter 测试 smoldot 宿主库禁止位于源码树' >&2; return 1 ;;
     esac
     case "$(uname -s)" in
-      Darwin) ln -s "$test_smoldot_library" "$project_root/libsmoldot.dylib" ;;
-      Linux) ln -s "$test_smoldot_library" "$project_root/libsmoldot.so" ;;
+      Darwin) ln -s "$test_smoldot_library" "$project_root/libsmoldot.dylib" || return 1 ;;
+      Linux) ln -s "$test_smoldot_library" "$project_root/libsmoldot.so" || return 1 ;;
       *) echo 'CitizenSDK Flutter 测试 smoldot 宿主库仅支持 macOS/Linux' >&2; return 1 ;;
     esac
   fi
-  command -v node >/dev/null 2>&1 \
-    || { echo 'CitizenSDK Flutter 隔离测试缺少 Node' >&2; return 1; }
-  mkdir "$project_root/.dart_tool"
-  while IFS= read -r -d '' source; do
-    name="${source##*/}"
-    [[ "$name" == package_config.json ]] && continue
-    ln -s "$source" "$project_root/.dart_tool/$name"
-  done < <(find "$sdk_dir/.dart_tool" -mindepth 1 -maxdepth 1 -print0)
-  node - "$sdk_dir/.dart_tool/package_config.json" \
-    "$project_root/.dart_tool/package_config.json" "$project_root" <<'NODE'
-const fs = require('node:fs');
-const { pathToFileURL } = require('node:url');
-const [input, output, projectRoot] = process.argv.slice(2);
-const inputUri = pathToFileURL(input);
-const config = JSON.parse(fs.readFileSync(input, 'utf8'));
-for (const entry of config.packages) {
-  const sourceRoot = new URL(entry.rootUri, inputUri).href;
-  entry.rootUri = entry.name === 'citizen_sdk'
-    ? pathToFileURL(`${projectRoot}/`).href
-    : sourceRoot;
-}
-fs.writeFileSync(output, `${JSON.stringify(config)}\n`, { flag: 'wx' });
-NODE
+  # Pub随后在此工程创建唯一.dart_tool；不读取或复制产品根的工具状态。
+  [[ -f "$project_root/pubspec.yaml" && -f "$project_root/pubspec.lock" ]] \
+    || { echo 'CitizenSDK测试视图缺少产品依赖声明或锁文件' >&2; return 1; }
 }
 
 cleanup_flutter_project() {
@@ -121,19 +143,17 @@ run_flutter() {
         ;;
     esac
   done
-  [[ ! -e "$sdk_dir/build" && ! -L "$sdk_dir/build" ]] \
-    || { echo 'CitizenSDK 源码树已存在禁止的 build 条目' >&2; return 1; }
-  refresh_flutter_packages || return 1
-  local project_root
-  project_root="$(mktemp -d "$test_root/flutter-project.XXXXXX")"
-  prepare_flutter_project "$project_root" \
-    || { cleanup_flutter_project "$project_root"; return 1; }
-  configure_flutter_output
-  local status=0
-  (cd "$project_root" && "$flutter_bin" test --no-pub --no-test-assets \
-    --packages="$project_root/.dart_tool/package_config.json" "$@") || status=$?
-  [[ ! -e "$sdk_dir/build" && ! -L "$sdk_dir/build" ]] \
-    || { echo 'Flutter 测试向 CitizenSDK 源码树写入了禁止的 build 条目' >&2; status=1; }
+  assert_read_only_source || return 1
+  local project_root status=0
+  project_root="$(mktemp -d "$test_root/flutter-project.XXXXXX")" || return 1
+  prepare_flutter_project "$project_root" || status=$?
+  if [[ "$status" == 0 ]]; then refresh_flutter_packages "$project_root" || status=$?; fi
+  if [[ "$status" == 0 ]]; then configure_flutter_output || status=$?; fi
+  if [[ "$status" == 0 ]]; then
+    (cd "$project_root" && "$flutter_bin" test --no-pub --no-test-assets \
+      --packages="$project_root/.dart_tool/package_config.json" "$@") || status=$?
+  fi
+  assert_read_only_source || status=1
   cleanup_flutter_project "$project_root" || return 1
   return "$status"
 }

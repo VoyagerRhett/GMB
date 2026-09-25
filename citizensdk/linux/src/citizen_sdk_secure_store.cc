@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits>
 #include "citizen_sdk_record_key.hpp"
+#include "citizensdk.h"
 
 namespace citizen_sdk::linux {
 namespace {
@@ -68,6 +69,49 @@ HostRecord SecureStore::wallet_profile_load() {
           statement.bytes(1, 1048576));
     }
     return HostRecord::absent(CITIZENSDK_HOST_RECORD_WALLET_PROFILE);
+  });
+}
+
+
+bool SecureStore::has_account_secret(const std::array<uint8_t, 32> &account_id) {
+  return read([&](sqlite3 *database) {
+    // 扫描本SDK命名空间的完整记录，不以某个代际未命中代替不存在；每次只持有一条密文。
+    Statement query(database, "SELECT revision, record FROM encrypted_secret LIMIT 65537");
+    citizensdk_account_id_t account{};
+    std::copy(account_id.begin(), account_id.end(), account.bytes);
+    std::size_t count = 0;
+    while (query.step_row_or_done()) {
+      require(++count <= 65536, CITIZENSDK_ERROR_UNAVAILABLE, "秘密存在性查询超过条数上限");
+      const auto revision = query.integer(0, 1, std::numeric_limits<int64_t>::max());
+      const auto record = query.bytes(1, 65536);
+      uint8_t present = 0;
+      const auto code = citizensdk_encrypted_secret_record_has_secret(&account, static_cast<uint64_t>(revision),
+          {record.data(), record.size()}, &present);
+      require(code == CITIZENSDK_OK, code, "秘密存在性记录检查失败");
+      if (present == 1) return true;
+    }
+    return false;
+  });
+}
+
+bool SecureStore::has_any_wallet_key(uint32_t wallet_index) {
+  return read([&](sqlite3 *database) {
+    // Linux物理TPM钥由sealed对象本体承载；退休标志不能掩盖尚未删除的对象。
+    Statement query(database,
+        "SELECT o.record_key, g.wallet_index, g.generation FROM vault_object o "
+        "LEFT JOIN vault_generation g ON g.record_key = o.record_key LIMIT 65537");
+    std::size_t count = 0;
+    while (query.step_row_or_done()) {
+      require(++count <= 65536, CITIZENSDK_ERROR_UNAVAILABLE, "金库对象查询超过条数上限");
+      WalletKey key{};
+      key.wallet_index = static_cast<uint32_t>(query.integer(1, 0, UINT32_MAX));
+      const auto generation = query.bytes(2, 16);
+      require(generation.size() == 16, CITIZENSDK_ERROR_INTEGRITY, "孤立金库对象不能证明归属");
+      std::copy(generation.begin(), generation.end(), key.generation.begin());
+      require(query.text(0, 64) == generation_key(key), CITIZENSDK_ERROR_INTEGRITY, "金库对象主键与事实不符");
+      if (key.wallet_index == wallet_index) return true;
+    }
+    return false;
   });
 }
 

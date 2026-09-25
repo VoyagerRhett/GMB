@@ -98,7 +98,56 @@ void expect_integrity_on_open(const std::filesystem::path &directory) {
 
 }  // namespace
 
+
+namespace {
+void secret_presence_contract() {
+  using namespace citizen_sdk::linux;
+  test::TempDirectory temporary("secret-presence");
+  SecureStore store(temporary.path() / "state");
+  const auto decode = [](const std::string &hex) {
+    Bytes result;
+    for (std::size_t i = 0; i < hex.size(); i += 2)
+      result.push_back(static_cast<uint8_t>(std::stoul(hex.substr(i, 2), nullptr, 16)));
+    return result;
+  };
+  // 独立CSHR合成金标，Rust host_codec测试同时逐字节核对；没有真实秘密。
+  const auto sealed = decode("43534852010038000500000000000000b8000000000000009481a10e6546da63b1c160907fb48acbfa35c6ffdee717bfd4a0094b3d9e57b901000700000008080808080808080808080808080808090909090909090909090909090909090a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a010100000000000000020b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b010000000c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c300000000d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d");
+  const auto tombstone = decode("43534852010038000500000000000000600000000000000017b5fd919396d702e90558844acef60fb5a38a41f42bdfa34a449075559ce09101000700000008080808080808080808080808080808090909090909090909090909090909090a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a010200000000000000030e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e");
+  const auto second = decode("43534852010038000500000000000000b800000000000000bbf644dec5dde868148f6f1ffe1151f121f1de7e78e2b7ecd7c9e35e0cdd48a501000700000058585858585858585858585858585858090909090909090909090909090909090a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a010100000000000000020b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b010000000c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c300000000d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d");
+  SecretIdentity identity{}; identity.wallet_index = 7; identity.kind = 1;
+  identity.generation.fill(8); identity.owner.fill(9); identity.account_id.fill(10);
+  assert(!store.has_account_secret(identity.account_id));
+  assert(store.encrypted_secret_compare_and_swap(identity, 0, sealed).error_code == CITIZENSDK_OK);
+  assert(store.has_account_secret(identity.account_id));
+  auto foreign = identity.account_id; foreign[0] = 11;
+  assert(!store.has_account_secret(foreign));
+  assert(store.encrypted_secret_compare_and_swap(identity, 1, tombstone).error_code == CITIZENSDK_OK);
+  assert(!store.has_account_secret(identity.account_id));
+  identity.generation.fill(88);
+  assert(store.encrypted_secret_compare_and_swap(identity, 0, second).error_code == CITIZENSDK_OK);
+  assert(store.has_account_secret(identity.account_id));
+  SecureStore isolated(temporary.path() / "isolated");
+  assert(!isolated.has_account_secret(identity.account_id));
+  assert(isolated.encrypted_secret_compare_and_swap(identity, 0, Bytes{1}).error_code == CITIZENSDK_OK);
+  bool rejected = false;
+  try { (void)isolated.has_account_secret(foreign); } catch (const HostError &) { rejected = true; }
+  assert(rejected && isolated.encrypted_secret_load(identity).record == Bytes{1}); // 坏记录不能被错账户过滤成false。
+  store.close();
+  rejected = false;
+  try { (void)store.has_account_secret(identity.account_id); } catch (const HostError &) { rejected = true; }
+  assert(rejected);
+  execute_sql(temporary.path() / "state" / "secure-state-v1.sqlite3",
+      "INSERT INTO vault_object(record_key, public_blob, private_blob, object_name, auth_salt) "
+      "VALUES('unknown', X'01', X'02', zeroblob(34), zeroblob(16))");
+  SecureStore corrupt(temporary.path() / "state");
+  rejected = false;
+  try { (void)corrupt.has_any_wallet_key(0); } catch (const HostError &) { rejected = true; }
+  assert(rejected); // 无代际归属的对象不能忽略后宣告没有钥。
+}
+}  // namespace
+
 int main() {
+  secret_presence_contract();
   using namespace citizen_sdk::linux;
 
   citizen_sdk::linux::test::TempDirectory temporary("secure-store");
@@ -171,12 +220,14 @@ int main() {
     assert(loaded->name == object.name);
     assert(loaded->auth_salt == object.auth_salt);
     assert(store.vault_object_is_active(key, object));
+    assert(store.has_any_wallet_key(0) && !store.has_any_wallet_key(UINT32_MAX));
     VaultObject different = object;
     different.auth_salt[0] ^= 0xff;
     assert(!store.vault_object_is_active(key, different));
 
     store.retire_generation(key, stranger);
     assert(!store.is_generation_active(key));
+    assert(store.has_any_wallet_key(0)); // 退休标志不等于物理TPM对象已删除。
     assert(!store.generation_owned_by(key, provision));
     assert(!store.ensure_generation(key, provision));
     assert(!store.vault_object_is_active(key, object));
@@ -190,6 +241,7 @@ int main() {
     assert(late_write_rejected);
     store.delete_vault_object(key);
     assert(!store.load_vault_object(key).has_value());
+    assert(!store.has_any_wallet_key(0));
 
     assert(permissions(directory) == 0700);
     assert(permissions(directory / "secure-state-v1.sqlite3") == 0600);

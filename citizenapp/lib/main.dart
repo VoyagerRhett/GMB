@@ -420,6 +420,9 @@ Future<List<Uint8List>> _provideColdAccountDataKeys({
     expiresAt: now + 120,
   );
   try {
+    if (!navigator.mounted) {
+      throw const AccountSecurityException('当前页面无法发起冷钱包用途钥请求');
+    }
     final request = await navigator.context.read<CitizenSdk>().qr.encodeDocument(
       CitizenQrContent.signRequest(
         requestIdPrefix: 'data-key-',
@@ -429,7 +432,9 @@ Future<List<Uint8List>> _provideColdAccountDataKeys({
         expiresAt: BigInt.from(session.expiresAt),
       ),
     );
-    if (!navigator.mounted) throw const AccountSecurityException('当前页面无法发起冷钱包用途钥请求');
+    if (!navigator.mounted) {
+      throw const AccountSecurityException('当前页面无法发起冷钱包用途钥请求');
+    }
     final response = await navigator.push<CitizenQrDocument>(
       MaterialPageRoute(
         builder: (_) => QrSignSessionPage(
@@ -546,7 +551,12 @@ Future<void> _closeCitizenSdk(
   CitizenSdk sdk,
   WalletTransactionHistoryService transactionHistory,
 ) async {
-  await transactionHistory.stop();
+  try {
+    await transactionHistory.stop();
+  } on Object catch (error, stackTrace) {
+    // 业务监听停止失败不能跳过轻节点的checkpoint与关闭；分别保留真实失败记录。
+    AppLog.d('[CitizenSDK] 交易监听停止失败: $error\n$stackTrace');
+  }
   try {
     if (sdk.lifecycle == CitizenSdkLifecycle.running) {
       await sdk.stop();

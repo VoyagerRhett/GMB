@@ -367,7 +367,10 @@ internal final class CitizenSDKNative: @unchecked Sendable {
             native.abiResources = CitizenSDKABIBorrowedResources(host: host, owner: native)
         }
         try bindOrRecover(
-            bind: native.bindCallback,
+            bind: {
+                try host?.registerSecretPresence(handle: handle)
+                try native.bindCallback()
+            },
             close: native.close,
             supervise: native.enqueueForSupervisedClose
         )
@@ -415,6 +418,15 @@ internal final class CitizenSDKNative: @unchecked Sendable {
 
     func start() throws -> CitizenSDKOperation<Void> {
         try begin(accept: { citizensdk_start(handle, $0) }, decode: CitizenSDKNativeCodec.empty)
+    }
+    /// 只委托Core接纳外壳序号，不分配异步请求或复制计数状态。
+    func acceptRequestSequence(_ sequence: Int64) throws {
+        try callLock.withLock {
+            try requireOpen()
+            try CitizenSDKChecks.requireOK(
+                citizensdk_accept_request_sequence(handle, UInt64(bitPattern: sequence)),
+                "CitizenSDK request sequence admission failed")
+        }
     }
     func stop() throws -> CitizenSDKOperation<Void> {
         try begin(accept: { citizensdk_stop(handle, $0) }, decode: CitizenSDKNativeCodec.empty)
@@ -571,6 +583,37 @@ internal final class CitizenSDKNative: @unchecked Sendable {
         try begin(accept: { citizensdk_get_wallet_state(handle, $0) }, decode: CitizenSDKNativeCodec.walletState)
     }
 
+    func inspectWallets() throws -> CitizenSDKOperation<CitizenWalletInspection> {
+        // 使用同一真实结果及原完成所有权转交，不建立第二目录或额外查库。
+        try begin(accept: { citizensdk_get_wallet_state(handle, $0) }, decode: {
+            CitizenWalletInspection(owner: self, result: $0, state: try CitizenSDKNativeCodec.walletState($0))
+        }, retainsResult: true)
+    }
+
+    func releaseWalletInspection(_ result: UInt64) throws {
+        try CitizenSDKChecks.requireOK(citizensdk_result_release(result), "钱包检查资源释放失败")
+    }
+
+    func repairHotWallet(_ inspection: CitizenWalletInspection, walletIndex: UInt32) throws -> CitizenSDKOperation<CitizenWalletState> {
+        try inspection.withResult(owner: self) { result in
+            try begin(accept: { citizensdk_repair_hot_wallet(handle, result, walletIndex, $0) }, decode: CitizenSDKNativeCodec.walletState)
+        }
+    }
+
+    func renameDiagnosticWallet(_ inspection: CitizenWalletInspection, walletIndex: UInt32, name: String) throws -> CitizenSDKOperation<CitizenWalletState> {
+        try inspection.withResult(owner: self) { result in
+            try withView(Data(name.utf8)) { name in
+                try begin(accept: { citizensdk_rename_diagnostic_wallet(handle, result, walletIndex, name, $0) }, decode: CitizenSDKNativeCodec.walletState)
+            }
+        }
+    }
+
+    func deleteDiagnosticWallet(_ inspection: CitizenWalletInspection, walletIndex: UInt32) throws -> CitizenSDKOperation<CitizenWalletState> {
+        try inspection.withResult(owner: self) { result in
+            try begin(accept: { citizensdk_delete_diagnostic_wallet(handle, result, walletIndex, $0) }, decode: CitizenSDKNativeCodec.walletState)
+        }
+    }
+
     func importColdAccountID(_ accountID: Data, name: String) throws -> CitizenSDKOperation<CitizenWalletState> {
         var account = try cAccount(accountID)
         let bytes = Data(name.utf8)
@@ -599,6 +642,18 @@ internal final class CitizenSDKNative: @unchecked Sendable {
                 citizensdk_reorder_wallet_accounts_without_default_change(
                     handle, expectedRevision, pointer, count, $0)
             }, decode: CitizenSDKNativeCodec.walletState)
+        }
+    }
+
+    func setActiveWallet(expectedRevision: UInt64, walletIndex: UInt32) throws -> CitizenSDKOperation<CitizenWalletState> {
+        try begin(accept: { citizensdk_set_active_wallet(handle, expectedRevision, walletIndex, $0) },
+                  decode: CitizenSDKNativeCodec.walletState)
+    }
+
+    func renameWallet(expectedRevision: UInt64, walletIndex: UInt32, name: String) throws -> CitizenSDKOperation<CitizenWalletState> {
+        try withView(Data(name.utf8)) { view in
+            try begin(accept: { citizensdk_rename_wallet(handle, expectedRevision, walletIndex, view, $0) },
+                      decode: CitizenSDKNativeCodec.walletState)
         }
     }
 
@@ -817,6 +872,21 @@ internal final class CitizenSDKNative: @unchecked Sendable {
                 citizensdk_encode_signing_payload(kind, views[0], views[1], output, capacity, required)
             }
         }
+    }
+
+    static func encryptedSecretRecordHasSecret(accountID: Data, revision: UInt64, record: Data) throws -> Bool {
+        guard accountID.count == 32, !record.isEmpty, record.count <= 65536 else {
+            throw CitizenSDKError(.invalidArgument, "密文存在性输入边界无效")
+        }
+        var account = citizensdk_account_id_t()
+        _ = withUnsafeMutableBytes(of: &account.bytes) { accountID.copyBytes(to: $0) }
+        var present: UInt8 = 0
+        let code = withViews([record]) { views in
+            citizensdk_encrypted_secret_record_has_secret(&account, revision, views[0], &present)
+        }
+        try CitizenSDKChecks.requireOK(code, "密文存在性检查失败")
+        guard present <= 1 else { throw CitizenSDKError(.integrity, "Core存在性结果无效") }
+        return present == 1
     }
 
     static func verify(accountID: Data, signature: Data, message: Data) throws -> Bool {

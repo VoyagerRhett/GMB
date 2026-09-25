@@ -47,18 +47,30 @@ void main() {
     final first = TestCitizenQrCapture();
     final second = TestCitizenQrCapture();
     final oldQr = TestCitizenQr()..captureFactory = (_) async => first;
+    var secondOpened = false;
     final newQr = TestCitizenQr()..captureFactory = (_) async {
       expect(first.closed, isTrue);
+      secondOpened = true;
       return second;
     };
     await tester.pumpWidget(_view(oldQr));
     await tester.pump();
     await tester.pumpWidget(_view(newQr));
-    await tester.pump();
+    // 等原资源排空与新资源接管后的页面帧，不把“旧close已发起”当作换绑完成。
+    await tester.pumpAndSettle();
+    for (var frame = 0; !secondOpened && frame < 50; frame++) {
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pump(const Duration(milliseconds: 20));
+    }
+    expect(secondOpened, isTrue, reason: '须真实接管新资源后再验证退出，不以未打开冒充未关闭');
     expect(first.closeCalls, 1);
     expect(second.closed, isFalse);
     await tester.pumpWidget(const SizedBox());
-    await tester.pump();
+    await tester.pumpAndSettle();
+    for (var frame = 0; second.closeCalls == 0 && frame < 50; frame++) {
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pump(const Duration(milliseconds: 20));
+    }
     expect(second.closeCalls, 1);
   });
 }

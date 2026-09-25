@@ -39,6 +39,19 @@ void main() {
     expect(popped, isNull);
   });
 
+  testWidgets('通讯录和用户码入口扫到签名请求保持各自原错误弹窗', (tester) async {
+    for (final mode in [QrScanMode.contact, QrScanMode.userContactValue]) {
+      final navigatorKey = await pumpScannerHost(tester);
+      unawaitedPushMode(navigatorKey, signRequestCode, mode);
+      await tester.pumpAndSettle();
+      expect(find.text(mode == QrScanMode.contact ? '无法识别二维码' : '这不是用户码'), findsOneWidget);
+      expect(find.text('请扫描当前入口支持的二维码'), findsNothing);
+      await tester.tap(find.text('确定')); await tester.pumpAndSettle();
+      expect(find.byType(QrScanPage), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    }
+  });
+
   testWidgets('账户目标入口拒绝签名请求码', (tester) async {
     final navigatorKey = await pumpScannerHost(tester);
     unawaitedPushMode(navigatorKey, signRequestCode, QrScanMode.accountTarget);
@@ -105,7 +118,7 @@ Future<QrScanTransferResult?> unawaitedPush(
 
 /// 页面只根据SDK事实选择原提示；协议有效性由SDK Core金标测试覆盖。
 TestCitizenQr _qrFor(String code) => TestCitizenQr()
-  ..captureFactory = (_) async => TestCitizenQrCapture()
+  ..captureFactory = (_) async { return TestCitizenQrCapture(); }
   ..parseDocument = (text) async {
     expect(text, code);
     return CitizenQrDocument(

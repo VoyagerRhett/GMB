@@ -114,6 +114,10 @@ internal class CitizenSdkHostServices(context: Context, private val modules: Int
         }
 
     @Suppress("unused")
+    // 两项均是实际只读查询；同一Host上下文由JNI/SDK销毁屏障保有，不从App回包推测。
+    fun hasAccountSecret(accountId: ByteArray): Boolean = secureStore.hasAccountSecret(accountId)
+    fun hasAnyWalletKey(walletIndex: Int): Boolean = vault.hasAnyWalletKey(walletIndex)
+
     fun encryptedSecretLoad(
         walletIndex: Int,
         kind: Int,

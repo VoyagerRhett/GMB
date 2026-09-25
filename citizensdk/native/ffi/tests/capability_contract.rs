@@ -130,7 +130,8 @@ fn snapshot_always_contains_ten_truthful_capabilities() {
         assert_eq!(
             status.reason,
             if compiled && selected {
-                CitizenSdkCapabilityReason::DependencyNotReady
+                // 未启动的纯链实例没有同步事实；不再伪报缺少热钱包依赖。
+                CitizenSdkCapabilityReason::ChainUnsynced
             } else if compiled {
                 CitizenSdkCapabilityReason::HostDisabled
             } else {

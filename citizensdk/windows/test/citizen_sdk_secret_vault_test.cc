@@ -55,6 +55,7 @@ struct FakeSystem final {
   bool authentication_available{true};
   bool cancel{false};
   bool delete_fails{false};
+  bool enumerate_fails{false};
   bool decrypt_fails{false};
   unsigned created{};
   unsigned deleted{};
@@ -68,6 +69,12 @@ struct FakeSystem final {
   SecretVaultServices services() {
     return {
       [this] { return available; },
+      [this] {
+        if (enumerate_fails) throw HostError(CITIZENSDK_ERROR_UNAVAILABLE, "合成系统枚举失败");
+        std::vector<std::string> names;
+        for (const auto &entry : keys) names.push_back(entry.first);
+        return names;
+      },
       [this] { return authentication_available; },
       [this](uint64_t host_operation_id) {
         assert(host_operation_id != 0);
@@ -362,6 +369,10 @@ int wmain(int count, wchar_t **arguments) {
   assert(vault.availability() == CITIZENSDK_HOST_VAULT_UNAVAILABLE);
   system.available = CngAvailability::kAvailable;
   assert(!vault.has_wallet_kek(wallet));
+  assert(!vault.has_any_wallet_key(0));
+  system.enumerate_fails = true;
+  fails(CITIZENSDK_ERROR_UNAVAILABLE, [&] { (void)vault.has_any_wallet_key(0); });
+  system.enumerate_fails = false;
   output.fill(0xa5);
   fails(CITIZENSDK_ERROR_KEY_INVALIDATED, [&] { vault.unwrap_dek(1, wallet, Bytes(256), output.data()); });
   assert(zero() && vault.idle());
@@ -372,6 +383,7 @@ int wmain(int count, wchar_t **arguments) {
   system.cancel = false;
   vault.ensure_wallet_kek(101, wallet, operation);
   assert(vault.has_wallet_kek(wallet) && system.created == 1);
+  assert(vault.has_any_wallet_key(0) && !vault.has_any_wallet_key(UINT32_MAX));
   const unsigned prompts = system.prompted;
   fails(CITIZENSDK_ERROR_KEY_INVALIDATED, [&] { other.ensure_wallet_kek(101, wallet, competing); });
   assert(system.created == 1 && system.deleted == 0 && system.prompted == prompts);
@@ -424,6 +436,7 @@ int wmain(int count, wchar_t **arguments) {
   fails(CITIZENSDK_ERROR_UNAVAILABLE, [&] { vault.retire_wallet_kek(wallet, operation); });
   assert(!store.is_generation_active(wallet) && store.load_vault_object(wallet) &&
       system.keys.count(cng_key_name(wallet)) == 1 && !vault.has_wallet_kek(wallet));
+  assert(vault.has_any_wallet_key(0)); // 元数据退休但系统删除失败，钥仍实际存在。
   system.delete_fails = false;
   vault.retire_wallet_kek(wallet, operation);
   assert(!store.load_vault_object(wallet) && system.keys.count(cng_key_name(wallet)) == 0);
@@ -434,6 +447,7 @@ int wmain(int count, wchar_t **arguments) {
   assert(store.ensure_generation(wallet, operation));
   const auto orphan = synthetic_object(wallet);
   system.keys.emplace(orphan.key_name, orphan);
+  assert(vault.has_any_wallet_key(0)); // 即使对象行尚未写入，也从系统枚举发现实际钥。
   vault.retire_wallet_kek(wallet, operation);
   assert(system.keys.count(orphan.key_name) == 0 && !store.ensure_generation(wallet, operation));
 
@@ -455,6 +469,19 @@ int wmain(int count, wchar_t **arguments) {
   assert(system.deleted == before_failure && system.keys.count(cng_key_name(wallet)) == 1);
   vault.retire_wallet_kek(wallet, operation);
   assert(system.keys.empty() && vault.idle() && other.idle());
+  assert(!vault.has_any_wallet_key(0));
+  const std::string unknown = "citizensdk." + std::string(32, 'f');
+  system.keys.emplace(unknown, VaultObject{});
+  fails(CITIZENSDK_ERROR_INTEGRITY, [&] { (void)vault.has_any_wallet_key(0); });
+  system.keys.erase(unknown);
+  auto first = wallet; first.generation[0] = 7;
+  auto second = wallet; second.generation[0] = 8;
+  vault.ensure_wallet_kek(103, first, operation);
+  vault.ensure_wallet_kek(104, second, competing);
+  vault.retire_wallet_kek(first, operation);
+  assert(vault.has_any_wallet_key(0));
+  vault.retire_wallet_kek(second, competing);
+  assert(!vault.has_any_wallet_key(0));
   try { cross_process_retirement(store, temporary.path() / "state"); }
   catch (...) { return 1; }
   return 0;

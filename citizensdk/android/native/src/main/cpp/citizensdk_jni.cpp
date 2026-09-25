@@ -202,6 +202,17 @@ bool write_wallet_account(citizensdk_result_handle_t result, uint32_t index,
   return true;
 }
 
+// 名称从同一Core结果有界复制，不能拿账户0标签替代钱包名称。
+bool write_wallet_name(citizensdk_result_handle_t result, WireWriter *payload) {
+  uint64_t required = 0;
+  if (citizensdk_wallet_profile_copy_name(result, nullptr, 0, &required) != kOk || required == 0 || required > 120) return false;
+  std::vector<uint8_t> name(static_cast<size_t>(required));
+  const auto capacity = required;
+  if (citizensdk_wallet_profile_copy_name(result, name.data(), capacity, &required) != kOk || required != capacity) return false;
+  payload->text(name);
+  return true;
+}
+
 bool write_wallet_profile(citizensdk_result_handle_t result,
                           WireWriter *payload) {
   auto info = info_value<citizensdk_wallet_profile_info_t>();
@@ -222,7 +233,7 @@ bool write_wallet_profile(citizensdk_result_handle_t result,
   for (uint32_t index = 0; index < count; ++index) {
     if (!write_wallet_account(result, index, payload)) return false;
   }
-  return true;
+  return write_wallet_name(result, payload);
 }
 
 bool write_wallet_accounts(citizensdk_result_handle_t result,
@@ -263,6 +274,7 @@ bool write_wallet_state(citizensdk_result_handle_t result,
     payload->fixed(profile.master_account_id.bytes, 32);
     payload->fixed(profile.active_account_id.bytes, 32);
     payload->u32(profile.account_count);
+    if (!write_wallet_name(result, payload)) return false;
   }
   payload->u32(state.account_count);
   for (uint32_t index = 0; index < state.account_count; ++index) {
@@ -300,13 +312,51 @@ bool write_wallet_state(citizensdk_result_handle_t result,
     payload->u64(account.created_at_millis);
     payload->u8(account.is_default == 0 ? 0 : 1);
   }
+  uint32_t diagnostic_count = 0;
+  if (citizensdk_wallet_state_get_diagnostic_count(result, &diagnostic_count) != kOk || diagnostic_count > 1991) return false;
   uint32_t initialization = 0;
   uint8_t cleanup = 0;
   if (citizensdk_wallet_state_get_initialization(result, &initialization, &cleanup) != kOk ||
       initialization > 2 || cleanup > 1 ||
-      ((initialization == 1) != (state.account_count != 0)) || (initialization == 0 && cleanup != 0)) return false;
+      ((initialization == 1) != (state.account_count != 0 || diagnostic_count != 0)) || (initialization == 0 && cleanup != 0)) return false;
   payload->u32(initialization);
   payload->u8(cleanup);
+  uint8_t present = 0;
+  uint32_t wallet_index = 0;
+  if (citizensdk_wallet_state_get_active_wallet(result, &present, &wallet_index) != kOk || present > 1) return false;
+  payload->u8(present);
+  if (present != 0) payload->u32(wallet_index);
+  payload->u32(diagnostic_count);
+  for (uint32_t index = 0; index < diagnostic_count; ++index) {
+    auto info = info_value<citizensdk_wallet_diagnostic_info_v1_t>();
+    if (citizensdk_wallet_state_get_diagnostic_at(result, index, &info) != kOk ||
+        info.has_ss58_address > 1 || info.sign_mode > 2 || info.diagnostic_reason < 1 || info.diagnostic_reason > 3 ||
+        info.cleanup_account_count > 1990 || info.delete_wallet_wide_key > 1 ||
+        (info.cleanup_account_count == 0 && info.delete_wallet_wide_key != 0) ||
+        info.wallet_name_len == 0 || info.wallet_name_len > 120 || info.ss58_address_len > 128 ||
+        (info.has_ss58_address == 0 && info.ss58_address_len != 0)) return false;
+    auto text = [&](uint32_t field, uint64_t required) {
+      std::vector<uint8_t> bytes(static_cast<size_t>(required));
+      uint64_t confirmed = required;
+      if (citizensdk_wallet_state_copy_diagnostic_text(result, index, field,
+          bytes.empty() ? nullptr : bytes.data(), required, &confirmed) != kOk || confirmed != required) return false;
+      payload->text(bytes); return true;
+    };
+    payload->u32(info.wallet_index);
+    if (!text(1, info.wallet_name_len)) return false;
+    payload->fixed(info.account_id.bytes, 32);
+    payload->u8(info.has_ss58_address != 0 ? 1 : 0);
+    if (info.has_ss58_address != 0 && !text(2, info.ss58_address_len)) return false;
+    payload->u32(info.diagnostic_reason);
+    payload->u32(info.sign_mode);
+    payload->u32(info.cleanup_account_count);
+    payload->u8(info.delete_wallet_wide_key != 0 ? 1 : 0);
+    for (uint32_t account_index = 0; account_index < info.cleanup_account_count; ++account_index) {
+      citizensdk_account_id_t account{};
+      if (citizensdk_wallet_state_get_diagnostic_cleanup_account(result, index, account_index, &account) != kOk) return false;
+      payload->fixed(account.bytes, 32);
+    }
+  }
   return true;
 }
 
@@ -571,6 +621,14 @@ jlong native_refresh_capabilities(JNIEnv *env, jobject, jlong raw) {
       env, bridge, [](auto handle, auto *out) {
         return citizensdk_refresh_capabilities(handle, out);
       });
+}
+
+void native_accept_request_sequence(JNIEnv *env, jobject, jlong raw, jlong sequence) {
+  // 通道序号与原生请求ID独立，唯一顺序判断归Core；不复制接纳算法。
+  auto bridge = bridge_from(env, raw);
+  if (!bridge) return;
+  const auto code = citizensdk_accept_request_sequence(bridge->handle(), static_cast<uint64_t>(sequence));
+  if (code != kOk) throw_sdk(env, code, "CitizenSDK request sequence admission failed");
 }
 
 jlong native_start(JNIEnv *env, jobject, jlong raw) {
@@ -847,6 +905,39 @@ jlong native_wallet_state(JNIEnv *env, jobject, jlong raw) {
   });
 }
 
+jlong native_inspect_wallets(JNIEnv *env, jobject, jlong raw) {
+  auto bridge = bridge_from(env, raw);
+  return bridge == nullptr ? 0 : begin_request(env, bridge, [&](auto, auto *out) {
+    return bridge->inspect_wallets(out);
+  });
+}
+
+void native_release_wallet_inspection(JNIEnv *env, jobject, jlong raw, jlong token) {
+  auto bridge = bridge_from(env, raw);
+  if (!bridge) return;
+  const auto code = token > 0 ? bridge->release_wallet_inspection(static_cast<uint64_t>(token)) : CITIZENSDK_ERROR_INVALID_HANDLE;
+  if (code != kOk) throw_sdk(env, code, "钱包检查资源释放失败");
+}
+
+jlong native_change_diagnostic(JNIEnv *env, jobject, jlong raw, jlong token, jlong index, jint action, jbyteArray name_bytes) {
+  auto bridge = bridge_from(env, raw);
+  if (!bridge) return 0;
+  if (token <= 0 || index < 0 || static_cast<uint64_t>(index) > UINT32_MAX ||
+      action < 1 || action > 3 || !bridge->has_wallet_inspection(static_cast<uint64_t>(token))) {
+    throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT, "钱包检查引用或目标无效"); return 0;
+  }
+  std::vector<uint8_t> name;
+  if (action == 2 && (name_bytes == nullptr || env->GetArrayLength(name_bytes) > 120 || !take_bytes(env, name_bytes, &name))) {
+    if (!env->ExceptionCheck()) throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT, "钱包名称无效");
+    return 0;
+  }
+  return begin_request(env, bridge, [&](auto handle, auto *out) {
+    if (action == 1) return citizensdk_repair_hot_wallet(handle, token, static_cast<uint32_t>(index), out);
+    if (action == 2) return citizensdk_rename_diagnostic_wallet(handle, token, static_cast<uint32_t>(index), view(name), out);
+    return citizensdk_delete_diagnostic_wallet(handle, token, static_cast<uint32_t>(index), out);
+  });
+}
+
 jlong native_import_cold_id(JNIEnv *env, jobject, jlong raw,
                             jbyteArray account_bytes, jbyteArray name_bytes) {
   auto bridge = bridge_from(env, raw);
@@ -880,6 +971,30 @@ jlong native_reorder_wallet(JNIEnv *env, jobject, jlong raw, jlong revision,
     return citizensdk_reorder_wallet_accounts_without_default_change(
         handle, static_cast<uint64_t>(revision), values.data(),
         static_cast<uint32_t>(values.size()), out);
+  });
+}
+
+jlong native_select_wallet(JNIEnv *env, jobject, jlong raw, jlong revision, jlong index) {
+  auto bridge = bridge_from(env, raw);
+  if (bridge == nullptr) return 0;
+  if (index < 0 || static_cast<uint64_t>(index) > UINT32_MAX) {
+    throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT, "Wallet index exceeds u32"); return 0;
+  }
+  return begin_request(env, bridge, [revision, index](auto handle, auto *out) {
+    return citizensdk_set_active_wallet(handle, static_cast<uint64_t>(revision), static_cast<uint32_t>(index), out);
+  });
+}
+
+jlong native_rename_wallet(JNIEnv *env, jobject, jlong raw, jlong revision, jlong index, jbyteArray bytes) {
+  auto bridge = bridge_from(env, raw);
+  if (bridge == nullptr) return 0;
+  if (index < 0 || static_cast<uint64_t>(index) > UINT32_MAX) {
+    throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT, "Wallet index exceeds u32"); return 0;
+  }
+  std::vector<uint8_t> name;
+  if (!take_bytes(env, bytes, &name)) return 0;
+  return begin_request(env, bridge, [revision, index, &name](auto handle, auto *out) {
+    return citizensdk_rename_wallet(handle, static_cast<uint64_t>(revision), static_cast<uint32_t>(index), view(name), out);
   });
 }
 
@@ -1502,6 +1617,24 @@ bool qr_input(JNIEnv *env, jbyteArray source, size_t maximum,
   return true;
 }
 
+jboolean native_encrypted_secret_record_has_secret(JNIEnv *env, jclass, jbyteArray account_bytes,
+    jlong revision, jbyteArray record_bytes) {
+  citizensdk_account_id_t value{};
+  if (!account(env, account_bytes, &value)) return JNI_FALSE;
+  if (revision < 0 || record_bytes == nullptr || env->GetArrayLength(record_bytes) > 65536) {
+    throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT, "密文存在性输入边界无效"); return JNI_FALSE;
+  }
+  std::vector<uint8_t> record;
+  if (!take_bytes(env, record_bytes, &record)) return JNI_FALSE;
+  uint8_t present = 0;
+  const auto code = citizensdk_encrypted_secret_record_has_secret(&value, static_cast<uint64_t>(revision), view(record), &present);
+  if (code != CITIZENSDK_OK || present > 1) {
+    throw_sdk(env, code == CITIZENSDK_OK ? CITIZENSDK_ERROR_INTEGRITY : code, "密文存在性检查失败");
+    return JNI_FALSE;
+  }
+  return present ? JNI_TRUE : JNI_FALSE;
+}
+
 jbyteArray native_encode_signing_payload(JNIEnv *env, jclass, jint kind,
     jbyteArray fields_bytes, jbyteArray payload_bytes) {
   std::vector<uint8_t> fields, payload;
@@ -1729,6 +1862,7 @@ void native_complete_unwrap(JNIEnv *env, jclass, jlong raw,
 }
 
 const JNINativeMethod kMethods[] = {
+    {const_cast<char *>("encryptedSecretRecordHasSecret"), const_cast<char *>("([BJ[B)Z"), reinterpret_cast<void *>(native_encrypted_secret_record_has_secret)},
     {const_cast<char *>("validateModules"), const_cast<char *>("(I)V"), reinterpret_cast<void *>(native_validate_modules)},
     {const_cast<char *>("verifySignature"), const_cast<char *>("([B[B[B)Z"), reinterpret_cast<void *>(native_verify)},
     {const_cast<char *>("encodeSigningPayload"), const_cast<char *>("(I[B[B)[B"), reinterpret_cast<void *>(native_encode_signing_payload)},
@@ -1740,6 +1874,7 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char *>("nativeCapabilities"), const_cast<char *>("(J)[B"), reinterpret_cast<void *>(native_capabilities)},
     {const_cast<char *>("nativeRefreshCapabilities"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_refresh_capabilities)},
     {const_cast<char *>("nativeStart"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_start)},
+    {const_cast<char *>("nativeAcceptRequestSequence"), const_cast<char *>("(JJ)V"), reinterpret_cast<void *>(native_accept_request_sequence)},
     {const_cast<char *>("nativeStop"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_stop)},
     {const_cast<char *>("nativeCancel"), const_cast<char *>("(JJ)Z"), reinterpret_cast<void *>(native_cancel)},
     {const_cast<char *>("nativeGetFinalizedHead"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_finalized_head)},
@@ -1764,9 +1899,14 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char *>("nativeGetFeeSnapshot"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_fee)},
     {const_cast<char *>("nativeGetWalletProfile"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_wallet_profile)},
     {const_cast<char *>("nativeGetWalletState"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_wallet_state)},
+    {const_cast<char *>("nativeInspectWallets"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_inspect_wallets)},
+    {const_cast<char *>("nativeReleaseWalletInspection"), const_cast<char *>("(JJ)V"), reinterpret_cast<void *>(native_release_wallet_inspection)},
+    {const_cast<char *>("nativeChangeDiagnostic"), const_cast<char *>("(JJJI[B)J"), reinterpret_cast<void *>(native_change_diagnostic)},
     {const_cast<char *>("nativeImportColdAccountId"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_import_cold_id)},
     {const_cast<char *>("nativeImportColdAccountSs58"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_import_cold_ss58)},
     {const_cast<char *>("nativeReorderWalletAccounts"), const_cast<char *>("(JJ[BI)J"), reinterpret_cast<void *>(native_reorder_wallet)},
+    {const_cast<char *>("nativeSetActiveWallet"), const_cast<char *>("(JJJ)J"), reinterpret_cast<void *>(native_select_wallet)},
+    {const_cast<char *>("nativeRenameWallet"), const_cast<char *>("(JJJ[B)J"), reinterpret_cast<void *>(native_rename_wallet)},
     {const_cast<char *>("nativeRenameAccount"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_rename_any)},
     {const_cast<char *>("nativeDeleteAccount"), const_cast<char *>("(J[B)J"), reinterpret_cast<void *>(native_delete_any)},
     {const_cast<char *>("nativeOpenPrivateKeyView"), const_cast<char *>("(J[BLorg/citizen/sdk/CitizenSdkPrivateKeyReceiver;)[J"), reinterpret_cast<void *>(native_open_private_key_view)},
@@ -1952,7 +2092,9 @@ void write_balance(WireWriter *writer, const citizensdk_account_balance_info_t &
 
 bool encode_result(citizensdk_result_handle_t result, uint64_t prepared_token,
                    WireWriter *writer,
-                   citizensdk_prepared_wallet_handle_t *prepared, bool *qr_review) {
+                   citizensdk_prepared_wallet_handle_t *prepared, bool *qr_review, bool *inspection) {
+  const bool requested_inspection = inspection != nullptr && *inspection;
+  if (inspection != nullptr) *inspection = false;
   *prepared = 0;
   *qr_review = false;
   auto info = info_value<citizensdk_result_info_t>();
@@ -2142,7 +2284,9 @@ bool encode_result(citizensdk_result_handle_t result, uint64_t prepared_token,
       break;
     }
     case CITIZENSDK_RESULT_WALLET_STATE:
-      valid = write_wallet_state(result, &payload);
+      valid = !requested_inspection || (result > 0 && result <= static_cast<uint64_t>(INT64_MAX));
+      payload.u64(requested_inspection ? result : 0);
+      if (valid) valid = write_wallet_state(result, &payload);
       break;
     case CITIZENSDK_RESULT_SIGNING_OUTCOME:
       valid = write_signing_outcome(result, &payload);
@@ -2285,6 +2429,7 @@ bool encode_result(citizensdk_result_handle_t result, uint64_t prepared_token,
   writer->text(message);
   writer->fixed(payload.data().data(), payload.data().size());
   *qr_review = info.kind == CITIZENSDK_RESULT_QR_REVIEW;
+  if (inspection != nullptr) *inspection = requested_inspection && info.kind == CITIZENSDK_RESULT_WALLET_STATE;
   return true;
 }
 

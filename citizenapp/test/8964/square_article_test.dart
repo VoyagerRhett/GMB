@@ -1,3 +1,4 @@
+import '../support/fake_citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -132,6 +133,7 @@ String? _validate({
 }
 
 void main() {
+  TestCitizenSdkHarness();
   group('articleValidationError', () {
     test('passes with valid title, cover and body', () {
       expect(_validate(), isNull);

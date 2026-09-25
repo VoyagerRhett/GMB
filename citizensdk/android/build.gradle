@@ -9,6 +9,25 @@ if (sdkSourceValue != null && !new File(sdkSourceValue).isAbsolute()) {
 def sdkProductRoot = sdkSourceValue == null
     ? project.projectDir.parentFile.canonicalFile : new File(sdkSourceValue).canonicalFile
 def androidSourceRoot = new File(sdkProductRoot, 'android')
+
+// 独立根工程测试复用调用方同一Flutter工具的官方embedding；宿主插件工程由
+// 官方Flutter Gradle插件提供类路径，不读取此测试输入，也不打包工具原件。
+def standaloneFlutterTests = project == rootProject && sdkSourceValue != null
+def flutterRootValue = standaloneFlutterTests ? System.getenv('CITIZENSDK_FLUTTER_ROOT') : null
+def flutterTestJar = null
+if (flutterRootValue != null) {
+    def flutterRootInput = new File(flutterRootValue)
+    def flutterRoot = flutterRootInput.canonicalFile
+    if (!flutterRootInput.isAbsolute() || flutterRootInput.absoluteFile != flutterRoot ||
+        !flutterRoot.isDirectory() || flutterRoot.toPath().startsWith(sdkProductRoot.toPath())) {
+        throw new GradleException('CitizenSDK Flutter test tool root must be an absolute real directory outside the source tree')
+    }
+    flutterTestJar = new File(flutterRoot, 'bin/cache/artifacts/engine/android-arm/flutter.jar')
+    if (!flutterTestJar.isFile() || flutterTestJar.absoluteFile != flutterTestJar.canonicalFile) {
+        throw new GradleException('CitizenSDK Flutter test tool must contain its official Android embedding')
+    }
+}
+
 def androidBuildValue = System.getenv('CITIZENSDK_ANDROID_BUILD_DIR')
 if (androidBuildValue != null && !androidBuildValue.trim().isEmpty()) {
     def androidBuildInput = file(androidBuildValue)
@@ -129,6 +148,9 @@ kotlin {
 
 def verifyCitizenSdkAndroidNativeInputs = tasks.register('verifyCitizenSdkAndroidNativeInputs') {
     doLast {
+        if (standaloneFlutterTests && flutterTestJar == null) {
+            throw new GradleException('CITIZENSDK_FLUTTER_ROOT is required for standalone Flutter binding tasks')
+        }
         if (!sharedFacadeSource.isDirectory()) {
             throw new GradleException("Missing shared CitizenSDK Android facade: ${sharedFacadeSource}")
         }
@@ -163,6 +185,11 @@ tasks.configureEach { task ->
 }
 
 dependencies {
+    if (flutterTestJar != null) {
+        // 生产只编译引用；JVM测试才把同一原件放入运行类路径。
+        compileOnly files(flutterTestJar)
+        testImplementation files(flutterTestJar)
+    }
     implementation 'androidx.biometric:biometric:1.1.0'
     implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'androidx.fragment:fragment-ktx:1.8.9'

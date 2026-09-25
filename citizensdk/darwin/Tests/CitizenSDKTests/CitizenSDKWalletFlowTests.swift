@@ -4,64 +4,22 @@ import XCTest
 private final class CitizenSDKWalletRegistryProbe: @unchecked Sendable { }
 
 final class CitizenSDKWalletFlowTests: XCTestCase {
-    func testOptionalPasswordUsesSameValidationForBothApplePresenters() {
-        for request in [CitizenSDKWalletFlowRequest.create(wordCount: 12), .importWallet, .addAccounts(indices: [1])] {
-            XCTAssertNoThrow(try CitizenSDKWalletInput.validatePassword(""))
-            XCTAssertFalse(CitizenSDKWalletInput.requiresRiskConfirmation(password: "", request: request))
-        }
-        XCTAssertThrowsError(try CitizenSDKWalletInput.validatePassword("x"))
-        XCTAssertNoThrow(try CitizenSDKWalletInput.validatePassword("abcdef"))
-        XCTAssertTrue(CitizenSDKWalletInput.requiresRiskConfirmation(password: "abcdef", request: .create(wordCount: 24)))
-        XCTAssertTrue(CitizenSDKWalletInput.requiresRiskConfirmation(password: "abcdef", request: .importWallet))
-        XCTAssertFalse(CitizenSDKWalletInput.requiresRiskConfirmation(password: "abcdef", request: .addAccounts(indices: [1])))
-    }
-
-    func testRequestValidationRunsBeforePresentation() {
-        XCTAssertNoThrow(try citizenSDKValidateWalletFlowRequest(.create(wordCount: 12)))
-        XCTAssertNoThrow(try citizenSDKValidateWalletFlowRequest(.create(wordCount: 24)))
-        XCTAssertNoThrow(try citizenSDKValidateWalletFlowRequest(.create(wordCount: 18)))
-        XCTAssertThrowsError(try citizenSDKValidateWalletFlowRequest(.create(wordCount: 15)))
-        XCTAssertThrowsError(try citizenSDKValidateWalletFlowRequest(.create(wordCount: 21)))
-        XCTAssertThrowsError(try citizenSDKValidateWalletFlowRequest(.addAccounts(indices: [])))
-        XCTAssertThrowsError(try citizenSDKValidateWalletFlowRequest(.addAccounts(indices: [1, 1])))
-        XCTAssertNoThrow(try citizenSDKValidateWalletFlowRequest(.addAccounts(indices: [1, 1_989])))
-    }
-
-    func testCancellationDoesNotRelabelIrreversibleFailure() throws {
-        let failure = CitizenSDKError(.storage, "fixture failure")
-        let irreversible = try XCTUnwrap(citizenSDKCancellationResult(
-            cancelRequested: true, irreversible: true, error: failure
-        ))
-        if case let .failed(error) = irreversible {
-            XCTAssertEqual(error, failure)
-        } else {
-            XCTFail("irreversible failure must remain failed")
-        }
-
-        let reversible = try XCTUnwrap(citizenSDKCancellationResult(
-            cancelRequested: true, irreversible: false, error: failure
-        ))
-        if case .cancelled = reversible { } else { XCTFail("reversible work may cancel") }
-        XCTAssertNil(citizenSDKCancellationResult(cancelRequested: false,
-                                                   irreversible: true, error: failure))
-    }
-
-    func testPreparedCancellationRequiresConfirmedRelease() {
-        if case .cancelled = citizenSDKPreparedCancellationResult(release: { }) { }
-        else { XCTFail("successful release must complete cancellation") }
-
-        let result = citizenSDKPreparedCancellationResult {
-            throw CitizenSDKError(.storage, "release fixture failed")
-        }
-        if case let .failed(error) = result {
-            XCTAssertEqual(error.code, .storage)
-        } else {
-            XCTFail("failed release must not be reported as cancelled")
-        }
+    func testIndependentResourceTicketsDoNotRecreateOneWindowSlot() throws {
+        let registry = CitizenSDKCloseGate()
+        let sdk = CitizenSDKWalletRegistryProbe()
+        registry.registerOpen(sdk)
+        let first = try registry.reserve(sdk), second = try registry.reserve(sdk)
+        XCTAssertNotEqual(first, second)
+        registry.finish(sdk, token: first)
+        XCTAssertEqual(registry.status(sdk), .owned)
+        XCTAssertThrowsError(try registry.beginClose(sdk))
+        registry.finish(sdk, token: second)
+        XCTAssertEqual(registry.status(sdk), .open)
+        registry.forget(sdk)
     }
 
     func testWalletAndCloseAdmissionAreOneAtomicStateMachine() throws {
-        let registry = CitizenSDKWalletFlowRegistry()
+        let registry = CitizenSDKCloseGate()
         let sdk = CitizenSDKWalletRegistryProbe()
         registry.registerOpen(sdk)
         XCTAssertEqual(registry.status(sdk), .open)
@@ -69,7 +27,7 @@ final class CitizenSDKWalletFlowTests: XCTestCase {
         let wallet = try registry.reserve(sdk)
         XCTAssertEqual(registry.status(sdk), .owned)
         registry.finish(sdk, token: UUID())
-        XCTAssertEqual(registry.status(sdk), .owned, "a stale UI token must not release ownership")
+        XCTAssertEqual(registry.status(sdk), .owned, "a stale resource token must not release ownership")
         XCTAssertThrowsError(try registry.beginClose(sdk)) { error in
             XCTAssertEqual((error as? CitizenSDKError)?.code, .busy)
         }
@@ -95,7 +53,7 @@ final class CitizenSDKWalletFlowTests: XCTestCase {
     }
 
     func testCloseFailureRollsBackOnlyBeforeABITeardownStarts() throws {
-        let registry = CitizenSDKWalletFlowRegistry()
+        let registry = CitizenSDKCloseGate()
         let sdk = CitizenSDKWalletRegistryProbe()
         registry.registerOpen(sdk)
 
@@ -123,7 +81,7 @@ final class CitizenSDKWalletFlowTests: XCTestCase {
     }
 
     func testSupervisedPreTeardownFailureStaysClosingBetweenRetries() throws {
-        let registry = CitizenSDKWalletFlowRegistry()
+        let registry = CitizenSDKCloseGate()
         let sdk = CitizenSDKWalletRegistryProbe()
         registry.registerOpen(sdk)
 
@@ -141,7 +99,7 @@ final class CitizenSDKWalletFlowTests: XCTestCase {
     }
 
     func testConcurrentWalletReserveCannotEnterClosePreflightWindow() throws {
-        let registry = CitizenSDKWalletFlowRegistry()
+        let registry = CitizenSDKCloseGate()
         let sdk = CitizenSDKWalletRegistryProbe()
         registry.registerOpen(sdk)
         let closeReserved = DispatchSemaphore(value: 0)

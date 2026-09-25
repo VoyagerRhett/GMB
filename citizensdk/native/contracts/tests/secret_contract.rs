@@ -2,6 +2,8 @@
 
 use std::{
     future::Future,
+    collections::HashSet,
+    sync::Mutex,
     task::{Context, Poll, Waker},
 };
 
@@ -83,9 +85,22 @@ impl ChainSigner for FakeSigner {
     }
 }
 
-struct FakeVault;
+#[derive(Default)]
+struct FakeVault {
+    keys: Mutex<HashSet<(u32, VaultGeneration)>>,
+    query_error: Mutex<Option<citizen_sdk_contracts::ContractErrorCode>>,
+}
 
 impl SecretVault for FakeVault {
+    fn has_any_wallet_key(&self, wallet_index: u32) -> ContractFuture<'_, bool> {
+        Box::pin(async move {
+            if let Some(code) = *self.query_error.lock().unwrap_or_else(|_| panic!("合成测试锁不可用")) {
+                return Err(citizen_sdk_contracts::ContractError::new(code, "合成金库查询失败"));
+            }
+            Ok(self.keys.lock().unwrap_or_else(|_| panic!("合成测试锁不可用")).iter().any(|(index, _)| *index == wallet_index))
+        })
+    }
+
     fn availability(&self) -> ContractFuture<'_, VaultAvailability> {
         Box::pin(async { Ok(VaultAvailability::Available) })
     }
@@ -93,10 +108,11 @@ impl SecretVault for FakeVault {
     fn seal(
         &self,
         _provisioning_operation_id: [u8; 16],
-        _secret_ref: SecretRef,
+        secret_ref: SecretRef,
         secret: SecretBuffer,
     ) -> ContractFuture<'_, EncryptedSecretEnvelope> {
         Box::pin(async move {
+            self.keys.lock().unwrap_or_else(|_| panic!("合成测试锁不可用")).insert((secret_ref.wallet_index(), secret_ref.generation()));
             let ciphertext =
                 secret.with_secret(|bytes| bytes.iter().map(|byte| *byte ^ 0xaa).collect());
             EncryptedSecretEnvelope::try_new(1, Hash32Bytes::from_bytes([3; 32]), ciphertext)
@@ -120,19 +136,19 @@ impl SecretVault for FakeVault {
 
     fn has_wallet_key(
         &self,
-        _wallet_index: u32,
-        _generation: VaultGeneration,
+        wallet_index: u32,
+        generation: VaultGeneration,
     ) -> ContractFuture<'_, bool> {
-        Box::pin(async { Ok(true) })
+        Box::pin(async move { Ok(self.keys.lock().unwrap_or_else(|_| panic!("合成测试锁不可用")).contains(&(wallet_index, generation))) })
     }
 
     fn delete_wallet_key(
         &self,
         _cleanup_operation_id: [u8; 16],
-        _wallet_index: u32,
-        _generation: VaultGeneration,
+        wallet_index: u32,
+        generation: VaultGeneration,
     ) -> ContractFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+        Box::pin(async move { self.keys.lock().unwrap_or_else(|_| panic!("合成测试锁不可用")).remove(&(wallet_index, generation)); Ok(()) })
     }
 }
 
@@ -149,7 +165,7 @@ fn secret_debug_is_redacted_and_direct_access_is_scoped_to_rust_closure() {
 fn signer_and_vault_are_distinct_object_safe_contracts() {
     assert_eq!(SR25519_SIGNING_CONTEXT, b"substrate");
     let signer: Box<dyn ChainSigner> = Box::new(FakeSigner);
-    let vault: Box<dyn SecretVault> = Box::new(FakeVault);
+    let vault: Box<dyn SecretVault> = Box::new(FakeVault::default());
     let generation = VaultGeneration::from_bytes([1; 16]);
     let secret_ref = SecretRef::account_mini_secret(
         0,
@@ -172,4 +188,26 @@ fn signer_and_vault_are_distinct_object_safe_contracts() {
         b"payload".to_vec(),
         signature,
     ))));
+}
+
+
+#[test]
+fn wallet_key_presence_covers_all_generations_and_propagates_query_failure() {
+    use citizen_sdk_contracts::ContractErrorCode;
+    let vault = FakeVault::default();
+    let first = VaultGeneration::from_bytes([1; 16]);
+    let second = VaultGeneration::from_bytes([2; 16]);
+    assert!(!value_or_panic(block_on(vault.has_any_wallet_key(7))));
+    vault.keys.lock().unwrap_or_else(|_| panic!("合成测试锁不可用")).extend([(7, first), (7, second), (u32::MAX, first)]);
+    assert!(value_or_panic(block_on(vault.has_any_wallet_key(7))));
+    assert!(!value_or_panic(block_on(vault.has_any_wallet_key(8))));
+    value_or_panic(block_on(vault.delete_wallet_key([3; 16], 7, first)));
+    assert!(value_or_panic(block_on(vault.has_any_wallet_key(7))));
+    value_or_panic(block_on(vault.delete_wallet_key([4; 16], 7, second)));
+    assert!(!value_or_panic(block_on(vault.has_any_wallet_key(7))));
+    assert!(value_or_panic(block_on(vault.has_any_wallet_key(u32::MAX))));
+    for code in [ContractErrorCode::Unsupported, ContractErrorCode::PermissionDenied, ContractErrorCode::AuthenticationCancelled] {
+        *vault.query_error.lock().unwrap_or_else(|_| panic!("合成测试锁不可用")) = Some(code);
+        assert!(block_on(vault.has_any_wallet_key(7)).is_err());
+    }
 }

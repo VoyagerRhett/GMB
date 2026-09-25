@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:citizen_sdk/citizen_sdk.dart';
@@ -11,8 +12,7 @@ final CitizenBlockRef testFinalizedBlock = CitizenBlockRef(
   finality: CitizenBlockFinality.finalized,
 );
 
-/// Keeps unexercised interface members fail-closed while allowing each test
-/// double to implement only the public calls relevant to the consumer matrix.
+/// 合成公开端口夹具：未配置调用失败；不运行真实钱包、链或设备认证。
 abstract class StrictPublicPort {
   @override
   dynamic noSuchMethod(Invocation invocation) => throw UnsupportedError(
@@ -36,13 +36,32 @@ final class RecordingChain extends StrictPublicPort implements CitizenChain {
   }
 }
 
+int _operationSequence = 0;
+CitizenSdkOperation<T> recordedOperation<T>(FutureOr<T> Function() action) => CitizenSdkOperation(
+  operationId: (++_operationSequence).toString(), result: Future<T>.sync(action), cancel: () async => false,
+);
+
+final class RecordingReview implements CitizenQrReview {
+  RecordingReview(this.document);
+  @override final CitizenQrDocument document;
+  bool released = false;
+  @override String get requestId => document.requestId!;
+  @override String get signerAccountId => document.signerAccountId!;
+  @override int get expiresAt => document.expiresAt!;
+  @override String get palletName => 'synthetic';
+  @override String get callName => 'test';
+  @override String get callArguments => '{}';
+  @override Future<void> release() async { released = true; }
+}
+
 final class RecordingWallet extends StrictPublicPort implements CitizenSdkWallet {
   @override
-  Future<CitizenWalletState> getState() async => CitizenWalletState(
+  CitizenSdkOperation<CitizenWalletState> getState() => recordedOperation(() => CitizenWalletState(
     revision: BigInt.from(3),
     hotProfile: null,
     accounts: const <CitizenWalletStateAccount>[],
-  );
+    initializationState: CitizenWalletInitializationState.empty, cleanupPending: false,
+  ));
 }
 
 final class RecordingSigning extends StrictPublicPort
@@ -53,29 +72,41 @@ final class RecordingSigning extends StrictPublicPort
   final List<CitizenSigningIntent> intents = <CitizenSigningIntent>[];
 
   @override
-  Future<CitizenSigningOutcome> begin(CitizenSigningIntent intent) async {
+  CitizenSdkOperation<CitizenSigningOutcome> begin(CitizenSigningIntent intent) => recordedOperation(() {
     intents.add(intent);
     return CitizenSigningCompleted(
       accountId: intent.accountId,
       payloadHash: '0x${'11' * 32}',
       signature: Uint8List(64),
     );
-  }
+  });
+
+  final reviews = <RecordingReview>[];
+  int signCalls = 0;
+  @override
+  CitizenSdkOperation<CitizenQrReview> reviewQrRequest(String request) => recordedOperation(() async {
+    final review = RecordingReview(await RecordingQr().parse(request));
+    reviews.add(review);
+    return review;
+  });
 
   @override
-  Future<CitizenQrSigned> signQrRequest(String signRequest) async =>
-      CitizenQrSigned(
+  CitizenSdkOperation<CitizenQrSigned> signQrRequest(CitizenQrReview review) => recordedOperation(() {
+    if (review is! RecordingReview || review.released || !reviews.contains(review)) throw StateError('review is not owned');
+    signCalls++;
+    return CitizenQrSigned(
         canonicalText: 'QR_V1 response',
         qrImage: CitizenQrImage(
           width: 2,
           height: 2,
           luminance: Uint8List.fromList(<int>[0, 255, 255, 0]),
         ),
-        requestId: mismatchedBinding ? 'other-request' : 'request-1',
+        requestId: mismatchedBinding ? 'other-request' : 'request-00000001',
         signerAccountId: testAccountId,
         signature: Uint8List(64),
-        signRequest: signRequest,
+        signRequest: review.document.canonicalText,
       );
+  });
 }
 
 final class RecordingQr extends StrictPublicPort implements CitizenQr {
@@ -100,10 +131,11 @@ final class RecordingQr extends StrictPublicPort implements CitizenQr {
     if (text == 'QR_V1 request') {
       return CitizenQrDocument(
         kind: CitizenQrKind.signRequest,
+        scanPurposeMask: 1 << (CitizenQrScanPurpose.signingRequest.value - 1),
         canonicalText: text,
-        requestId: 'request-1',
+        requestId: 'request-00000001',
         expiresAt: 4102444800,
-        action: 0,
+        action: 0x0400,
         signerAccountId: testAccountId,
         reviewPayload: Uint8List.fromList(<int>[1, 2, 3]),
       );
@@ -113,8 +145,9 @@ final class RecordingQr extends StrictPublicPort implements CitizenQr {
       if (mismatchedResponseSignature) signature[0] = 1;
       return CitizenQrDocument(
         kind: CitizenQrKind.signResponse,
+        scanPurposeMask: 1 << (CitizenQrScanPurpose.externalSignature.value - 1),
         canonicalText: text,
-        requestId: 'request-1',
+        requestId: 'request-00000001',
         expiresAt: 4102444800,
         signerAccountId: testAccountId,
         signature: signature,

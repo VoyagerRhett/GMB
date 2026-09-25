@@ -4,36 +4,25 @@ import XCTest
 @testable import CitizenSDKFlutter
 
 final class CitizenSDKFlutterSecretBoundaryTests: XCTestCase {
-    func testImportTupleHasNoMnemonicOrPasswordPosition() throws {
-        let valid: [Any?] = [NSNumber(value: 1), "session", NSNumber(value: 1)]
-        if case let .empty(method, _, _) = try CitizenSdkFlutterCodec.decode(
-            method: "importWallet", arguments: valid
-        ) {
-            XCTAssertEqual(method, "importWallet")
-        } else {
-            XCTFail("import must remain a secret-free UI request")
+    func testExplicitImportAndAppendInputsStayBoundedAndNeverBecomeErrorText() throws {
+        let input = "synthetic-input"
+        guard case let .walletInput(_, _, _, text, password, _, _) = try CitizenSdkFlutterCodec.decode(
+            method: "importWallet", arguments: [2, "s", 1, input, ""]) else { return XCTFail("import request") }
+        XCTAssertEqual(text, input); XCTAssertEqual(password, "")
+        for method in ["importWallet", "addNextWalletAccount"] {
+            XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: method, arguments: [2, "s", 1]))
+            XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: method, arguments: [2, "s", 1, String(repeating: "x", count: 1025), ""])) { error in
+                XCTAssertFalse(String(describing: error).contains(String(repeating: "x", count: 64)))
+            }
         }
-
-        XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(
-            method: "importWallet", arguments: valid + ["mnemonic", "password"]
-        ))
     }
 
-    func testCreateAndAddTuplesContainOnlySelections() throws {
-        if case let .create(_, _, words) = try CitizenSdkFlutterCodec.decode(
-            method: "createWallet",
-            arguments: [NSNumber(value: 1), "session", NSNumber(value: 2), NSNumber(value: 12)]
-        ) {
-            XCTAssertEqual(words, 12)
-        } else { XCTFail("create tuple drifted") }
-
-        if case let .addAccounts(_, _, indices) = try CitizenSdkFlutterCodec.decode(
-            method: "addWalletAccounts",
-            arguments: [NSNumber(value: 1), "session", NSNumber(value: 3),
-                        [NSNumber(value: 1), NSNumber(value: 2)]]
-        ) {
-            XCTAssertEqual(indices, [1, 2])
-        } else { XCTFail("add-account tuple drifted") }
+    func testPreparedAndPrivateResourcesNeverAcceptRawCoreHandles() {
+        for method in ["copyRecoveryPhrase", "revealPrivateKey", "closePrivateKey"] {
+            XCTAssertNoThrow(try CitizenSdkFlutterCodec.decode(method: method, arguments: [2, "s", 1, "resource-owned"]))
+            XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: method, arguments: [2, "s", 1, 7]))
+            XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: method, arguments: [2, "s", 1, "resource-owned", true]))
+        }
     }
 
     func testErrorTupleContainsOnlyStablePublicFields() {

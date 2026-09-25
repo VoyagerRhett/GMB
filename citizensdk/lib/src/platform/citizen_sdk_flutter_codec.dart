@@ -73,6 +73,11 @@ final class CitizenSdkFlutterCodec {
     'getAccountNonce',
     'getFeeSnapshot',
     'getWalletState',
+    'inspectWallets',
+    'releaseWalletInspection',
+    'repairHotWallet',
+    'renameDiagnosticWallet',
+    'deleteDiagnosticWallet',
     'validateWalletPassword',
     'validateWalletMnemonic',
     'walletWordSuggestions',
@@ -92,6 +97,8 @@ final class CitizenSdkFlutterCodec {
     'importColdAccountId',
     'importColdAccountSs58',
     'reorderWalletAccountsWithoutDefaultChange',
+    'setActiveWallet',
+    'renameWallet',
     'renameAccount',
     'deleteAccount',
     'importWallet',
@@ -656,8 +663,11 @@ final class CitizenSdkFlutterCodec {
 
   CitizenWalletProfile? decodeWalletProfile(Object? raw) {
     if (raw == null) return null;
-    final tuple = _tuple(raw, 6, 'wallet profile');
+    final tuple = _tuple(raw, 7, 'wallet profile');
     final accountsRaw = _list(tuple[5], 'wallet accounts');
+    if (accountsRaw.length > 1990) throw _decodeFailure('钱包账户超过1990项');
+    final walletName = _string(tuple[6], 'profile.walletName');
+    if (!_validAccountName(walletName)) throw _decodeFailure('钱包名称无效');
     final activeAccountId = _hex32(tuple[4], 'profile.activeAccountId');
     final accounts = <CitizenAccount>[];
     for (var index = 0; index < accountsRaw.length; index++) {
@@ -704,6 +714,7 @@ final class CitizenSdkFlutterCodec {
     final originText = _string(tuple[1], 'profile.origin');
     return CitizenWalletProfile(
       walletIndex: walletIndex,
+      walletName: walletName,
       origin: CitizenWalletOrigin.values.firstWhere(
         (candidate) => candidate.name == originText,
         orElse: () => throw _decodeFailure('未知 wallet origin：$originText'),
@@ -716,7 +727,7 @@ final class CitizenSdkFlutterCodec {
   }
 
   CitizenWalletState decodeWalletState(Object? raw) {
-    final tuple = _tuple(raw, 5, 'wallet state');
+    final tuple = _tuple(raw, 7, 'wallet state');
     final revision = _u64Decimal(tuple[0], 'walletState.revision');
     final hotProfile = decodeWalletProfile(tuple[1]);
     final accountsRaw = _list(tuple[2], 'walletState.accounts');
@@ -792,17 +803,68 @@ final class CitizenSdkFlutterCodec {
         !projectedHotIds.containsAll(hotIds)) {
       throw _decodeFailure('统一钱包目录的账户闭集不一致');
     }
+    final diagnosticRaw = _list(tuple[6], 'walletState.diagnostics');
+    if (diagnosticRaw.length > 1991) throw _decodeFailure('钱包诊断数量越界');
+    final diagnostics = <CitizenWalletDiagnostic>[];
+    final walletIndices = accounts.map((account) => account.walletIndex).toSet();
+    final diagnosticIds = <String>{};
+    for (final raw in diagnosticRaw) {
+      final item = _tuple(raw, 7, 'wallet diagnostic');
+      final index = _u32Int(item[0], 'diagnostic.walletIndex');
+      final name = _string(item[1], 'diagnostic.walletName');
+      final id = _hex32(item[2], 'diagnostic.accountId');
+      final address = item[3] == null ? null : _string(item[3], 'diagnostic.ss58Address');
+      final reason = _u32Int(item[4], 'diagnostic.reason');
+      if (!_validAccountName(name) || (address != null && utf8.encode(address).length > 128) ||
+          reason < 1 || reason > 3 || !walletIndices.add(index) ||
+          accountIds.contains(id) || !diagnosticIds.add(id)) {
+        throw _decodeFailure('钱包诊断事实不一致');
+      }
+      final mode = switch (item[5]) {
+        null => null,
+        'hot' => CitizenWalletSignMode.hot,
+        'cold' => CitizenWalletSignMode.cold,
+        _ => throw _decodeFailure('诊断原模式无效'),
+      };
+      CitizenWalletCleanupTargets? cleanupTargets;
+      if (item[6] != null) {
+        final targets = _tuple(item[6], 2, 'diagnostic.cleanupTargets');
+        final ids = _list(targets[0], 'cleanup.accountIds').map((value) => _hex32(value, 'cleanup.accountId')).toList();
+        if (ids.isEmpty || ids.length > 1990 || ids.toSet().length != ids.length ||
+            !Iterable<int>.generate(ids.length - 1).every((i) => ids[i].compareTo(ids[i + 1]) < 0)) {
+          throw _decodeFailure('清理账户目标无效');
+        }
+        cleanupTargets = CitizenWalletCleanupTargets(accountIds: ids, deleteWalletWideKey: _boolean(targets[1], 'cleanup.deleteWalletWideKey'));
+      }
+      diagnostics.add(CitizenWalletDiagnostic(walletIndex: index, walletName: name, accountId: id,
+        ss58Address: address, diagnosticReason: CitizenWalletDiagnosticReason.values[reason - 1],
+        signMode: mode, cleanupTargets: cleanupTargets));
+    }
     final state = _u32Int(tuple[3], 'walletState.initializationState');
     final cleanup = _boolean(tuple[4], 'walletState.cleanupPending');
-    if (state > 2 || (state == 1) != accounts.isNotEmpty || (state == 0 && cleanup)) {
+    if (state > 2 || (state == 1) != (accounts.isNotEmpty || diagnostics.isNotEmpty) || (state == 0 && cleanup)) {
       throw _decodeFailure('钱包初始化/清理事实与目录不一致');
+    }
+    final activeWalletIndex = tuple[5] == null ? null : _u32Int(tuple[5], 'walletState.activeWalletIndex');
+    if (activeWalletIndex != null && !walletIndices.contains(activeWalletIndex)) {
+      throw _decodeFailure('付款钱包索引不在当前目录');
+    }
+    // 同一修订的热账户投影必须逐字段一致，不能只核账户集合。
+    for (final account in accounts.where((account) => account.signMode == CitizenWalletSignMode.hot)) {
+      final original = hotProfile?.accountById(account.accountId);
+      if (original == null || original.index != account.accountIndex || original.name != account.name ||
+          original.ss58Address != account.ss58Address || original.createdAtMillis != account.createdAtMillis) {
+        throw _decodeFailure('热账户投影与同修订profile不一致');
+      }
     }
     return CitizenWalletState(
       revision: revision,
+      activeWalletIndex: activeWalletIndex,
       hotProfile: hotProfile,
       accounts: accounts,
       initializationState: CitizenWalletInitializationState.values[state],
       cleanupPending: cleanup,
+      diagnostics: diagnostics,
     );
   }
 
@@ -1127,6 +1189,7 @@ final class CitizenSdkFlutterCodec {
       case 'getFeeSnapshot':
       case 'getWalletState':
       case 'deleteWallet':
+      case 'inspectWallets':
       case 'signAndDeleteWallet':
       case 'reconcileWalletCleanup':
         _expectLength(fields, 0, '$method fields');
@@ -1280,6 +1343,7 @@ final class CitizenSdkFlutterCodec {
       case 'closeQrCapture':
       case 'pauseQrCapture':
       case 'resumeQrCapture':
+      case 'releaseWalletInspection':
         _expectLength(fields, 1, '$method fields');
         _resource(fields[0]);
         return;
@@ -1303,6 +1367,25 @@ final class CitizenSdkFlutterCodec {
         _qrText(fields[0], '$method.code');
         final codeName = _string(fields[1], '$method.name');
         if (codeName.isNotEmpty && !_validAccountName(codeName)) throw _decodeFailure('账户名称无效');
+        return;
+      case 'repairHotWallet':
+      case 'deleteDiagnosticWallet':
+      case 'renameDiagnosticWallet':
+        _expectLength(fields, method == 'renameDiagnosticWallet' ? 3 : 2, '$method fields');
+        _resource(fields[0]);
+        _u32Int(fields[1], '$method.walletIndex');
+        if (method == 'renameDiagnosticWallet' && !_validAccountName(_string(fields[2], '$method.name'))) {
+          throw _decodeFailure('钱包名称无效');
+        }
+        return;
+      case 'setActiveWallet':
+      case 'renameWallet':
+        _expectLength(fields, method == 'setActiveWallet' ? 2 : 3, '$method fields');
+        _u64Decimal(fields[0], '$method.expectedRevision');
+        _u32Int(fields[1], '$method.walletIndex');
+        if (method == 'renameWallet' && !_validAccountName(_string(fields[2], '$method.name'))) {
+          throw _decodeFailure('钱包名称无效');
+        }
         return;
       case 'renameAccount':
         _expectLength(fields, 2, 'renameAccount fields');
@@ -1537,6 +1620,7 @@ final class CitizenSdkFlutterCodec {
       case 'pauseQrCapture':
       case 'resumeQrCapture':
       case 'setQrCaptureTorch':
+      case 'releaseWalletInspection':
         _expectLength(value, 0, '$method value');
         return;
       case 'openQrCapture':
@@ -1699,9 +1783,14 @@ final class CitizenSdkFlutterCodec {
         return;
       case 'getWalletState':
       case 'importColdAccountCode':
+      case 'repairHotWallet':
+      case 'deleteDiagnosticWallet':
+      case 'renameDiagnosticWallet':
       case 'importColdAccountId':
       case 'importColdAccountSs58':
       case 'reorderWalletAccountsWithoutDefaultChange':
+      case 'setActiveWallet':
+      case 'renameWallet':
       case 'renameAccount':
       case 'deleteAccount':
         _expectLength(value, 1, '$method value');
@@ -1770,6 +1859,11 @@ final class CitizenSdkFlutterCodec {
         _expectLength(value, 1, '$method value');
         decodeQrAuthorization(value[0]);
         return;
+      case 'inspectWallets':
+        _expectLength(value, 2, '$method value');
+        _resource(value[0]);
+        decodeWalletState(value[1]);
+        return;
       case 'reviewQrRequest':
         _expectLength(value, 2, '$method value');
         _resource(value[0]);
@@ -1829,7 +1923,11 @@ final class CitizenSdkFlutterCodec {
     final reason = _nonNegativeInt(value['reason'], 'authorization.reason');
     if (reason >= CitizenQrAuthorizationReason.values.length) throw _decodeFailure('未知授权准备原因');
     if (reason != 0) {
-      if (keys.where((key) => key != 'reason').any((key) => value[key] != null)) {
+      // 校验后的Map直接逐字段读取，不捕获try内赋值的Object?破坏类型提升。
+      for (final key in keys) {
+        if (key == 'reason' || value[key] == null) {
+          continue;
+        }
         throw _decodeFailure('无效授权准备不得携带成功事实');
       }
       return CitizenQrAuthorization(reason: CitizenQrAuthorizationReason.values[reason]);

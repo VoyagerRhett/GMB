@@ -7,6 +7,8 @@ import 'package:citizenapp/security/account_data_key_provision.dart';
 import 'package:citizenapp/security/device_data_key_vault.dart';
 import 'package:citizenapp/security/device_subkey.dart';
 import 'package:citizenapp/security/local_data_key.dart';
+import 'package:citizenapp/transaction/history/local_tx_store.dart';
+import 'package:citizenapp/transaction/offchain-transaction/services/clearing_bank_prefs.dart';
 
 /// CitizenApp 用户／设备安全操作错误；SDK 错误仍保留自己的错误码和阶段。
 class AccountSecurityException implements Exception {
@@ -447,16 +449,16 @@ interface class AccountSecurityService {
 
   /// 在 SDK 钱包事实删除前保存 App 设备材料的精确清理意图。
   Future<void> prepareAccountCleanup({
-    required List<CitizenWalletStateAccount> accounts,
+    required List<String> accountIds,
+    required Set<int> walletIndexes,
     required bool deleteWalletWideKey,
   }) async {
-    if (accounts.isEmpty) return;
-    final walletIndexes = accounts.map((account) => account.walletIndex).toSet();
+    if (accountIds.isEmpty) return;
     if (deleteWalletWideKey && walletIndexes.length != 1) {
       throw const AccountSecurityException('整钱包清理必须只包含一个 wallet_index');
     }
     final value = jsonEncode(<String, Object>{
-      'account_ids': accounts.map((account) => account.accountId).toList(),
+      'account_ids': accountIds,
       'wallet_indices': walletIndexes.toList()..sort(),
       'delete_wallet_wide_key': deleteWalletWideKey,
     });
@@ -467,7 +469,10 @@ interface class AccountSecurityService {
     await _blobStore.write(_pendingCleanupKey, value);
   }
 
-  /// SDK 删除成功后清理 App 自己的 CID、P-256 与设备用途钥；启动时也调用本入口恢复。
+  /// 原清理提示只读既有意图的存在事实，不在页面刷新中执行或撤销清理。
+  Future<bool> get hasPendingAccountCleanup async => await _blobStore.read(_pendingCleanupKey) != null;
+
+  /// SDK安全清理完成后调用原关联清理能力；全部成功才清除同一持久意图。
   Future<void> reconcileAccountCleanup() async {
     final raw = await _blobStore.read(_pendingCleanupKey);
     if (raw == null || raw.isEmpty) return;
@@ -485,10 +490,13 @@ interface class AccountSecurityService {
     }
     final accountIds = ids.cast<String>().toSet();
     final state = await _wallet.getState().result;
-    if (state.accounts.any((account) => accountIds.contains(account.accountId))) {
-      await _blobStore.delete(_pendingCleanupKey);
-      return;
+    if (state.accounts.any((account) => accountIds.contains(account.accountId)) ||
+        state.diagnostics.any((record) => indexes.contains(record.walletIndex))) {
+      // 存在事实时保留意图；普通刷新不能撤销另一条已接纳删除的准备记录。
+      throw const AccountSecurityException('钱包事实仍存在，尚不能执行后续清理');
     }
+    // 诊断仍在即事实未删；Core安全清理未完成时保留原意图，不能先清关联设备材料。
+    if (state.cleanupPending) throw const AccountSecurityException('钱包安全清理尚未完成');
     final bindings = await _bindingStore.readAll();
     for (final binding in bindings.where(
       (binding) => accountIds.contains(binding.accountId),
@@ -500,6 +508,11 @@ interface class AccountSecurityService {
     for (final index in indexes.cast<int>()) {
       await _removeDeviceKeyMaterialIndexEntries(index, accountIds);
       if (deleteWide) await _deviceDataKeyVault.delete(index);
+    }
+    // 原历史/清算行清理仍调用各自唯一实现；全部成功后才归还同一持久意图。
+    for (final accountId in accountIds) {
+      await LocalTxStore.deleteWalletLocalHistory(accountId);
+      await ClearingBankPrefs.clear(accountId);
     }
     await _blobStore.delete(_pendingCleanupKey);
     if (await _blobStore.read(_pendingCleanupKey) != null) {

@@ -48,6 +48,7 @@ internal class CitizenSdkNative private constructor(
     }
     fun refreshCapabilities(): Long = call { nativeRefreshCapabilities(it) }
     fun start(): Long = call { nativeStart(it) }
+    fun acceptRequestSequence(sequence: Long) = call { nativeAcceptRequestSequence(it, sequence) }
     fun stop(): Long = call { nativeStop(it) }
     fun cancel(coreRequestId: Long): Boolean = call { nativeCancel(it, coreRequestId) }
     fun getFinalizedHead(): Long = call { nativeGetFinalizedHead(it) }
@@ -110,6 +111,12 @@ internal class CitizenSdkNative private constructor(
     fun getFeeSnapshot(): Long = call { nativeGetFeeSnapshot(it) }
     fun getWalletProfile(): Long = call { nativeGetWalletProfile(it) }
     fun getWalletState(): Long = call { nativeGetWalletState(it) }
+    fun inspectWallets(): Long = call { nativeInspectWallets(it) }
+    fun changeDiagnostic(token: Long, index: Long, action: Int, name: String?): Long =
+        call { nativeChangeDiagnostic(it, token, index, action, name?.toByteArray(Charsets.UTF_8)) }
+    fun releaseWalletInspection(token: Long) {
+        if (!calls.isClosed()) call { nativeReleaseWalletInspection(it, token) }
+    }
     fun importColdAccountId(accountId: ByteArray, name: String): Long =
         call { nativeImportColdAccountId(it, accountId, name.toByteArray(Charsets.UTF_8)) }
     fun importColdAccountSs58(address: String, name: String): Long = call {
@@ -117,6 +124,9 @@ internal class CitizenSdkNative private constructor(
     }
     fun reorderWalletAccounts(expectedRevision: Long, accountIds: Array<ByteArray>): Long =
         call { nativeReorderWalletAccounts(it, expectedRevision, flattenAccounts(accountIds), accountIds.size) }
+    fun setActiveWallet(revision: Long, walletIndex: Long): Long = call { nativeSetActiveWallet(it, revision, walletIndex) }
+    fun renameWallet(revision: Long, walletIndex: Long, name: String): Long =
+        call { nativeRenameWallet(it, revision, walletIndex, name.toByteArray(Charsets.UTF_8)) }
     fun renameAnyAccount(accountId: ByteArray, name: String): Long =
         call { nativeRenameAccount(it, accountId, name.toByteArray(Charsets.UTF_8)) }
     fun deleteAnyAccount(accountId: ByteArray): Long = call { nativeDeleteAccount(it, accountId) }
@@ -383,6 +393,7 @@ internal class CitizenSdkNative private constructor(
     private external fun nativeCapabilities(bridge: Long): ByteArray
     private external fun nativeRefreshCapabilities(bridge: Long): Long
     private external fun nativeStart(bridge: Long): Long
+    private external fun nativeAcceptRequestSequence(bridge: Long, sequence: Long)
     private external fun nativeStop(bridge: Long): Long
     private external fun nativeCancel(bridge: Long, coreRequestId: Long): Boolean
     private external fun nativeGetFinalizedHead(bridge: Long): Long
@@ -407,9 +418,14 @@ internal class CitizenSdkNative private constructor(
     private external fun nativeGetFeeSnapshot(bridge: Long): Long
     private external fun nativeGetWalletProfile(bridge: Long): Long
     private external fun nativeGetWalletState(bridge: Long): Long
+    private external fun nativeInspectWallets(bridge: Long): Long
+    private external fun nativeChangeDiagnostic(bridge: Long, token: Long, index: Long, action: Int, name: ByteArray?): Long
+    private external fun nativeReleaseWalletInspection(bridge: Long, token: Long)
     private external fun nativeImportColdAccountId(bridge: Long, accountId: ByteArray, name: ByteArray): Long
     private external fun nativeImportColdAccountSs58(bridge: Long, address: ByteArray, name: ByteArray): Long
     private external fun nativeReorderWalletAccounts(bridge: Long, expectedRevision: Long, accountIds: ByteArray, count: Int): Long
+    private external fun nativeSetActiveWallet(bridge: Long, revision: Long, walletIndex: Long): Long
+    private external fun nativeRenameWallet(bridge: Long, revision: Long, walletIndex: Long, name: ByteArray): Long
     private external fun nativeRenameAccount(bridge: Long, accountId: ByteArray, name: ByteArray): Long
     private external fun nativeDeleteAccount(bridge: Long, accountId: ByteArray): Long
     private external fun nativeOpenPrivateKeyView(bridge: Long, accountId: ByteArray, buffer: CitizenSdkPrivateKeyReceiver): LongArray
@@ -504,13 +520,16 @@ internal class CitizenSdkNative private constructor(
             modules: Int = CitizenSdkModules.FULL,
         ): CitizenSdkNative = CitizenSdkNative(assets, hostServices, modules)
 
-        // 中文注释：类本身仍是SDK内部实现；这四个@JvmStatic JNI成员必须使用JVM public名称，
+        // 中文注释：类本身仍是SDK内部实现；这些@JvmStatic JNI成员必须使用JVM public名称，
         // 否则Kotlin会给internal成员追加模块后缀，破坏C++ RegisterNatives唯一准确表。
         @JvmStatic
         external fun validateModules(modules: Int)
 
         @JvmStatic
         external fun verifySignature(accountId: ByteArray, signature: ByteArray, message: ByteArray): Boolean
+
+        @JvmStatic
+        external fun encryptedSecretRecordHasSecret(accountId: ByteArray, expectedRevision: Long, record: ByteArray): Boolean
 
         @JvmStatic
         external fun encodeSigningPayload(kind: Int, fields: ByteArray, payload: ByteArray): ByteArray

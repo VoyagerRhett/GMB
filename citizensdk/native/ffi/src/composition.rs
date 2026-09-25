@@ -192,6 +192,14 @@ pub(crate) struct ProductComposition {
 }
 
 impl ProductComposition {
+    pub(crate) unsafe fn set_secret_presence_provider(
+        &self, provider: crate::host_providers::CitizenSdkHostSecretPresenceV1,
+    ) -> FfiResult<()> {
+        let host = self.host_services.as_ref().ok_or_else(|| FfiError::new(
+            crate::abi::CitizenSdkErrorCode::Unsupported, "实例没有Host服务"))?;
+        unsafe { host.set_secret_presence_provider(provider) }.map_err(FfiError::from)
+    }
+
     pub(crate) fn private_key_view_vault(
         &self,
         authorizing: Arc<dyn Fn(u64) -> i32 + Send + Sync>,

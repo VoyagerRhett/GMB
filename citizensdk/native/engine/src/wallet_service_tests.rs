@@ -24,7 +24,7 @@ use citizen_sdk_contracts::{
     EncryptedSecretBlobSnapshot, EncryptedSecretBlobState, EncryptedSecretEnvelope, Hash32Bytes,
     SecretBuffer, SecretOwner, SecretRef, SecretVault, SigningIntent, SigningTransform,
     Sr25519PublicKey, Sr25519Signature, VaultAvailability, VaultGeneration, WalletCleanupPlan,
-    WalletOrigin, WalletProvisioningPlan, WalletSignMode, WalletState,
+    WalletOrigin, WalletProvisioningPlan, WalletSignMode, WalletState, WalletRecord, WalletDiagnosticReason,
 };
 use citizen_signer::Sr25519SoftwareSigner;
 use futures::{executor::block_on, join};
@@ -120,6 +120,7 @@ impl WalletProfileStore for MemoryWalletProfileStore {
 
 #[derive(Debug, Default)]
 struct MemoryEncryptedSecretStore {
+    presence_error: Mutex<Option<ContractErrorCode>>,
     entries: Mutex<HashMap<SecretRef, EncryptedSecretBlobSnapshot>>,
     next_fault: Mutex<WriteFault>,
     deletion_order: Mutex<Vec<SecretRef>>,
@@ -166,6 +167,14 @@ impl MemoryEncryptedSecretStore {
 }
 
 impl EncryptedSecretBlobStore for MemoryEncryptedSecretStore {
+    fn has_account_secret(&self, account_id: AccountId32) -> ContractFuture<'_, bool> {
+        Box::pin(async move {
+            if let Some(code) = *self.presence_error.lock().unwrap() { return Err(ContractError::new(code, "合成密文查询失败")); }
+            Ok(self.entries.lock().unwrap().iter().any(|(reference, value)|
+                reference.account_id() == account_id && value.envelope().is_some()))
+        })
+    }
+
     fn load(&self, secret_ref: SecretRef) -> ContractFuture<'_, EncryptedSecretBlobSnapshot> {
         Box::pin(async move {
             Ok(self
@@ -213,6 +222,7 @@ impl EncryptedSecretBlobStore for MemoryEncryptedSecretStore {
 
 #[derive(Debug)]
 struct MemorySecretVault {
+    presence_error: Mutex<Option<ContractErrorCode>>,
     availability: Mutex<VaultAvailability>,
     availability_gate: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
     availability_entered: Mutex<Option<futures::channel::oneshot::Sender<()>>>,
@@ -228,6 +238,7 @@ struct MemorySecretVault {
 impl Default for MemorySecretVault {
     fn default() -> Self {
         Self {
+            presence_error: Mutex::new(None),
             availability: Mutex::new(VaultAvailability::Available),
             availability_gate: Mutex::new(None),
             availability_entered: Mutex::new(None),
@@ -252,6 +263,13 @@ impl MemorySecretVault {
 }
 
 impl SecretVault for MemorySecretVault {
+    fn has_any_wallet_key(&self, wallet_index: u32) -> ContractFuture<'_, bool> {
+        Box::pin(async move {
+            if let Some(code) = *self.presence_error.lock().unwrap() { return Err(ContractError::new(code, "合成物理钥查询失败")); }
+            Ok(self.wallet_keys.lock().unwrap().iter().any(|(index, _)| *index == wallet_index))
+        })
+    }
+
     fn availability(&self) -> ContractFuture<'_, VaultAvailability> {
         Box::pin(async move {
             if let Some(entered) = self.availability_entered.lock().unwrap().take() {
@@ -538,6 +556,280 @@ fn cold_accounts_share_one_order_and_never_call_the_secret_vault() {
         assert_eq!(harness.vault.delete_wallet_calls.load(Ordering::SeqCst), 0);
         assert!(harness.vault.wallet_keys.lock().unwrap().is_empty());
         assert_eq!(harness.secrets.envelope_count(), 0);
+    });
+}
+
+
+/// 只替换合成MemoryStore中的原槽以模拟持久字段损坏；生产API不提供写入坏模式的入口。
+fn seed_diagnostic(harness: &Harness, record: WalletRecord) -> WalletState {
+    let before = harness.profiles.snapshot();
+    let profile = before.profile().filter(|profile| profile.wallet_index() != record.wallet_index()).cloned();
+    let cold: Vec<_> = before.cold_accounts().iter().filter(|account| account.wallet_index() != record.wallet_index()).cloned().collect();
+    let valid: HashSet<_> = profile.iter().flat_map(|profile| profile.accounts()).map(|account| account.account_id())
+        .chain(cold.iter().map(|account| account.account_id())).collect();
+    let order = before.ordered_account_ids().iter().copied().filter(|account| valid.contains(account)).collect();
+    let mut diagnostics: Vec<_> = before.diagnostics().iter().filter(|entry| entry.wallet_index() != record.wallet_index()).cloned().collect();
+    diagnostics.push(record);
+    let state = WalletState::try_from_catalog_parts(before.revision() + 1, profile, cold, order,
+        before.next_cold_wallet_index(), None, None, Vec::new()).unwrap()
+        .try_with_diagnostics(diagnostics).unwrap()
+        .try_with_active_wallet(before.active_wallet_index()).unwrap();
+    *harness.profiles.state.lock().unwrap() = state.clone();
+    state
+}
+fn broken_mode(mut record: WalletRecord) -> WalletRecord {
+    match &mut record {
+        WalletRecord::Profile { sign_mode, .. } | WalletRecord::Account { sign_mode, .. } => *sign_mode = "untrusted-mode".to_owned(),
+    }
+    record
+}
+
+#[test]
+fn diagnostic_hot_wallet_is_present_but_cannot_sign_create_or_select_until_real_proof() {
+    block_on(async {
+        let harness = Harness::new();
+        let profile = harness.service.import(&known_mnemonic(), "").await.unwrap();
+        let raw = broken_mode(WalletRecord::from_profile(&profile));
+        assert_eq!(raw.diagnostic_reason(), Some(WalletDiagnosticReason::InvalidSignMode));
+        let before = seed_diagnostic(&harness, raw.clone());
+        let snapshot = harness.service.state().await.unwrap();
+        assert_eq!(snapshot.initialization_state(), crate::wallet_service::WalletInitializationState::Ready);
+        assert!(snapshot.profile().is_none() && snapshot.ordered_account_ids().is_empty());
+        assert_eq!(snapshot.diagnostics(), &[raw.clone()]);
+        assert_eq!(harness.service.account_sign_mode(profile.master_account_id()).await.unwrap(), None);
+        assert!(harness.signing_service().sign(profile.master_account_id(), vec![1]).await.is_err());
+        assert!(harness.service.prepare_create(WalletWordCount::Words12, Zeroizing::new(String::new())).await.is_err());
+        assert!(harness.service.set_active_wallet(before.revision(), 0).await.is_err());
+        let opens = harness.vault.open_calls.load(Ordering::SeqCst);
+        let restored = harness.service.repair_hot_wallet(before.revision(), &raw).await.unwrap();
+        assert_eq!(restored.profile(), Some(&profile));
+        assert!(restored.diagnostics().is_empty());
+        assert_eq!(restored.active_wallet_index(), Some(0));
+        assert_eq!(harness.vault.open_calls.load(Ordering::SeqCst), opens + 1);
+        assert!(harness.service.repair_hot_wallet(before.revision(), &raw).await.is_err());
+    });
+}
+
+#[test]
+fn diagnostic_hot_proof_failure_and_stale_snapshot_never_relabel() {
+    block_on(async {
+        let harness = Harness::new();
+        let profile = harness.service.import(&known_mnemonic(), "").await.unwrap();
+        let raw = broken_mode(WalletRecord::from_profile(&profile));
+        let before = seed_diagnostic(&harness, raw.clone());
+        *harness.vault.availability.lock().unwrap() = VaultAvailability::Unavailable;
+        assert!(harness.service.repair_hot_wallet(before.revision(), &raw).await.is_err());
+        assert_eq!(harness.profiles.snapshot(), before);
+        *harness.vault.availability.lock().unwrap() = VaultAvailability::Available;
+        harness.secrets.insert_envelope(profile.accounts()[0].secret_ref()); // 正式signer可识别与目标公钥不匹配的合成秘密。
+        assert!(harness.service.repair_hot_wallet(before.revision(), &raw).await.is_err());
+        assert_eq!(harness.profiles.snapshot(), before);
+        let foreign = raw.try_with_wallet_name("不是原快照").unwrap();
+        assert!(harness.service.repair_hot_wallet(before.revision(), &foreign).await.is_err());
+        assert_eq!(harness.profiles.snapshot(), before);
+    });
+}
+
+#[test]
+fn diagnostic_proof_rechecks_record_after_pending_authentication_even_at_same_revision() {
+    block_on(async {
+        let harness = Harness::new();
+        let profile = harness.service.import(&known_mnemonic(), "").await.unwrap();
+        let raw = broken_mode(WalletRecord::from_profile(&profile));
+        let before = seed_diagnostic(&harness, raw.clone());
+        let (entered, waiting) = futures::channel::oneshot::channel();
+        let (release, gate) = futures::channel::oneshot::channel();
+        *harness.vault.open_entered.lock().unwrap() = Some(entered);
+        *harness.vault.open_gate.lock().unwrap() = Some(gate);
+        let change = async {
+            waiting.await.unwrap();
+            let changed = raw.try_with_wallet_name("合成并发改名").unwrap();
+            *harness.profiles.state.lock().unwrap() = before.try_with_diagnostics(vec![changed]).unwrap();
+            release.send(()).unwrap();
+        };
+        let (result, ()) = join!(harness.service.repair_hot_wallet(before.revision(), &raw), change);
+        assert_contract_code(result.unwrap_err(), ContractErrorCode::Conflict);
+        assert!(harness.profiles.snapshot().profile().is_none());
+        assert_eq!(harness.profiles.snapshot().diagnostics()[0].wallet_name(), "合成并发改名");
+    });
+}
+
+#[test]
+fn cold_reimport_repairs_only_matching_invalid_mode_and_keeps_existing_wallet_facts() {
+    block_on(async {
+        let harness = Harness::new();
+        let account_id = AccountId32::from_bytes([0x51; 32]);
+        let account = harness.service.import_cold_account(account_id, "原名称").await.unwrap();
+        let raw = broken_mode(WalletRecord::from_cold_account(&account));
+        let before = seed_diagnostic(&harness, raw.clone());
+        *harness.vault.availability.lock().unwrap() = VaultAvailability::Unavailable; // 元数据查询不依赖强认证可用。
+        let restored = harness.service.import_cold_account(account_id, "不能覆盖原名称").await.unwrap();
+        assert_eq!(restored, account);
+        let state = harness.profiles.snapshot();
+        assert_eq!(state.revision(), before.revision() + 1);
+        assert_eq!(state.active_wallet_index(), before.active_wallet_index());
+        assert_eq!(state.default_account_id(), Some(account_id));
+        assert!(state.diagnostics().is_empty());
+        assert_eq!(harness.vault.open_calls.load(Ordering::SeqCst), 0);
+        assert!(harness.service.import_cold_account(account_id, "").await.is_err());
+    });
+}
+
+#[test]
+fn cold_reimport_never_treats_secrets_keys_errors_or_bad_identity_as_absence() {
+    block_on(async {
+        for case in 0..6 {
+            let harness = Harness::new();
+            let account_id = AccountId32::from_bytes([0x52; 32]);
+            let account = harness.service.import_cold_account(account_id, "原名称").await.unwrap();
+            let mut raw = broken_mode(WalletRecord::from_cold_account(&account));
+            if case == 4 { if let WalletRecord::Account { ss58_address, .. } = &mut raw { *ss58_address = "invalid".to_owned(); } }
+            if case == 5 { if let WalletRecord::Account { sign_mode, .. } = &mut raw { *sign_mode = "hot".to_owned(); } }
+            let before = seed_diagnostic(&harness, raw);
+            match case {
+                0 => harness.secrets.insert_envelope(SecretRef::account_mini_secret(0, VaultGeneration::from_bytes([9; 16]),
+                    SecretOwner::from_bytes([8; 16]), account_id)),
+                1 => { harness.vault.wallet_keys.lock().unwrap().insert((account.wallet_index(), VaultGeneration::from_bytes([99; 16]))); },
+                2 => *harness.secrets.presence_error.lock().unwrap() = Some(ContractErrorCode::Storage),
+                3 => *harness.vault.presence_error.lock().unwrap() = Some(ContractErrorCode::Unsupported),
+                _ => {}
+            }
+            assert!(harness.service.import_cold_account(account_id, "").await.is_err());
+            assert_eq!(harness.profiles.snapshot(), before);
+        }
+    });
+}
+
+#[test]
+fn diagnostic_rename_and_delete_preserve_other_records_and_use_existing_cleanup() {
+    block_on(async {
+        let harness = Harness::new();
+        let profile = harness.service.import(&known_mnemonic(), "").await.unwrap();
+        let cold = harness.service.import_cold_account(AccountId32::from_bytes([0x53; 32]), "另一个").await.unwrap();
+        let cold_record = broken_mode(WalletRecord::from_cold_account(&cold));
+        seed_diagnostic(&harness, cold_record.clone());
+        let hot_record = broken_mode(WalletRecord::from_profile(&profile));
+        let before = seed_diagnostic(&harness, hot_record.clone());
+        let renamed = harness.service.rename_diagnostic_wallet(before.revision(), &hot_record, "重命名").await.unwrap();
+        assert_eq!(renamed.diagnostic(0).unwrap().wallet_name(), "重命名");
+        assert_eq!(renamed.diagnostic(cold.wallet_index()), Some(&cold_record));
+        assert_eq!(renamed.diagnostic(0).unwrap().sign_mode(), "untrusted-mode");
+        assert!(harness.service.delete_diagnostic_wallet(before.revision(), &hot_record).await.is_err());
+        let hot = renamed.diagnostic(0).unwrap().clone();
+        let opens = harness.vault.open_calls.load(Ordering::SeqCst);
+        let removed = harness.service.delete_diagnostic_wallet(renamed.revision(), &hot).await.unwrap();
+        assert!(removed.profile().is_none() && removed.cleanup().is_none());
+        assert_eq!(removed.diagnostics(), &[cold_record.clone()]);
+        assert_eq!(harness.vault.open_calls.load(Ordering::SeqCst), opens); // 无签名删除不得额外取私钥。
+        assert!(!harness.vault.has_key(0, profile.generation()));
+        let removed_cold = harness.service.delete_diagnostic_wallet(removed.revision(), &cold_record).await.unwrap();
+        assert!(removed_cold.diagnostics().is_empty());
+        assert_eq!(harness.service.state().await.unwrap().initialization_state(), crate::wallet_service::WalletInitializationState::Empty);
+    });
+}
+
+#[test]
+fn diagnostic_changes_handle_cas_failures_and_plain_wipe_without_losing_pending_ownership() {
+    block_on(async {
+        for fault in [WriteFault::BeforeWrite, WriteFault::AfterWrite] {
+            let harness = Harness::new();
+            let profile = harness.service.import(&known_mnemonic(), "").await.unwrap();
+            let raw = broken_mode(WalletRecord::from_profile(&profile));
+            let before = seed_diagnostic(&harness, raw.clone());
+            *harness.profiles.next_fault.lock().unwrap() = fault;
+            let result = harness.service.rename_diagnostic_wallet(before.revision(), &raw, "已改名").await;
+            if fault == WriteFault::BeforeWrite { assert!(result.is_err()); assert_eq!(harness.profiles.snapshot(), before); }
+            else { assert_eq!(result.unwrap().diagnostic(0).unwrap().wallet_name(), "已改名"); }
+            harness.service.delete_wallet().await.unwrap();
+            assert!(harness.profiles.snapshot().diagnostics().is_empty());
+        }
+    });
+}
+
+
+struct ProofSigner {
+    inner: Sr25519SoftwareSigner,
+    messages: Mutex<Vec<Vec<u8>>>,
+    reject_verification: bool,
+}
+impl ChainSigner for ProofSigner {
+    fn derive_hard<'a>(&'a self, parent: &'a SecretBuffer, junction: citizen_sdk_contracts::DerivationJunction) -> ContractFuture<'a, SecretBuffer> {
+        self.inner.derive_hard(parent, junction)
+    }
+    fn public_key<'a>(&'a self, secret: &'a SecretBuffer) -> ContractFuture<'a, Sr25519PublicKey> { self.inner.public_key(secret) }
+    fn sign<'a>(&'a self, secret: &'a SecretBuffer, message: Vec<u8>) -> ContractFuture<'a, Sr25519Signature> {
+        self.messages.lock().unwrap().push(message.clone());
+        self.inner.sign(secret, message)
+    }
+    fn verify(&self, public_key: Sr25519PublicKey, message: Vec<u8>, signature: Sr25519Signature) -> ContractFuture<'_, bool> {
+        if self.reject_verification { return Box::pin(async { Ok(false) }); }
+        self.inner.verify(public_key, message, signature)
+    }
+}
+
+#[test]
+fn hot_mode_proof_uses_original_0x23_scale_domain_and_failed_verification_never_commits() {
+    block_on(async {
+        for reject in [false, true] {
+            let harness = Harness::new();
+            let profile = harness.service.import(&known_mnemonic(), "").await.unwrap();
+            let raw = broken_mode(WalletRecord::from_profile(&profile));
+            let before = seed_diagnostic(&harness, raw.clone());
+            let signer = Arc::new(ProofSigner { inner: Sr25519SoftwareSigner, messages: Mutex::new(Vec::new()), reject_verification: reject });
+            let service = WalletService::new(signer.clone(), harness.vault.clone(), harness.profiles.clone(),
+                harness.secrets.clone(), harness.entropy.clone(), harness.clock.clone());
+            let next_entropy = harness.entropy.0.load(Ordering::SeqCst);
+            let result = service.repair_hot_wallet(before.revision(), &raw).await;
+            let mut challenge = [0u8; 32];
+            // 同一有限熵源规则仅用于构造公开期望；正式签名仍是Sr25519SoftwareSigner。
+            CountingEntropy(AtomicU64::new(next_entropy)).fill(&mut challenge).unwrap();
+            let mut scale = citizen_sdk_contracts::CITIZENCHAIN_GENESIS_HASH.as_bytes().to_vec();
+            scale.extend_from_slice(profile.master_account_id().as_bytes());
+            scale.extend_from_slice(b"\x0chot");
+            scale.extend_from_slice(&challenge);
+            let expected = citizen_sdk_contracts::encode_signing_payload(citizen_sdk_contracts::SigningPayload::Message {
+                op_tag: 0x23, scale_payload: &scale,
+            }).unwrap();
+            assert_eq!(*signer.messages.lock().unwrap(), vec![expected]);
+            if reject {
+                assert_contract_code(result.unwrap_err(), ContractErrorCode::Integrity);
+                assert_eq!(harness.profiles.snapshot(), before);
+            } else { assert!(result.unwrap().diagnostics().is_empty()); }
+        }
+    });
+}
+
+#[test]
+fn missing_account_references_never_authorize_unprovable_cleanup() {
+    block_on(async {
+        let harness = Harness::new();
+        let profile = harness.service.import(&known_mnemonic(), "").await.unwrap();
+        let mut raw = WalletRecord::from_profile(&profile);
+        if let WalletRecord::Profile { accounts, .. } = &mut raw { accounts.clear(); }
+        let before = seed_diagnostic(&harness, raw.clone());
+        assert_eq!(raw.ss58_address(), None);
+        assert!(harness.service.delete_diagnostic_wallet(before.revision(), &raw).await.is_err());
+        assert_eq!(harness.profiles.snapshot(), before);
+        assert!(harness.vault.has_key(0, profile.generation()));
+        assert_eq!(harness.vault.delete_wallet_calls.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
+fn ordinary_account_and_metadata_changes_keep_unrelated_diagnostics_byte_for_byte() {
+    block_on(async {
+        let harness = Harness::new();
+        let profile = harness.service.import(&known_mnemonic(), "").await.unwrap();
+        let cold = harness.service.import_cold_account(AccountId32::from_bytes([0x54; 32]), "异常保留").await.unwrap();
+        let raw = broken_mode(WalletRecord::from_cold_account(&cold));
+        seed_diagnostic(&harness, raw.clone());
+        let state = harness.profiles.snapshot();
+        harness.service.set_active_wallet(state.revision(), 0).await.unwrap();
+        let state = harness.profiles.snapshot();
+        harness.service.rename_wallet(state.revision(), 0, "正常钱包").await.unwrap();
+        harness.service.rename_account(profile.master_account_id(), "正常账户").await.unwrap();
+        harness.service.add_next_account(&known_mnemonic(), "").await.unwrap();
+        assert_eq!(harness.profiles.snapshot().diagnostics(), &[raw]);
     });
 }
 
@@ -901,6 +1193,110 @@ fn signing_guard_rejects_before_auth_without_wallet_management() {
             harness.profiles.cas_calls.load(Ordering::SeqCst),
             writes_before
         );
+    });
+}
+
+
+/// 钱包级标签不能被追加、账户改名或当前账户切换覆盖。
+#[test]
+fn wallet_name_is_independent_and_survives_account_mutations() {
+    block_on(async {
+        let h = Harness::new();
+        let mnemonic = known_mnemonic();
+        let original = h.service.import(&mnemonic, "").await.unwrap();
+        let account_name = original.accounts()[0].name().to_owned();
+        let before = h.profiles.snapshot();
+        let calls = h.vault.open_calls.load(Ordering::SeqCst);
+        let renamed = h.service.rename_wallet(before.revision(), 0, " 我的钱包 ").await.unwrap();
+        assert_eq!(renamed.profile().unwrap().wallet_name(), "我的钱包");
+        assert_eq!(renamed.profile().unwrap().accounts()[0].name(), account_name);
+        assert_eq!(renamed.ordered_account_ids(), before.ordered_account_ids());
+        assert_eq!(h.vault.open_calls.load(Ordering::SeqCst), calls);
+        let expanded = h.service.add_accounts(&mnemonic, "", &[1]).await.unwrap();
+        let child = expanded.account_by_index(1).unwrap().account_id();
+        assert_eq!(expanded.wallet_name(), "我的钱包");
+        assert_eq!(h.service.set_active_account(child).await.unwrap().wallet_name(), "我的钱包");
+        let changed = h.service.rename_account(child, "账户单独名称").await.unwrap();
+        assert_eq!(changed.wallet_name(), "我的钱包");
+        h.service.delete_account(child).await.unwrap();
+        assert_eq!(h.service.profile().await.unwrap().unwrap().wallet_name(), "我的钱包");
+    });
+}
+
+/// 两种当前选择和默认顺序分别不变，冷钱包元数据操作不访问不可用金库。
+#[test]
+fn payment_wallet_selection_is_revision_bound_and_independent_of_default() {
+    block_on(async {
+        let h = Harness::new();
+        *h.vault.availability.lock().unwrap() = VaultAvailability::Unavailable;
+        let a = AccountId32::from_bytes([0xe1; 32]);
+        let b = AccountId32::from_bytes([0xe2; 32]);
+        h.service.import_cold_account(a, "一").await.unwrap();
+        h.service.import_cold_account(b, "二").await.unwrap();
+        let before = h.profiles.snapshot();
+        assert_eq!(before.active_wallet_index(), Some(2));
+        let selected = h.service.set_active_wallet(before.revision(), 1).await.unwrap();
+        assert_eq!(selected.active_wallet_index(), Some(1));
+        assert_eq!(selected.default_account_id(), before.default_account_id());
+        assert_eq!(selected.ordered_account_ids(), before.ordered_account_ids());
+        let writes = h.profiles.cas_calls.load(Ordering::SeqCst);
+        assert_eq!(h.service.set_active_wallet(selected.revision(), 1).await.unwrap(), selected);
+        assert_eq!(h.profiles.cas_calls.load(Ordering::SeqCst), writes);
+        assert_contract_code(h.service.set_active_wallet(before.revision(), 2).await.unwrap_err(),
+            ContractErrorCode::Conflict);
+        assert_contract_code(h.service.set_active_wallet(selected.revision(), 99).await.unwrap_err(),
+            ContractErrorCode::NotFound);
+        assert_eq!(h.profiles.snapshot(), selected);
+        let renamed = h.service.rename_wallet(selected.revision(), 2, "冷钱包名字").await.unwrap();
+        assert_eq!(renamed.cold_account_by_id(b).unwrap().name(), "冷钱包名字");
+        assert_eq!(renamed.active_wallet_index(), Some(1));
+        assert_eq!(h.vault.open_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(h.secrets.envelope_count(), 0);
+    });
+}
+
+#[test]
+fn wallet_metadata_rejects_bad_names_and_preserves_failed_cas() {
+    block_on(async {
+        let h = Harness::new();
+        h.service.import_cold_account(AccountId32::from_bytes([0xe3; 32]), "原名").await.unwrap();
+        let before = h.profiles.snapshot();
+        for name in [String::new(), " ".into(), "坏\u{0085}名".into(), "名".repeat(31)] {
+            assert_contract_code(h.service.rename_wallet(before.revision(), 1, &name).await.unwrap_err(),
+                ContractErrorCode::InvalidArgument);
+            assert_eq!(h.profiles.snapshot(), before);
+        }
+        let boundary = "名".repeat(30);
+        *h.profiles.next_fault.lock().unwrap() = WriteFault::BeforeWrite;
+        assert!(h.service.rename_wallet(before.revision(), 1, &boundary).await.is_err());
+        assert_eq!(h.profiles.snapshot(), before);
+        h.profiles.fail_next_after_write();
+        let after = h.service.rename_wallet(before.revision(), 1, &boundary).await.unwrap();
+        assert_eq!(after.cold_accounts()[0].name(), boundary);
+        assert_eq!(after, h.profiles.snapshot(), "写后异常只有精确回读候选才算成功");
+        assert_contract_code(h.service.rename_wallet(before.revision(), 1, "旧修订").await.unwrap_err(),
+            ContractErrorCode::Conflict);
+        assert_eq!(h.profiles.snapshot(), after);
+    });
+}
+
+#[test]
+fn deleting_selected_wallet_chooses_last_remaining_without_reordering_accounts() {
+    block_on(async {
+        let h = Harness::new();
+        for byte in 1..=3 {
+            h.service.import_cold_account(AccountId32::from_bytes([byte; 32]), "").await.unwrap();
+        }
+        let before = h.profiles.snapshot();
+        h.service.set_active_wallet(before.revision(), 1).await.unwrap();
+        h.service.delete_cold_account(AccountId32::from_bytes([1; 32])).await.unwrap();
+        let after = h.profiles.snapshot();
+        assert_eq!(after.active_wallet_index(), Some(3), "原交互按wallet_index取最后一只");
+        assert_eq!(after.default_account_id(), Some(AccountId32::from_bytes([2; 32])));
+        h.service.delete_cold_account(AccountId32::from_bytes([3; 32])).await.unwrap();
+        assert_eq!(h.profiles.snapshot().active_wallet_index(), Some(2));
+        h.service.delete_cold_account(AccountId32::from_bytes([2; 32])).await.unwrap();
+        assert_eq!(h.profiles.snapshot().active_wallet_index(), None);
     });
 }
 
@@ -1283,7 +1679,7 @@ fn missing_key_or_any_existing_child_blocks_append_before_new_facts() {
             } else {
                 harness
                     .secrets
-                    .remove_without_contract(child[0].secret_ref());
+                    .remove_without_contract(child.account_by_index(1).unwrap().secret_ref());
             }
             let before = harness.profiles.snapshot();
             let count = harness.secrets.envelope_count();
@@ -1640,7 +2036,9 @@ fn add_accounts_write_after_errors_preserve_active_and_every_added_account() {
             .add_accounts(&mnemonic, "", &[1])
             .await
             .unwrap()
-            .remove(0);
+            .account_by_index(1)
+            .unwrap()
+            .clone();
         harness
             .service
             .set_active_account(first.account_id())
@@ -1649,6 +2047,7 @@ fn add_accounts_write_after_errors_preserve_active_and_every_added_account() {
 
         harness.profiles.fail_next_after_write();
         harness.secrets.fail_next_after_write();
+        // 追加返回完整profile；原账户与新增账户必须同时保留。
         let added = harness
             .service
             .add_accounts(&mnemonic, "", &[3, 2])
@@ -1656,10 +2055,11 @@ fn add_accounts_write_after_errors_preserve_active_and_every_added_account() {
             .expect("profile/首个密文写后异常均应收敛");
         assert_eq!(
             added
+                .accounts()
                 .iter()
                 .map(|account| account.index())
                 .collect::<Vec<_>>(),
-            vec![2, 3]
+            vec![0, 1, 2, 3]
         );
 
         let current = harness.service.profile().await.unwrap().unwrap();
@@ -2141,7 +2541,9 @@ fn private_key_view_rejects_missing_ciphertext_invalidated_key_and_wrong_account
             .add_accounts(&mnemonic, "", &[1])
             .await
             .unwrap()
-            .remove(0);
+            .account_by_index(1)
+            .unwrap()
+            .clone();
         let master = profile.account_by_id(profile.master_account_id()).unwrap();
         let master_ref = master.secret_ref();
         let original = harness.secrets.entries.lock().unwrap()[&master_ref].clone();

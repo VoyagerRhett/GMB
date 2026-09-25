@@ -241,6 +241,8 @@ public struct CitizenWalletAccount: Equatable, Sendable {
 }
 
 public struct CitizenWalletProfile: Equatable, Sendable {
+    /// 独立钱包级标签，不复用账户0名称。
+    public let walletName: String
     public let origin: CitizenWalletOrigin
     public let walletIndex: UInt32
     public let createdAtMillis: UInt64
@@ -261,6 +263,23 @@ public struct CitizenWalletStateAccount: Equatable, Sendable {
     public let isDefault: Bool
 }
 
+/// 同一Core精确校验输出的公开清理目标；不含秘密引用，不授予删除权限。
+public struct CitizenWalletCleanupTargets: Equatable, Sendable {
+    public let accountIDs: [Data]
+    public let deleteWalletWideKey: Bool
+}
+
+/// 只读异常事实，不是可签名账户；缺失地址不伪造为空地址。
+public struct CitizenWalletDiagnostic: Equatable, Sendable {
+    public let walletIndex: UInt32
+    public let walletName: String
+    public let accountID: Data
+    public let ss58Address: String?
+    public let diagnosticReason: UInt32
+    public let signMode: CitizenWalletSignMode?
+    public let cleanupTargets: CitizenWalletCleanupTargets?
+}
+
 /// Stable public wallet snapshot. The first account is the only default projection.
 public struct CitizenWalletState: Equatable, Sendable {
     public let revision: UInt64
@@ -268,6 +287,17 @@ public struct CitizenWalletState: Equatable, Sendable {
     public let accounts: [CitizenWalletStateAccount]
     public let initializationState: UInt32
     public let cleanupPending: Bool
+    /// 独立付款钱包，不改变默认账户或热钱包activeAccountID。
+    public let activeWalletIndex: UInt32?
+    public let diagnostics: [CitizenWalletDiagnostic]
+
+    internal init(revision: UInt64, hotProfile: CitizenWalletProfile?, accounts: [CitizenWalletStateAccount],
+                  initializationState: UInt32, cleanupPending: Bool, activeWalletIndex: UInt32?,
+                  diagnostics: [CitizenWalletDiagnostic] = []) {
+        self.revision = revision; self.hotProfile = hotProfile; self.accounts = accounts
+        self.initializationState = initializationState; self.cleanupPending = cleanupPending
+        self.activeWalletIndex = activeWalletIndex; self.diagnostics = diagnostics
+    }
 
     public var defaultAccount: CitizenWalletStateAccount? { accounts.first }
 }

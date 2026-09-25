@@ -34,7 +34,7 @@ void main() {
     expect(prepared.transactionFormatNumber, 9);
     expect(prepared.nonce, BigInt.from(11));
     expect(platform.lastArguments, <Object?>[
-      1,
+      2,
       'session-a',
       1,
       _account(1),
@@ -43,7 +43,7 @@ void main() {
 
     await sdk.transactions.cancelPreparedTransaction(prepared.preparationId);
     expect(platform.lastArguments, <Object?>[
-      1,
+      2,
       'session-a',
       2,
       prepared.preparationId,
@@ -69,7 +69,7 @@ void main() {
     expect(completed.resolution, CitizenTransactionResolution.finalizedSuccess);
     expect(completed.execution?.status, CitizenExecutionStatus.success);
     expect(platform.lastArguments, <Object?>[
-      1,
+      2,
       'session-a',
       3,
       pending.executionId,
@@ -82,7 +82,7 @@ void main() {
     final sdk = await CitizenSdk.open();
     await sdk.transactions.cancelPreparedTransactionExecution(_executionId(2));
     expect(platform.lastArguments, <Object?>[
-      1,
+      2,
       'session-a',
       1,
       _executionId(2),
@@ -108,13 +108,13 @@ void main() {
       'syncTransactionHistory',
     ]);
     expect(platform.historyArguments.first, <Object?>[
-      1,
+      2,
       'session-a',
       1,
       null,
       2,
     ]);
-    expect(platform.historyArguments.last, <Object?>[1, 'session-a', 2]);
+    expect(platform.historyArguments.last, <Object?>[2, 'session-a', 2]);
     await sdk.close();
   });
 
@@ -157,7 +157,7 @@ final class _TransactionPlatform implements CitizenSdkPlatform {
   Future<Object?> invoke(String method, List<Object?> arguments) async {
     if (method == 'open') {
       return <Object?>[
-        1,
+        2,
         'session-a',
         0,
         <Object?>['created', 1],
@@ -191,7 +191,7 @@ final class _TransactionPlatform implements CitizenSdkPlatform {
       'close' => <Object?>['disposed'],
       _ => throw StateError('未预期 method：$method'),
     };
-    return <Object?>[1, 'session-a', sequence, value];
+    return <Object?>[2, 'session-a', sequence, value];
   }
 
   Future<void> dispose() => _events.close();

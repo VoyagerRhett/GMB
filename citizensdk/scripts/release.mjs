@@ -31,10 +31,10 @@ import { fileURLToPath } from 'node:url';
 const PRODUCT_ID = 'citizensdk';
 const PACKAGE_NAME = 'citizen_sdk';
 // 正式产品名和包内平台名称不随调用方选择的源码外目录改变。
-// 独立于任何 binding 源码的 Flutter v1 公共面金标。五份绑定都必须从自己的
+// 独立于任何 binding 源码的 Flutter v2 无UI公共面金标。五份绑定都必须从自己的
 // 权威常量/方法表解析并逐项匹配；不能用一端源码生成另一端预期值。
-const FLUTTER_METHOD_CHANNEL = 'citizen/sdk/core/v1';
-const FLUTTER_EVENT_CHANNEL = 'citizen/sdk/events/v1';
+const FLUTTER_METHOD_CHANNEL = 'citizen/sdk/core/v2';
+const FLUTTER_EVENT_CHANNEL = 'citizen/sdk/events/v2';
 const FLUTTER_METHODS = Object.freeze([
   'open',
   'start',
@@ -61,22 +61,38 @@ const FLUTTER_METHODS = Object.freeze([
   'getAccountBalances',
   'getAccountNonce',
   'getFeeSnapshot',
-  'getWalletProfile',
-  'viewAccountPrivateKey',
   'getWalletState',
-  'initializeWallet',
-  'importColdAccountWithUi',
+  'inspectWallets',
+  'releaseWalletInspection',
+  'repairHotWallet',
+  'renameDiagnosticWallet',
+  'deleteDiagnosticWallet',
+  'validateWalletPassword',
+  'validateWalletMnemonic',
+  'walletWordSuggestions',
+  'prepareWalletCreation',
+  'copyRecoveryPhrase',
+  'commitWalletCreation',
+  'releasePreparedWallet',
+  'openPrivateKey',
+  'revealPrivateKey',
+  'closePrivateKey',
+  'cancelOperation',
+  'respondCredential',
+  'cancelCredential',
+  'addNextWalletAccount',
+  'signAndDeleteWallet',
+  'importColdAccountCode',
   'importColdAccountId',
   'importColdAccountSs58',
   'reorderWalletAccountsWithoutDefaultChange',
+  'setActiveWallet',
+  'renameWallet',
   'renameAccount',
   'deleteAccount',
-  'createWallet',
   'importWallet',
   'addWalletAccounts',
   'setActiveWalletAccount',
-  'renameWalletAccount',
-  'deleteWalletAccount',
   'deleteWallet',
   'reconcileWalletCleanup',
   'signWalletPayload',
@@ -87,6 +103,9 @@ const FLUTTER_METHODS = Object.freeze([
   'beginDefaultAccountChange',
   'consumeDefaultAccountChange',
   'verifySignature',
+  'encodeSigningPayload',
+  'qrEncodeDocument',
+  'qrPrepareAccountAuthorization',
   'prepareTransaction',
   'cancelPreparedTransaction',
   'executePreparedTransaction',
@@ -96,12 +115,20 @@ const FLUTTER_METHODS = Object.freeze([
   'syncTransactionHistory',
   'qrParse',
   'qrCreateSignRequest',
+  'qrValidateSignResponse',
   'qrConsumeSignResponse',
   'qrCancelSignRequest',
   'qrEncodeAccountId',
   'qrDecodeLuminance',
   'qrEncode',
-  'qrScan',
+  'reviewQrRequest',
+  'releaseQrReview',
+  'openQrCapture',
+  'closeQrCapture',
+  'pauseQrCapture',
+  'resumeQrCapture',
+  'setQrCaptureTorch',
+  'qrDecodeImage',
   'signQrRequest',
 ]);
 const ROOT_FILES = [
@@ -145,7 +172,7 @@ const RELEASE_PLATFORMS = Object.freeze(['Android', 'iOS', 'macOS', 'LinuxARM', 
 const LINUX_PLATFORMS = Object.freeze(['LinuxARM', 'LinuxAMD']);
 const LINUX_HOST_HEADERS = Object.freeze([
   'citizen_sdk.hpp', 'citizen_sdk_config.hpp', 'citizen_sdk_error.hpp',
-  'citizen_sdk_events.hpp', 'citizen_sdk_models.hpp', 'citizen_sdk_wallet_flow.hpp',
+  'citizen_sdk_events.hpp', 'citizen_sdk_models.hpp',
   'citizensdk_host.h',
 ]);
 const LINUX_CMAKE_FILES = Object.freeze([
@@ -153,8 +180,8 @@ const LINUX_CMAKE_FILES = Object.freeze([
   'CitizenSDKDependencies.cmake', 'CitizenSDKTargets.cmake',
   'CitizenSDKTargets-release.cmake',
 ]);
-// 一个产品的两个机器变体：各自完整的 20 项安装前缀合并为 27 项。
-// 七个 Host 头与来源重叠，必须比较字节，绝不以产物覆盖来源。
+// 一个产品的两个机器变体：各自完整的 19 项安装前缀合并为 26 项。
+// 六个 Host 头与来源重叠，必须比较字节，绝不以产物覆盖来源。
 function linuxInstallPaths(platform) {
   return [
     'include/citizensdk.h', 'include/citizensdk_types.h', 'include/citizensdk_qr_image.h',
@@ -174,13 +201,13 @@ const LINUX_INJECTED_FILES = new Set(LINUX_RELEASE_FILES.filter(
 const HOSTED_LINUX_PLUGIN_FILES = Object.freeze([
   'CMakeLists.txt', 'cmake/CitizenSDKFlutter.cmake',
   'include/citizen_sdk/citizen_sdk_plugin.h', 'src/citizen_sdk_plugin.cc',
-  ...['codec', 'sessions', 'wallet_flow', 'environment'].flatMap(
+  ...['codec', 'sessions', 'environment'].flatMap(
     (name) => ['cc', 'hpp'].map((extension) => `src/citizen_sdk_flutter_${name}.${extension}`),
   ),
 ]);
 const WINDOWS_HOST_HEADERS = Object.freeze([
   'citizen_sdk.hpp', 'citizen_sdk_config.hpp', 'citizen_sdk_error.hpp',
-  'citizen_sdk_events.hpp', 'citizen_sdk_models.hpp', 'citizen_sdk_wallet_flow.hpp',
+  'citizen_sdk_events.hpp', 'citizen_sdk_models.hpp',
   'citizensdk_host.h',
 ]);
 const WINDOWS_CMAKE_FILES = Object.freeze([
@@ -202,7 +229,7 @@ const WINDOWS_INJECTED_FILES = new Set(WINDOWS_RELEASE_FILES.filter(
 const HOSTED_WINDOWS_PLUGIN_FILES = Object.freeze([
   'CMakeLists.txt', 'cmake/CitizenSDKFlutter.cmake',
   'include/citizen_sdk/citizen_sdk_plugin.h', 'src/citizen_sdk_plugin.cc',
-  ...['codec', 'sessions', 'wallet_flow', 'environment'].flatMap(
+  ...['codec', 'sessions', 'environment'].flatMap(
     (name) => ['cc', 'hpp'].map((extension) => `src/citizen_sdk_flutter_${name}.${extension}`),
   ),
 ]);
@@ -370,182 +397,161 @@ const HOSTED_DEV_DEPENDENCIES = Object.freeze({
 // 根 include/ 是 CitizenSDK 唯一产品 ABI。两文件完整闭集既固定字节，也阻止
 // 上游 smoldot/signer 符号、任意 RPC 和秘密导出接口绕过 citizensdk_* 边界。
 const PUBLIC_ABI_FILES = Object.freeze({
-  'include/citizensdk.h': 'cab904fd371888596c729ffac52a77b3bd118a631ec1da358935f218fa63bad8',
-  'include/citizensdk_types.h': 'fd64f7a45c6791c548e4440050a94c406773b5614bdc486a1c094e53c3f869ac',
+  'include/citizensdk.h': 'a6a40841dcabdb3d1166ce608255b4d6e7352880b2769fff42ba1f4ab17fed9d',
+  'include/citizensdk_types.h': 'de8e319f163f2bb8e176b300b849beb2135aa8c755eb0bcb22fd56e984b657d3',
 });
 // Dart（排除已有独立来源合同的 smoldot 快照）、Android root/native 与
 // Apple darwin 生产输入构成一个反向闭集。平台测试、文档和注入的 AAR/
 // XCFramework 分别由测试、文档与候选投影合同固定，不能在本表建立第二条来源。
-const MOBILE_BINDING_SOURCE_FILE_COUNT = 95;
+const MOBILE_BINDING_SOURCE_FILE_COUNT = 85;
 const MOBILE_BINDING_SOURCE_FILES = Object.freeze({
-  'android/native/src/main/kotlin/org/citizen/sdk/ui/CitizenSdkQrCoordinator.kt': '213bb08e1240aec35fbaabe5a02c3b714ef998692e47d63c88392ac887300fda',
-  'android/native/src/main/kotlin/org/citizen/sdk/ui/CitizenSdkQrActivity.kt': '2ae1c5314c1595c247b6d80e65c70d92839254b869ea05a2a60dbe3e9a3976be',
-  'darwin/Sources/CitizenSDK/CitizenSDKQrScanner.swift': '4ae2a37ae8ab25928d381f5f47339196ae03c387deab00b690de764e6a58f925',
-  'android/build.gradle': '1759d2738abbc127ad0da67124a6cfb0b4b157382c4b1036020cd70b5145a85e',
+  'android/build.gradle': '26401bbfe2e1f6e044dce4b3055a57a19fb22b6b3422a24ba28fa9f1a278ce52',
   'android/gradle.properties': '5318804f9c8a0d30039e9449e074d4ce23c97ce76ce4fc58349f671cc43deecf',
   'android/native/build.gradle': '734abdd3b2c52dc57ce84fa3fa9d5fd201cf6dceadcd28fe5b50ca8b36ea1b49',
   'android/native/consumer-rules.pro': '81c0d229a083f6b87647b45708e1b19ad116a65c5eed33bf5152ac35def7f2c0',
-  'android/native/src/main/AndroidManifest.xml': '70b610be6bb295f81b54e0a55d9e0171f2cbc022f3a318034a711813d12eff54',
+  'android/native/src/main/AndroidManifest.xml': '709ef7018c08e6f14d3d02fec899180b6758177b4f1defbae51d815782aa9a8a',
   'android/native/src/main/cpp/CMakeLists.txt': '51b1cf4641cfc3c66d8c0cf4bdfe9821dab8115491efb5ed6ec4e29518624d57',
-  'android/native/src/main/cpp/citizensdk_host_bridge.cpp': '689352265865ce35867ffe3f00e1b280c67e00561b5560c438f073d21851b2c4',
-  'android/native/src/main/cpp/citizensdk_host_bridge.hpp': '4cfc72f77914d45472e151d3e0c31b49f2158d1cf776b1497e83aee43ce4a543',
-  'android/native/src/main/cpp/citizensdk_jni.cpp': 'd40e80f6490f14caf82783730f15fc70ec6dbf451ce85a52ebaee1d4fbee4fd3',
-  'android/native/src/main/cpp/citizensdk_jni_support.hpp': '10a527969caf3d4ed7d8bda6caa2d8b1e56e582bd4877c0b80fc188a68886513',
-  'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdk.kt': '56263c6e8ba64fa5f5e4c56dc62892f0e013e5aaeb70cbd060fbe202d168f5e8',
+  'android/native/src/main/cpp/citizensdk_host_bridge.cpp': 'c572aabcaf39a2a2077fb15cb9f9b872912b4d54c6d9edc254db56d142ff50c0',
+  'android/native/src/main/cpp/citizensdk_host_bridge.hpp': 'e87140fce8cdae22e52dde261c9a89eec886088ca0d165ab4fd9efb2c6a0dcf2',
+  'android/native/src/main/cpp/citizensdk_jni.cpp': 'f86c8ddb79a576391cb4be85f7089677e8211d06d4101f10bfdd1be65a14a93a',
+  'android/native/src/main/cpp/citizensdk_jni_support.hpp': 'b0b4fcef64701248f0c34e4d1ffb76fa19cc07bdb96e2b0ff48d7b14926561fa',
+  'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdk.kt': '1a9a7ac21371d7a052954845a79c8744d9807e4cc661020543131d22ab9b5fa3',
   'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdkError.kt': '317ae6a6eeeb3283c2f9035a5c0a63579688eb48fa10fc9424f9eda15f6cdaba',
-  'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdkEvents.kt': '522afb421b818a7d6e6ef1ddf4733aada0cfa34d1d1c1b29e88d5654d7895f7f',
-  'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdkModels.kt': 'c75ab80f6776777174e04136b1b23e21eb2eb31032a9f435fb49d75d42b58827',
+  'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdkEvents.kt': '43107b2606d06928508b634a0ad5a673bfefa607528786b91bab658efb7fa034',
+  'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdkModels.kt': 'af239629e3fa34b27a384111eb86f6b4ce863aa05b20c40ff282f17e93e25fea',
   'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdkOperation.kt': 'f623f51baff06efd8c9b39aade5968af2fd85860cca331e763d7c27bc5f4bc7c',
-  'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdkPreparedWallet.kt': '74f08d32ce1ddeac586180d75dd80a034651da50a83387667355b7a5fd92b0ed',
-  'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdkQr.kt': 'eaaaff5950921a4af2a9652da0eefbd276b47ddfb866dddc7afdd72fe3bbcf65',
-  'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdkRecoveryPhrase.kt': 'a2f90846b60e59fa98339a60e2b19b0c3a9c5692c8caa93038ce2116ca8cfc29',
+  'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdkPreparedWallet.kt': '654afe7899d6fd572f3083358df1c143375f3e0c0bfba0493e45a95d225fe571',
+  'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdkQr.kt': 'bee1cd0b3bb95e090725e5cf97149704ff8a3df85cf0c36e8fcb3b1976bb52ba',
+  'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdkQrCapture.kt': '61777aa9611fc24bf8f6d95eebb57812539f5d5e5a63d02157a243a71760016f',
+  'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdkRecoveryPhrase.kt': 'a2b3938b577baed26c5411dbd29cf0c14147b14128a0e24e2361959054186b83',
   'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkAssets.kt': '28e6eb8a028f5c7b5404f68ef8ef886107c6f188838bd5c0dae2d111dafa7e79',
-  'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkHardwareVault.kt': '06f7e293462da5783f13ce0e7b1ebc84c63b365959759f72702c85e18f39e531',
+  'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkHardwareVault.kt': '4994dfb5ff5eb236d256fe98075b0b2bc34cc640e8664c6788ff11a08daef3c6',
   'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkHostRecord.kt': '6cdb3638939976db4c1b179a5871d8de111dd4bf2a3c94eab378e281cbcc9b49',
-  'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkHostServices.kt': 'c0670b7ae295745d4a4551eec8c8b1aafcf8b4f641e782495e1117d11020bd8c',
-  'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkNative.kt': '855e92e2e9529825211031687d4ea95bf7e04a9f8df7f78f45be49a9bc5b90fc',
-  'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkNativeCodec.kt': 'a7bff0dcda21ee1f5c127e76c3bd6446c87694b35b832dc00f351c2cc47b3e20',
-  'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkNativeResult.kt': 'ad99a1c3d4371c2525d5cf1a7d99f360d58750b9390115b934397c469f05282f',
+  'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkHostServices.kt': '12947fde352a8723bef9529dd4e41c375cf1bb456c78a7b7f97475bff2bb2399',
+  'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkNative.kt': 'a1732741f7cd181e701715215ac73925a9dbefc8cb214b2dabb60e6139c08616',
+  'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkNativeCodec.kt': '434f49cd3f493bea135209263ceaf2644b6d1fcb9a7a7b8d143d7fc2da4c35a6',
+  'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkNativeResult.kt': 'd45832c31e03d83c384659ac0d9d2a919a680c427c8a4bb29b04161d47f3ff8f',
   'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkPublicStore.kt': '2bf4f6a208b51ce4a89b278a060ffc051a4b985260780125bc76ad1f633ee1d5',
   'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkRecordKey.kt': 'a43d9a8d303cd2a687bf11004ec5b95eb9e684a2f55befc364ca62b50f1c9a14',
-  'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkRequestRouter.kt': '98a5f17bf12fffa1ef0f478e0e42d17c1f57d441197d39f6f62e0adefdd25a40',
-  'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkSecureStore.kt': 'a464b26f1b374ecf8b7f3cc3de86d738a42440877f12e1040347c8bf9ecf0270',
+  'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkRequestRouter.kt': 'bbe7a711c0995cb647cabe679b40f92ced051b34d868cd8e18e7570ce8d23bfd',
+  'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkSecureStore.kt': 'dde91aebfcdeea9aa6b108319dd5718ac92dc02791f37ed4b3d5c6958c34ae21',
   'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkSensitiveBytes.kt': 'fe2129f7612e3cad88ed7d2f38d66d371488554238794c94d9139c95729337c6',
   'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkSqlite.kt': 'e1633581171b733d3c37d63444c7652e6ce5c91616e5fd5c9dc063778312dd79',
-  'android/native/src/main/kotlin/org/citizen/sdk/ui/CitizenSdkRecoveryContent.kt': '3e2a6df4b7efadb3f48679a3a333f6e5c418b72dffc24ee547982f81c7fabc67',
-  'android/native/src/main/kotlin/org/citizen/sdk/ui/CitizenSdkWalletFlowActivity.kt': 'f18bffed5e1e3d01fa5af32010b0f98e9b8422f32cf9bf54b3f273f4135b32d6',
-  'android/native/src/main/kotlin/org/citizen/sdk/ui/CitizenSdkWalletFlowContract.kt': '3d8192a7b319770c8481bb1a3dc6484743cb90ed0a5ab453f20aaa2022ebea80',
-  'android/native/src/main/kotlin/org/citizen/sdk/ui/CitizenSdkWalletFlowCoordinator.kt': 'a33570297fc5315c6953a5f8a3100e7d8814a84207cf705b751e2a247894a63c',
   'android/settings.gradle': '8c640faa6535ad6f80efd22154ccc50332ae9c77e2b8a0a69419afbfcffe9a8b',
-  'android/src/main/AndroidManifest.xml': 'a89f063492bdb6f248de2f760ccb88bdfa5c769bd6c967c4366a8a7700286ca2',
-  'android/src/main/kotlin/org/citizen/sdk/CitizenSdkFlutterCodec.kt': 'a9c6d943d12612b22858915bc9548c76680eaaf578e5b3a8cd253e4112f43789',
-  'android/src/main/kotlin/org/citizen/sdk/CitizenSdkFlutterSessions.kt': '06d86c487c8900c352fc37df888a3af6e206efe3fa83cbe5ed77a8616ce61676',
-  'android/src/main/kotlin/org/citizen/sdk/CitizenSdkFlutterWalletFlow.kt': '8cf230c3fade789db2a3b2bb5f4dd8106c057948500096625c9ab27ed1b78003',
-  'android/src/main/kotlin/org/citizen/sdk/CitizenSdkPlugin.kt': '828f56c10c3c3e41c95c335528fff5fe855b2dce1c7e8a45e1f5e4059c3f474f',
+  'android/src/main/AndroidManifest.xml': '5f63723834c354984501a277bf3752b0cd4dc85350bf2e09558538364fcb28ec',
+  'android/src/main/kotlin/org/citizen/sdk/CitizenSdkFlutterCodec.kt': 'ad895ed0c5af0c029b11668b2de5a1fce4071e8491e4f05259b31285f60c577b',
+  'android/src/main/kotlin/org/citizen/sdk/CitizenSdkFlutterSessions.kt': '2c62b17a97f84c951d7ad166b1e2882678f8fdeaa5a401892e85709e7e8eaa55',
+  'android/src/main/kotlin/org/citizen/sdk/CitizenSdkPlugin.kt': '5054cf69ad1216f58ca65d32e01d4ff8faa5fc3eadc9ec828e80d0f0dff321d7',
   'darwin/Package.swift': '159c504cab86afb641fbef2b1fd35c59c20bbbe81d003cd7cdeec914a3ee91fc',
   'darwin/Sources/CitizenSDK/CitizenSDK-Bridging-Header.h': '977e6c4e7ede7d12d193032be74810c49412492321ea719937873482956f25a8',
-  'darwin/Sources/CitizenSDK/CitizenSDK.swift': 'cb93ada753a91fa48b0391b4edb552db7f85f45c270de4896b22f11cd3e1aad2',
+  'darwin/Sources/CitizenSDK/CitizenSDK.swift': '118a506d01da300d926f9e4582a0cf5ee00b429f39b4022d4042e01436cd0caa',
   'darwin/Sources/CitizenSDK/CitizenSDKAssets.swift': '56cac1ebe833ddba39fb48aa8118e670612042a1673bba24805f2581d8fb10f6',
   'darwin/Sources/CitizenSDK/CitizenSDKError.swift': '8e7667873254e1361d6e624d0f89f12eba0f5ba4499f4da694f3eb6b45175a7f',
-  'darwin/Sources/CitizenSDK/CitizenSDKEvents.swift': 'e779dbe05c8f8de4dcbce8b209868e4fa385b3970b758a2d96c486b0f862c61b',
-  'darwin/Sources/CitizenSDK/CitizenSDKHostBridge.swift': 'ecf69cc7f473f0200c8fde8b1c09c685f3d7fc99f15b96ba665ea0f0519be508',
+  'darwin/Sources/CitizenSDK/CitizenSDKEvents.swift': 'cf0a342a28209eb0fc4058f10535a2420912402dd18339a141d6595c06544c71',
+  'darwin/Sources/CitizenSDK/CitizenSDKHostBridge.swift': '0e6ffac0864c302f2e283670a3d446308cdec87c9c52aa6ce9e653668279b8a8',
   'darwin/Sources/CitizenSDK/CitizenSDKHostRecord.swift': '70d951817f68a0ca5adb55a0a82323d8919920a1605b062e042c3122b9b391d8',
   'darwin/Sources/CitizenSDK/CitizenSDKInputLimits.swift': '922448dbb204788c9e3774c9fa3f6026b6c00828e292f11072abfce63b8802b6',
-  'darwin/Sources/CitizenSDK/CitizenSDKModels.swift': 'c1a73f5d86308393bac8bc9b85b3d6ebcaca0dfa80280c2bae9c8db4d27dbbda',
-  'darwin/Sources/CitizenSDK/CitizenSDKNative.swift': '307dc8a098f1225f6ebb7bf27dd3cefd723d25b84e9a506d2380d0a4d2bd297e',
-  'darwin/Sources/CitizenSDK/CitizenSDKNativeCodec.swift': 'a956bfac804674a5ed189b0e8a680aa7e178cbb935ffca6b34b4888b976e4681',
-  'darwin/Sources/CitizenSDK/CitizenSDKOperation.swift': 'a36da7031a4775e90328c80b2ef8749a88af89759c89eec278dcdc561c803646',
-  'darwin/Sources/CitizenSDK/CitizenSDKPreparedWallet.swift': 'e405d16b3a45b774400e737300bf0c6a9e0caa7990c15a53ccbc16fa7c522d10',
-  'darwin/Sources/CitizenSDK/CitizenSDKQr.swift': 'f70cce436dbfa10c51c675dcbf90f9d056e56406d79d5ea6ee98234bbccd8a58',
+  'darwin/Sources/CitizenSDK/CitizenSDKModels.swift': 'f4de02144a4b697794d91d30f2f3688763de19f974a574adf842ffc01994c460',
+  'darwin/Sources/CitizenSDK/CitizenSDKNative.swift': '83fbf19e57b91201c18f5019d5b5817f88759c116c667b7aebf1d4d624b30494',
+  'darwin/Sources/CitizenSDK/CitizenSDKNativeCodec.swift': 'b49e8f7093254007bfc42fc7a42a88d81a0bbe47416ba9639072d441bb4e4eb2',
+  'darwin/Sources/CitizenSDK/CitizenSDKOperation.swift': 'c4316129d0383e347042952d3a02c71fdd72c67f40ecc64343f4ec04a9c2008a',
+  'darwin/Sources/CitizenSDK/CitizenSDKPreparedWallet.swift': '7539ee20c84f3efc2577401901ad64dcd388f43ed6abff0cc75deed8f4e24aab',
+  'darwin/Sources/CitizenSDK/CitizenSDKQr.swift': 'b1dadb79ffcd83830fbeea5754bb2626eb56a4a18af676daf1fde51d28554589',
+  'darwin/Sources/CitizenSDK/CitizenSDKQrCapture.swift': '984142c8b3e9fe697636cde1277bf6b183ca7626a48069fb52c339f5c40805d1',
   'darwin/Sources/CitizenSDK/CitizenSDKPublicStore.swift': '581b9057a3d4fe531c71f84077985cf41b803b073d6819ad1d87aadfd78b8fbd',
   'darwin/Sources/CitizenSDK/CitizenSDKRecordKey.swift': 'e4e0cd2f0ab0c6e1390391bdd5eb3c54370d49da23bca08c45ed37ed4936256e',
-  'darwin/Sources/CitizenSDK/CitizenSDKRecoveryPhrase.swift': '5600c386b88b6b17299a13e758655337ae2441e1cea4a08426bdd69ed0815a34',
+  'darwin/Sources/CitizenSDK/CitizenSDKRecoveryPhrase.swift': 'c794a5320b02d32cc348d8fb6f45d34df2e49260070eece3c620376f6f824993',
   'darwin/Sources/CitizenSDK/CitizenSDKSQLite.swift': '9a2e592decdbebb53a70b056ec70c3cc09ad0b4105aa5e94a282b66b86ceb5c9',
-  'darwin/Sources/CitizenSDK/CitizenSDKScreenSecurity.swift': '8501af1dcf92faf8f62d0113bd8831569f7060cbe825994d1d2915a908469c70',
-  'darwin/Sources/CitizenSDK/CitizenSDKSecretVault.swift': '139076205baf5d9572bdb9d9c6cbb6783eb2e13f358cb41d3dbf46f232b221f0',
-  'darwin/Sources/CitizenSDK/CitizenSDKSecureStore.swift': 'ecf5be4e8cb98f80f32b737c6367996f65499e4c64fd7a31b92e24eca74d0aaf',
+  'darwin/Sources/CitizenSDK/CitizenSDKScreenSecurity.swift': '2ad9b025e8c1ae3eef0ce7cdcca2c675570d39a41fc282cfcc4ecefea688731e',
+  'darwin/Sources/CitizenSDK/CitizenSDKSecretVault.swift': 'b9525e1844cb17ca20ae41c78f4ab20b01e0b537172cefc6c4dbf4b41ab9d5ee',
+  'darwin/Sources/CitizenSDK/CitizenSDKSecureStore.swift': '0ca43e22a9b841a56c3bfc15c6cf2fa4bf2225750fe9e6358451c01242ead720',
   'darwin/Sources/CitizenSDK/CitizenSDKSensitiveBuffer.swift': '2b92446c0fb99663105dcbe070a9bd0718ba492d807ce8ff1966d41a512ed25a',
-  'darwin/Sources/CitizenSDK/CitizenSDKWalletFlow.swift': '4637d3466b2a68fcbfc4f931971f980d8d635c92c68322c9d553a3da976b063a',
-  'darwin/Sources/CitizenSDK/CitizenSDKWalletFlowIOS.swift': '166aabcabb01fe3320006ea7167a086e1e10761dda8a0dc1538aedbbcacc27d9',
-  'darwin/Sources/CitizenSDK/CitizenSDKWalletFlowMacOS.swift': '85deaa8739d8faef4cff30cfc3e31b382017a4d6bc837b060525b7f458854ee6',
   'darwin/Sources/CitizenSDK/PrivacyInfo.xcprivacy': 'bc417321bb94066c1bca08840349eea542c3c13e6addfc8248533791627434f3',
-  'darwin/Sources/CitizenSDKFlutter/CitizenSdkFlutterCodec.swift': 'e5f8ab45eb4030e41f15cd9b76d6acbcc8ce5e6a4a32fa73750ea39f9ab655ea',
-  'darwin/Sources/CitizenSDKFlutter/CitizenSdkFlutterSessions.swift': 'b0de51610c7ec8f4572a0a3f7d8bd05be6c5d4129a3cf86b2c66b3634e9ad24e',
-  'darwin/Sources/CitizenSDKFlutter/CitizenSdkFlutterWalletFlow.swift': 'd950e3c24dbaa5384b257d2777422e76b82b3abcec333e68bbbf9d91183cf207',
-  'darwin/Sources/CitizenSDKFlutter/CitizenSdkPlugin.swift': '01e524093d65351fae076bc367ebd795664b089c85831a1132c41fbc50bab2e9',
+  'darwin/Sources/CitizenSDKFlutter/CitizenSdkFlutterCodec.swift': '380e01cf7d22ec30486e903013596e31e211fb4533168a0e950eb4602727870d',
+  'darwin/Sources/CitizenSDKFlutter/CitizenSdkFlutterSessions.swift': 'b2b4adab84ddd18bf8f38520f6f34cfb2ef9ab8fd63049db49729ce4be36135e',
+  'darwin/Sources/CitizenSDKFlutter/CitizenSdkPlugin.swift': 'a923e7b3c81404fe6861ffa1698c50735306ede3e7de1ff68b335467a3b1c29d',
   'darwin/citizen_sdk.podspec': 'c5fcb9e8cb52b5fc4c9f3c6dc568d83c5c9536c88c41e6ecb2274ebad85dff26',
   'lib/citizen_sdk.dart': 'ac8fcf2b24f3556523dbbfc737dce00326ab4679797a45eaaa4f981e0104f243',
   'lib/src/api/citizen_chain.dart': 'f64e8fd8918469564b11f32212bbaadd2fc3cd09f5ee34711ba819b531f00077',
-  'lib/src/api/citizen_qr.dart': 'e7eb62d4f139498bb74b57a15ce76728f6fb0d01de247dceec9dd47e5b5554e0',
-  'lib/src/api/citizen_sdk.dart': '504498f38b7005f3ed3357088cf1d913614412738232247dd4eb047fe7eb87a7',
-  'lib/src/api/citizen_sdk_error.dart': 'a9a6aeb39b5b283ba9d7c7342a34b9923e2e87060e298b04be2a826578547e71',
-  'lib/src/api/citizen_sdk_events.dart': 'f84118fc1efa536f6688fcd4d66673a9d1d469d51fc72e181930021e57d515ee',
+  'lib/src/api/citizen_qr.dart': 'd9cf0d5ff673069d27e6d728686a5000ba8e15cbcd2d820436bc94df8fa59d6d',
+  'lib/src/api/citizen_sdk.dart': '0f87f167420a0adcfe7328a25dc2609676db39495e906dc09c962b2a8fa451dc',
+  'lib/src/api/citizen_sdk_error.dart': '1bd6c7b0ce0391ca8edfb41e20a681f1372a506f18d0730f65b0d9d417b42f4f',
+  'lib/src/api/citizen_sdk_events.dart': 'f4313b944ba072d4aaa2307bc3f232a6f15cd2a1adb7742625e03a3dae71e03e',
   'lib/src/api/citizen_transactions.dart': 'cfedd56d49a07f4c3d3ba15ec5a91441271a275d802a697856dc1c4402ad5bc8',
-  'lib/src/api/citizen_sdk_wallet.dart': '0d0c14a9a0f0bbf1593fe691063a300df10db78c96aee07e98b19f3fb49d5470',
+  'lib/src/api/citizen_sdk_wallet.dart': '4e8d5755bb6f545ce2fc55a19588c50fa371f0b1b526e97e67fcabe7655c1221',
   'lib/src/crypto/account_codec.dart': 'ce72262d96193ae47da43a9f675d6141f5c565eed05bb9e9755b575d96fcbc84',
   'lib/src/models/citizen_account.dart': '086319ca3010b0c848eba635954299c6425519b8c4eefd84b18ec26b2763ec4f',
   'lib/src/models/citizen_capability.dart': 'e7d5bfa94a60b005cd390f36ae25dfcb87a34c46c5b4e8188984a6103ba2103d',
   'lib/src/models/citizen_chain_state.dart': '24960cfa52d27901169c62afbeedd75dbf8ae69a3ce1f50b242c70e6c686d65a',
-  'lib/src/models/citizen_signing.dart': 'afb9f9fa1c514b17753b14eabee11e25744c9b13478067b998b9fcd5b0619ab4',
+  'lib/src/models/citizen_signing.dart': '16d7256faf8340ac92ba22be1fe4ac72cdf37bb9eea1393b27800eee6dd4a414',
   'lib/src/models/citizen_transaction.dart': 'c5582330841d84628ac49a050ff1ed2fed08154c6368b22faa09384d17ba1268',
-  'lib/src/models/citizen_wallet.dart': '041a8204a745d58b4aa6eb4bdec91faf8fc276ac3816c1fbdd082e10c93be904',
-  'lib/src/platform/citizen_sdk_flutter_codec.dart': '57858cfbdb6abcfcc87a332ec9bbf74a5851e37a5c23143f3dd47fca7f135a81',
-  'lib/src/platform/citizen_sdk_flutter_sessions.dart': '36c1ccb11a6b5e48f51667edd772ffa6ed5eb07855f3aa81bb699662b04b06af',
+  'lib/src/models/citizen_wallet.dart': '244e120ca4b6ecdc1a9d997295a8d5ab66eea8c510c1fcae5c91ef754ed7c2eb',
+  'lib/src/platform/citizen_sdk_flutter_codec.dart': '0d724193db03df79dff1a17a679f59f3316a83b292d4edfed1e8900f14d03792',
+  'lib/src/platform/citizen_sdk_flutter_sessions.dart': '108fb8a5b0234d67828b4d45d7fb843092b2e48b717869213f4c5e44e769c56c',
   'lib/src/platform/citizen_sdk_platform.dart': '295798fba26533cdbba0ec993acd215cf48889b9b744b43c2192e6566fe29f6c',
-  'lib/src/platform/flutter_citizen_sdk_platform.dart': '5e8b738cc77de41bcfc12d1653f998971d2e900c0da132802ab484beb02dd2b8',
+  'lib/src/platform/flutter_citizen_sdk_platform.dart': '18faee02334a8c3dabbcb3a80e01ac34ad56279cdb8011d18313ebcaf9f53761',
 });
 // Linux C/C++ Host 与 Flutter adapter 都只是根产品 ABI 的宿主投影，不是
 // 第二份 Core。测试和 README 分别由测试、文档闭集固定；其余 CMake、公共头
 // 与实现逐字节进入独立来源闭集，不能悄然混入另一套协议或生成产物。
 const WINDOWS_BINDING_SOURCE_FILES = Object.freeze({
-  'windows/src/citizen_sdk_qr_flow.cc': 'ffbc02731906ca0963ab78c07a44323c3be947f72a7d5d283f281b994af5ae83',
-  'windows/src/citizen_sdk_qr_flow.hpp': '0f66f0a70e3fcb2a7a9ae482ae52cbccf9ffff4353e116c6bc622de1f39ae686',
-  'windows/src/citizen_sdk_qr_camera.cc': '2b81e0992b0462608699b96fc41e42118034d0f648567ec6f28d067c8687426f',
-  'windows/src/citizen_sdk_qr_camera.hpp': 'c3345384e01ac9f8919fb53bacf9a052266f37d3cbc67f10d9a8544b6e82ec8d',
-  'windows/cmake/CitizenSDKFlutter.cmake': '9dcbbb80a62f9ef5be022e99b8270dfbd69f3af08131ff1b8c5e04d63218877d',
+  'windows/src/citizen_sdk_qr_camera.cc': 'de0b1dfd3cb33d972ec375a25eb58006694849a1a1a5a48104407f248b515de2',
+  'windows/src/citizen_sdk_qr_camera.hpp': 'a6937a5a30ca27ab87b767d51c766b4989918f4194a32718c67ea405ac605aaa',
+  'windows/cmake/CitizenSDKFlutter.cmake': 'cec7b3608111b49408be53de981dada7a0099f2f0542019639a1921989c4cf17',
   'windows/include/citizen_sdk/citizen_sdk_plugin.h': 'ed4a806687c01f9be2a4c4c76dff5dd7d8676f7fe0c6860551006c3a056256ec',
-  'windows/src/citizen_sdk_flutter_codec.cc': '1d158c4d0bfc063548d00d190ed1ba33edf4ede1c975856a85da4cacc06a0539',
-  'windows/src/citizen_sdk_flutter_codec.hpp': 'a14dd009add4b40d043c7c72e5477b7453c1dd591204fefcc4ce0fb3fe240000',
+  'windows/src/citizen_sdk_flutter_codec.cc': 'e8a199d4fa56cc286b951d6e08c716c3974dd9ba2f43f38b75115a2593731b81',
+  'windows/src/citizen_sdk_flutter_codec.hpp': 'db04ac284ce30de39d6cd1cae0fd5f9a2c282703fe3deaf71eef35872911538c',
   'windows/src/citizen_sdk_flutter_environment.cc': '55752e05934f60eefe922a6a2090dcf47f60b39280985f99628bcbde2ea34f29',
   'windows/src/citizen_sdk_flutter_environment.hpp': '958a42b9f877a3ed3d74ae893a51ceb57603d80ebad2aec1eadf82785b60a055',
-  'windows/src/citizen_sdk_flutter_sessions.cc': '0dd7629a42b22dcbda796be4e5ebb08cfd0420c1c56ec4784479d3e92de10bea',
-  'windows/src/citizen_sdk_flutter_sessions.hpp': 'e1a556d0e84b2e9ba854fd2295a7573d1544335d46be341140634151ebad3ca0',
-  'windows/src/citizen_sdk_flutter_wallet_flow.cc': '9e3300a07b3a1fbf2f2c8d94d39564d17d55fc2e6b926b828f9c1d532c6304ad',
-  'windows/src/citizen_sdk_flutter_wallet_flow.hpp': '5a33d4a1b1b27635fa52437d132a51c075f6b2838f8aa5d1ded9ce3c6aab7d95',
-  'windows/src/citizen_sdk_plugin.cc': '999229f3b5f84c6871aa451cb1389bf45c9b4c77795ddb61b8a4cbfdad05ffd8',
-  'windows/CMakeLists.txt': 'a8dcf50d287a00f40f99230f1972b1b5f60e79ed88e220eea2dc0bc5da111050',
+  'windows/src/citizen_sdk_flutter_sessions.cc': 'e8c81105d26e90369abb49c9bd304444ab4ec14ca3db40aa238de0e0d5283940',
+  'windows/src/citizen_sdk_flutter_sessions.hpp': '662cd44b983352fc3cc1ddc1078c9c3704bfd1e9ad65563e274bb482b46776af',
+  'windows/src/citizen_sdk_plugin.cc': '0c056bfd4580fee4fc58e4a6a09d6ae421844476dcc93e2b46af6936ebd49d1b',
+  'windows/CMakeLists.txt': 'ef8eb981dfd445d4968c70cd7e265cffadf336d084c1ce30bc2019af48fd019a',
   'windows/cmake/CitizenSDKConfig.cmake.in': '81744e9502983d927f9963a8288dd20a33f47b0bb0dbba96ec620bb93b0e5671',
   'windows/cmake/CitizenSDKConfigVersion.cmake.in': '5e180138e3d7ac236ad945c42a15184f48d3076a40206a3d7c90d545d42be235',
   'windows/cmake/CitizenSDKDependencies.cmake': '22e2ce5543f07f84def46b119df9fd9ab248f4c4df8ab27d4ab5f86c9ac65300',
-  'windows/cmake/citizensdk_host.def': 'bcb4fbd98b8a71ba99ef02333b5077cea7fc1e93dcc8aec16cb3a4e0b50212de',
-  'windows/include/citizen_sdk/citizen_sdk.hpp': '6a0b6e68b021fbb8cd53dd10a280ed7902525031837d366b511fed575a5149fb',
-  'windows/include/citizen_sdk/citizen_sdk_config.hpp': 'eff96e4819cfc987eea65280384f56e906d6a4ee575062774f0f9d61b9551afd',
+  'windows/cmake/citizensdk_host.def': '7532bb23a8f760aefd08057334cc7395bb487babada8f1b024226ddeef2f7afd',
+  'windows/include/citizen_sdk/citizen_sdk.hpp': '949cc690fa499d1b373e0336afc45f015d34d99caace329b66182688d8d6b4fc',
+  'windows/include/citizen_sdk/citizen_sdk_config.hpp': 'ec428263bffce15723485b6c4bafbcec99b40ce6979aa4514b2badc378b80296',
   'windows/include/citizen_sdk/citizen_sdk_error.hpp': '693d3c6adf930c6403f5d99f769578db6f4e02ba182e6bb051bdb76f8c3e2db9',
   'windows/include/citizen_sdk/citizen_sdk_events.hpp': '32c2f64beb04bc2ec274c909ff9776e47ab3c05a0face18e879a16d5a4069dc7',
-  'windows/include/citizen_sdk/citizen_sdk_models.hpp': 'ec0843fd6ec849287bbaee015190735ff813c3002b64c19c8cbd0b01703c4c32',
-  'windows/include/citizen_sdk/citizen_sdk_wallet_flow.hpp': '2630b15afc40ce1e1e1a3b80d02aa49486307bbf72f148336f62b6acc954a568',
-  'windows/include/citizen_sdk/citizensdk_host.h': '15d84703b773e6c3f41f47f74ddf9349a82aad602caa251cfc36631ec1393a56',
+  'windows/include/citizen_sdk/citizen_sdk_models.hpp': '8e14f3162f51175cdf8e9082cf2233c95619bec33e45152450839a522e8c7242',
+  'windows/include/citizen_sdk/citizensdk_host.h': 'e77158404edbacbca31ab2000837184d929fae387918b48b96d5706a369d0c29',
   'windows/src/citizen_sdk_assets.cc': '9f55e98f71f87f8baa3c2608bf64c52e2e8755aed4fa7ded13e47494f9968207',
   'windows/src/citizen_sdk_assets.hpp': '5e50c7ca69023c63af645eec4b97fa1bf74ae3089aef86fdcf1d35fcd4fab8cc',
   'windows/src/citizen_sdk_cng.cc': '88c6cc4d5532eec088d30211826e8cd4583e629557a43d687768a49353d39ffc',
   'windows/src/citizen_sdk_cng.hpp': 'b7e15414228fb0671cbf907aa1a6cbe0ca3ff57a1101805306b2c40c3f3321e5',
   'windows/src/citizen_sdk_directory.cc': 'e32bdb3c8d1f752bc750eae1bbf104b81c54e665fbec6ec8d9d3173a6d5c6844',
   'windows/src/citizen_sdk_directory.hpp': 'c46f0679df4c328b2a43be50260cb8001341f5da66d0ede2830b258c801d546a',
-  'windows/src/citizen_sdk_host_api.cc': 'b548f7f924a15429b0f97b0362df3007b7ee275b0606fd5f544c76490f758fe7',
-  'windows/src/citizen_sdk_host_bridge.cc': '1a7ad1e7209a46808acc040cf657638056838b6c24dd2b6fccaee2507b885988',
-  'windows/src/citizen_sdk_host_bridge.hpp': 'bbea917d69595b07d61219db34791aab138001cdeb44d4f6a65f5b3509dfd2ba',
+  'windows/src/citizen_sdk_host_api.cc': '93fced9a38714295833c93d26a646cf068b8015a90b4b7cc940dd0198b80f106',
+  'windows/src/citizen_sdk_host_bridge.cc': 'f4f97f6d7b26db9d699978aa28345d873e401989f16f36397b26d83bafad1eed',
+  'windows/src/citizen_sdk_host_bridge.hpp': '7671bee5c95e2e8697664de21fe34da75c3d7d82326de8456749db4a74e8aa1b',
   'windows/src/citizen_sdk_host_record.cc': 'ef59ba6feefc4686f5d5ed619a7a5cc43d5bd4a167fae1ba4f7022da85d19c39',
   'windows/src/citizen_sdk_host_record.hpp': '9e53109d9d1c3fe31e8f591acba8ec83b869031ff831013f44599a0f80914f68',
   'windows/src/citizen_sdk_input_limits.cc': '4ec6953b4090cd1cda3e82dc7c314a0380e941978654a1a764860658191fdf46',
   'windows/src/citizen_sdk_input_limits.hpp': '562181bcd62d4aca1117daecd0fd454e9079c70e86148d8903399ae3583e815a',
-  'windows/src/citizen_sdk_lifecycle.cc': '31cf403c44b29cf6f632a4457a120ea4d07ffd216ea951ad90cb2f0baa02d4de',
-  'windows/src/citizen_sdk_lifecycle.hpp': '46f4bb12bd1f103f8e50e07b1a86d9c4f250dedce3a5201034cf03e9e2ca5b23',
-  'windows/src/citizen_sdk_operation.cc': '1d83a173d0a403ac26990b3b455b0655938665583325b0e5c3d1c1d7c0d3b771',
-  'windows/src/citizen_sdk_operation.hpp': '631404a8099b19062aad81f4872b7bfbda7195b48a24d22566aaf954e7aa4a4c',
+  'windows/src/citizen_sdk_lifecycle.cc': '33e03ff5c2fcdb15fd5d5f7bcd340ff3b9437cd8bb90c7871ac759478baea7e3',
+  'windows/src/citizen_sdk_lifecycle.hpp': 'ae6767db44c01778c91bd17b140da62efa69c245b9df78aafbef41ecba76c2a2',
+  'windows/src/citizen_sdk_operation.cc': 'cf91f83b6f6dc318dc782d231855b5effb44b905a2ee8325423f883a8a9715ee',
+  'windows/src/citizen_sdk_operation.hpp': '5864304e0760b45a4e41fe7e923b623809d795f27e18262acc0f5daf0e4ff38b',
   'windows/src/citizen_sdk_public_store.cc': '28bd90809bc9f8db126731cac574ccd8473421df15053d1ad462fea9e0bf18a9',
   'windows/src/citizen_sdk_public_store.hpp': '014b53c41685616f0186c5d15db3778629fbc83a23d308e8d005e934f32befe0',
   'windows/src/citizen_sdk_record_key.cc': '689eb3eab6a279b930f60ebd292b594f17ca2fb06faa0c938ed8311c23cdf3df',
   'windows/src/citizen_sdk_record_key.hpp': '8f41cb538870037827ecda3401178dcaee5d839d052375ddb6b5e9e74326f736',
-  'windows/src/citizen_sdk_secret_vault.cc': '6333ca220d76bae082d590ec3a9e72c04711d6b94963fae16202187405ddb2a4',
-  'windows/src/citizen_sdk_secret_vault.hpp': 'd16fa0fc99a1b3245f37aa6239cfd4390298b4eb15bc3de16b41103d75774173',
-  'windows/src/citizen_sdk_secure_store.cc': 'daa23ab6fce9853b6139494a91da4f901601849ef37d380f935ea355d42455e6',
-  'windows/src/citizen_sdk_secure_store.hpp': '9749e169f1ea50642c2837f80b5eb658ce49cfcf002012d893437d75cd6793b6',
+  'windows/src/citizen_sdk_secret_vault.cc': 'b9b545ceda031ab989360f4b72503701986a6c9ce0367d98c3fa37e884910595',
+  'windows/src/citizen_sdk_secret_vault.hpp': '15c53e797216da049e179229139852d43356ddc3abd3cb8e6c59630157ae8355',
+  'windows/src/citizen_sdk_secure_store.cc': 'd7861e3859d0f3be1461d385f190d24d43e8eb1f492d1d8fce691841ddabb348',
+  'windows/src/citizen_sdk_secure_store.hpp': '90ae0c83d1d5fd70b38eaee46ba51897c4169ad3b308ca124e4ddffdea4c384f',
   'windows/src/citizen_sdk_sensitive_buffer.cc': '3e57b05e29b90c92f95dee292360debeb0c330af1fce41a24de9cf9c3d04dff6',
   'windows/src/citizen_sdk_sensitive_buffer.hpp': '99c5cd23993b3bed07605f4a707eec55cdf087a97677bbd684f8363355ef3ce7',
   'windows/src/citizen_sdk_sqlite.cc': '503bfacb9e83a1d2c35dc45aec0184c5a3fc759b1e8cb44182ab47334697d854',
   'windows/src/citizen_sdk_sqlite.hpp': '0d69a315553abd90a42029646fa4355b3acc9867fb16a9343312abcffb4aa2d3',
-  'windows/src/citizen_sdk_user_auth.cc': '7a51220f936914665c4cef8aff7d02b5febc27b3dd241e0bb51d1490d8f34b16',
-  'windows/src/citizen_sdk_user_auth.hpp': '3df44605aad022a3acd3dc4c9259cd88f649ba438156eced488d7638321473cd',
-  'windows/src/citizen_sdk_wallet_flow.cc': '603c723ebd2ccd3b8ffe10b057e6be828f5b4082c948e6fabc274e5c149cf7b7',
-  'windows/src/citizen_sdk_wallet_flow.hpp': '90647bc0dd435d1b8669d6ac077183005abb3b9509238d9d28a1306b8f611ce0',
-  'windows/src/citizen_sdk_wallet_validation.cc': '1cf9508dc779d3c319183bbd8a804630436e6b0bccf86529f43a739efad17c31',
-  'windows/src/citizen_sdk_wallet_validation.hpp': 'a864e6f6a66142cab791007ae0e99bf71fc362d85bff0bfe2cbfebe39beac059',
-  'windows/src/citizen_sdk_wallet_window.cc': '2caa1307f6d6842c7cf0d359abc13e1153a3065642973754a8775ad5a2020ea7',
-  'windows/src/citizen_sdk_wallet_window.hpp': '2804890a7aa996fdff275cfeb9379996222a64fd6210b3b4a4de8f5b6ba5cd43',
+  'windows/src/citizen_sdk_user_auth.cc': '18d4ef171f17266372bfddbea5a1c4211d1fb6383b0eff86ed45673d5e2f0b0b',
+  'windows/src/citizen_sdk_user_auth.hpp': '9b93257a9e295e43952d612f4652b76898c58d91478d54a2b2f75ef907ed2a49',
   'windows/src/citizen_sdk_window.cc': '76673550457b05c7f75a426739cfc925e8322b98c872c3519420a465d79afe7c',
   'windows/src/citizen_sdk_window.hpp': '60fff1bbed42f818449e351e819aae65e30029b95bb27b92421f7793a1ccfa6b',
 });
-const LINUX_BINDING_SOURCE_FILE_COUNT = 64;
+const LINUX_BINDING_SOURCE_FILE_COUNT = 51;
 const LINUX_BINDING_SOURCE_DIRECTORIES = Object.freeze([
   'cmake',
   'include',
@@ -554,70 +560,57 @@ const LINUX_BINDING_SOURCE_DIRECTORIES = Object.freeze([
   'test',
 ]);
 const LINUX_BINDING_SOURCE_FILES = Object.freeze({
-  'linux/src/citizen_sdk_qr_flow.cc': '48e6b3d4dc67127ad650e621e99726115fda628705ea493b22ff3eed9517da23',
-  'linux/src/citizen_sdk_qr_flow.hpp': 'b1a00a2432034a054c50672ef03f335ea161c88bf251977dd5611895c43fc358',
-  'linux/src/citizen_sdk_qr_camera.cc': '49ffa92937867441927f17690f3d688e03c18d4b3506969bf60f7136df31f009',
-  'linux/src/citizen_sdk_qr_camera.hpp': '0f644214c988867f8d349d1c65e53c544956ef3dfa2bab45e17478db514b3a70',
-  'linux/CMakeLists.txt': '274591668343127ca73c3f223190ca94d988855ccf2366bcf448629c51c074ff',
+  'linux/src/citizen_sdk_qr_camera.cc': 'abb06ae107649dbacfd8cde28f5607aaff83dec906d0c82e88eaa3db8c486e44',
+  'linux/src/citizen_sdk_qr_camera.hpp': '7978efb0277b58a6a73b1dffc053f01e016285a9011a3ee9bb278f0e267b447d',
+  'linux/CMakeLists.txt': '52f5a45f18ec8973718167296061f9ede5bc39eddb07e44c72da0e4c7824c14d',
   'linux/cmake/CitizenSDKConfig.cmake.in': '0f3981dcfdab1fbea6f893af38f2bfe3dd093aac9258a5deb8a26ee6a666f211',
   'linux/cmake/CitizenSDKConfigVersion.cmake.in': 'b2dd2bb6bb58f1255b6e9eca0f61b635f589ee2809537f7ba7fa45d46e3d7685',
   'linux/cmake/CitizenSDKDependencies.cmake': 'c0ab6dffc4577ebfff8b3eb467f37f2b8c7fb45158bf3f64b7e8d753b9d8f5d0',
-  'linux/cmake/CitizenSDKFlutter.cmake': '9bf8c3d1d720070f7081063e18e06a8201910d095d0be662b633d1ca52d76a64',
-  'linux/cmake/citizensdk_host.map': '55b8fded38b58ad55b71e4f24f6c0ab2008fb11341bb53deee1e734e0718f04a',
-  'linux/include/citizen_sdk/citizen_sdk.hpp': 'c1b352e91b21d2a48037c1d7ecdf0877ba2fc69b046f65ec1843e2fec968a2fd',
-  'linux/include/citizen_sdk/citizen_sdk_config.hpp': '1f995e4d9ad24fda5e927f256f34617fae7b5996c5f17af71c9ee6c9cedc6815',
+  'linux/cmake/CitizenSDKFlutter.cmake': 'a330974dc01a40fd0a21be8e74211b670b976da626a29ac9d74f312336cb261e',
+  'linux/cmake/citizensdk_host.map': 'dc3ce26cbf848b5bb56d0051fcab5cb38e88ad281a36bee95e720c78742ffe88',
+  'linux/include/citizen_sdk/citizen_sdk.hpp': '1f5f17f425e2ec79ee236eba29f4ab35093cf04c4375469c41bed2208e5649bb',
+  'linux/include/citizen_sdk/citizen_sdk_config.hpp': '874ed6acabd193589d572d97b0d8d9106f70f80210507433ba46b97263c4e6c6',
   'linux/include/citizen_sdk/citizen_sdk_error.hpp': '693d3c6adf930c6403f5d99f769578db6f4e02ba182e6bb051bdb76f8c3e2db9',
   'linux/include/citizen_sdk/citizen_sdk_events.hpp': '32c2f64beb04bc2ec274c909ff9776e47ab3c05a0face18e879a16d5a4069dc7',
-  'linux/include/citizen_sdk/citizen_sdk_models.hpp': 'ec0843fd6ec849287bbaee015190735ff813c3002b64c19c8cbd0b01703c4c32',
+  'linux/include/citizen_sdk/citizen_sdk_models.hpp': '8e14f3162f51175cdf8e9082cf2233c95619bec33e45152450839a522e8c7242',
   'linux/include/citizen_sdk/citizen_sdk_plugin.h': '06636001f326a317617a39f7c1108eb510b127f416de7f0dcb4c4cdd84be0c2f',
-  'linux/include/citizen_sdk/citizen_sdk_wallet_flow.hpp': '2630b15afc40ce1e1e1a3b80d02aa49486307bbf72f148336f62b6acc954a568',
-  'linux/include/citizen_sdk/citizensdk_host.h': '3414aadc903bf44d821d8f9d4f7975d98fec3e0d98503539b1787dbbc385477b',
+  'linux/include/citizen_sdk/citizensdk_host.h': 'dbfeb366336a504ca1ab58e5543d7a73522364cd7b3e4fd04ac4835d84ff0df9',
   'linux/src/citizen_sdk_assets.cc': 'b663b653299c22d62a44a7f242e1e57f2d8471408d0d3d81728bbe37929d0cb6',
   'linux/src/citizen_sdk_assets.hpp': '44d30123c623ea266030235126552e4a9334839f0d5d44adb5931f56d8b93401',
-  'linux/src/citizen_sdk_flutter_codec.cc': '7c6d12f34fe28d6cc32287dbd7261b28fe319ccb60e619cd65f0a7017e091006',
-  'linux/src/citizen_sdk_flutter_codec.hpp': 'af7e133e2a2cfc216dbf93f57a0807c4f236fef633a11b2e3c892a7bd4770052',
+  'linux/src/citizen_sdk_flutter_codec.cc': 'de053e4261c7b492678d2e338e54d0ea61a82d866c2d4a9e38a497931979c452',
+  'linux/src/citizen_sdk_flutter_codec.hpp': '1e735d591d62fd8213dad6d50b358cfc63e0394df0e88a032076bf37e75295c8',
   'linux/src/citizen_sdk_flutter_environment.cc': '7705ddce74f6d2b94c0102328f25421846623ce55f18563ccdbed9d3820e7737',
   'linux/src/citizen_sdk_flutter_environment.hpp': 'cb7c3707b5060d178bfaebab973358a897cabac08945220fd975a6e050e2a455',
-  'linux/src/citizen_sdk_flutter_sessions.cc': '695b4f9af764c8eab879e4202ddf2e5215065c4866d52f73bb5da8f43a7539e2',
-  'linux/src/citizen_sdk_flutter_sessions.hpp': 'b8c51f9a288f99d037c7753ed201703cbe0a3336b045f4a1c227890e74ed45e5',
-  'linux/src/citizen_sdk_flutter_wallet_flow.cc': 'b02842a148f7fe5465b447f1a3bc4bdfa327aa4577071a18a6cdeeb64c218188',
-  'linux/src/citizen_sdk_flutter_wallet_flow.hpp': '717fe64d7a8f078810571202ccb4dbb508037f3b8570fa4b4c0e4a170514742a',
-  'linux/src/citizen_sdk_gtk_parent.cc': '885485999900f9d121cec35fb859abf8b378f0caa0fb674a2b909f96377cf5ba',
-  'linux/src/citizen_sdk_gtk_parent.hpp': '891a3fb929951b7a51a0e76854d50aa289a72795ca90c3f8c7140292a19a8cad',
-  'linux/src/citizen_sdk_host_api.cc': 'd19a4be5f290d7f58f5ffec6a85c93fe34b1d54e0a1666b05672e2d9e8766807',
-  'linux/src/citizen_sdk_host_bridge.cc': 'c4b8f516a8d45861d45ec3318528105e604264efb96e5eb07d0b6c48fd0a8dc2',
-  'linux/src/citizen_sdk_host_bridge.hpp': 'ca808c962238e8039abf326325ca355963ec1a09917fbd707585853bdbb45423',
+  'linux/src/citizen_sdk_flutter_sessions.cc': '195792798706682e16f0d648b6096dfd8fb1c200fb49d3e79fb1f5bfda7a5a06',
+  'linux/src/citizen_sdk_flutter_sessions.hpp': 'd326ac7b97ccd11b74a1ac6d35238d6894893444df6392332da656beca8ffe79',
+  'linux/src/citizen_sdk_host_api.cc': '1ff5822dbfae143c909bb2a2809872217e76638a8773440eeca41a6fe5564ecf',
+  'linux/src/citizen_sdk_host_bridge.cc': 'f37deeac85a58c434fc4001e0cf27333889d0cb1d2ea8924a08cd356b0cc9839',
+  'linux/src/citizen_sdk_host_bridge.hpp': '8b94dd77907414326a916b8bb22e8f800b89aaa05ce2b73bd6e1e1194ad9410c',
   'linux/src/citizen_sdk_host_record.cc': '68fea5575759fadbc9bd9257a32bbb00779bad9961908e76135329c3fcc110c3',
   'linux/src/citizen_sdk_host_record.hpp': 'd3c5b9cfaf91c85ee47bf86713f1299f204ef220614035257adb1c2d56be5742',
   'linux/src/citizen_sdk_input_limits.cc': 'bcee60aea062432c44f16d71a99b2b61e4f6fd08f564c60290d21247b856ea7f',
   'linux/src/citizen_sdk_input_limits.hpp': '939167673437101beb1c55e4076441b613d50deae694c44191da8063389c523a',
-  'linux/src/citizen_sdk_lifecycle.cc': '699b015d446e3de84b25a705bdde9baae5d2820c10de0a2e2e84b1905355cb05',
-  'linux/src/citizen_sdk_lifecycle.hpp': 'e5251c01d91e3470caa5188b00706cb556ff3f5452413f7a639debd9cd0d4456',
-  'linux/src/citizen_sdk_operation.cc': '5cff05d1e1f031880d89a4b9e03aa83c0acf3310d41e2f7bc1d03438030187bb',
-  'linux/src/citizen_sdk_operation.hpp': '77becb3dd81f8ae63d4a50ad893989133b81b5fd41f8bf5a573359bc94855bf2',
-  'linux/src/citizen_sdk_plugin.cc': '74a0d6dfcc3d29ea654b8372f59625315f069c8d119f3de076c34c43c66a6953',
+  'linux/src/citizen_sdk_lifecycle.cc': '78fcdac10137a4f39d5eb6bd69be1a74a51b5f449f969f7d6e048ba8828a441f',
+  'linux/src/citizen_sdk_lifecycle.hpp': '08c384e14cdae9938d07d681d55648e0e0e623b07f69e0d4c5f472a7077539c6',
+  'linux/src/citizen_sdk_operation.cc': '5fc6658dc917578d88b256feda05352e7c7f30447bcda0218a0169f0cf7ac94c',
+  'linux/src/citizen_sdk_operation.hpp': 'cecfd6e3864996c40995ebdb25c7fd82094f19dc039481ba35451b7196ee1aac',
+  'linux/src/citizen_sdk_plugin.cc': '6d351a5824e5dd0112dc3398a31c5969251f89d9fb632f5994c41acc24f39604',
   'linux/src/citizen_sdk_public_store.cc': '1c4daf7421f85365d8aec2a51e60564acbb8f7b1102d3fb5db416ce744ddb476',
   'linux/src/citizen_sdk_public_store.hpp': '0ed71b85c8bb736c2454137dfdc856da3cd4b963fb5fa3fb9c3e7b0324bbe197',
   'linux/src/citizen_sdk_record_key.cc': '80425cd8dffa7b537ab6634018b8877f2bac365949dc41667c8f0b8945be193e',
   'linux/src/citizen_sdk_record_key.hpp': '267aca52f7d0e0647f5d716eebc08cb2c77be5c093d491365baa7c01e0118bdd',
-  'linux/src/citizen_sdk_secret_vault.cc': '055a9001517ff05787d8f2eadbb6486da30fa440bfbd47aab614a472c62839ec',
-  'linux/src/citizen_sdk_secret_vault.hpp': '2b26c83d812a265bba7b8dfbaf8f727979411e23a18002a84056e998781d2d52',
-  'linux/src/citizen_sdk_secure_store.cc': '88a7a4ee4bb5fd6248727d825a79ea4800fd8ecc59fd7816693e74df38b545c1',
-  'linux/src/citizen_sdk_secure_store.hpp': '7fd52a836df5cc796c0a9c287d24ae92e5d07715a31af9a44506718f0ddebced',
+  'linux/src/citizen_sdk_secret_vault.cc': '808beec1cffef5f07f963afcdd03be4fd22ed78414e4839cbe640f668818ae4c',
+  'linux/src/citizen_sdk_secret_vault.hpp': 'c00710be510461e0e4467290ed3e7e18a77e244d6c5bebf484d10fdee384d452',
+  'linux/src/citizen_sdk_secure_store.cc': 'a3703ef08bdf6cfc2acd454c433aa6e19cd38171c2b89a1d62f83f0ce4b77ccd',
+  'linux/src/citizen_sdk_secure_store.hpp': '2fcbb33e911042cb7cfd74acb7a75f370ce51c5bb66e4147824219fb991faaad',
   'linux/src/citizen_sdk_sensitive_buffer.cc': '3904d22d1d02bf03512d84fb5a06d30912793b7e5abecba283b30ba3b15d1e90',
   'linux/src/citizen_sdk_sensitive_buffer.hpp': 'ea8254eb8420c7abe4b7adc338d87fdf0ce9cc8a44ca42ec305618c3788b1046',
   'linux/src/citizen_sdk_sqlite.cc': '1c216fc9d40e8311cbfba188cf65aa3f65304751f40bcb1ed727a4e8288926f4',
   'linux/src/citizen_sdk_sqlite.hpp': '758df4068b8db94a1122e1a64823fd38aca9f5590c1ec1ba39ac5eb69f49041b',
   'linux/src/citizen_sdk_tpm2.cc': '09fee7a54f2163d81584c9cdef05ca38d5b533057437d0621c1c2d44357310e9',
   'linux/src/citizen_sdk_tpm2.hpp': 'a8a7c68d743b8e662ad57a736c23ff54518e53155d72ccae9913b61964cae644',
-  'linux/src/citizen_sdk_user_auth.cc': '62e9af7d8fc21162f4c42913d774dbcf2297f66e49e57204bcdf556f2a85dbca',
-  'linux/src/citizen_sdk_user_auth.hpp': '455b08deccede104cc44c6ce9acba4c5f550a55a1cea7085c49587e99aeb2032',
-  'linux/src/citizen_sdk_wallet_flow.cc': '8648dbe6f71016e4a8e9a53c864708f96192759b01cd6571bf6dc403ae3dfc96',
-  'linux/src/citizen_sdk_wallet_flow.hpp': '88e310af7d30c1a9a938d9725db29aa58e1118c8108b0d7a2838e30a94595c86',
-  'linux/src/citizen_sdk_wallet_validation.cc': '2eae55a5a4d9f1f2fa58940c2f00fde0b72cc4885a7f3c35f9a7ca0ac7c4d548',
-  'linux/src/citizen_sdk_wallet_validation.hpp': '5ba45105bd8c4902d43958c876cfb7871735c08f04bc82418dc1c7b03296e95a',
-  'linux/src/citizen_sdk_wallet_window.cc': '1fdb28654cd24c060bc9872a937dd6a7a792720b58cc9f5dd903988830e318d3',
-  'linux/src/citizen_sdk_wallet_window.hpp': 'a91f31e8d32fd21b625d575210a6281cb33e74a59366b328383058b72d5f9e43',
+  'linux/src/citizen_sdk_user_auth.cc': '6a092ca1f388102f9eec259bdcb3239523622e802e2b9d52df26294a456311cc',
+  'linux/src/citizen_sdk_user_auth.hpp': 'c4e52fdb8bf9b106e3fa2f57e23cf24829089ebd99cd7dd8c034606e102208fe',
 });
 // 产品技术文档只存在于唯一中央文档；产品源码中的文档闭集必须保持为空。
 const DOCUMENTATION_FILE_COUNT = 0;
@@ -665,139 +658,139 @@ const SDK_SCRIPT_ENTRIES = Object.freeze({
 });
 const SDK_PINNED_SCRIPT_FILES = Object.freeze({
   'scripts/analysis_options.yaml': '67a8f842d8b2c0eee53ab22db23c98e4deb3f8d3992a20d1a977870dc2e8218a',
-  'scripts/build-native.sh': 'a12aede6c59908f4e67a28b3b43535ecc0066c06fe171e7adfa3c25d0a581faa',
+  'scripts/build-native.sh': '919288272aa20e757e347aaa074b767389ab35a6f494a6ff5a9aebe3ecd435bd',
   'scripts/dependencies.lock.json': '0a8512053a401ac12604098de0c19e810b529424eea3e81f952a5eea14e9d5da',
-  'scripts/dependencies.mjs': '353e1841578730688aa437980d1d14adb43321dc83513b64e5336a4cff2177fa',
-  'scripts/test.sh': 'd96eee81a084a195386875afdb473cc440f3ce30755b6666fa524d1c721fc075',
+  'scripts/dependencies.mjs': 'd3411d94527d99a93857eb8b9302027e42af6484ddb4fb95c71fdf9c2f13739b',
+  'scripts/test.sh': 'ce50ec9439388273a2ee071bc96609eff8decb8743beeee9f22b7cd9190cff7b',
 });
 const SDK_TEST_CONTRACT_FILES = Object.freeze({
-  'test/baselines/sdk_1_10_1_contract_test.dart': '0984acffb4f3202501474f0fad87822d4dbc9d1f8615adda00b066cf3db76ab7',
+  'test/baselines/sdk_1_10_1_contract_test.dart': 'f170849e496644850dee0f50510d32ce58c455d791d85e8bcaae9f25634df951',
   'native/engine/tests/baseline_resource_contract.rs': '78b211a0d7ce43d9819cbaf1f867f8680222cf649a5b9729ea9a808ce09abb03',
   'native/smoldot/provider/tests/baseline_lifecycle_contract.rs': '881490cfd192e6b6c5e1693ccba4a3e6725a7f8cdb7aeb34fd47de576e1cf5ee',
-  'native/engine/src/qr_review_tests.rs': 'd81e4f649bc6ba617c750e748a1ff6cb2da1189bed71cdbcc89c4150a1515420',
+  'native/engine/src/qr_review_tests.rs': '9112a367745bd8aca6796316a8ec31895021edd762b2cfd655b8a357d72aa00d',
   'native/smoldot/provider/src/bootstrap_tests.rs': '688a8883eb780fd61c69f348353d32300115b32928b001ea1113e7ae95e0bf30',
   'native/ffi/src/chain_monitor_tests.rs': '249e22c52f52ff4f17ab6fad58c5ce37f9f0a880ce4156671b8356e29214730e',
-  'native/engine/src/wallet_input_tests.rs': 'bad1351fca2ba69af4a0a41ffca18a3d913da0422588fabe7357f672262e1122',
-  'android/native/src/androidTest/kotlin/org/citizen/sdk/ui/CitizenSdkWalletInputTest.kt': '5890f662654e262f26390623b6200600b20280f2d3d2fb6bec7f02cca29ecea3',
-  'darwin/Tests/CitizenSDKTests/CitizenSDKWalletInputTests.swift': 'bd63eb4bd1a516c21c474013e18aa391952b6f9e7e5c96136ed36beb5ae5374d',
+  'native/engine/src/wallet_input_tests.rs': 'a48405f12472122b7ab1dbac19b806e3900c99152a396987e1f0956fb9bcf3af',
+  'android/native/src/androidTest/kotlin/org/citizen/sdk/ui/CitizenSdkWalletInputTest.kt': 'dd671df3bd18b0172b840c18c39363c36a08971438f476da728bc341f87aab26',
+  'darwin/Tests/CitizenSDKTests/CitizenSDKWalletInputTests.swift': 'fc94c673b311d486b708122cf2ae8ecb1ed60730d8ae5210f7e5b6f00b255bbd',
   'windows/test/citizen_sdk_flutter_consumer.dart': '2abfb7c58ed8ccadb53aa14194daa87c6b2cc9a20627c3014c9b1e3ec762c69b',
   'windows/test/CitizenSDKConsumer.cmake': '025fff5bfc95a553bff57f7378372148c9d4932476c887fb84ce438e5c0e8117',
-  'windows/test/citizen_sdk_c_consumer.c': '0ab5501f173c87f55f79207eed0ba27cffc7af93073d1d9a44af0eed2a6495d6',
-  'windows/test/citizen_sdk_cpp_consumer.cc': '363893e86aa7e79cdabfcb8f28ac04aff82306fa584411ed147e2346d1eaa697',
-  'windows/test/citizen_sdk_flutter_codec_test.cc': '4f1d5ce38209f83df3fc025605ffd929fa0ba8221fbdc4574e41b30698aef0e1',
+  'windows/test/citizen_sdk_c_consumer.c': 'ba564a941be5ddf91235057fb8444b3c342c3932c139a07996f64adee105546e',
+  'windows/test/citizen_sdk_cpp_consumer.cc': 'a6a78ae4b3d07f5ed1f99990f54bb8c5c4d41c27f06cb0a999520ee64d90c96b',
+  'windows/test/citizen_sdk_flutter_codec_test.cc': '8a0f5c1aed8a8139001b466786bc677a55a0eca65ed3da5901adc7066a262d45',
   'windows/test/citizen_sdk_flutter_environment_test.cc': '83df99bf0f62688523d2106cea1d6c993a5af8978ea7739dacdcc5fd11612019',
-  'windows/test/citizen_sdk_flutter_plugin_test.cc': '6c0be3e2ae099334c12ae803fbb8bc5856da066d5de7092f678755baffe35e05',
-  'windows/test/citizen_sdk_flutter_secret_boundary_test.cc': '5af637815c403f5fa7d45f0fcb67e0f99d0882e2b3f528fdd7d68c578abba457',
-  'windows/test/citizen_sdk_flutter_sessions_test.cc': 'fe574a45d39fcc3f0c6580b520cf7eee6c486e6dedc51ff5e1411230f65feaa0',
-  'windows/test/citizen_sdk_flutter_test_support.hpp': 'bf0b583cabbc0ec14ce86d743870433731a79fd61b0647d6f55fc6212b96bd39',
-  'windows/test/citizen_sdk_flutter_wallet_flow_test.cc': 'd2c63517ddbdd1cb83a5cb7a9338cb760296103eef945573f803b36ff4fcfd47',
-  'windows/test/CMakeLists.txt': 'b953ce6fcba468ea5db1f57d4eb306b58ee20213fd6700c6c669c3772da0588c',
-  'windows/test/citizen_sdk_api_contract_test.cc': 'e3e8d8ddbd3499962d17638c27f2b1431dddf4bb6051870a38d194302f606a86',
+  'windows/test/citizen_sdk_flutter_plugin_test.cc': '466bc68608196dd5f74059c05833da29fd632df3456df2da20efdcb1bb7ee0ca',
+  'windows/test/citizen_sdk_flutter_secret_boundary_test.cc': '8c0a7a11041ef5541124168452f8f9e729339b1979c81afcba2536df784546f0',
+  'windows/test/citizen_sdk_flutter_sessions_test.cc': '171a73af6577ef841667473fca75cbf3dfaeee5b7534d4c1adc7938c2dc8ad6a',
+  'windows/test/citizen_sdk_flutter_test_support.hpp': 'c70f2f414d92aa56c2e86e300c2567bb46c38927039ae9f519d1e262b7bcfb47',
+  'windows/test/citizen_sdk_flutter_wallet_flow_test.cc': 'de915483b99e047f7424a55f2eafc1fed817cab643a3e7cbbc25b4e7acd6b342',
+  'windows/test/CMakeLists.txt': '5c3462d43fad39b9e221d662287151589eff9dc2147bb282ea85eff34934c46a',
+  'windows/test/citizen_sdk_api_contract_test.cc': '95c248c668ce99d7e23f476a90026479a42bcfeaa1261a4c5d14a2e5c3e5bfa8',
   'windows/test/citizen_sdk_assets_test.cc': '2d1e8d32af98b75afdeffefb2371c98bf95fda7017fabfe6c51a301373d8ea9e',
   'windows/test/citizen_sdk_cng_test.cc': '2041c11af27e7424295d4294f271c1d0cd8c7162c64d67af9155eaced422f4fc',
   'windows/test/citizen_sdk_directory_test.cc': '952bdc527cb00371cf721f7bad8bd527a7d7f4251799df45e38d19087f4aac61',
-  'windows/test/citizen_sdk_host_operation_test.cc': '34faa39c22315d365b7fc705c198a81be62942c38a8a9a058ef9bde56ceb9c2c',
-  'windows/test/citizen_sdk_lifecycle_test.cc': 'c1cb7d1d668f1eaa390d08d8b092608fc0d643fc8cbab0f19e93a55585c1b628',
+  'windows/test/citizen_sdk_host_operation_test.cc': 'a2d010265461834843430de81fcc1e5dffae2a7e9aa6990781321fa3c3c0498f',
+  'windows/test/citizen_sdk_lifecycle_test.cc': 'ff5b56597c32a9cf0e88ee10c3d6a38e5b45564cc487c428896e92f57f8650c9',
   'windows/test/citizen_sdk_public_store_test.cc': '8d3910973a554c5518089477112372474cdfd183b71e45d439771ac802d07cb8',
   'windows/test/citizen_sdk_record_key_test.cc': '421e9dd2e9950c02addb9343fe12ca23f3d9c1832c4a25725420928dbc9423e1',
-  'windows/test/citizen_sdk_secret_boundary_test.cc': '84ef2838458be86eeab028ebb4846c2240ec8b3ab64af45ce00b5ac5190e75a2',
-  'windows/test/citizen_sdk_secret_vault_test.cc': '224d4817a01010dce951fa5d3f83ed2072eb8e02fef0f68b688b3af1e298ddd4',
-  'windows/test/citizen_sdk_secure_store_test.cc': 'f4e06493a7bd9b64dc43255fb2f51ee8e7af5b8c894ffc53b775f6f9ab35b0c0',
+  'windows/test/citizen_sdk_secret_boundary_test.cc': '7e6c220a4ac2129d8cb11ca67206951e9c1bec56976d66398bc14d1c56f085ea',
+  'windows/test/citizen_sdk_secret_vault_test.cc': 'a209f8263db08f6f8680259308430c6657619890cffab90d034c54edf10ce96c',
+  'windows/test/citizen_sdk_secure_store_test.cc': 'ca29f5d02a0f15556c370c9a0cba9c8ab93501effe335240dbfb1077887d9b77',
   'windows/test/citizen_sdk_sensitive_buffer_test.cc': '23d0d8f7f28db585ff1dc6ac23d350018c7f6636adb07925f3b3891d0b4eceee',
   'windows/test/citizen_sdk_test_support.hpp': 'd128551fc1e6f8aefb9604ac88ed32cfedcc2d57c97be30995aa974e7a5ee38c',
-  'windows/test/citizen_sdk_user_auth_test.cc': 'd148cf2e4714164a36ea36d2c5d5d5b77ca42fbcbcc8f9b8812e2ec6766a6496',
-  'windows/test/citizen_sdk_wallet_flow_test.cc': 'ac4fd0615ab9d2c2d4de5e4a434d8ebf6e17231ae452aca0f142335fafe683f1',
-  'android/native/src/androidTest/kotlin/org/citizen/sdk/CitizenSdkHardwareVaultTest.kt': '1c69b2a0512aeb59bc21e36a8aa7e3c8741a33edc5cecb7206cb7336d74d5cfd',
-  'android/native/src/androidTest/kotlin/org/citizen/sdk/CitizenSdkLifecycleTest.kt': 'f3dcb93ebfa32033e83db309e75aa9a1dad8f76d83fbfae31e02dfdd65f08767',
+  'windows/test/citizen_sdk_user_auth_test.cc': 'fbe8fb1941f722775b27954d2e3222bac40feee99b88565c7bb227f01e560324',
+  'windows/test/citizen_sdk_wallet_flow_test.cc': '92ec625effc84cd482d6a80217de253227e07990a9b79395551196fc566401e3',
+  'android/native/src/androidTest/kotlin/org/citizen/sdk/CitizenSdkHardwareVaultTest.kt': 'b918b6949b7dff85041bbe1e1a95efdc8772911c7dc4470220ff958bb9bc5c26',
+  'android/native/src/androidTest/kotlin/org/citizen/sdk/CitizenSdkLifecycleTest.kt': 'e16c4493a198d8c2d9e790bc2d2d16f73db4d97f71e2356cccf7f543823fb0dd',
   'android/native/src/androidTest/kotlin/org/citizen/sdk/CitizenSdkNativeAbiTest.kt': 'cd17759ab121ec22fc224715233a0ee118f75882bc026f4e713a0b89c2e686e0',
-  'android/native/src/androidTest/kotlin/org/citizen/sdk/CitizenSdkStateStoreTest.kt': 'd39f6b845b2e598e02b8a2d5e955aa85abf859809244aef7de91b7c2af4b7637',
-  'android/native/src/androidTest/kotlin/org/citizen/sdk/ui/CitizenSdkWalletFlowCancellationTest.kt': '43437c234ac4ae9b8305220347b0c0d3c1aed399f8f14646fa91489e20625ee1',
-  'android/native/src/androidTest/kotlin/org/citizen/sdk/ui/CitizenSdkWalletFlowSecretBoundaryTest.kt': 'e34e53d30e322f229eb62bedb61e02303fae0e49c43155b73d71138b73775ba2',
+  'android/native/src/androidTest/kotlin/org/citizen/sdk/CitizenSdkStateStoreTest.kt': '27492e04ad6dab009e7df496f2ae6237cef9b79af5f313de94267e75eeb2e7e3',
+  'android/native/src/androidTest/kotlin/org/citizen/sdk/ui/CitizenSdkWalletFlowCancellationTest.kt': '28881d7e4cb2bd0919ca96c367964c81e30aab19a1f7ef59ca03c9e5e3c9262a',
+  'android/native/src/androidTest/kotlin/org/citizen/sdk/ui/CitizenSdkWalletFlowSecretBoundaryTest.kt': '9ed5779c514f268d804b0660d7e498b3e6921851923427c68bc2d9d16118acf1',
   'android/native/src/test/java/org/citizen/sdk/CitizenSdkJavaApiTest.java': '14831f3885786a8c04bb8425b257f2baa7bf4205f42e579236ca3fa63c75506f',
-  'android/native/src/test/java/org/citizen/sdk/CitizenSdkJavaOwnershipTest.java': '102ff8ef18cf144d7b99405e0cde3e3c5d959df3da5856b40085471ea1c8145b',
-  'android/native/src/test/kotlin/org/citizen/sdk/CitizenSdkApiContractTest.kt': '4f45795c884b5c9575def26f1225a3872639d91b1abd58d90a68a17ba5588c28',
-  'android/native/src/test/kotlin/org/citizen/sdk/CitizenSdkPreparedWalletTest.kt': 'a790f3a925dde741cfd593c1c222443fb568e2696ec5646d3a3256ea35e55064',
-  'android/native/src/test/kotlin/org/citizen/sdk/internal/CitizenSdkHostOperationTest.kt': 'ef1a463efc675d298bc326353d7b6de251e4c5ee38e87e2a6b711cef4ea78283',
+  'android/native/src/test/java/org/citizen/sdk/CitizenSdkJavaOwnershipTest.java': '81d06cf7ace9cc41b2045f757588a9859ec7f02cc24c4b11fab95d7ad5dc74a4',
+  'android/native/src/test/kotlin/org/citizen/sdk/CitizenSdkApiContractTest.kt': '77d39a306283bf75a41bbda67c9e0ca6df8b56b2f23db2151cbaa6019a5d36af',
+  'android/native/src/test/kotlin/org/citizen/sdk/CitizenSdkPreparedWalletTest.kt': '326742ec538a0a0b73188ac24d06f3e6042776a8e0b545c50f6defcbf04cc632',
+  'android/native/src/test/kotlin/org/citizen/sdk/internal/CitizenSdkHostOperationTest.kt': 'f1f9bde38554168e856a966d7c79803d2fc02ecae1ca7dc7996a685fc5c01602',
   'android/native/src/test/kotlin/org/citizen/sdk/internal/CitizenSdkRecordKeyTest.kt': 'b83832d2431e40caaea3b9356390c3ea7c03624c93733fc821d3a6f832aed634',
   'android/native/src/test/kotlin/org/citizen/sdk/internal/CitizenSdkVaultIdentityTest.kt': '995a25c4742c3098e96f869379ea4f7e77289e2230cd4c211462712ec4ba1acb',
-  'android/src/test/kotlin/org/citizen/sdk/CitizenSdkFlutterCodecTest.kt': '22a0798ed5ce53d8e927f4bad21d754e358d9d59ce2584bb89816621c733d9b8',
-  'android/src/test/kotlin/org/citizen/sdk/CitizenSdkFlutterSessionsTest.kt': '1b84e1d3131e1e3ccdcec847bdc9bef823959edade2ee3331785280ef4266894',
-  'android/src/test/kotlin/org/citizen/sdk/CitizenSdkFlutterWalletFlowTest.kt': 'ba5eb7acfb27cf8cf3db56fd3f6027327180ca4688a2fd8d161bc068ee32b047',
-  'darwin/Tests/CitizenSDKFlutterTests/CitizenSDKFlutterCodecTests.swift': '841ecf0623347d91c5409ffc76c69ba92cd0a8a4667815135c48e6b5b5082c43',
+  'android/src/test/kotlin/org/citizen/sdk/CitizenSdkFlutterCodecTest.kt': '5ca0b611e72043965b49e26ae4b9802e4164801be1e2b11cba2655b030c883e3',
+  'android/src/test/kotlin/org/citizen/sdk/CitizenSdkFlutterSessionsTest.kt': 'd0ec0045359a6888668a8a8e7d9004ba66c8fc7696dab7fd4e66a4c5c54d64e9',
+  'android/src/test/kotlin/org/citizen/sdk/CitizenSdkFlutterWalletFlowTest.kt': '5af91c52409e5cfe41c827e0e762aa2148e491ca645e22019c63c0a2e5d61a0a',
+  'darwin/Tests/CitizenSDKFlutterTests/CitizenSDKFlutterCodecTests.swift': '535593bec7e4c99b8d3932e79039320cf94be2294443076c924a08829ca615cb',
   'darwin/Tests/CitizenSDKFlutterTests/CitizenSDKFlutterPluginTests.swift': 'd905fda42ad2303ec3fdf7e7b1e6993694747be02b2fb949de1089164aa71923',
-  'darwin/Tests/CitizenSDKFlutterTests/CitizenSDKFlutterSecretBoundaryTests.swift': '41c0917ff67a05e0690b8402581e2003482fa98f9889ecbe18ba2e971ca99e66',
-  'darwin/Tests/CitizenSDKFlutterTests/CitizenSDKFlutterSessionsTests.swift': '7eaa3b1a58380d879df8e13dde534229c4158a65172fffa510d784ccdab026ff',
-  'darwin/Tests/CitizenSDKFlutterTests/CitizenSDKFlutterWalletFlowTests.swift': '6055d18fc224ad075e88ceea165bdd03109f8e909ad37b8432be4db6f7b53d34',
-  'darwin/Tests/CitizenSDKTests/CitizenSDKApiContractTests.swift': 'dea518838e1a7179eebe525b9bca11920d3437d5145c23e10e64c307ec86d09b',
+  'darwin/Tests/CitizenSDKFlutterTests/CitizenSDKFlutterSecretBoundaryTests.swift': '2f0150db79a60ac27e7524d2974ea91229c65b576b0498ab7e1ce4e823fb5ed1',
+  'darwin/Tests/CitizenSDKFlutterTests/CitizenSDKFlutterSessionsTests.swift': 'ff2e0cd1cee390a27948e36c2447c27572827bca6a1bd48c2a2629f35826b8ee',
+  'darwin/Tests/CitizenSDKFlutterTests/CitizenSDKFlutterWalletFlowTests.swift': '8caa0560b189af5ff0e67f59c0d090c1b34086cc90dd50d113d5b48389ef471f',
+  'darwin/Tests/CitizenSDKTests/CitizenSDKApiContractTests.swift': 'd455f73b09bf08056379bf9e50303feef67b6cfcb708ada9743e6fe3cba1e32f',
   'darwin/Tests/CitizenSDKTests/CitizenSDKHostOperationTests.swift': '109be3ae384db564139db63537895b0151fe29b59fc7c2370d51553e7fe5f3c5',
   'darwin/Tests/CitizenSDKTests/CitizenSDKLifecycleTests.swift': '88c34852b88c4dbf90bd5411151c91a6487f2ff08ae2e946f245eac33098eb48',
-  'darwin/Tests/CitizenSDKTests/CitizenSDKNativeAbiTests.swift': '20f04549946946c3d5297500b4f3b4991651d0d06037a92d3a7c2606e9ab71c9',
-  'darwin/Tests/CitizenSDKTests/CitizenSDKPublicStoreTests.swift': 'b0ac6e5e32686079f215cd9749e7b5e5c2b39d4030b6c0e0ff73f24b83c3cccc',
+  'darwin/Tests/CitizenSDKTests/CitizenSDKNativeAbiTests.swift': '2159517ecb7cf46ad1a8e1628e5da18aa2376a6737116bc4f3f3c1354bc84f2e',
+  'darwin/Tests/CitizenSDKTests/CitizenSDKPublicStoreTests.swift': '537b71a8cd4bd78d24bac4ae0dea39e0b46d44b257e2b6876d0bd3462a473b1c',
   'darwin/Tests/CitizenSDKTests/CitizenSDKRecordKeyTests.swift': '30891704a7d2d4fa98bf3750c9ec88370389fd4e6bdf7f4641faeb8a0873791f',
-  'darwin/Tests/CitizenSDKTests/CitizenSDKSecretVaultTests.swift': 'bc9974f13a43b13160ecc8ecbcd90d0b2f17e1a50adffad3697d9006feb56ac3',
-  'darwin/Tests/CitizenSDKTests/CitizenSDKSecureStoreTests.swift': 'd7581577b15dc0e053d5130845ed54c01fc8b20034c105a71736c9899763cedd',
-  'darwin/Tests/CitizenSDKTests/CitizenSDKSensitiveBufferTests.swift': '2bb9dbd84f3d7ca572ba42a21c3e76330fc5294f425a5338ce934e32f455f98f',
-  'darwin/Tests/CitizenSDKTests/CitizenSDKWalletFlowTests.swift': 'f09799a51f098c67b79f447f828c0dd86a72dde0bb5696d3e4299c9c9772a83a',
+  'darwin/Tests/CitizenSDKTests/CitizenSDKSecretVaultTests.swift': 'b8f5825dd79174df6c3cac1ed3c3599bb8c3b8327c94484cc57d1361b65ab23f',
+  'darwin/Tests/CitizenSDKTests/CitizenSDKSecureStoreTests.swift': 'fa29b12165632e1f4574a09267316ed0308e6813080a7def22bd87fe75daa481',
+  'darwin/Tests/CitizenSDKTests/CitizenSDKSensitiveBufferTests.swift': '6788049be932cfe0555d45f03f2abffcdad40bc66d011520f4c0d2f185f79863',
+  'darwin/Tests/CitizenSDKTests/CitizenSDKWalletFlowTests.swift': 'cf41e9d2848f6d7d55eb352de683b214be039b740b68756d9fc0c83804057bdb',
   'darwin/Tests/citizen_sdk_flutter_consumer.dart': '5d22a10bdd551ead221dba2253005d45d236e2d9313c4576b6f1bc0d929cf2aa',
   'linux/test/CitizenSDKConsumer.cmake': '70bcb6aa7484daa5b480a9db9f8d2e556cebbdd680f7501bbc086602761c58ed',
-  'linux/test/citizen_sdk_c_consumer.c': '33bce9c880fd69a59ba98cb4148baead91e1f6815c4d3dd827d2ae7cb15bf5f1',
-  'linux/test/citizen_sdk_cpp_consumer.cc': '676438754d9fa496fd8b91194b90b21d06c47fa74ad121a7f0216537f247f07f',
+  'linux/test/citizen_sdk_c_consumer.c': 'fcba2e20096acc6611a6b198a273fb78093bfc5ee77b3924d6551464316e186f',
+  'linux/test/citizen_sdk_cpp_consumer.cc': '6b85472aabb166361711ca5ad1c91831ec58ea13704fda29c5f2c57ca3d85df0',
   'linux/test/citizen_sdk_flutter_consumer.dart': '2dc4c2ccbabcf6dab101423667a3a1d8305c279fc1f1901927f4cb33fa3a1916',
-  'linux/test/CMakeLists.txt': 'fb5d19bb841ef30ac7b0d6df8459347df73cc241f7a6b4fa6d3fed3d2fb3a9b1',
-  'linux/test/citizen_sdk_api_contract_test.cc': 'fff234f2c3a13626f06714fb872dfd369a8b08cd9b0f1f457904daa94a2782a5',
+  'linux/test/CMakeLists.txt': '2259f265f3704ca621cb4628c4acfaf3e9e553f11b0307bc792608d5975551a1',
+  'linux/test/citizen_sdk_api_contract_test.cc': '27c7b487b630dfde300b68ea28ab0454bcef1684e355f0f61fb4ef8aeaeaf801',
   'linux/test/citizen_sdk_assets_test.cc': '9d5b6f2ad9e23fc55c759deed22e0a50bdca8886608ebe53dd80d0696f5f9e08',
-  'linux/test/citizen_sdk_host_operation_test.cc': '4ea3d5da48ea3c7e5d21eb6c80273eea94dd01589de4898ddf3f2afe727feda0',
-  'linux/test/citizen_sdk_lifecycle_test.cc': '9d189f161ed19886c44332248a2f19921383e05d3b765851d5c9b98819089f2e',
+  'linux/test/citizen_sdk_host_operation_test.cc': '9dab4cca7a7df3ee7568aef6271639f5f3da8bc8d13f8cffeacc36017ba6fc56',
+  'linux/test/citizen_sdk_lifecycle_test.cc': 'b83e03c30914979e9979d6a655ddc0acd5c9b9d20b0f19c6449c31d2b285ceca',
   'linux/test/citizen_sdk_public_store_test.cc': 'e30a162b2a6df54e49820cd49acebfb545fd25900dde850edf8f57fd2a45d3ca',
   'linux/test/citizen_sdk_record_key_test.cc': '11871f6372b6983d7265fddb1714ed9b283d9ff43a9f6e782759d47dd5c74e4d',
-  'linux/test/citizen_sdk_flutter_codec_test.cc': '0b9dbf33560c6d9be849dc040175c9bbcfea202e4dec908bfa49f998e700902e',
+  'linux/test/citizen_sdk_flutter_codec_test.cc': '1875538fdcca9aa613a112b259d171e99d661bcaf3e01bb3a8668087c111a2cb',
   'linux/test/citizen_sdk_flutter_environment_test.cc': 'ad145d79c91ee22ffee5ccc886feb405f514421652e90d381e75115ec25050a6',
-  'linux/test/citizen_sdk_flutter_plugin_test.cc': '10190254cdd51f8892ed24e3df92cea2d0943125c8688c56b56cb625c62823af',
-  'linux/test/citizen_sdk_flutter_secret_boundary_test.cc': 'a67b1c10d47342ca031d1ce9fd5b8f3145220132ad1b761f552ebd831a476be2',
-  'linux/test/citizen_sdk_flutter_sessions_test.cc': '93a943223603f9dece885d5b2c0671e3cd07abd2cb43afa8deb9e5558db7bec2',
+  'linux/test/citizen_sdk_flutter_plugin_test.cc': 'c251e3007f7e3b1096c25c5c7f164d19d7cf32fab665a4c8c04f8222a4cfeeaa',
+  'linux/test/citizen_sdk_flutter_secret_boundary_test.cc': '7d0019a804bae35863b9ca2cd202f7fa0a9aed222fe68a8a6ee46131e696da61',
+  'linux/test/citizen_sdk_flutter_sessions_test.cc': 'c38840df5589614228eb77eda61e92d32670f8efed40a20cd1ce6c3c38adeb21',
   'linux/test/citizen_sdk_flutter_test_support.hpp': '1b92cf8f6a6fd0df6a58d5630f72ad29578d3118f7aa886ee1b3149b86606f56',
-  'linux/test/citizen_sdk_flutter_wallet_flow_test.cc': '15c975e90f8c6b7584ec8eff05e9b15fa581cc3b1b44e772741f29585de1cc11',
-  'linux/test/citizen_sdk_secret_boundary_test.cc': 'f33b93ed3b35598d495678d0751c987320a69c5dd8fcdd72159b12e829b7f270',
-  'linux/test/citizen_sdk_secret_vault_test.cc': '9a69e0444552fa5af343d1f70b2c138ee937b00d2749ec76cb1782dd482bea8c',
-  'linux/test/citizen_sdk_secure_store_test.cc': 'c65570ffd3350da9da2fa85854715cb66096c86c45e9165da62d34a5e477a499',
+  'linux/test/citizen_sdk_flutter_wallet_flow_test.cc': '2191dd5e6f1e3fec557e0e8df9e74147d156cde2525a24dcf6b1f1aa07605180',
+  'linux/test/citizen_sdk_secret_boundary_test.cc': '53e9de1a509b709ffe0197653ffc6d68719123104b11f9c73ee4173c997be929',
+  'linux/test/citizen_sdk_secret_vault_test.cc': '26ce4cd84721bcbffa76cf41c3f0b741ede2f4a3e799da659da4ef16ebff21d2',
+  'linux/test/citizen_sdk_secure_store_test.cc': 'a07f4f19dbac1394d9b2ccc41ef4771cb119a68bd0b5312af51cefb7bf8130f1',
   'linux/test/citizen_sdk_sensitive_buffer_test.cc': 'e82855221fde7e20ce07ef194619c18cd1c25ed7b8c9ae5a85fd8f94256a5ec0',
   'linux/test/citizen_sdk_test_support.hpp': '5bec8904799c5648eed148a67be4dbb6f22a6d8d1ffaab4504202677da467884',
   'linux/test/citizen_sdk_tpm2_test.cc': '29146093852ac3a51d7925e6d9a27f042e5f136c37d58a6367de2bd119c9f8e5',
-  'linux/test/citizen_sdk_wallet_flow_test.cc': 'c2ad4772213f8c2c9b2ff8dead31eaddab94299575d7aa781e6f4c609f61f937',
+  'linux/test/citizen_sdk_wallet_flow_test.cc': 'aa301bda2895150c6d3798909bdbe824338768076a549e22b6404e5a2e5f4772',
   'native/contracts/tests/account_contract.rs': '2f2af9930ccaba2cf73a21c1ea3593295a6e7d8633a95db05fbcb642e7c74992',
   'native/contracts/tests/capability_contract.rs': '797298ce4a1a33934b400cafc37f22f8e9592a0e4067dbc1a868987182fd9cac',
   'native/contracts/tests/chain_contract.rs': '29b0f790a72565653c134c9f11d5b8384d19c36e0f9f7fd6c6196328cd1f103f',
-  'native/contracts/tests/secret_contract.rs': 'e5585e0a2b584f3955a2516f6dff11615ca1fe299764a41289d0313d71ff1554',
-  'native/contracts/tests/state_store_contract.rs': '90158716b7109a4790272f3951015007d7e3e19e3794badfc331e15f96f9a054',
+  'native/contracts/tests/secret_contract.rs': '45ef3f24c35edc68c327c7be16eb1af94f113322ce7cfd7a0f499aa83da326e8',
+  'native/contracts/tests/state_store_contract.rs': '0ebc2d16392bcc7c80d57276b8fe8a6012f6387dbde14b4a0e63ffd8d366d209',
   'native/contracts/tests/transaction_history_contract.rs': '88a08ac80f2a131a6f1a4e215ba0b55e8476fac71059b9ab14ff329159724f54',
   'native/contracts/tests/transaction_build_contract.rs': '4fcc035715077d907e3a31f86e7bf1fb11cc4791bed9b75b0c38c4a04282cb25',
   'native/contracts/tests/transaction_prepare_contract.rs': '1ff363381350352c500fd639b3346e6dd2be556cad23878755268b90a17712dc',
   'native/engine/src/wallet_derivation_tests.rs': '0af6e57e748e0811e5651841ec40e3be43618139ea138b5491178a325e5a438d',
-  'native/engine/src/wallet_service_tests.rs': '779bcaf8a17ac308967f6630a3e123139219878e7dd92514a3dadafb33f6c9b8',
+  'native/engine/src/wallet_service_tests.rs': '1b3d7312280809bfe4ef85a77cec2d026645f0f8a50847859ea46462201dab3b',
   'native/engine/tests/account_state.rs': '32b3d9321033aa8238908ef0afa5c3eec40399d767bcabcc29d2c8cb545a3a82',
   'native/engine/tests/capabilities.rs': 'dcfdbffcbaeabc44a6d6934021b2a80ec593d6c8b64b23a7cfbed8b6791f3e93',
-  'native/engine/tests/chain_access.rs': 'c13d1cc19b005010ce2468cc9f635df5c8f7c6f840dbe3d5040fd870d2d65637',
+  'native/engine/tests/chain_access.rs': '8df836b9bb209fe4db1dfc8766410172a12e042da9236c5898f5292d0bcc4cf5',
   'native/engine/tests/engine_boundary.rs': '62d04ec6b9035204c4f44777cbf08815521bd63e29146b8bcceb8774190bcbd3',
   'native/engine/tests/runtime_context.rs': 'e5eb9f999668b6664d29ba61a0c8b2fd8b2e9fe37f7830bb4f4b7732b9c4fe43',
   'native/engine/tests/state_import.rs': '6937752568de3531a32b8ad35b1fd7270abad120c4b5aac423ae7df970d3f917',
   'native/engine/tests/transaction_outcome.rs': '68a05dfbdeedccaf70c22f83f88ad05131e8f65f9c2f355f12ce93d90e7d0645',
-  'native/ffi/src/composition_tests.rs': 'a8ec50944dd0a6a60264e3013720a109d303f7c054b65c89e67d46cfea5b0727',
-  'native/ffi/src/host_codec_tests.rs': '2bd9c35b5a960bcbbd611c6c02ab3e32eb07a19f52d7e6b81fec331183d5c6b2',
-  'native/ffi/src/wallet_abi_tests.rs': '77fbe121a430f252ad262de051a836a0a7dd286ae8a244ac6266ac1a2692297d',
-  'native/ffi/tests/abi_layout.rs': 'c6c06e457701e85567872f672758076aeb730178d91e2fb223413560156f0259',
+  'native/ffi/src/composition_tests.rs': '54578c4a7353adfe9021547ac0a510bde49bcfe87c3471728cad6ffad74d8255',
+  'native/ffi/src/host_codec_tests.rs': '2c4530aa91512284dd273663c31e80c3a47734be82a04fe8a5245d0beb80574a',
+  'native/ffi/src/wallet_abi_tests.rs': '20339123ad114ccf96ffe360add937e1e462c67d5dc7bb8d6ce8dc6b9f5a717c',
+  'native/ffi/tests/abi_layout.rs': '47bdc77d20364275e8f2609d8dce7977735e8f1956c6ba458c85cda817028888',
   'native/ffi/tests/asset_boundary.rs': 'd18d152b1960860afc4db8b0e35b88dc4b121bc77cba2f984b74331506d0ec1b',
-  'native/ffi/tests/c_header_c11.c': '081a2bef08849813bc91ead9f399769ad5fba8eb3b4a6048b658448579a52644',
-  'native/ffi/tests/c_header_cpp17.cc': 'af9e8c2a6f094953040ef1d59f2f4d89c7898746acc7905aa66e501de2dbc38a',
-  'native/ffi/tests/capability_contract.rs': 'e28560068840fb201210c3f9e4dab5ca7e44c0536471b03e92dcbba07b7950ba',
+  'native/ffi/tests/c_header_c11.c': '94e61d4e2cafd9fad83d17bbd650099dbb478249a2d6bdb1672778e5592c62b0',
+  'native/ffi/tests/c_header_cpp17.cc': 'ed7d2e7e3f12476ecd9df4d80c7589273a69972acee55f996f614cd31a764468',
+  'native/ffi/tests/capability_contract.rs': '6623187159e8d9fb4e34deaa0669f55050e62e941d44cb5529bd464aca628e6c',
   'native/ffi/tests/error_contract.rs': 'ae585490b05768b64401b1e6774789ba1beb1eede552e4d3e70a99cd1d395d91',
   'native/ffi/tests/event_contract.rs': 'f80b6644265ed166109f967bc666a7d9f7415df833e109d6525bdba4c1e8efef',
   'native/ffi/tests/handle_contract.rs': '964785ac8a11fb746464b6b25112eeda4bca21bca4ecb23deb236249f7b1d81b',
   'native/ffi/tests/host_provider_contract.rs': 'b10aac8905c66e3fd96d5e233304c5e08f1e4c58a89a568a43724ec877966890',
   'native/ffi/tests/ownership_contract.rs': '1046ef5656bf151bb2fbb8a8172602fbf3fc8846582f5d4346534a65cbe80321',
-  'native/ffi/tests/qr_abi_contract.rs': '094df8b1a56adc3566697fabde653e94ee9f7012fdd6cf8ddc5b8732d8912f66',
-  'native/ffi/tests/request_contract.rs': 'e75d670fbea505bb69cb1cc2a4de9c34d1972abdb9f182beb703d10ef001bc16',
-  'native/ffi/tests/symbol_contract.rs': 'cc661492aaa80c04b9c779c3ddf05a8536fe4ff03f7d2a7d8918d795983be036',
-  'native/ffi/tests/wallet_abi_contract.rs': 'b9344888bf0f7465f020d1a64fd5afcb7c60dba29fc93635b54d4ab360aa2c8e',
+  'native/ffi/tests/qr_abi_contract.rs': '760aac708a04c952eaf2563d7c96b3ddede85a095ae2268bb89cba625be5725a',
+  'native/ffi/tests/request_contract.rs': '587c5cbab565a5b6c574a5fadeb29577f6b647563c3203a21b3d11b85eb74534',
+  'native/ffi/tests/symbol_contract.rs': '12ecb544c92bead55c7b27921d76822f6fa80051f33be5d9536d1a44ba1f1f6b',
+  'native/ffi/tests/wallet_abi_contract.rs': '5bee7ff12a74a75e362b98a154f386ab8e6c98ec75b5fd7de475c3bb329c808f',
   'native/signer/tests/chain_signer_contract.rs': 'd4e53512dffab3f75ee213a08b71909dbc6c667b4b287df39cd9ac3e62824b31',
   'native/signer/tests/ffi_contract.rs': 'bf38f650394011e7f68219ee8ba435453f616281f91649634c536b8620407038',
   'native/signer/tests/legacy_parity.rs': '984a1521042d8a5b2285a43459383ef3972058db20e8f05154c1f75a2a11d70f',
@@ -805,25 +798,25 @@ const SDK_TEST_CONTRACT_FILES = Object.freeze({
   'native/smoldot/provider/tests/account_nonce_contract.rs': '13f2d194df11c94527fd5b513228cc1ec917f3735b12f3326c239b600821b754',
   'native/smoldot/provider/tests/legacy_parity.rs': '7db2b3ef4959a7bd1c83b22597666b0448f48b3079b82821f624efd2ccb7d9dc',
   'native/smoldot/provider/tests/verified_chain_client_contract.rs': '2239b6e9a0a3375bfa45d9a7fdf2157eee6696ff75c1e5154aba373f8ef17de8',
-  'scripts/release.test.mjs': '82ef13c3c3e977fbea9b7986a77ac7d46f284283822044846050628010e3ffa0',
-  'test/api/citizen_sdk_test.dart': '0ccc29e8305bfb6754ce65db8b136fcc0c70b5e6c874dd180f0a021da5dd334c',
-  'test/api/citizen_transaction_test.dart': '91aa19c7594af4f5afd6378551034df156be2d0bc6f9098cca18f452f4546650',
-  'test/api/citizen_wallet_flow_test.dart': 'f7fc3542a6613bcc8bad421f496d42f655dbe19c8d4eacda7872d28334d736aa',
-  'test/api/public_api_contract_test.dart': 'ca77ee1913552ac4bc58da8dfe2f4c1536c1c70017e5bd8f459d3754398f26f2',
-  'test/citizen_sdk_facade_test.dart': '1f741b5f6dc81f526a96a4517285f84f60194746deea6b5ebd377fbc20666230',
-  'test/consumers/citizenapp_fixture/citizenapp_fixture.dart': '607fce0d39f4e68a5b38352ba01fea71904f000399a93f73c6d954f3b3071034',
-  'test/consumers/consumer_test_support.dart': '0c6628c6934cc9ee2d0224b28bdd7b87d7a6623185fe0ec1f0e2804b800c88d3',
-  'test/consumers/external_signer/generic_qr_v1_signer.dart': 'f06f92d35f22c028110d0a42b7c314644de16a5f8bfa01999188cf1c3213ebce',
-  'test/consumers/multi_consumer_contract_test.dart': '3a7be8a02ab75dc968902f93a1844979c3a630d6a04c48c680f20a8a04e0d74a',
-  'test/consumers/reference/reference_consumer.dart': '31154e9a4f2231e5151fa3628ce94284831eb6d1dddfeb2b728bb5eb3376ead8',
-  'test/consumers/third_party_fixture/third_party_fixture.dart': '65f7c5feab6061c23cc19ca096ea7e2b6d85e63d7341cc6fd6d44cf6409925c7',
-  'test/models/public_models_test.dart': '684e62a0c0395a8a35e1095e1237e87c0a50e4ba3347fbcbbdebe98ff12d5674',
+  'scripts/release.test.mjs': 'ad6964143b1b659a3c91dff2f78115f808a1efd893377da2b76d1ea47f69d3c9',
+  'test/api/citizen_sdk_test.dart': '682d5b30eed22732404d83f00da062578e4676fe64ff7e4be33cae2e7c8e9548',
+  'test/api/citizen_transaction_test.dart': '323b2315d2b6a6343c682f1626b10938c141348994b566b4ba0e75d2b656a4a8',
+  'test/api/citizen_wallet_flow_test.dart': 'd69cdc13378c8b9af9ff9bc302540af0c28fa726673beb4183cf57091de46c0d',
+  'test/api/public_api_contract_test.dart': '877413d9dabd44f8d514a4bef860b0260a336aafafbe3fc70245613eb10c9e3e',
+  'test/citizen_sdk_facade_test.dart': '936a5f95fd0045a498dec828bdff0913f2febc9ca6576a22f8a8c27e8eb998a6',
+  'test/consumers/citizenapp_fixture/citizenapp_fixture.dart': 'b06f4fad06481223a1fbde7046743aeaad6af72e0c10cc67cfc54b158686e3a0',
+  'test/consumers/consumer_test_support.dart': 'aed47f5bde9605510eeb26cdc9b876034ee0cca753cab27e04ab3c72d75b1d11',
+  'test/consumers/external_signer/generic_qr_v1_signer.dart': 'cd5c9b09093798cebb25ec64ceefd8e4ab691136d1b651444989a77d5c509ad5',
+  'test/consumers/multi_consumer_contract_test.dart': '2ee394f2916a6e34bafe71bfc1e41dc2cf9ade9967534d9f8cf6b9b4e3a0d8db',
+  'test/consumers/reference/reference_consumer.dart': '56b5e9d414302d45a4ba796b7c3af2b25b1e67c9268ecc1907d2ecacd7f01520',
+  'test/consumers/third_party_fixture/third_party_fixture.dart': 'adf75a027328a9a83c26b0d3783d821c3383cb39f4a5d787db0248ca51cf8f99',
+  'test/models/public_models_test.dart': '72127a821f1718b3da255aabef731338ebcb478be8f316310ac79a1eb3cad7c5',
   'test/models/u128_codec_test.dart': 'e406f077258130ed22481af2e228066a4030dab19b765731eaefcfdc2f0ca6f5',
   'test/node/chain_assets_test.dart': '754099bc6103d4c0f049be6eb257632c7158dbb74236650eb5b5930382f05203',
   'test/node/citizensdk_bootstrap_manifest.json': '33bd8e2c7407abea376f21a7adf7c9df644aedb7a9e985211075bba6cde28a00',
-  'test/platform/flutter_codec_test.dart': '5021941656d9eff67358823e7a6935aecb4ea9a687c2d9c66ae7b6babbf42d12',
-  'test/platform/flutter_secret_boundary_test.dart': 'f921a5a920d65f0ae05addfe4037f3c15a374851386fd565d760ddec8ab111a2',
-  'test/platform/flutter_sessions_test.dart': '53e08dcab5cc3058097941ee107cc8c0e111e6f242feadf1b0495e07095fcb70',
+  'test/platform/flutter_codec_test.dart': '5ba03c85cdf9399fcb924d1f025e18a8bbe41a45e5148c5b49d093d00b260b6d',
+  'test/platform/flutter_secret_boundary_test.dart': 'd24c8025d0dfd9153ee26303f5503a54993e37f015adea7ff07e4df40bd3ed5c',
+  'test/platform/flutter_sessions_test.dart': '45a67829059b2b7c909b4d953a28feeaad3fbcd1345ab1b8632be182a65f2ce8',
   'test/smoldot/chain_info_test.dart': '5de74abf31c75c579716366d72a457e91339352972a4a118ec7fe18de005b158',
   'test/smoldot/client_basic_test.dart': '4617fc86f8fc4a555e837f04ad747a25b501d93532532f8f0565e1d51e17a5cc',
   'test/smoldot/ffi_basic_test.dart': 'd7f16ab19bfd842f4414f43e989a3536d6725a1ba9e2eab78ac6f53dd7fa6cef',
@@ -949,108 +942,108 @@ const CORE_RUST_ROOTS = Object.freeze([
 ]);
 const CORE_RUST_FILES = Object.freeze({
   'native/engine/tests/baseline_resource_contract.rs': '78b211a0d7ce43d9819cbaf1f867f8680222cf649a5b9729ea9a808ce09abb03',
-  'native/engine/src/qr_review_tests.rs': 'd81e4f649bc6ba617c750e748a1ff6cb2da1189bed71cdbcc89c4150a1515420',
-  'native/engine/src/qr_review.rs': 'fbd670d8a9739ffbbf3198ea2ecd78bbea5e8e7aa84b571847ddd96cdadda305',
+  'native/engine/src/qr_review_tests.rs': '9112a367745bd8aca6796316a8ec31895021edd762b2cfd655b8a357d72aa00d',
+  'native/engine/src/qr_review.rs': '1e2e05bcef1fff6e532ba4e3ea16a6dace6d4494db03522e14a21b6015ba285e',
   'native/engine/src/chain_monitor.rs': 'b530254a11c1c6014cceb9c58e16032cabff5891b033e587d97cf5145198a682',
   'native/ffi/src/chain_monitor.rs': '5a624dc62ef7d2ea3546762def76499deeaf98466bb0ec66cab6ed6feca136dc',
   'native/ffi/src/chain_monitor_tests.rs': '249e22c52f52ff4f17ab6fad58c5ce37f9f0a880ce4156671b8356e29214730e',
-  'native/engine/src/wallet_input.rs': '1665357d083f40b8d348a0b379677728b1e3f9ec9b54aa543fd40ace1052a53f',
-  'native/engine/src/wallet_input_tests.rs': 'bad1351fca2ba69af4a0a41ffca18a3d913da0422588fabe7357f672262e1122',
+  'native/engine/src/wallet_input.rs': '70325d8faf5666454cf1d5f237c5d6f842730080a8635d2f3c8436d94b637076',
+  'native/engine/src/wallet_input_tests.rs': 'a48405f12472122b7ab1dbac19b806e3900c99152a396987e1f0956fb9bcf3af',
   'native/contracts/Cargo.toml': '9bda2e7d8b80ba215bff5d0157bc7210fb0fbd891d1d16e0404f204c1c922c14',
   'native/contracts/src/account.rs': 'c9e128bbfecf910d574c2a8a8467214e580452a900ebc321b5c89463b09297f3',
   'native/contracts/src/capability.rs': 'e32d875040adae8a85b30f9bb2cc7bc661f80b95d0960ee460aa348d527b9013',
   'native/contracts/src/chain.rs': 'f2caa17ed4f59fccc72d98b1bfca62dffc11509c619ebd5af9d41b573f7102b6',
   'native/contracts/src/chain_signer.rs': 'c20cf42f83f5be8607894934074d7608467d2f9a0d020e4a13b90bc31be12b16',
   'native/contracts/src/error.rs': '99f9396c29c3948a6c8c899041c0aae23833c6241ade2a89abb294dc0507c90c',
-  'native/contracts/src/lib.rs': '7aef73da625b14a7ce879625a2dd6a5cf0535408ef74c76e10cb4d6466685ae5',
+  'native/contracts/src/lib.rs': 'a9d5ac3997e63d9dd83a371da430677b6d54559ac3a8da52d521064da454233d',
   'native/contracts/src/transaction_prepare.rs': '6fbfde1b659b99af7b7960e35be381c8b95d312030460f65e2c3dbdd2149e0aa',
-  'native/contracts/src/secret_vault.rs': 'd79cc63b96f917c09eb40164df7aa24e65a83f6c780cd34118aded0da9d01c27',
+  'native/contracts/src/secret_vault.rs': 'd51d153dab7295f0295061c854a8a11a88b2ebdd405bf3fcb1e438198151d312',
   'native/contracts/src/store/chain_database.rs': '31a2e46f046fc8259de01fd776050625b0cfbfb4d8f516cc8695a7d5d1ce9c13',
-  'native/contracts/src/store/encrypted_secret_blob.rs': '619588b892cfb736ceea543ea75d694257430460efc8548c6813223f4d05b2d2',
+  'native/contracts/src/store/encrypted_secret_blob.rs': 'a92c8e9e5f92dfca99c4c2547de4be6505ae3006f7c77a612d107676bec8a457',
   'native/contracts/src/store/mod.rs': 'a25aa27f57edd79f2c2e13d0b955fdf79ec6c1189c7619212816165e9144be75',
   'native/contracts/src/store/runtime_cache.rs': '164fa1302ab7b6aac8ac9de92c8adb733695960b09ac6ae7ccc2cd735f0a744e',
   'native/contracts/src/store/transaction_history.rs': 'f2fc847a8a1b33d4f25f732cb95d0bedc13d006a3fe9607b9201d75e5f2e98cc',
   'native/contracts/src/store/wallet_profile.rs': '3d1869fed7b17b931a8a9740df2466928a159d19e0b28f97b18668ccd4fd193e',
   'native/contracts/src/transaction.rs': 'f028a9e00bc160cbdb3ba88f752be0b95f35df9db00b3fc96718d3463096b723',
   'native/contracts/src/transaction_build.rs': '22b6f9d9279f00ab8155efb648586d6b25aaa7152031dbc958a789c78a457c01',
-  'native/contracts/src/wallet.rs': 'c22f3260d7ac5574426bb01b86e743291e40623dee2eadba0fc3773f0f03d27a',
+  'native/contracts/src/wallet.rs': '0948112103825307226c45f669883b4fd76874d4cbddd03f3214549e874614b2',
   'native/contracts/tests/account_contract.rs': '2f2af9930ccaba2cf73a21c1ea3593295a6e7d8633a95db05fbcb642e7c74992',
   'native/contracts/tests/capability_contract.rs': '797298ce4a1a33934b400cafc37f22f8e9592a0e4067dbc1a868987182fd9cac',
   'native/contracts/tests/chain_contract.rs': '29b0f790a72565653c134c9f11d5b8384d19c36e0f9f7fd6c6196328cd1f103f',
-  'native/contracts/tests/secret_contract.rs': 'e5585e0a2b584f3955a2516f6dff11615ca1fe299764a41289d0313d71ff1554',
-  'native/contracts/tests/state_store_contract.rs': '90158716b7109a4790272f3951015007d7e3e19e3794badfc331e15f96f9a054',
+  'native/contracts/tests/secret_contract.rs': '45ef3f24c35edc68c327c7be16eb1af94f113322ce7cfd7a0f499aa83da326e8',
+  'native/contracts/tests/state_store_contract.rs': '0ebc2d16392bcc7c80d57276b8fe8a6012f6387dbde14b4a0e63ffd8d366d209',
   'native/contracts/tests/transaction_history_contract.rs': '88a08ac80f2a131a6f1a4e215ba0b55e8476fac71059b9ab14ff329159724f54',
   'native/contracts/tests/transaction_build_contract.rs': '4fcc035715077d907e3a31f86e7bf1fb11cc4791bed9b75b0c38c4a04282cb25',
   'native/contracts/tests/transaction_prepare_contract.rs': '1ff363381350352c500fd639b3346e6dd2be556cad23878755268b90a17712dc',
   'native/engine/Cargo.toml': '518b47a8a3d4fa3e69959392b57d7b07dedc55519ea19304dd20bed691635b0c',
   'native/engine/src/account_state.rs': '55bfefcff2038ba1cdbe71846b3acc7d1ffa5177d95e057d029c0f1d1b5e78fd',
   'native/engine/src/capabilities.rs': 'c729aaef5559127aeb2185ea2793456a3bc73346724996a190cc66a97c58181e',
-  'native/engine/src/engine.rs': 'b6158bb5504bc82663dd204d87fec5abb09532bed1f0fc1a9a846c9a3dc736a1',
+  'native/engine/src/engine.rs': '8bec606a3b5936bc9e384b15241fb928d9035a211df8c2eb2271979d1b800b6b',
   'native/engine/src/error.rs': '949efd108cc8c2205f2adf58d03b55148bc88c03c89e0acd9f453f52716c2bcf',
   'native/engine/src/finalized_history_runtime.rs': '846579e3d1a23c3485d933671adfd010181cbbacf05887f15c6888138782da0b',
-  'native/engine/src/lib.rs': 'dfef5a1ec47feaf98a282b477fb2f5b3f2f31c00dab6fd0fb348a356e8689c8d',
+  'native/engine/src/lib.rs': '51d041be9275ac2f8aeeb10eedacdb30496dabda189792293c9821d7d66b1320',
   'native/engine/src/metadata.rs': '65c649dbdd0dbe693d2bd0074a8a2d586e34fa1fe7441c4bc94ff0aa83969a5e',
   'native/engine/src/runtime_context.rs': 'b7bac6e77f1761237ba3a309cbcc15b68bcedc49f1fb85d65366cf145ef73b6f',
   'native/engine/src/state_import.rs': '1308efbbc2626bfd5f9cc936a8e3c6e4984dbc6e2e2dda9dc0917b24d98eaa01',
   'native/engine/src/system_events.rs': 'd3f2722e4106d615a6d96e4b9b92c89b97413d6f6b17d4026e167435eb790d22',
   'native/engine/src/transaction_prepare.rs': '81d7d1982648a02973c9fc16dad22c6fdc9c1da227dbc6bb1de07bb0c0819636',
-  'native/engine/src/transaction_execution.rs': '412755023847d1928e0cd3b920478ef6895f6d2a0bdb58b881ee7cc695f8149d',
+  'native/engine/src/transaction_execution.rs': 'd11dfd412def26059bbd3a96da79d04dfa8a55a5dd0d4a14aa76f82298557784',
   'native/engine/src/transaction_history.rs': '4cc4636d48c5b4876c0e773e04d8482a96055e8d90862ca5949b2f9ce00b2b12',
   'native/engine/src/transaction_outcome.rs': '19efcf69c62c79c329070636a69383417d064bc1ad5a312efd27543d29b86a5a',
-  'native/engine/src/wallet_derivation.rs': '7a9ad8956701b1b086339b40f0cbf89ef87bba27f3aaa6c7c6a9466ceababfb7',
+  'native/engine/src/wallet_derivation.rs': '6fbb0293b709e3f1757c2af4230fbd2976b3c43d79785cdf1dddab43e93fd14a',
   'native/engine/src/wallet_derivation_tests.rs': '0af6e57e748e0811e5651841ec40e3be43618139ea138b5491178a325e5a438d',
-  'native/engine/src/wallet_service.rs': '9654d97216fa99dc7de7d26465d020ea95e5295f0d1da2ff7777c3ea3d46c7ad',
-  'native/engine/src/wallet_service_tests.rs': '779bcaf8a17ac308967f6630a3e123139219878e7dd92514a3dadafb33f6c9b8',
+  'native/engine/src/wallet_service.rs': 'e144efbf37dcb6653c7b2fe15a6c432775c84278cc6bd731cd8c6c19ad50a1e2',
+  'native/engine/src/wallet_service_tests.rs': '1b3d7312280809bfe4ef85a77cec2d026645f0f8a50847859ea46462201dab3b',
   'native/engine/tests/account_state.rs': '32b3d9321033aa8238908ef0afa5c3eec40399d767bcabcc29d2c8cb545a3a82',
   'native/engine/tests/capabilities.rs': 'dcfdbffcbaeabc44a6d6934021b2a80ec593d6c8b64b23a7cfbed8b6791f3e93',
-  'native/engine/tests/chain_access.rs': 'c13d1cc19b005010ce2468cc9f635df5c8f7c6f840dbe3d5040fd870d2d65637',
+  'native/engine/tests/chain_access.rs': '8df836b9bb209fe4db1dfc8766410172a12e042da9236c5898f5292d0bcc4cf5',
   'native/engine/tests/engine_boundary.rs': '62d04ec6b9035204c4f44777cbf08815521bd63e29146b8bcceb8774190bcbd3',
   'native/engine/tests/runtime_context.rs': 'e5eb9f999668b6664d29ba61a0c8b2fd8b2e9fe37f7830bb4f4b7732b9c4fe43',
   'native/engine/tests/state_import.rs': '6937752568de3531a32b8ad35b1fd7270abad120c4b5aac423ae7df970d3f917',
   'native/engine/tests/transaction_outcome.rs': '68a05dfbdeedccaf70c22f83f88ad05131e8f65f9c2f355f12ce93d90e7d0645',
   'native/ffi/Cargo.toml': 'c82cc038401911e135b9e43dccdf5bb774a0292830bedc4eced66605f4403d66',
-  'native/ffi/src/abi.rs': '162ff2492356ce8c8835b50e3ae1ac52c4842d4a11e1e970db425d6716493272',
+  'native/ffi/src/abi.rs': 'de2d7c034441064ea7408ba92d81ecfe0fd16e2f35cc552d44c86ef9f80b7347',
   'native/ffi/src/assets.rs': '38ec1fc759746e68967ced815b7fcd4d1312be8ccc8da80cc4f8c60b4278ac67',
-  'native/ffi/src/capabilities.rs': 'aefe8b51f182767c5ad713a117503a41b736d396619ba0542887d84c5fb11c12',
-  'native/ffi/src/composition.rs': 'b2f4418f179bbf232b405c3de2bde8d69bda643b8a397e2fa94aa6b79a8b47df',
-  'native/ffi/src/composition_tests.rs': 'a8ec50944dd0a6a60264e3013720a109d303f7c054b65c89e67d46cfea5b0727',
+  'native/ffi/src/capabilities.rs': '107ae5a5fe465b6ed20af8e9117c892424b33a9f6fe572b8f73ef2b9200775fa',
+  'native/ffi/src/composition.rs': '89791c6cf65bebcece27a9feceafebe27a550f7a541455154b7481de2e01689a',
+  'native/ffi/src/composition_tests.rs': '54578c4a7353adfe9021547ac0a510bde49bcfe87c3471728cad6ffad74d8255',
   'native/ffi/src/error.rs': '8c22eafa0b4ceac60a136fc0cd1f46471a7336eb5ea50ee0967c7ecbff15e5e5',
-  'native/ffi/src/events.rs': '0749a0bd33f01d56e65adc40f8a44844bcdf44f5c85ceb842e13b42cb860b29d',
+  'native/ffi/src/events.rs': '2bab42f8a4048f60e6bbe64d1c4b6e15bf5881b84f9504de91288f8e266440bf',
   'native/ffi/src/handles.rs': '9e248ecb6fb9506b85d098172b731c22787f9860ccb53926ebc793da1fffd0c9',
-  'native/ffi/src/host_codec.rs': '4213cc7c64d7ec512ff954d08110abf4d66846e29c02eb70ab51cd3ea249539e',
-  'native/ffi/src/host_codec_tests.rs': '2bd9c35b5a960bcbbd611c6c02ab3e32eb07a19f52d7e6b81fec331183d5c6b2',
-  'native/ffi/src/host_providers.rs': '3ba69cc61a20d6701688579c6b2561b33823990189fa44469ad6ac48d904eb8a',
-  'native/ffi/src/lib.rs': '27d44ddd698b91cb4eefe302cd275bdbeb769b946820278aaeeffc75e4ecad35',
-  'native/ffi/src/ownership.rs': '84036c6c6b72cec80293bbb414847fea34183072ac479b1547259faf60563d8c',
-  'native/ffi/src/qr_abi.rs': 'bbeddd283118f7c824992c4345dd1433069bee5c3cc970473f29b944e37444fe',
+  'native/ffi/src/host_codec.rs': '9a2624f73e1978ec16bb35311269eb8ed1b908626339dfabcf8c90ec8b062c8c',
+  'native/ffi/src/host_codec_tests.rs': '2c4530aa91512284dd273663c31e80c3a47734be82a04fe8a5245d0beb80574a',
+  'native/ffi/src/host_providers.rs': '5bc57c2f3db9447f626892c8aecdbb5ab5acb4dc1f8246db0c8ae792561013e2',
+  'native/ffi/src/lib.rs': '67016de235e2bb995d5b06e487a2a5a404846523664ef18920366d237184a81f',
+  'native/ffi/src/ownership.rs': '7739286ddba8f043fff0c50020438b5a87148512eeb49b194f80faec31db6168',
+  'native/ffi/src/qr_abi.rs': 'eb858f929ebc7b0dd1a31b8f384b60ae27e776b077a8b24d55aaf7218fc5ac40',
   'native/ffi/src/requests.rs': 'e880ae4f9e8f20d02e2d291035ca4f6283843dcdb8af5ed935c9c40a342bc11f',
-  'native/ffi/src/runtime.rs': '0aa5f31c6c4e8b6c43f2ca4bc5d357ca23de50f386aec26cac4b4b6b64684ba6',
-  'native/ffi/src/transaction_abi.rs': '59f30de2a8a022c7d7786ad26555aedea6cd1d0394123fd4e6ac6f2a5a9e8f79',
-  'native/ffi/src/wallet_abi.rs': '81da17e008cc3595c3ed3c1b3d571f5abffe002c0279f99b93ccbfe15ebc1699',
-  'native/ffi/src/wallet_abi_tests.rs': '77fbe121a430f252ad262de051a836a0a7dd286ae8a244ac6266ac1a2692297d',
-  'native/ffi/tests/abi_layout.rs': 'c6c06e457701e85567872f672758076aeb730178d91e2fb223413560156f0259',
+  'native/ffi/src/runtime.rs': '2f213621be4cc4aae5d983e3b62955e6c0198fe00aa5253b175f80a396e7e315',
+  'native/ffi/src/transaction_abi.rs': 'c7efad24af031b185a2b13da1b8f1e7e2208d113db3e94af18148b576aec5991',
+  'native/ffi/src/wallet_abi.rs': 'e00d0a2699257926507416cd5a5c03a9578f1c1c1de1726225392f2493beeff9',
+  'native/ffi/src/wallet_abi_tests.rs': '20339123ad114ccf96ffe360add937e1e462c67d5dc7bb8d6ce8dc6b9f5a717c',
+  'native/ffi/tests/abi_layout.rs': '47bdc77d20364275e8f2609d8dce7977735e8f1956c6ba458c85cda817028888',
   'native/ffi/tests/asset_boundary.rs': 'd18d152b1960860afc4db8b0e35b88dc4b121bc77cba2f984b74331506d0ec1b',
-  'native/ffi/tests/c_header_c11.c': '081a2bef08849813bc91ead9f399769ad5fba8eb3b4a6048b658448579a52644',
-  'native/ffi/tests/c_header_cpp17.cc': 'af9e8c2a6f094953040ef1d59f2f4d89c7898746acc7905aa66e501de2dbc38a',
-  'native/ffi/tests/capability_contract.rs': 'e28560068840fb201210c3f9e4dab5ca7e44c0536471b03e92dcbba07b7950ba',
+  'native/ffi/tests/c_header_c11.c': '94e61d4e2cafd9fad83d17bbd650099dbb478249a2d6bdb1672778e5592c62b0',
+  'native/ffi/tests/c_header_cpp17.cc': 'ed7d2e7e3f12476ecd9df4d80c7589273a69972acee55f996f614cd31a764468',
+  'native/ffi/tests/capability_contract.rs': '6623187159e8d9fb4e34deaa0669f55050e62e941d44cb5529bd464aca628e6c',
   'native/ffi/tests/error_contract.rs': 'ae585490b05768b64401b1e6774789ba1beb1eede552e4d3e70a99cd1d395d91',
   'native/ffi/tests/event_contract.rs': 'f80b6644265ed166109f967bc666a7d9f7415df833e109d6525bdba4c1e8efef',
   'native/ffi/tests/handle_contract.rs': '964785ac8a11fb746464b6b25112eeda4bca21bca4ecb23deb236249f7b1d81b',
   'native/ffi/tests/host_provider_contract.rs': 'b10aac8905c66e3fd96d5e233304c5e08f1e4c58a89a568a43724ec877966890',
   'native/ffi/tests/ownership_contract.rs': '1046ef5656bf151bb2fbb8a8172602fbf3fc8846582f5d4346534a65cbe80321',
-  'native/ffi/tests/qr_abi_contract.rs': '094df8b1a56adc3566697fabde653e94ee9f7012fdd6cf8ddc5b8732d8912f66',
-  'native/ffi/tests/request_contract.rs': 'e75d670fbea505bb69cb1cc2a4de9c34d1972abdb9f182beb703d10ef001bc16',
-  'native/ffi/tests/symbol_contract.rs': 'cc661492aaa80c04b9c779c3ddf05a8536fe4ff03f7d2a7d8918d795983be036',
-  'native/ffi/tests/wallet_abi_contract.rs': 'b9344888bf0f7465f020d1a64fd5afcb7c60dba29fc93635b54d4ab360aa2c8e',
+  'native/ffi/tests/qr_abi_contract.rs': '760aac708a04c952eaf2563d7c96b3ddede85a095ae2268bb89cba625be5725a',
+  'native/ffi/tests/request_contract.rs': '587c5cbab565a5b6c574a5fadeb29577f6b647563c3203a21b3d11b85eb74534',
+  'native/ffi/tests/symbol_contract.rs': '12ecb544c92bead55c7b27921d76822f6fa80051f33be5d9536d1a44ba1f1f6b',
+  'native/ffi/tests/wallet_abi_contract.rs': '5bee7ff12a74a75e362b98a154f386ab8e6c98ec75b5fd7de475c3bb329c808f',
   'native/qr/Cargo.toml': '5bee37654c4e2198ae00b65578cf6c005df3b8000434dfa9a9948bc5853505b4',
-  'native/contracts/src/signing.rs': 'e9f6fb2b6e2d5ef651cbebd366812ca552c150b6aca56d40428f5f002cc82366',
-  'native/qr/src/codec.rs': '337a26e689480a05caaaba5e6604f2e128079d073ba0a4ebf465454d4b356cf3',
-  'native/qr/src/lib.rs': 'eb19d9a107490e206a797263eaf5aac058756ea274bc39b3c7cd24656709bf2f',
-  'native/qr/src/session.rs': 'e439b901319374b6acabd33e9ae2373dec657cb16d1a8397e88761cbaebcc333',
+  'native/contracts/src/signing.rs': 'a55cabb69e572c70e3b25d316a3cf69d86930299ad51f90fe2a54341ba154907',
+  'native/qr/src/codec.rs': 'ca467f6c9f51c5847f7558b93a046c55900d115b46ed6ee70d60792ee5bf3c18',
+  'native/qr/src/lib.rs': '80108ffffb7eb50c425e7f65bb9acacb025283b8568ab345f63c2663d0ead0c0',
+  'native/qr/src/session.rs': 'ed0aeaf91e375fff2a4f8901b090d1d4f725674946cc881580e06cd90eafae0f',
   'native/qr-image/CMakeLists.txt': '9e3ba578a613fe69fbb8026f957f2968cddef48912f6e6eb9b928bc701151ec5',
-  'native/qr-image/citizensdk_qr_image.cc': '9e3b38c4f5ad28ab95b448e3930612114e7d698cfd25d5ee6449443935882417',
-  'native/qr-image/citizensdk_qr_image.h': 'c2f84def1e173c53af13b28aa7c3b6fede0292460117648eeb591cd9b369d19f',
-  'native/qr-image/citizensdk_qr_image_test.cc': '78b0a1426c404c5c55b27813778d466b7a745fb33417051f7853b1d68616b313',
+  'native/qr-image/citizensdk_qr_image.cc': 'd202695159393c46083f67d4199fd5ee99e87cec9289a654d6ce08b295b09a77',
+  'native/qr-image/citizensdk_qr_image.h': '80856c440e590786cdf026cf3011a27f7ab1d62508ce8fb5e3fa4156df72861a',
+  'native/qr-image/citizensdk_qr_image_test.cc': '68437056555e173ec390b65b83cc5fbb9b8b994cddbcf5847f86ac9a05d60290',
 });
 // native 根只能拥有这些已审核直接条目，防止出现第二个未审查的 Rust 产品边界。
 const NATIVE_ROOT_ENTRIES = Object.freeze({
@@ -1226,8 +1219,8 @@ export function assertFlutterBindingContract(root) {
                           `${binding.label} methods`),
       binding.label,
     );
-    if (methods.length !== 67 || JSON.stringify(methods) !== expectedMethods) {
-      fail(`CitizenSDK ${binding.label} Flutter 方法合同漂移：必须精确为固定 67 项`);
+    if (methods.length !== 94 || JSON.stringify(methods) !== expectedMethods) {
+      fail(`CitizenSDK ${binding.label} Flutter 方法合同漂移：必须精确为固定 94 项`);
     }
   }
 }
@@ -1526,12 +1519,23 @@ export function assertSmoldotDartSource(root) {
 
 export function assertSmoldotLocks(root) {
   const sourceRoot = resolve(root);
+  // 根锁已受产品来源合同固定；共用合同层的直接依赖不能在独立宿主锁中分叉。
+  // 这里只比较现有futures-core身份，不另设版本常量或固定整份上游锁哈希。
+  const expected = resolveCargoDependency(
+    parseCargoLock(join(sourceRoot, 'Cargo.lock'), 'SDK 根锁'),
+    'futures-core', 'SDK 根锁',
+  );
   for (const relativePath of SMOLDOT_UPSTREAM_LOCK_FILES) {
     const path = join(sourceRoot, ...relativePath.split('/'));
     if (!existsSync(path) || !lstatSync(path).isFile() || lstatSync(path).isSymbolicLink()) {
       fail(`CitizenSDK 缺少上游 smoldot 锁文件：${relativePath}`);
     }
-    parseCargoLock(path, `上游 smoldot 锁 ${relativePath}`);
+    const packages = parseCargoLock(path, `上游 smoldot 锁 ${relativePath}`);
+    const actual = resolveCargoDependency(packages, 'futures-core', relativePath);
+    if (cargoPackageIdentity(actual) !== cargoPackageIdentity(expected)
+        || actual.checksum !== expected.checksum) {
+      fail(`CitizenSDK futures-core 必须与根锁同一版本、来源及checksum：${relativePath}`);
+    }
   }
 }
 
@@ -1937,17 +1941,24 @@ export function assertPublicAbiHeaders(root) {
       'citizensdk_import_wallet',
       'citizensdk_add_wallet_accounts',
       'citizensdk_prepared_wallet_copy_mnemonic',
-      'citizensdk_validate_wallet_mnemonic',
+      'citizensdk_add_next_wallet_account',
     ]);
-    if (forbiddenPrivateMaterial
-        || carriesGenericSecret
+    // 敏感边界只允许已登记receiver、资源控制与只读存在性的准确签名；禁止同名新增裸秘密输出。
+    const sensitiveFunctions = new Map([
+      ['citizensdk_set_secret_presence_provider', 'citizensdk_error_code_t citizensdk_set_secret_presence_provider( citizensdk_handle_t handle, const citizensdk_host_secret_presence_v1_t *provider)'],
+      ['citizensdk_encrypted_secret_record_has_secret', 'citizensdk_error_code_t citizensdk_encrypted_secret_record_has_secret( const citizensdk_account_id_t *account_id, uint64_t expected_revision, citizensdk_bytes_view_t record, uint8_t *out_present)'],
+      ['citizensdk_private_key_open', 'citizensdk_error_code_t citizensdk_private_key_open( citizensdk_handle_t handle, const citizensdk_account_id_t *account_id, const citizensdk_private_key_receiver_v1_t *receiver, uint64_t *out_secret_id, citizensdk_request_id_t *out_request_id)'],
+      ['citizensdk_private_key_reveal', 'citizensdk_error_code_t citizensdk_private_key_reveal( citizensdk_handle_t handle, uint64_t secret_id)'],
+      ['citizensdk_private_key_cancel', 'citizensdk_error_code_t citizensdk_private_key_cancel( citizensdk_handle_t handle, uint64_t secret_id)'],
+      ['citizensdk_private_key_finish', 'citizensdk_error_code_t citizensdk_private_key_finish( citizensdk_handle_t handle, uint64_t secret_id)'],
+    ]);
+    if (sensitiveFunctions.has(functionName)) {
+      if (normalized !== sensitiveFunctions.get(functionName)) {
+        fail('CitizenSDK 敏感边界 ABI 必须保持准确登记签名');
+      }
+    } else if (forbiddenPrivateMaterial || carriesGenericSecret
         || (carriesMnemonic && !mnemonicFunctions.has(functionName))) {
       fail(`CitizenSDK 公共 ABI 禁止助记词、私钥或秘密导出：${functionName}`);
-    }
-    // 同步校验只接收只读视图及显式词数，不能借校验函数名增加秘密输出。
-    if (functionName === 'citizensdk_validate_wallet_mnemonic'
-        && normalized !== 'citizensdk_error_code_t citizensdk_validate_wallet_mnemonic( citizensdk_bytes_view_t mnemonic, citizensdk_wallet_word_count_t word_count)') {
-      fail('CitizenSDK 助记词校验 ABI 只允许输入视图、词数和状态码');
     }
     if (functionName === 'citizensdk_prepared_wallet_copy_mnemonic'
         && (!/\bcitizensdk_handle_t\s+handle\b/.test(normalized)
@@ -2103,8 +2114,8 @@ export function assertWindowsBindingSource(root, { allowInjectedWindowsArtifacts
   const windowsRoot = join(sourceRoot, 'windows');
   if (!existsSync(windowsRoot) || lstatSync(windowsRoot).isSymbolicLink()
       || !lstatSync(windowsRoot).isDirectory()) fail('CitizenSDK 缺少普通 Windows Host 来源目录');
-  if (Object.keys(WINDOWS_BINDING_SOURCE_FILES).length !== 66) {
-    fail('CitizenSDK Windows Host/Flutter 固定生产清单必须精确为 66 文件');
+  if (Object.keys(WINDOWS_BINDING_SOURCE_FILES).length !== 55) {
+    fail('CitizenSDK Windows Host/Flutter 固定生产清单必须精确为 55 文件');
   }
   const directories = regularDirectories(windowsRoot);
   const expectedDirectories = [...new Set(['cmake', 'include', 'include/citizen_sdk', 'src', 'test',
@@ -2135,11 +2146,12 @@ export function assertWindowsBindingSource(root, { allowInjectedWindowsArtifacts
     .split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('LIBRARY ') && line !== 'EXPORTS').sort();
   const qrImageFunctions = [
     'citizensdk_qr_image_decode_luminance',
+    'citizensdk_qr_image_decode_luminance_all',
     'citizensdk_qr_image_encode_text',
     'citizensdk_qr_image_zxing_version',
   ];
   const expectedExports = [...functions, ...qrImageFunctions].sort();
-  if (functions.length !== 17 || JSON.stringify(expectedExports) !== JSON.stringify(exports)) {
+  if (functions.length !== 19 || JSON.stringify(expectedExports) !== JSON.stringify(exports)) {
     fail('CitizenSDK Windows Host 导出闭集漂移');
   }
   return versions[0][1];
@@ -3171,7 +3183,7 @@ function assertLinuxInstalledPlatform(sourceRoot, prefix, platform) {
   const hostHeader = readFileSync(join(sourceRoot, 'linux/include/citizen_sdk/citizensdk_host.h'), 'utf8');
   const hostSymbols = [...new Set([...hostHeader.matchAll(/\b(citizensdk_host_[a-z0-9_]+)\s*\(/g)]
     .map((match) => match[1]))].sort();
-  if (hostSymbols.length !== 17) fail('CitizenSDK Linux Host 必须精确为 17 个公开 C 符号');
+  if (hostSymbols.length !== 19) fail('CitizenSDK Linux Host 必须精确为 19 个公开 C 符号');
   const hostAndQrSymbols = [...hostSymbols, ...expectedQrImageSymbols(sourceRoot)].sort();
   for (const [host, names] of [[false, expectedCitizenSdkLinkedSymbols(sourceRoot)], [true, hostAndQrSymbols]]) {
     const name = host ? 'libcitizensdk_host.so' : 'libcitizensdk.so';
@@ -3180,7 +3192,7 @@ function assertLinuxInstalledPlatform(sourceRoot, prefix, platform) {
   }
 }
 
-/** Verify the merged 27-file installation and the unchanged source closure. */
+/** Verify the merged 26-file installation and the unchanged source closure. */
 export function assertLinuxReleaseProjection(root) {
   const sourceRoot = resolve(root);
   assertLinuxBindingSource(sourceRoot, { allowInjectedLinuxArtifacts: true });
@@ -3311,7 +3323,7 @@ function windowsPe(path, { headersOnly = false } = {}) {
 }
 
 const WINDOWS_SYSTEM_IMPORTS = new Set([
-  'mf.dll', 'mfplat.dll', 'mfreadwrite.dll',
+  'mf.dll', 'mfplat.dll', 'mfreadwrite.dll', 'windowscodecs.dll',
   'advapi32.dll', 'bcrypt.dll', 'bcryptprimitives.dll', 'cfgmgr32.dll', 'comctl32.dll',
   'crypt32.dll', 'cryptbase.dll', 'dbghelp.dll', 'dnsapi.dll', 'gdi32.dll', 'imm32.dll',
   'iphlpapi.dll', 'kernel32.dll', 'kernelbase.dll', 'ncrypt.dll', 'netapi32.dll',
@@ -3623,7 +3635,7 @@ function assertWindowsInstalledPlatform(sourceRoot, prefix) {
   const hostSymbols = [...new Set([...readFileSync(join(sourceRoot, 'windows/include/citizen_sdk/citizensdk_host.h'), 'utf8')
     .matchAll(/\b(citizensdk_host_[a-z0-9_]+)\s*\(/g)].map((match) => match[1]))].sort();
   const hostAndQrSymbols = [...hostSymbols, ...expectedQrImageSymbols(sourceRoot)].sort();
-  if (coreSymbols.length !== 125 || hostSymbols.length !== 17 || hostAndQrSymbols.length !== 20) fail('CitizenSDK Windows 121公开+4内部Core及17Host+3图像导出闭集漂移');
+  if (coreSymbols.length !== 146 || hostSymbols.length !== 19 || hostAndQrSymbols.length !== 23) fail('CitizenSDK Windows 146公开Core及19Host+4图像导出闭集漂移');
   for (const [name, symbols, imports, library] of [
     ['citizensdk.dll', coreSymbols, [], 'citizensdk.dll.lib'],
     ['citizensdk_host.dll', hostAndQrSymbols, ['citizensdk.dll'], 'citizensdk_host.lib'],
@@ -4345,17 +4357,21 @@ export function assertAndroidReleaseProjection(root) {
     'org/citizen/sdk/internal/CitizenSdkHardwareVault.class',
     'org/citizen/sdk/internal/CitizenSdkHostServices.class',
     'org/citizen/sdk/internal/CitizenSdkRequestRouter.class',
-    'org/citizen/sdk/ui/CitizenSdkWalletFlowActivity.class',
-    'org/citizen/sdk/ui/CitizenSdkWalletFlowContract.class',
-    'org/citizen/sdk/ui/CitizenSdkWalletFlowCoordinator.class',
-    'org/citizen/sdk/ui/CitizenSdkQrActivity.class',
-    'org/citizen/sdk/ui/CitizenSdkQrCoordinator.class',
+    'org/citizen/sdk/CitizenSdkPreparedWallet.class',
+    'org/citizen/sdk/CitizenSdkRecoveryPhrase.class',
+    'org/citizen/sdk/CitizenSdkPrivateKey.class',
+    'org/citizen/sdk/CitizenSdkQrCapture.class',
+    'org/citizen/sdk/CitizenQrReview.class',
+    'org/citizen/sdk/CitizenWalletInspection.class',
+    'org/citizen/sdk/CitizenWalletDiagnostic.class',
+    'org/citizen/sdk/CitizenWalletCleanupTargets.class',
   ]) {
     if (!classEntries.has(required)) {
       fail(`CitizenSDK Android classes.jar 缺少必需实现：${required}`);
     }
   }
   for (const [path, content] of classEntries) {
+    if (path.startsWith('org/citizen/sdk/ui/')) fail('CitizenSDK Android classes.jar 残留SDK界面实现');
     if (path.startsWith('io/flutter/') || content.includes(Buffer.from('io/flutter/'))) {
       fail('CitizenSDK Android 原生 AAR 混入或引用 Flutter API');
     }
@@ -4562,9 +4578,9 @@ export function citizenSdkInternalHeader() {
 function expectedCitizenSdkSymbols(root) {
   const header = readFileSync(join(root, 'include', 'citizensdk.h'), 'utf8');
   const symbols = [...new Set(
-    [...header.matchAll(/\b(citizensdk_[a-z0-9_]+)\s*\(/g)].map((match) => match[1]),
+    [...header.matchAll(/\b(citizensdk_[a-z0-9_]+)\s*\((?!\s*\*)/g)].map((match) => match[1]),
   )].sort();
-  if (symbols.length !== 121) fail('CitizenSDK 产品头必须精确声明 121 个 citizensdk_* 函数');
+  if (symbols.length !== 146) fail('CitizenSDK 产品头必须精确声明 146 个 citizensdk_* 函数');
   return symbols;
 }
 
@@ -4573,7 +4589,7 @@ function expectedQrImageSymbols(root) {
   const symbols = [...new Set(
     [...header.matchAll(/\b(citizensdk_qr_image_[a-z0-9_]+)\s*\(/g)].map((match) => match[1]),
   )].sort();
-  if (symbols.length !== 3) fail('CitizenSDK QR 图像头必须精确声明 3 个函数');
+  if (symbols.length !== 4) fail('CitizenSDK QR 图像头必须精确声明 4 个函数');
   return symbols;
 }
 
@@ -4641,7 +4657,7 @@ function assertAppleFrameworkSlice(candidate, xcframework, identifier, contract)
     .filter((symbol) => symbol.startsWith('citizensdk_'))
     .sort();
   if (JSON.stringify(actualSymbols) !== JSON.stringify(expectedSymbols)) {
-    fail(`${label} 必须精确导出 121 个 citizensdk_* 产品符号`);
+    fail(`${label} 必须精确导出 150 个 citizensdk_* 产品符号`);
   }
   const forbidden = [...binary.symbols]
     .filter((symbol) => /^(?:smoldot_|citizen_sr25519_|account_crypto_)/.test(symbol))

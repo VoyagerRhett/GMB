@@ -27,7 +27,7 @@ set(CITIZENSDK_TSS2_RC_ARCHIVE "" CACHE FILEPATH "Pinned libtss2-rc.a")
 set(CITIZENSDK_TSS2_TCTI_DEVICE_ARCHIVE "" CACHE FILEPATH "Pinned libtss2-tcti-device.a")
 set(CITIZENSDK_ZXING_SOURCE_DIR "" CACHE PATH "Official complete ZXing-C++ 3.1.1 source directory")
 option(CITIZENSDK_BUILD_TESTS "Build Linux Host contract tests" OFF)
-option(CITIZENSDK_ENABLE_WALLET_UI "Build the SDK-owned GTK3 wallet and authentication UI" ON)
+option(CITIZENSDK_ENABLE_QR_CAPTURE "Build non-UI camera and native image adapters" ON)
 option(CITIZENSDK_WARNINGS_AS_ERRORS "Treat CitizenSDK Linux Host warnings as errors" ON)
 
 # Flutter 只编译适配层，消费同版已安装 Host/Core；不得在插件构建中
@@ -84,7 +84,7 @@ endforeach()
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0 gio-2.0)
-if(CITIZENSDK_ENABLE_WALLET_UI)
+if(CITIZENSDK_ENABLE_QR_CAPTURE)
   pkg_check_modules(GTK3 REQUIRED IMPORTED_TARGET gtk+-3.0>=3.24)
   pkg_check_modules(GSTREAMER REQUIRED IMPORTED_TARGET
     gstreamer-1.0>=1.18 gstreamer-app-1.0>=1.18 gstreamer-video-1.0>=1.18)
@@ -107,7 +107,6 @@ add_library(citizensdk_host SHARED
   src/citizen_sdk_host_api.cc
   src/citizen_sdk_host_bridge.cc
   src/citizen_sdk_host_record.cc
-  src/citizen_sdk_gtk_parent.cc
   src/citizen_sdk_input_limits.cc
   src/citizen_sdk_lifecycle.cc
   src/citizen_sdk_operation.cc
@@ -120,10 +119,6 @@ add_library(citizensdk_host SHARED
   src/citizen_sdk_tpm2.cc
   src/citizen_sdk_user_auth.cc
   src/citizen_sdk_qr_camera.cc
-  src/citizen_sdk_qr_flow.cc
-  src/citizen_sdk_wallet_flow.cc
-  src/citizen_sdk_wallet_validation.cc
-  src/citizen_sdk_wallet_window.cc
 )
 add_library(CitizenSDK::Host ALIAS citizensdk_host)
 
@@ -131,7 +126,7 @@ target_compile_features(citizensdk_host PUBLIC cxx_std_17)
 target_compile_definitions(citizensdk_host PRIVATE
   _GNU_SOURCE=1
   CITIZENSDK_HOST_BUILDING=1
-  CITIZENSDK_ENABLE_WALLET_UI=$<BOOL:${CITIZENSDK_ENABLE_WALLET_UI}>
+  CITIZENSDK_ENABLE_QR_CAPTURE=$<BOOL:${CITIZENSDK_ENABLE_QR_CAPTURE}>
   CITIZENSDK_HOST_VERSION="${PROJECT_VERSION}"
 )
 target_include_directories(citizensdk_host
@@ -157,7 +152,7 @@ target_link_libraries(citizensdk_host
   "$<LINK_LIBRARY:WHOLE_ARCHIVE,citizensdk_qr_image>"
   ${CMAKE_DL_LIBS}
 )
-if(CITIZENSDK_ENABLE_WALLET_UI)
+if(CITIZENSDK_ENABLE_QR_CAPTURE)
   target_link_libraries(citizensdk_host PRIVATE PkgConfig::GTK3 PkgConfig::GSTREAMER)
 endif()
 set_target_properties(citizensdk_host PROPERTIES

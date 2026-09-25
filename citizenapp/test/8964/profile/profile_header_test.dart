@@ -1,3 +1,7 @@
+import 'dart:typed_data';
+import '../../support/fake_citizen_sdk.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
+import 'package:provider/provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -16,6 +20,8 @@ import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/identity_badge.dart';
 
 import 'fake_profile.dart';
+
+late TestCitizenSdkHarness _sdkHarness;
 
 const String _profileCidNumber = 'CN001-CTZN-000000001-2026';
 
@@ -45,7 +51,7 @@ Widget _wrap({
   SquareMembershipState? initialMembershipState,
   SubscriptionService? subscriptionService,
 }) {
-  return MaterialApp(
+  return Provider<CitizenSdk>.value(value: _sdkHarness.sdk, child: MaterialApp(
     theme: ThemeData(platform: platform),
     builder: (context, child) => MediaQuery(
       data: MediaQuery.of(
@@ -65,10 +71,14 @@ Widget _wrap({
           subscriptionService ?? _NullMembershipSnapshotService(),
       viewerAccountLoader: () async => null,
     ),
-  );
+  ));
 }
 
 void main() {
+  _sdkHarness = TestCitizenSdkHarness(handlers: {
+    // UI导航只需要合成像素；用户码协议编码仍调用当前真实Core。
+    'qrEncode': (_) => [1, 1, Uint8List.fromList([0])],
+  });
   testWidgets('公开昵称、公民号、三项关系和四类内容计数按身份语义展示', (tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(411, 914);
@@ -202,7 +212,7 @@ void main() {
 
   testWidgets('订阅入口固定在通知左侧且与三图标保持同一行', (tester) async {
     await tester.pumpWidget(
-      const MaterialApp(
+      Provider<CitizenSdk>.value(value: _sdkHarness.sdk, child: const MaterialApp(
         home: Scaffold(
           body: ProfileActionIcons(
             isSelf: false,
@@ -214,7 +224,7 @@ void main() {
             ),
           ),
         ),
-      ),
+      )),
     );
 
     final subscribe = find.byKey(
@@ -307,7 +317,7 @@ void main() {
         addTearDown(tester.view.reset);
 
         await tester.pumpWidget(
-          MaterialApp(
+          Provider<CitizenSdk>.value(value: _sdkHarness.sdk, child: MaterialApp(
             theme: AppTheme.lightTheme.copyWith(platform: platform),
             builder: (context, child) => MediaQuery(
               data: MediaQuery.of(context).copyWith(
@@ -335,7 +345,7 @@ void main() {
                 ),
               ),
             ),
-          ),
+          )),
         );
         await tester.pumpAndSettle();
 
@@ -654,7 +664,7 @@ void main() {
     String? peer;
     String? chatTitle;
     await tester.pumpWidget(
-      MaterialApp(
+      Provider<CitizenSdk>.value(value: _sdkHarness.sdk, child: MaterialApp(
         home: UserProfilePage(
           cidNumber: _profileCidNumber,
           isSelf: false,
@@ -670,7 +680,7 @@ void main() {
             return Future<void>.value();
           },
         ),
-      ),
+      )),
     );
     await tester.pumpAndSettle();
 
@@ -684,7 +694,7 @@ void main() {
   testWidgets('从他人视角看的是自己账户时私信按钮置灰不触发', (tester) async {
     String? peer;
     await tester.pumpWidget(
-      MaterialApp(
+      Provider<CitizenSdk>.value(value: _sdkHarness.sdk, child: MaterialApp(
         home: UserProfilePage(
           cidNumber: _profileCidNumber,
           isSelf: false,
@@ -700,7 +710,7 @@ void main() {
             return Future<void>.value();
           },
         ),
-      ),
+      )),
     );
     await tester.pumpAndSettle();
 

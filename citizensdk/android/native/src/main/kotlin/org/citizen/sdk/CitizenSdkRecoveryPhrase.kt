@@ -149,7 +149,7 @@ internal class CitizenSdkPrivateKeyReceiver {
     private var lastCode: Int? = null
     private var listener: ((Int) -> Unit)? = null
 
-    fun bind(id: Long) = synchronized(gate) { check(id != 0L && (secretId == 0L || secretId == id)); secretId = id }
+    fun bind(id: Long) = synchronized(gate) { check(!closed && id != 0L && (secretId == 0L || secretId == id)); secretId = id }
     fun listen(callback: (Int) -> Unit) {
         val code = synchronized(gate) { listener = callback; lastCode }
         if (code != null) callback(code)
@@ -168,14 +168,17 @@ internal class CitizenSdkPrivateKeyReceiver {
     fun receive(id: Long, bytes: ByteBuffer): Int = synchronized(gate) {
         if (!bytes.isDirect || bytes.capacity() != 32 || bytes.position() != 0 || bytes.remaining() != 32) return@synchronized CitizenSdkErrorCode.INTEGRITY.value
         if (closed || populated || id == 0L || id != secretId) return@synchronized CitizenSdkErrorCode.CANCELLED.value
-        bytes.get(value)
+        // JNI借用视图的游标不归接收者所有，复制不能改变调用方position。
+        bytes.duplicate().get(value)
         populated = true
         CitizenSdkErrorCode.OK.value
     }
     @Suppress("unused")
     fun settled(id: Long, code: Int) {
         val callback = synchronized(gate) {
-            if (id == 0L || secretId != 0L && id != secretId) return
+            if (closed || id == 0L || secretId != 0L && id != secretId) return
+            // 早到通知也先绑定真实编号，后续bind不得领取其它资源的通知。
+            if (secretId == 0L) secretId = id
             lastCode = code
             listener
         }

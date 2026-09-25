@@ -11,7 +11,7 @@ use citizen_sdk_contracts::{
     FinalizedAccountBalance, Hash32, PreparedTransactionSummary, RuntimeContext, SecretBuffer,
     SigningCompletion, Sr25519Signature, TransactionExecutionCompleted, TransactionExecutionId,
     TransactionHistoryPage, VerifiedBlockBody, VerifiedBlockHeader, VerifiedBlockRef,
-    WalletAccount, WalletProfile,
+    WalletProfile,
 };
 use citizen_sdk_engine::WalletStateSnapshot;
 
@@ -87,7 +87,6 @@ pub enum ResultPayload {
     #[cfg(feature = "chain")]
     FeeSnapshot(BestFeeSnapshot),
     WalletProfile(Option<WalletProfile>),
-    WalletAccounts(Vec<WalletAccount>),
     Signature(Sr25519Signature),
     PreparedWallet(u64),
     TransactionHistoryPage(TransactionHistoryPage),
@@ -124,7 +123,6 @@ impl ResultPayload {
             #[cfg(feature = "chain")]
             Self::FeeSnapshot(_) => CitizenSdkResultKind::FeeSnapshot,
             Self::WalletProfile(_) => CitizenSdkResultKind::WalletProfile,
-            Self::WalletAccounts(_) => CitizenSdkResultKind::WalletAccounts,
             Self::Signature(_) => CitizenSdkResultKind::Signature,
             Self::PreparedWallet(_) => CitizenSdkResultKind::PreparedWallet,
             Self::TransactionHistoryPage(_) => CitizenSdkResultKind::TransactionHistoryPage,
@@ -155,7 +153,6 @@ impl ResultPayload {
             | Self::AccountBalances(_)
             | Self::AccountNonce(_)
             | Self::WalletProfile(_)
-            | Self::WalletAccounts(_)
             | Self::PreparedWallet(_)
             | Self::TransactionHistoryPage(_) => 0,
             Self::ApplicationKey(_) => 32,

@@ -1,213 +1,63 @@
+// 旧窗口协调测试改为真实生产codec的无UI钱包参数/资源边界；不再构造窗口Presenter。
 #include <cassert>
-#include <functional>
 #include <string>
-#include <utility>
 #include <vector>
-
-#include "citizen_sdk_flutter_wallet_flow.hpp"
+#include "citizen_sdk_flutter_codec.hpp"
 #include "citizen_sdk_flutter_test_support.hpp"
-#include "citizen_sdk_host_record.hpp"
-#include "citizen_sdk_wallet_validation.hpp"
-
 #ifdef NDEBUG
-#error "CitizenSDK Flutter wallet-flow contract assertions must remain enabled"
+#error "CitizenSDK Flutter contract assertions must remain enabled"
 #endif
+namespace csf = citizen_sdk::flutter;
+using citizen_sdk::flutter::test::fl;
+using citizen_sdk::flutter::test::list;
+using citizen_sdk::flutter::test::expect_failure;
 
-using citizen_sdk::WalletFlowKind;
-using citizen_sdk::WalletFlowResult;
-using citizen_sdk::WalletFlowStatus;
-using citizen_sdk::flutter::DecodedRequest;
-using citizen_sdk::flutter::FlutterWalletFlows;
-using citizen_sdk::flutter::Method;
-
-namespace {
-
-// 与公开 C++ 门面的字段投影一致，并实际调用 Host 生产校验器；不再让
-// mock presenter 仅比较 kind、却漏掉会在 Host 被拒绝的 word_count。
-citizen_sdk::linux::ValidatedWalletRequest validate_contract(
-    const citizen_sdk::WalletFlowRequest &request) {
-  citizensdk_wallet_flow_request_v1_t native{};
-  native.struct_size = sizeof(native);
-  native.abi_version = CITIZENSDK_HOST_ABI_VERSION;
-  native.kind = static_cast<uint32_t>(request.kind);
-  native.word_count = request.word_count;
-  native.account_indices = request.account_indices.empty()
-                               ? nullptr : request.account_indices.data();
-  native.account_index_count = static_cast<uint32_t>(request.account_indices.size());
-  if (request.initialization_text.size() == 5) {
-    auto view = [](const std::string &value) { return citizensdk_bytes_view_t{
-        reinterpret_cast<const uint8_t *>(value.data()), value.size()}; };
-    native.wallet_account_role_text = view(request.initialization_text[0]);
-    native.wallet_authorization_text = view(request.initialization_text[1]);
-    native.wallet_completion_text = view(request.initialization_text[2]);
-    native.wallet_backup_text = view(request.initialization_text[3]);
-    native.wallet_cold_account_text = view(request.initialization_text[4]);
-  } else if (request.initialization_text.size() == 1) {
-    native.wallet_cold_account_text = {reinterpret_cast<const uint8_t *>(request.initialization_text[0].data()), request.initialization_text[0].size()};
-  }
-  return citizen_sdk::linux::validate_wallet_request(native);
+csf::DecodedRequest decode(const char *method, csf::Value value) {
+  auto native = fl(value);
+  return csf::decode_request(method, native.get());
 }
-
-void expect_host_rejection(const citizen_sdk::WalletFlowRequest &request) {
-  bool rejected = false;
-  try {
-    (void)validate_contract(request);
-  } catch (const citizen_sdk::linux::HostError &error) {
-    rejected = error.code() == CITIZENSDK_ERROR_INVALID_ARGUMENT;
-  }
-  assert(rejected);
-}
-
-}  // namespace
-
 
 int main() {
-  std::vector<std::function<void()>> queue;
-  FlutterWalletFlows flows([&](std::function<void()> work) {
-    queue.push_back(std::move(work));
-  });
-
-  DecodedRequest create;
-  create.method = Method::create_wallet;
-  create.session = "session-a";
-  create.sequence = 1;
-  create.word_count = 24;
-  auto contract = FlutterWalletFlows::contract(create);
-  assert(contract.kind == WalletFlowKind::Create && contract.word_count == 24);
-  assert(validate_contract(contract).word_count == CITIZENSDK_WALLET_WORDS_24);
-  auto twelve = create;
-  twelve.word_count = 12;
-  assert(validate_contract(FlutterWalletFlows::contract(twelve)).word_count ==
-         CITIZENSDK_WALLET_WORDS_12);
-  auto eighteen = create;
-  eighteen.word_count = 18;
-  assert(validate_contract(FlutterWalletFlows::contract(eighteen)).word_count ==
-         CITIZENSDK_WALLET_WORDS_18);
-  assert(citizen_sdk::WalletFlowRequest{}.word_count == 12);
-  DecodedRequest initialize;
-  initialize.method = Method::initialize_wallet;
-  initialize.word_count = 18;
-  initialize.wallet_initialization_text = {"账户角色", "授权说明", "完成说明", "备份说明", "冷账户说明"};
-  const auto initialize_contract = FlutterWalletFlows::contract(initialize);
-  assert(initialize_contract.kind == WalletFlowKind::Initialize);
-  assert(validate_contract(initialize_contract).word_count == CITIZENSDK_WALLET_WORDS_18);
-  DecodedRequest cold;
-  cold.method = Method::import_cold_account_with_ui;
-  cold.wallet_initialization_text = {"只接受账户码"};
-  const auto cold_contract = FlutterWalletFlows::contract(cold);
-  assert(cold_contract.kind == WalletFlowKind::ImportColdAccount);
-  assert(validate_contract(cold_contract).kind == CITIZENSDK_WALLET_FLOW_IMPORT_COLD_ACCOUNT);
-
-  int completions = 0;
-  // Deliberately complete before the presenter returns. The production bridge
-  // must have preallocated the route and must settle it exactly once.
-  flows.launch(create,
-    [](const auto &decoded, auto completion) {
-      const auto request = FlutterWalletFlows::contract(decoded);
-      assert(request.kind == WalletFlowKind::Create);
-      assert(validate_contract(request).word_count == CITIZENSDK_WALLET_WORDS_24);
-      completion({WalletFlowStatus::Completed, CITIZENSDK_OK});
-      completion({WalletFlowStatus::Failed, CITIZENSDK_ERROR_INTERNAL});
-      return [] {};
-    },
-    [&](WalletFlowResult result) {
-      ++completions;
-      assert(result.status == WalletFlowStatus::Completed);
-    });
-  assert(completions == 1);
-  assert(flows.active_count() == 0);
-  for (auto &work : queue) work();
-  assert(completions == 1);
-
-  DecodedRequest imported;
-  imported.method = Method::import_wallet;
-  imported.session = "session-b";
-  imported.sequence = 9;
-  bool cancelled = false;
-  citizen_sdk::WalletFlowCompletion late;
-  flows.launch(imported,
-    [&](const auto &decoded, auto completion) {
-      const auto request = FlutterWalletFlows::contract(decoded);
-      assert(request.kind == WalletFlowKind::Import);
-      assert(request.word_count == 0 && request.account_indices.empty());
-      assert(validate_contract(request).kind == CITIZENSDK_WALLET_FLOW_IMPORT);
-      late = std::move(completion);
-      return [&] { cancelled = true; };
-    },
-    [&](WalletFlowResult result) {
-      ++completions;
-      assert(result.status == WalletFlowStatus::Cancelled);
-    });
-  flows.cancel_session("session-b");
-  assert(cancelled);
-  assert(flows.active_count() == 1);  // cancel is not a terminal promise
-  late({WalletFlowStatus::Cancelled, CITIZENSDK_OK});
-  assert(completions == 1);
-  assert(!queue.empty());
-  queue.back()();
-  assert(completions == 2 && flows.active_count() == 0);
-
-  DecodedRequest add;
-  add.method = Method::add_wallet_accounts;
-  add.indices = {1, 1989};
-  contract = FlutterWalletFlows::contract(add);
-  assert(contract.kind == WalletFlowKind::AddAccounts);
-  assert(contract.account_indices == add.indices);
-  assert(contract.word_count == 0);
-  const auto validated_add = validate_contract(contract);
-  assert(validated_add.kind == CITIZENSDK_WALLET_FLOW_ADD_ACCOUNTS);
-  assert(validated_add.word_count == 0 && validated_add.account_indices == add.indices);
-
-  // 保持 Host 的严格拒绝合同，不能通过放宽校验掩盖适配层污染。
-  auto contaminated = FlutterWalletFlows::contract(imported);
-  contaminated.word_count = 12;
-  expect_host_rejection(contaminated);
-  contaminated = contract;
-  contaminated.word_count = 24;
-  expect_host_rejection(contaminated);
-  contaminated = contract;
-  contaminated.account_indices = {1, 1};
-  expect_host_rejection(contaminated);
-  contaminated.account_indices = {};
-  expect_host_rejection(contaminated);
-  contaminated = FlutterWalletFlows::contract(create);
-  contaminated.account_indices = {1};
-  expect_host_rejection(contaminated);
-
-  for (const uint32_t words : {15U, 21U}) {
-    auto invalid = create;
-    invalid.word_count = words;
-    citizen_sdk::flutter::test::expect_failure(
-        [&] { (void)FlutterWalletFlows::contract(invalid); },
-        CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  const auto request = [](csf::Value::List fields) {
+    csf::Value::List value{csf::Value::integer(2), csf::Value::string("sdk"), csf::Value::integer(1)};
+    value.insert(value.end(), fields.begin(), fields.end());
+    return csf::Value::list(std::move(value));
+  };
+  for (auto count : {12, 18, 24}) {
+    const auto prepared = decode("prepareWalletCreation", request({csf::Value::integer(count), csf::Value::string("")}));
+    assert(prepared.method == csf::Method::prepare_wallet_creation && prepared.word_count == static_cast<uint32_t>(count));
+    assert(prepared.password && prepared.password->value.empty());
   }
-
-  // 查看只传公开账户并复用同一排空路由；取消先于晚回调不算已结束。
-  DecodedRequest viewing;
-  viewing.method = Method::view_account_private_key;
-  viewing.session = "private-view"; viewing.sequence = 1;
-  viewing.account_id.bytes[0] = 7;
-  citizen_sdk::WalletFlowCompletion view_done;
-  int view_cancelled = 0, view_completed = 0;
-  flows.launch(viewing, [&](const auto &request, auto completion) {
-    assert(request.method == Method::view_account_private_key && request.account_id.bytes[0] == 7);
-    assert(request.payload.empty() && request.indices.empty());
-    view_done = std::move(completion);
-    return [&] { ++view_cancelled; };
-  }, [&](WalletFlowResult result) {
-    assert(result.status == WalletFlowStatus::Cancelled);
-    ++view_completed;
-  });
-  flows.cancel_session(viewing.session);
-  assert(view_cancelled == 1 && view_completed == 0 && flows.active_count() == 1);
-  view_done({WalletFlowStatus::Cancelled, CITIZENSDK_ERROR_CANCELLED});
-  flows.drain();
-  view_done({WalletFlowStatus::Completed, CITIZENSDK_OK});
-  flows.drain();
-  assert(view_completed == 1 && flows.active_count() == 0);
-
-  // No secret-bearing field exists in either the decoded public request or
-  // wallet contract; import receives all secrets only inside Host-owned GTK.
-  static_assert(sizeof(citizen_sdk::WalletFlowRequest) < 128);
+  for (auto count : {0, 15, 21, 25})
+    expect_failure([&] { (void)decode("prepareWalletCreation", request({csf::Value::integer(count), csf::Value::string("")})); },
+                   CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  const auto imported = decode("importWallet", request({csf::Value::string("synthetic"), csf::Value::string("example")}));
+  assert(imported.mnemonic && imported.password);
+  assert(imported.mnemonic->value == csf::Value::Bytes({'s','y','n','t','h','e','t','i','c'}));
+  const auto added = decode("addWalletAccounts", request({csf::Value::string("synthetic"), csf::Value::string(""),
+      list({csf::Value::integer(1), csf::Value::integer(1989)})}));
+  assert((added.indices == std::vector<uint32_t>{1, 1989}));
+  const auto next = decode("addNextWalletAccount", request({csf::Value::string("synthetic"), csf::Value::string("")}));
+  assert(next.indices.empty()); // 原子分配由Core负责，界面不提交推算编号。
+  expect_failure([&] { (void)decode("importWallet", request({csf::Value::string(std::string(1025, 'a')), csf::Value::string("")})); },
+                 CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  expect_failure([&] { (void)decode("addNextWalletAccount", request({csf::Value::string("synthetic"), csf::Value::string(""),
+      csf::Value::integer(1)})); }, CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  for (const char *old : {"createWallet", "initializeWallet", "importColdAccountWithUi",
+                         "viewAccountPrivateKey", "getWalletProfile", "qrScan"})
+    expect_failure([&] { (void)decode(old, request({})); }, CITIZENSDK_ERROR_UNSUPPORTED);
+  for (const char *method : {"copyRecoveryPhrase", "commitWalletCreation", "releasePreparedWallet",
+                            "revealPrivateKey", "closePrivateKey"}) {
+    assert(decode(method, request({csf::Value::string("opaque-owned-resource")})).resource_id == "opaque-owned-resource");
+    expect_failure([&] { (void)decode(method, request({csf::Value::integer(7)})); }, CITIZENSDK_ERROR_INVALID_ARGUMENT);
+    expect_failure([&] { (void)decode(method, request({csf::Value::string("a/b")})); }, CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  }
+  // 只有显式资源方法可返回敏感字节；普通签名仍只接收64字节公开签名。
+  csf::validate_public_value(csf::Method::reveal_private_key, list({csf::Value::bytes(csf::Value::Bytes(32, 7))}));
+  expect_failure([&] { csf::validate_public_value(csf::Method::reveal_private_key,
+      list({csf::Value::bytes(csf::Value::Bytes(31))})); }, CITIZENSDK_ERROR_INTEGRITY);
+  csf::validate_public_value(csf::Method::sign_wallet_payload, list({csf::Value::bytes(csf::Value::Bytes(64))}));
+  expect_failure([&] { csf::validate_public_value(csf::Method::sign_wallet_payload,
+      list({csf::Value::bytes(csf::Value::Bytes(32))})); }, CITIZENSDK_ERROR_INTEGRITY);
   return 0;
 }

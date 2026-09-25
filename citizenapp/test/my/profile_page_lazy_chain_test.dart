@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+import 'package:provider/provider.dart';
 import '../support/fake_citizen_sdk.dart';
 import 'dart:async';
 import 'dart:io';
@@ -24,6 +26,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../8964/profile/fake_profile.dart';
+
+late TestCitizenSdkHarness _sdkHarness;
 
 const _cidNumber = 'CN220-CTZN2-198805200-2026';
 
@@ -237,6 +241,10 @@ class _PendingCreatorService implements CreatorService {
 }
 
 void main() {
+  _sdkHarness = TestCitizenSdkHarness(handlers: {
+    // UI导航只需要合成像素；用户码协议编码仍调用当前真实Core。
+    'qrEncode': (_) => [1, 1, Uint8List.fromList([0])],
+  });
   testWidgets('我的页面只读徽章快照且不启动轻节点', (tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(411, 914);
@@ -245,7 +253,7 @@ void main() {
     final snapshotStore = _FakeIdentityBadgeSnapshotStore();
     final wallet = _testWallet;
     await tester.pumpWidget(
-      MaterialApp(
+      Provider<CitizenSdk>.value(value: _sdkHarness.sdk, child: MaterialApp(
         theme: AppTheme.lightTheme,
         home: MyTab(
           wallet: _FakeWallet(wallet),
@@ -254,7 +262,7 @@ void main() {
           sessionProvider: FakeSessionProvider(fakeSession()),
           subscriptionService: _ConfirmedMembershipSnapshotService(),
         ),
-      ),
+      )),
     );
     await tester.pump(const Duration(milliseconds: 300));
 
@@ -330,7 +338,7 @@ void main() {
     final membershipService = _ConfirmedMembershipSnapshotService();
     final snapshotStore = _FakeIdentityBadgeSnapshotStore();
     await tester.pumpWidget(
-      MaterialApp(
+      Provider<CitizenSdk>.value(value: _sdkHarness.sdk, child: MaterialApp(
         home: MyTab(
           wallet: _FakeWallet(wallet),
           currentUserContext: _CachedIdentityCache(),
@@ -341,7 +349,7 @@ void main() {
           squareApi: squareApi,
           subscriptionService: membershipService,
         ),
-      ),
+      )),
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
@@ -381,7 +389,7 @@ void main() {
     );
     final remoteMembership = _ActiveMembershipSquareApi();
     await tester.pumpWidget(
-      MaterialApp(
+      Provider<CitizenSdk>.value(value: _sdkHarness.sdk, child: MaterialApp(
         home: MyTab(
           wallet: _FakeWallet(wallet),
           currentUserContext: _CachedIdentityCache(),
@@ -396,7 +404,7 @@ void main() {
           squareApi: remoteMembership,
           subscriptionService: _ConfirmedMembershipSnapshotService(),
         ),
-      ),
+      )),
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
@@ -432,7 +440,7 @@ void main() {
     final squareApi = _PendingMembershipSquareApi();
     final creatorService = _PendingCreatorService();
     await tester.pumpWidget(
-      MaterialApp(
+      Provider<CitizenSdk>.value(value: _sdkHarness.sdk, child: MaterialApp(
         home: MyTab(
           wallet: _FakeWallet(wallet),
           currentUserContext: _CachedIdentityCache(),
@@ -444,7 +452,7 @@ void main() {
           subscriptionService: membershipSnapshots,
           creatorService: creatorService,
         ),
-      ),
+      )),
     );
     await tester.pump();
 

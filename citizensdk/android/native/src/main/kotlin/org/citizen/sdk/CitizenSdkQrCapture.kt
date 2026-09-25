@@ -24,6 +24,24 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
+/** CameraX亮度平面只复制有界像素；长整型预检避免恶意行/像素跨度溢出。 */
+internal object CitizenSdkQrLuminance {
+    fun copy(source: java.nio.ByteBuffer, width: Int, height: Int, rowStride: Int, pixelStride: Int): ByteArray {
+        if (width !in 1..4096 || height !in 1..4096 || rowStride <= 0 || pixelStride <= 0 ||
+            rowStride.toLong() < (width - 1L) * pixelStride + 1 ||
+            (height - 1L) * rowStride + (width - 1L) * pixelStride + 1 > source.remaining().toLong()) {
+            throw CitizenSdkException(CitizenSdkErrorCode.INTEGRITY, "相机亮度平面边界无效")
+        }
+        val input = source.duplicate()
+        val base = input.position()
+        return ByteArray(width * height).also { luminance ->
+            for (y in 0 until height) for (x in 0 until width) {
+                luminance[y * width + x] = input.get(base + y * rowStride + x * pixelStride)
+            }
+        }
+    }
+}
+
 /** 相机只提供采集和Surface租约，不创建Activity、View、文字或确认按钮。 */
 class CitizenSdkQrCapture internal constructor(
     private val sdk: CitizenSdk,
@@ -51,6 +69,7 @@ class CitizenSdkQrCapture internal constructor(
     private var preview: Preview? = null
     private var analysis: ImageAnalysis? = null
     private var camera: Camera? = null
+    private var cameraObserver: androidx.lifecycle.Observer<androidx.camera.core.CameraState>? = null
     private var starting = false
     private var framesReturned = false
     private var surfaces = 0
@@ -84,6 +103,7 @@ class CitizenSdkQrCapture internal constructor(
         analysis?.clearAnalyzer()
         val owned = listOfNotNull(preview, analysis)
         if (owned.isNotEmpty()) provider?.unbind(*owned.toTypedArray())
+        clearCameraObserver()
         camera = null
     }
     fun resume(): CompletableFuture<Void> = onMain {
@@ -120,6 +140,7 @@ class CitizenSdkQrCapture internal constructor(
                 preview?.setSurfaceProvider(null)
                 val owned = listOfNotNull(preview, analysis)
                 if (owned.isNotEmpty()) provider?.unbind(*owned.toTypedArray())
+                clearCameraObserver()
                 camera = null; preview = null; analysis = null
                 executor.shutdown()
                 Thread({
@@ -154,14 +175,15 @@ class CitizenSdkQrCapture internal constructor(
                     current.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) -> CameraSelector.DEFAULT_FRONT_CAMERA
                     else -> throw CitizenSdkException(CitizenSdkErrorCode.UNAVAILABLE, "camera is unavailable")
                 }
+                val frameGeneration = generation.get()
                 val output = Preview.Builder().build()
                 output.setSurfaceProvider(ContextCompat.getMainExecutor(activity)) { request ->
-                    if (revoked.get()) request.willNotProvideSurface()
+                    if (revoked.get() || paused.get() || generation.get() != frameGeneration || preview !== output) request.willNotProvideSurface()
                     else {
                         val size = request.resolution
                         texture.setDefaultBufferSize(size.width, size.height)
                         request.setTransformationInfoListener(ContextCompat.getMainExecutor(activity)) { info ->
-                            if (!revoked.get()) {
+                            if (!revoked.get() && !paused.get() && generation.get() == frameGeneration && preview === output) {
                                 previewWidth = size.width; previewHeight = size.height; rotationDegrees = info.rotationDegrees
                                 listener.onPreview(size.width, size.height, info.rotationDegrees)
                                 opened.complete(this)
@@ -180,33 +202,35 @@ class CitizenSdkQrCapture internal constructor(
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888).build()
                 provider = current; preview = output; analysis = input
-                input.setAnalyzer(executor, ::analyze)
-                camera = current.bindToLifecycle(activity, selector, output, input)
-                camera!!.cameraInfo.cameraState.observe(activity) { state ->
-                    if (state.error != null && !revoked.get()) fail(CitizenSdkException(CitizenSdkErrorCode.UNAVAILABLE, "camera was disconnected"))
+                input.setAnalyzer(executor) { image -> analyze(image, frameGeneration) }
+                val bound = current.bindToLifecycle(activity, selector, output, input)
+                camera = bound
+                val observer = androidx.lifecycle.Observer<androidx.camera.core.CameraState> { state ->
+                    if (state.error != null && !revoked.get() && generation.get() == frameGeneration && camera === bound)
+                        fail(CitizenSdkException(CitizenSdkErrorCode.UNAVAILABLE, "camera was disconnected"))
                 }
+                cameraObserver = observer
+                bound.cameraInfo.cameraState.observe(activity, observer)
             } catch (error: Throwable) { fail(cameraError(error)) }
         }, ContextCompat.getMainExecutor(activity))
     }
 
-    private fun analyze(image: ImageProxy) {
+    private fun clearCameraObserver() {
+        cameraObserver?.let { camera?.cameraInfo?.cameraState?.removeObserver(it) }
+        cameraObserver = null
+    }
+
+    private fun analyze(image: ImageProxy, capturedGeneration: Long) {
         try {
-            if (revoked.get() || paused.get()) return
-            val capturedGeneration = generation.get()
+            if (revoked.get() || paused.get() || generation.get() != capturedGeneration) return
             val now = System.nanoTime()
             if (now >= lastFrame && now - lastFrame < 100_000_000) return
             lastFrame = now
             check(image.format == ImageFormat.YUV_420_888)
             val width = image.width; val height = image.height
-            check(width in 1..4096 && height in 1..4096)
-            val plane = image.planes[0]; val input = plane.buffer.duplicate()
-            val row = plane.rowStride; val pixel = plane.pixelStride
-            check(pixel > 0 && row >= (width - 1) * pixel + 1)
-            val base = input.position()
-            check((height - 1L) * row + (width - 1L) * pixel + 1 <= input.remaining())
-            val luminance = ByteArray(width * height)
+            val plane = image.planes[0]
+            val luminance = CitizenSdkQrLuminance.copy(plane.buffer, width, height, plane.rowStride, plane.pixelStride)
             try {
-                for (y in 0 until height) for (x in 0 until width) luminance[y * width + x] = input.get(base + y * row + x * pixel)
                 val document = sdk.qrDecodeLuminance(luminance, width, height, width)
                 val result = CitizenQrScanResult.forPurpose(document, purpose)
                 main.post {
@@ -215,9 +239,9 @@ class CitizenSdkQrCapture internal constructor(
             } finally { luminance.fill(0) }
         } catch (error: CitizenSdkException) {
             // 未识别到码不是错误；码型不符或无效内容报告后继续采集，不能提前结束资源。
-            if (error.code != CitizenSdkErrorCode.NOT_FOUND) main.post { if (!revoked.get()) listener.onError(error) }
+            if (error.code != CitizenSdkErrorCode.NOT_FOUND) main.post { if (!revoked.get() && !paused.get() && generation.get() == capturedGeneration) listener.onError(error) }
         } catch (error: Throwable) {
-            main.post { if (!revoked.get()) listener.onError(cameraError(error)) }
+            main.post { if (!revoked.get() && !paused.get() && generation.get() == capturedGeneration) listener.onError(cameraError(error)) }
         } finally { image.close() }
     }
 

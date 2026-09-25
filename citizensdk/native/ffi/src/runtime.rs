@@ -16,7 +16,7 @@ use citizen_sdk_smoldot_provider::{ProviderLifecycle, SmoldotVerifiedChainClient
 use crate::{
     abi::{
         CitizenSdkErrorCode, CitizenSdkEventCallback, CitizenSdkEventType, CitizenSdkHandle,
-        CitizenSdkHostServicesV1, CitizenSdkRequestId,
+        CitizenSdkHostServicesV1, CitizenSdkRequestId, CitizenSdkResultHandle,
     },
     capabilities::require_snapshot,
     composition::ProductComposition,
@@ -29,6 +29,8 @@ use crate::{
 struct RequestState {
     accepting: bool,
     next_request: u64,
+    // 通道序号独立于原生request_id；各平台共用此实例唯一接纳状态。
+    next_request_sequence: u64,
     exclusive_request: Option<CitizenSdkRequestId>,
     callback_registered: bool,
     callback_transition: bool,
@@ -109,6 +111,34 @@ pub struct NativeRuntime {
 }
 
 impl NativeRuntime {
+    /// 外壳先接纳一次，再解方法参数；单次参数失败不得封死后续合法请求。
+    /// 只保护传输关联，不分配原生请求，不触发业务、设备或网络操作。
+    pub(crate) fn accept_request_sequence(&self, sequence: u64) -> FfiResult<()> {
+        if sequence == 0 || sequence > i64::MAX as u64 {
+            return Err(FfiError::new(CitizenSdkErrorCode::InvalidArgument, "invalid request sequence"));
+        }
+        let mut state = self.request_state.lock()
+            .map_err(|_| FfiError::internal("request state is poisoned"))?;
+        if !state.accepting {
+            return Err(FfiError::new(CitizenSdkErrorCode::InvalidState, "instance is shutting down"));
+        }
+        if sequence != state.next_request_sequence {
+            return Err(FfiError::new(CitizenSdkErrorCode::Conflict, "request sequence is not the next instance sequence"));
+        }
+        if state.next_request_sequence == i64::MAX as u64 {
+            return Err(FfiError::new(CitizenSdkErrorCode::Integrity, "request sequence space is exhausted"));
+        }
+        state.next_request_sequence += 1;
+        Ok(())
+    }
+
+    pub(crate) unsafe fn set_secret_presence_provider(
+        &self, provider: crate::host_providers::CitizenSdkHostSecretPresenceV1,
+    ) -> FfiResult<()> {
+        // Host唯一操作门同时保护首次登记与关闭；不另建实例状态或回调路由。
+        unsafe { self.composition.set_secret_presence_provider(provider) }
+    }
+
     pub(crate) fn private_key_view_vault(
         &self,
         authorizing: Arc<dyn Fn(u64) -> i32 + Send + Sync>,
@@ -158,6 +188,7 @@ impl NativeRuntime {
             request_state: Mutex::new(RequestState {
                 accepting: true,
                 next_request: 1,
+                next_request_sequence: 1,
                 exclusive_request: None,
                 callback_registered: false,
                 callback_transition: false,
@@ -520,6 +551,22 @@ impl NativeRuntime {
             return Err(error);
         }
         Ok(())
+    }
+
+    /// 保留真实同实例钱包快照，复用结果分配器及销毁计数；关闭门内不再产生引用。
+    pub fn retain_wallet_state(&self, result: CitizenSdkResultHandle) -> FfiResult<CitizenSdkResultHandle> {
+        let state = self.request_state.lock()
+            .map_err(|_| FfiError::internal("request state is poisoned"))?;
+        ensure_accepting(&state)?;
+        let owned = ownership::get(result)?;
+        if owned.owner != self.handle || owned.code != CitizenSdkErrorCode::Ok
+            || !matches!(&owned.payload, ResultPayload::WalletState(_))
+        {
+            return Err(FfiError::invalid("检查资源必须来自同实例成功钱包快照"));
+        }
+        let retained = ownership::reserve_with(self.handle, self.result_handles)?.commit(owned)?;
+        self.owned_results.fetch_add(1, Ordering::SeqCst);
+        Ok(retained)
     }
 
     pub fn result_released(&self) {
@@ -1038,6 +1085,46 @@ mod tests {
         .unwrap_or_else(|error| panic!("runtime creation failed: {error:?}"))
     }
 
+    #[test]
+    fn request_sequence_admission_is_per_instance_and_survives_parameter_rejection() {
+        let first = runtime();
+        let second = runtime();
+        // 接纳只推进外壳序号；模拟之后的参数拒绝，不创建任何Core异步请求。
+        first.accept_request_sequence(1).unwrap();
+        assert_eq!(first.request_state.lock().unwrap().next_request, 1);
+        first.accept_request_sequence(2).unwrap();
+        second.accept_request_sequence(1).unwrap();
+        for sequence in [0, i64::MAX as u64 + 1, u64::MAX] {
+            assert_eq!(first.accept_request_sequence(sequence).unwrap_err().code, CitizenSdkErrorCode::InvalidArgument);
+        }
+        for sequence in [1, 2, 4] {
+            assert_eq!(first.accept_request_sequence(sequence).unwrap_err().code, CitizenSdkErrorCode::Conflict);
+        }
+        first.accept_request_sequence(3).unwrap();
+        second.accept_request_sequence(2).unwrap();
+        assert_eq!(first.pending_requests.load(Ordering::SeqCst), 0);
+        first.request_state.lock().unwrap().accepting = false;
+        assert_eq!(first.accept_request_sequence(4).unwrap_err().code, CitizenSdkErrorCode::InvalidState);
+        assert_eq!(first.request_state.lock().unwrap().next_request_sequence, 4);
+    }
+
+    #[test]
+    fn request_sequence_admission_is_atomic_and_never_wraps() {
+        let runtime = runtime();
+        let accepted = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8).map(|_| {
+                let runtime = Arc::clone(&runtime);
+                scope.spawn(move || runtime.accept_request_sequence(1).map_err(|error| error.code))
+            }).collect();
+            workers.into_iter().map(|worker| worker.join().unwrap()).collect::<Vec<_>>()
+        });
+        assert_eq!(accepted.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(accepted.iter().filter_map(|result| result.as_ref().err()).all(|code| *code == CitizenSdkErrorCode::Conflict));
+        runtime.request_state.lock().unwrap().next_request_sequence = i64::MAX as u64;
+        assert_eq!(runtime.accept_request_sequence(i64::MAX as u64).unwrap_err().code, CitizenSdkErrorCode::Integrity);
+        assert_eq!(runtime.request_state.lock().unwrap().next_request_sequence, i64::MAX as u64);
+    }
+
     fn runtime_with_exhausted_result_handles() -> Arc<NativeRuntime> {
         let assets = crate::assets::verify_assets(
             include_bytes!("../../../assets/citizenchain/manifest.json"),
@@ -1053,6 +1140,39 @@ mod tests {
             &EXHAUSTED_RESULT_HANDLES,
         )
         .unwrap_or_else(|error| panic!("runtime creation failed: {error:?}"))
+    }
+
+    #[test]
+    fn retained_wallet_state_uses_existing_owner_allocator_and_shutdown_gate() {
+        use crate::{error::FfiError, ownership::OwnedResult};
+        let runtime = runtime();
+        let snapshot = citizen_sdk_engine::WalletStateSnapshot::from_state(
+            &citizen_sdk_contracts::WalletState::empty()).unwrap();
+        let source = ownership::insert(OwnedResult::success(runtime.handle,
+            ResultPayload::WalletState(Box::new(snapshot.clone())))).unwrap();
+        let retained = runtime.retain_wallet_state(source).unwrap();
+        assert_ne!(source, retained);
+        ownership::release(source).unwrap();
+        assert!(ownership::get(retained).is_ok());
+        assert!(runtime.retain_wallet_state(source).is_err());
+        assert_eq!(runtime.owned_results.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.shutdown().unwrap_err().code, CitizenSdkErrorCode::Busy);
+        for wrong in [
+            OwnedResult::success(runtime.handle + 1, ResultPayload::WalletState(Box::new(snapshot.clone()))),
+            OwnedResult::success(runtime.handle, ResultPayload::Empty),
+            OwnedResult::failure(runtime.handle, FfiError::invalid("合成失败")),
+        ] {
+            let result = ownership::insert(wrong).unwrap();
+            assert!(runtime.retain_wallet_state(result).is_err());
+            ownership::release(result).unwrap();
+            assert_eq!(runtime.owned_results.load(Ordering::SeqCst), 1);
+        }
+        runtime.request_state.lock().unwrap().accepting = false;
+        assert!(runtime.retain_wallet_state(retained).is_err());
+        runtime.request_state.lock().unwrap().accepting = true;
+        ownership::release(retained).unwrap();
+        runtime.result_released();
+        assert_eq!(runtime.owned_results.load(Ordering::SeqCst), 0);
     }
 
     #[test]

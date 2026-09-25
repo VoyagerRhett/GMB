@@ -44,14 +44,14 @@ void main() {
     final subscription = sdk.events.listen(events.add);
 
     platform.emit(<Object?>[
-      1,
+      2,
       'another-session',
       1,
       'lifecycleChanged',
       <Object?>['running'],
     ]);
     platform.emit(<Object?>[
-      1,
+      2,
       'session-a',
       1,
       'lifecycleChanged',
@@ -70,12 +70,12 @@ void main() {
     final events = <CitizenSdkEvent>[];
     final subscription = sdk.events.listen(events.add);
     final before = sdk.lifecycle;
-    platform.emit(<Object?>[1, 'session-a', 1, 'historyChanged', <Object?>[]]);
+    platform.emit(<Object?>[2, 'session-a', 1, 'historyChanged', <Object?>[]]);
     await Future<void>.delayed(Duration.zero);
     expect(events.single, isA<CitizenSdkHistoryChanged>());
     expect(sdk.lifecycle, before);
     await sdk.close();
-    platform.emit(<Object?>[1, 'session-a', 2, 'historyChanged', <Object?>[]]);
+    platform.emit(<Object?>[2, 'session-a', 2, 'historyChanged', <Object?>[]]);
     await Future<void>.delayed(Duration.zero);
     expect(events, hasLength(1));
     await subscription.cancel();
@@ -221,7 +221,7 @@ final class _SdkPlatform implements CitizenSdkPlatform {
     methods.add(method);
     if (method == 'open') {
       return <Object?>[
-        1,
+        2,
         'session-a',
         0,
         <Object?>['created', 1],
@@ -243,7 +243,7 @@ final class _SdkPlatform implements CitizenSdkPlatform {
       ];
       if (batchFailure == 2 && balances.isNotEmpty) balances.removeLast();
       return <Object?>[
-        1,
+        2,
         'session-a',
         sequence,
         <Object?>[balances],
@@ -324,7 +324,7 @@ final class _SdkPlatform implements CitizenSdkPlatform {
       ],
       _ => throw StateError('未预期 method：$method'),
     };
-    return <Object?>[1, 'session-a', sequence, value];
+    return <Object?>[2, 'session-a', sequence, value];
   }
 
   void emit(Object? event) => _events.add(event);

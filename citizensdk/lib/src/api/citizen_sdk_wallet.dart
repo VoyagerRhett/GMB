@@ -6,6 +6,7 @@ import '../models/citizen_wallet.dart';
 /// 通用无UI钱包能力；界面、文字和导航由宿主拥有，所有规则与真实状态由SDK提供。
 abstract interface class CitizenSdkWallet {
   CitizenSdkOperation<CitizenWalletState> getState();
+  CitizenSdkOperation<CitizenWalletInspection> inspect();
   Future<CitizenWalletInputValidation> validatePassword(String password);
   Future<CitizenWalletInputValidation> validateMnemonic(String mnemonic, CitizenWalletWordCount wordCount);
   Future<List<String>> wordSuggestions(String prefix);
@@ -22,6 +23,9 @@ abstract interface class CitizenSdkWallet {
   CitizenSdkOperation<CitizenWalletState> importColdAccountCode({required String code, String name = ''});
   Future<CitizenSdkPrivateKey> openPrivateKey(String accountId);
   CitizenSdkOperation<CitizenWalletProfile> setActiveAccount(String accountId);
+  /// 只选择付款钱包；必须基于最新目录修订，不触发签名或默认账户重排。
+  CitizenSdkOperation<CitizenWalletState> setActiveWallet({required BigInt expectedRevision, required int walletIndex});
+  CitizenSdkOperation<CitizenWalletState> renameWallet({required BigInt expectedRevision, required int walletIndex, required String name});
   CitizenSdkOperation<CitizenWalletState> renameAccount({required String accountId, required String name});
   CitizenSdkOperation<CitizenWalletState> deleteAccount(String accountId);
 

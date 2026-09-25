@@ -82,21 +82,25 @@ class _ScannerViewState extends State<ScannerView> with WidgetsBindingObserver {
   }
 
   void _failure(Object error) {
-    if (mounted) widget.onFailure?.call(
-      ScannerFailure.fromDeviceError(error, operation: '扫码'),
-    );
+    if (mounted) {
+      widget.onFailure?.call(
+        ScannerFailure.fromDeviceError(error, operation: '扫码'),
+      );
+    }
   }
 
   Future<void> _release() async {
     if (mounted) widget.onCapture?.call(null);
-    for (final subscription in _subscriptions) {
-      await subscription.cancel();
-    }
+    final subscriptions = List<StreamSubscription<dynamic>>.of(_subscriptions);
     _subscriptions.clear();
     final capture = _capture;
+    // 同轮撤销监听与关闭真实采集均立即发起，并等待两者排空；不让流取消延后设备关闭。
+    await Future.wait<void>([
+      for (final subscription in subscriptions) subscription.cancel(),
+      if (capture != null) capture.close(),
+    ]);
     if (capture != null) {
       // close成功前不丢弃资源所有权；失败仍由SDK会话持有并报告。
-      await capture.close();
       if (identical(capture, _capture)) {
         _capture = null;
         if (mounted) setState(() {});

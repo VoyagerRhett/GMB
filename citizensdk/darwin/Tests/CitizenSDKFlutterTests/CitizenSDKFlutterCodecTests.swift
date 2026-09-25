@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
-@testable import CitizenSDK
+@_spi(CitizenSDKFlutter) @testable import CitizenSDK
+
 @testable import CitizenSDKFlutter
 
 #if os(iOS)
@@ -10,6 +11,72 @@ import FlutterMacOS
 #endif
 
 final class CitizenSDKFlutterCodecTests: XCTestCase {
+    func testRealChannelNullCursorsAndRejectedParametersKeepCoreSequenceUsable() async throws {
+        // 仅QR实例与测试临时根；不打开用户金库、不启动链，不以Swift手写nil代替通道空值。
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            if FileManager.default.fileExists(atPath: root.path) { XCTAssertNoThrow(try FileManager.default.removeItem(at: root)) }
+        }
+        let sdk = try CitizenSdk.open(storageRoot: root, applicationID: "org.citizen.sdk.tests", modules: .qr)
+        do {
+            let codec = FlutterStandardMethodCodec.sharedInstance()
+            let block: [Any] = ["0x" + String(repeating: "00", count: 32), "1", "finalized"]
+            let call = FlutterMethodCall(methodName: "getStorageKeysPaged",
+                arguments: [2, "synthetic", 1, block, FlutterStandardTypedData(bytes: Data([1])), NSNull(), 256])
+            let decoded = codec.decodeMethodCall(codec.encode(call))
+            let wireValues = try XCTUnwrap(decoded.arguments as? [Any?])
+            XCTAssertTrue(wireValues[5] is NSNull, "真实通道数组空值必须覆盖NSNull，不能用手写Swift nil替代")
+            let envelope = try XCTUnwrap(CitizenSdkFlutterCodec.envelope(method: decoded.method, arguments: decoded.arguments))
+            try sdk.acceptRequestSequence(try XCTUnwrap(envelope.sequence))
+            let request = try CitizenSdkFlutterCodec.decode(method: decoded.method, arguments: decoded.arguments)
+            if case let .storageKeysPage(_, _, _, _, start, _) = request { XCTAssertNil(start) }
+            else { XCTFail("storage request") }
+            let history = codec.decodeMethodCall(codec.encode(FlutterMethodCall(
+                methodName: "getTransactionHistory", arguments: [2, "synthetic", 2, NSNull(), 100])))
+            try sdk.acceptRequestSequence(2)
+            XCTAssertNoThrow(try CitizenSdkFlutterCodec.decode(method: history.method, arguments: history.arguments))
+            // 有效外壳接纳后参数拒绝；后续序号与查询继续工作，不自动重建SDK或跳号。
+            try sdk.acceptRequestSequence(3)
+            XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "getStorageKeysPaged", arguments: [2, "synthetic", 3]))
+            try sdk.acceptRequestSequence(4)
+            _ = try sdk.capabilities()
+            XCTAssertThrowsError(try sdk.acceptRequestSequence(4))
+            XCTAssertThrowsError(try sdk.acceptRequestSequence(6))
+            try sdk.acceptRequestSequence(5)
+        } catch {
+            try await sdk.supervisedClose()
+            throw error
+        }
+        try await sdk.supervisedClose()
+
+    }
+
+    func testWalletMetadataSeparatesRevisionSelectionAndName() throws {
+        let select = try CitizenSdkFlutterCodec.decode(method: "setActiveWallet", arguments: [2, "sdk", 1, "18446744073709551615", Int64(UInt32.max)])
+        guard case let .walletMetadata(method, _, _, revision, index, name) = select else { return XCTFail("metadata request") }
+        XCTAssertEqual(method, "setActiveWallet"); XCTAssertEqual(revision, UInt64.max)
+        XCTAssertEqual(index, UInt32.max); XCTAssertNil(name)
+        XCTAssertEqual(select.sessionID, "sdk"); XCTAssertEqual(select.sequence, 1)
+        XCTAssertNoThrow(try CitizenSdkFlutterCodec.decode(method: "renameWallet", arguments: [2, "sdk", 2, "7", 0, "钱包名"]))
+        let invalid: [[Any]] = [[2, "sdk", 3, "01", 0], [2, "sdk", 3, "1", -1],
+            [2, "sdk", 3, "1", Int64(UInt32.max) + 1], [2, "sdk", 3, "1", 0, "extra"]]
+        for arguments in invalid { XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "setActiveWallet", arguments: arguments)) }
+        for name in ["", " bad", String(repeating: "名", count: 31)] {
+            XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "renameWallet", arguments: [2, "sdk", 4, "1", 0, name]))
+        }
+        let profile = CitizenWalletProfile(walletName: "钱包名", origin: .created, walletIndex: 0, createdAtMillis: 1,
+            masterAccountID: Data(repeating: 1, count: 32), activeAccountID: Data(repeating: 1, count: 32), accounts: [])
+        let projected = CitizenSdkFlutterCodec.profile(profile)
+        XCTAssertEqual(projected?.count, 7); XCTAssertEqual(projected?[6] as? String, "钱包名")
+        let empty = CitizenWalletState(revision: 0, hotProfile: nil, accounts: [], initializationState: 0, cleanupPending: false, activeWalletIndex: nil)
+        let state = CitizenSdkFlutterCodec.walletState(empty)
+        XCTAssertEqual(state.count, 7); XCTAssertNil(state[5])
+        // 仅验证公开UInt32到Int64投影，不把合成边界值当作真实钱包资格。
+        let boundary = CitizenWalletState(revision: 1, hotProfile: nil, accounts: [],
+            initializationState: 1, cleanupPending: false, activeWalletIndex: UInt32.max)
+        XCTAssertEqual(CitizenSdkFlutterCodec.walletState(boundary)[5] as? Int64, Int64(UInt32.max))
+    }
+
     func testNonConsumingResponseValidationHasExactOwnedFields() throws {
         guard case let .qr(method, _, _, fields) = try CitizenSdkFlutterCodec.decode(
             method: "qrValidateSignResponse", arguments: [2, "sdk", 1, "request", "{}"])
@@ -36,42 +103,39 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
         XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "qrPrepareAccountAuthorization", arguments: [2, "s", 3, 10,
             FlutterStandardTypedData(bytes: Data(count: 1921)), ""]))
     }
-    func testQrUiRoutesRejectInjectedClockSignatureAndLegacyMethods() throws {
-        guard case let .qr(method, _, _, fields) = try CitizenSdkFlutterCodec.decode(method: "qrScan", arguments: [1, "session", 1]) else {
-            return XCTFail("扫码必须走唯一会话 QR 请求")
+    func testHeadlessQrRoutesRejectInjectedClockSignatureAndLegacyMethods() throws {
+        XCTAssertNoThrow(try CitizenSdkFlutterCodec.decode(method: "openQrCapture", arguments: [2, "session", 1, 1]))
+        for method in ["qrParse", "qrConsumeSignResponse", "reviewQrRequest"] {
+            XCTAssertNoThrow(try CitizenSdkFlutterCodec.decode(method: method, arguments: [2, "session", 2, "{}"]))
+            XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: method, arguments: [2, "session", 2, "{}", 123]))
         }
-        XCTAssertEqual(method, "qrScan"); XCTAssertTrue(fields.isEmpty)
-        for method in ["qrParse", "qrConsumeSignResponse", "signQrRequest"] {
-            XCTAssertNoThrow(try CitizenSdkFlutterCodec.decode(method: method, arguments: [1, "session", 2, "{}"]))
-            XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: method, arguments: [1, "session", 2, "{}", 123]))
-            XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: method, arguments: [1, "session", 2, "{}", FlutterStandardTypedData(bytes: Data(count: 64))]))
-        }
-        for method in ["qrSigningInput", "qrCreateSignResponse", "qrEncodeImage"] {
+        XCTAssertNoThrow(try CitizenSdkFlutterCodec.decode(method: "signQrRequest", arguments: [2, "session", 2, "owned"]))
+        for method in ["qrScan", "viewAccountPrivateKey", "createWallet", "initializeWallet", "qrSigningInput", "qrCreateSignResponse", "qrEncodeImage"] {
             XCTAssertFalse(CitizenSdkFlutterCodec.methods.contains(method))
-            XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: method, arguments: [1, "session", 3, "{}"]))
+            XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: method, arguments: [2, "session", 3, "{}"]))
         }
     }
 
     func testPrivateKeyViewTransportsOnlyOnePublicAccountAndKeepsSessionIdentity() throws {
         let account = "0x" + String(repeating: "11", count: 32)
-        let request = try CitizenSdkFlutterCodec.decode(method: "viewAccountPrivateKey", arguments: [1, "session", 7, account])
+        let request = try CitizenSdkFlutterCodec.decode(method: "openPrivateKey", arguments: [2, "session", 7, account])
         guard case let .account(method, session, sequence, accountID) = request else { return XCTFail("expected public account request") }
-        XCTAssertEqual(method, "viewAccountPrivateKey"); XCTAssertEqual(session, "session")
+        XCTAssertEqual(method, "openPrivateKey"); XCTAssertEqual(session, "session")
         XCTAssertEqual(sequence, 7); XCTAssertEqual(accountID.count, 32)
-        for tuple: [Any?] in [[1, "session", 7], [1, "session", 7, account, "extra"],
-                             [1, "session", 7, "0X" + String(repeating: "11", count: 32)]] {
-            XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "viewAccountPrivateKey", arguments: tuple))
+        for tuple: [Any?] in [[2, "session", 7], [2, "session", 7, account, "extra"],
+                             [2, "session", 7, "0X" + String(repeating: "11", count: 32)]] {
+            XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "openPrivateKey", arguments: tuple))
         }
     }
 
     func testChainQueriesKeepSessionShapeAndBatchInputOrder() throws {
         let first = "0x" + String(repeating: "11", count: 32)
         let second = "0x" + String(repeating: "22", count: 32)
-        let genesis = try CitizenSdkFlutterCodec.decode(method: "getGenesisHash", arguments: [1, "session", 7])
+        let genesis = try CitizenSdkFlutterCodec.decode(method: "getGenesisHash", arguments: [2, "session", 7])
         XCTAssertEqual(genesis.sessionID, "session")
         XCTAssertEqual(genesis.sequence, 7)
         for accounts in [[], [second, first, second], Array(repeating: first, count: 1_990)] {
-            let request = try CitizenSdkFlutterCodec.decode(method: "getAccountBalances", arguments: [1, "session", 8, accounts])
+            let request = try CitizenSdkFlutterCodec.decode(method: "getAccountBalances", arguments: [2, "session", 8, accounts])
             guard case let .balances(session, sequence, values) = request else { return XCTFail("expected balances") }
             XCTAssertEqual(session, "session")
             XCTAssertEqual(sequence, 8)
@@ -79,9 +143,9 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
             if accounts.count == 3 { XCTAssertEqual(values, [Data(repeating: 0x22, count: 32), Data(repeating: 0x11, count: 32), Data(repeating: 0x22, count: 32)]) }
         }
         let invalid: [[Any?]] = [
-            [1, "session", 8, Array(repeating: first, count: 1_991)],
-            [1, "session", 8, ["0x" + String(repeating: "AA", count: 32)]],
-            [1, "session", 8, first], [1, "session", 8, [], "extra"],
+            [2, "session", 8, Array(repeating: first, count: 1_991)],
+            [2, "session", 8, ["0x" + String(repeating: "AA", count: 32)]],
+            [2, "session", 8, first], [2, "session", 8, [], "extra"],
         ]
         for tuple in invalid {
             XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "getAccountBalances", arguments: tuple)) {
@@ -90,21 +154,21 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
                 XCTAssertEqual(failure?.sequence, 8)
             }
         }
-        XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "getGenesisHash", arguments: [1, "session", 7, "extra"]))
+        XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "getGenesisHash", arguments: [2, "session", 7, "extra"]))
     }
 
     func testOpenCarriesExactModuleSelectionAndRejectsOldShape() throws {
         for raw in [1, 2, 4, 12, 20, 31, 32, 63] {
-            let request = try CitizenSdkFlutterCodec.decode(method: "open", arguments: [1, raw])
+            let request = try CitizenSdkFlutterCodec.decode(method: "open", arguments: [2, raw, false])
             guard case let .open(modules) = request else { return XCTFail("expected open") }
             XCTAssertEqual(modules.rawValue, UInt32(raw))
         }
-        let invalid: [[Any?]] = [[1], [1, true], [1, 1.0], [1, -1], [1, 4_294_967_296], [1, 31, 0]]
+        let invalid: [[Any?]] = [[1, 31, false], [2], [2, 31], [2, true, false], [2, 1.0, false], [2, -1, false], [2, 4_294_967_296, false], [2, 31, 0]]
         for tuple in invalid {
             XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "open", arguments: tuple))
         }
         // 位依赖检查归 Rust；传输层不得另写一套规则或吞掉未知位。
-        guard case let .open(modules) = try CitizenSdkFlutterCodec.decode(method: "open", arguments: [1, 32]) else {
+        guard case let .open(modules) = try CitizenSdkFlutterCodec.decode(method: "open", arguments: [2, 32, false]) else {
             return XCTFail("expected unchanged module value")
         }
         XCTAssertEqual(modules.rawValue, 32)
@@ -112,7 +176,7 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
 
     func testVerifyHasExactPublicSignatureAndAllowsEmptyMessage() throws {
         let account = "0x" + String(repeating: "11", count: 32)
-        let prefix: [Any?] = [1, account]
+        let prefix: [Any?] = [2, account]
         let payload = FlutterStandardTypedData(bytes: Data())
         for length in [0, 63, 65] {
             XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "verifySignature",
@@ -132,12 +196,12 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
         let signature = FlutterStandardTypedData(bytes: Data(repeating: 0, count: 64))
         let payload = FlutterStandardTypedData(bytes: Data())
         let invalid: [[Any?]] = [
-            [1, "session", 7, account, signature, payload],
+            [2, "session", 7, account, signature, payload],
             [true, account, signature, payload],
-            [1, "0X" + String(repeating: "11", count: 32), signature, payload],
-            [1, account, Data(repeating: 0, count: 64), payload],
-            [1, account, signature, [1, 2]],
-            [1, account, signature, payload, "extra"],
+            [2, "0X" + String(repeating: "11", count: 32), signature, payload],
+            [2, account, Data(repeating: 0, count: 64), payload],
+            [2, account, signature, [1, 2]],
+            [2, account, signature, payload, "extra"],
         ]
         for tuple in invalid {
             XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "verifySignature", arguments: tuple)) { error in
@@ -161,50 +225,126 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
     }
     func testWalletWordCountsAreExactlyTwelveEighteenTwentyFour() throws {
         for count in [12, 18, 24] {
-            let request = try CitizenSdkFlutterCodec.decode(method: "createWallet", arguments: [1, "session", 1, count])
-            guard case let .create(_, _, actual) = request else { return XCTFail("expected create request") }
+            let request = try CitizenSdkFlutterCodec.decode(method: "prepareWalletCreation", arguments: [2, "session", 1, count, ""])
+            guard case let .walletInput(_, _, _, _, _, actual, _) = request else { return XCTFail("expected prepare request") }
             XCTAssertEqual(actual, UInt32(count))
         }
         for count in [0, 15, 21, 30] {
-            XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "createWallet", arguments: [1, "session", 1, count]))
+            XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "prepareWalletCreation", arguments: [2, "session", 1, count, ""]))
         }
     }
 
-    func testEveryV1MethodHasOneExactPositionalShape() throws {
-        XCTAssertEqual(CitizenSdkFlutterCodec.methodChannel, "citizen/sdk/core/v1")
-        XCTAssertEqual(CitizenSdkFlutterCodec.eventChannel, "citizen/sdk/events/v1")
-        XCTAssertEqual(CitizenSdkFlutterCodec.version, 1)
+    func testEveryV2MethodHasOneExactPositionalShape() throws {
+        XCTAssertEqual(CitizenSdkFlutterCodec.methodChannel, "citizen/sdk/core/v2")
+        XCTAssertEqual(CitizenSdkFlutterCodec.eventChannel, "citizen/sdk/events/v2")
+        XCTAssertEqual(CitizenSdkFlutterCodec.version, 2)
         let exactMethods: Set<String> = [
-            "open", "start", "stop", "close", "getCapabilities", "getFinalizedHead",
-            "getSyncStatus", "getBestHead", "getFinalizedBlockAt", "resolveFinalizedBlock",
-            "getBlockHeader", "getBlockBody", "getRuntimeContext", "getStorage", "getStorageBatch",
-            "getStorageKeysPaged", "callRuntimeApi",
-            "getSystemEvents", "exportState", "importState",
-            "getGenesisHash", "getAccountBalance", "getAccountBalances", "getAccountNonce", "getFeeSnapshot", "getWalletProfile",
-            "getWalletState", "importColdAccountId", "importColdAccountSs58",
-            "reorderWalletAccountsWithoutDefaultChange", "renameAccount", "deleteAccount",
-            "viewAccountPrivateKey", "createWallet", "importWallet", "addWalletAccounts", "setActiveWalletAccount",
-            "renameWalletAccount", "deleteWalletAccount", "deleteWallet",
-            "reconcileWalletCleanup", "signWalletPayload", "deriveApplicationKey",
-            "beginSigning", "consumeExternalSignature",
-            "cancelSigning", "beginDefaultAccountChange", "consumeDefaultAccountChange",
-            "verifySignature", "prepareTransaction", "cancelPreparedTransaction", "executePreparedTransaction",
-            "consumePreparedTransactionQrResponse", "cancelPreparedTransactionExecution",
-            "getTransactionHistory", "syncTransactionHistory", "qrParse", "qrCreateSignRequest",
-            "qrConsumeSignResponse", "qrCancelSignRequest", "qrEncodeAccountId",
-            "qrDecodeLuminance", "qrEncode", "qrScan", "signQrRequest",
+            "open",
+            "start",
+            "stop",
+            "close",
+            "getCapabilities",
+            "getFinalizedHead",
+            "getSyncStatus",
+            "getBestHead",
+            "getFinalizedBlockAt",
+            "resolveFinalizedBlock",
+            "getBlockHeader",
+            "getBlockBody",
+            "getRuntimeContext",
+            "getStorage",
+            "getStorageBatch",
+            "getStorageKeysPaged",
+            "callRuntimeApi",
+            "getSystemEvents",
+            "exportState",
+            "importState",
+            "getGenesisHash",
+            "getAccountBalance",
+            "getAccountBalances",
+            "getAccountNonce",
+            "getFeeSnapshot",
+            "getWalletState",
+            "inspectWallets",
+            "releaseWalletInspection",
+            "repairHotWallet",
+            "renameDiagnosticWallet",
+            "deleteDiagnosticWallet",
+            "validateWalletPassword",
+            "validateWalletMnemonic",
+            "walletWordSuggestions",
+            "prepareWalletCreation",
+            "copyRecoveryPhrase",
+            "commitWalletCreation",
+            "releasePreparedWallet",
+            "openPrivateKey",
+            "revealPrivateKey",
+            "closePrivateKey",
+            "cancelOperation",
+            "respondCredential",
+            "cancelCredential",
+            "addNextWalletAccount",
+            "signAndDeleteWallet",
+            "importColdAccountCode",
+            "importColdAccountId",
+            "importColdAccountSs58",
+            "reorderWalletAccountsWithoutDefaultChange",
+            "setActiveWallet",
+            "renameWallet",
+            "renameAccount",
+            "deleteAccount",
+            "importWallet",
+            "addWalletAccounts",
+            "setActiveWalletAccount",
+            "deleteWallet",
+            "reconcileWalletCleanup",
+            "signWalletPayload",
+            "deriveApplicationKey",
+            "beginSigning",
+            "consumeExternalSignature",
+            "cancelSigning",
+            "beginDefaultAccountChange",
+            "consumeDefaultAccountChange",
+            "verifySignature",
+            "encodeSigningPayload",
+            "qrEncodeDocument",
+            "qrPrepareAccountAuthorization",
+            "prepareTransaction",
+            "cancelPreparedTransaction",
+            "executePreparedTransaction",
+            "consumePreparedTransactionQrResponse",
+            "cancelPreparedTransactionExecution",
+            "getTransactionHistory",
+            "syncTransactionHistory",
+            "qrParse",
+            "qrCreateSignRequest",
+            "qrValidateSignResponse",
+            "qrConsumeSignResponse",
+            "qrCancelSignRequest",
+            "qrEncodeAccountId",
+            "qrDecodeLuminance",
+            "qrEncode",
+            "reviewQrRequest",
+            "releaseQrReview",
+            "openQrCapture",
+            "closeQrCapture",
+            "pauseQrCapture",
+            "resumeQrCapture",
+            "setQrCaptureTorch",
+            "qrDecodeImage",
+            "signQrRequest",
         ]
         XCTAssertEqual(CitizenSdkFlutterCodec.methods, exactMethods)
 
-        let version = NSNumber(value: 1)
+        let version = NSNumber(value: 2)
         let sequence = NSNumber(value: 1)
         let account = "0x" + String(repeating: "11", count: 32)
         let destination = "0x" + String(repeating: "22", count: 32)
-        var requests: [String: [Any?]] = ["open": [version, NSNumber(value: 63)]]
+        var requests: [String: [Any?]] = ["open": [version, NSNumber(value: 63), false]]
         for method in [
             "start", "stop", "close", "getCapabilities", "getFinalizedHead", "getSyncStatus",
             "getBestHead", "exportState", "getGenesisHash",
-            "getFeeSnapshot", "getWalletProfile", "getWalletState", "importWallet", "deleteWallet",
+            "getFeeSnapshot", "getWalletState", "inspectWallets", "deleteWallet", "signAndDeleteWallet",
             "reconcileWalletCleanup",
         ] { requests[method] = [version, "session-1", sequence] }
         let finalizedBlock: [Any?] = [account, "1", "finalized"]
@@ -225,14 +365,13 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
         requests["importState"] = [version, "session-1", sequence, NSNumber(value: 1), finalizedBlock,
                                    FlutterStandardTypedData(bytes: Data([1]))]
         for method in [
-            "getAccountBalance", "getAccountNonce", "viewAccountPrivateKey", "setActiveWalletAccount",
-            "deleteWalletAccount", "deleteAccount",
+            "getAccountBalance", "getAccountNonce", "openPrivateKey", "setActiveWalletAccount",
+            "deleteAccount",
         ] { requests[method] = [version, "session-1", sequence, account] }
         requests["getAccountBalances"] = [version, "session-1", sequence, [account, account]]
-        requests["createWallet"] = [version, "session-1", sequence, NSNumber(value: 24)]
-        requests["addWalletAccounts"] = [version, "session-1", sequence,
+        requests["prepareWalletCreation"] = [version, "session-1", sequence, NSNumber(value: 24), ""]
+        requests["addWalletAccounts"] = [version, "session-1", sequence, "synthetic", "",
                                           [NSNumber(value: 1), NSNumber(value: 7)]]
-        requests["renameWalletAccount"] = [version, "session-1", sequence, account, "main"]
         requests["renameAccount"] = [version, "session-1", sequence, account, "main"]
         requests["importColdAccountId"] = [version, "session-1", sequence, account, "cold"]
         requests["importColdAccountSs58"] = [version, "session-1", sequence,
@@ -262,7 +401,7 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
         requests["executePreparedTransaction"] = [version, "session-1", sequence,
             "0x00112233445566778899aabbccddeeff"]
         requests["consumePreparedTransactionQrResponse"] = [version, "session-1", sequence,
-            "0x112233445566778899aabbccddeeff00", "QR_V1"]
+            "0x112233445566778899aabbccddeeff00", "QR_V2"]
         requests["cancelPreparedTransactionExecution"] = [version, "session-1", sequence,
             "0x112233445566778899aabbccddeeff00"]
         requests["getTransactionHistory"] = [version, "session-1", sequence, nil, NSNumber(value: 100)]
@@ -270,8 +409,7 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
         requests["qrParse"] = [version, "session-1", sequence, "{}"]
         requests["qrCreateSignRequest"] = [version, "session-1", sequence, NSNumber(value: 0x0400),
             account, FlutterStandardTypedData(bytes: Data([4, 0])), NSNumber(value: 120)]
-        requests["qrScan"] = [version, "session-1", sequence]
-        requests["signQrRequest"] = [version, "session-1", sequence, "{}"]
+        requests["signQrRequest"] = [version, "session-1", sequence, "owned"]
         requests["qrConsumeSignResponse"] = [version, "session-1", sequence, "{}"]
         requests["qrCancelSignRequest"] = [version, "session-1", sequence, "abcdefghijklmnop"]
         requests["qrEncodeAccountId"] = [version, "session-1", sequence, account]
@@ -279,12 +417,65 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
             FlutterStandardTypedData(bytes: Data([0])), NSNumber(value: 1), NSNumber(value: 1), NSNumber(value: 1)]
         requests["qrEncode"] = [version, "session-1", sequence, "{}", NSNumber(value: 4)]
 
+        requests["validateWalletPassword"] = [version, "session-1", sequence, ""]
+        requests["validateWalletMnemonic"] = [version, "session-1", sequence, "synthetic", 18]
+        requests["walletWordSuggestions"] = [version, "session-1", sequence, "ab"]
+        for method in ["copyRecoveryPhrase", "commitWalletCreation", "releasePreparedWallet", "revealPrivateKey",
+                       "closePrivateKey", "releaseQrReview", "closeQrCapture", "pauseQrCapture", "resumeQrCapture", "releaseWalletInspection"] {
+            requests[method] = [version, "session-1", sequence, "owned"]
+        }
+        requests["cancelOperation"] = [version, "session-1", sequence, "1"]
+        requests["respondCredential"] = [version, "session-1", sequence, "1", nil]
+        requests["cancelCredential"] = [version, "session-1", sequence, "1"]
+        for method in ["importWallet", "addNextWalletAccount"] { requests[method] = [version, "session-1", sequence, "synthetic", ""] }
+        requests["importColdAccountCode"] = [version, "session-1", sequence, "{}", ""]
+        requests["setActiveWallet"] = [version, "session-1", sequence, "7", 0]
+        requests["renameWallet"] = [version, "session-1", sequence, "7", 0, "名字"]
+        for method in ["repairHotWallet", "deleteDiagnosticWallet"] { requests[method] = [version, "session-1", sequence, "owned", 0] }
+        requests["renameDiagnosticWallet"] = [version, "session-1", sequence, "owned", 0, "名字"]
+        requests["qrEncodeDocument"] = [version, "session-1", sequence, "{}"]
+        requests["qrPrepareAccountAuthorization"] = [version, "session-1", sequence, 10, FlutterStandardTypedData(bytes: Data()), ""]
+        requests["encodeSigningPayload"] = [version, 2, "{\"op_tag\":16}", FlutterStandardTypedData(bytes: Data())]
+        requests["qrValidateSignResponse"] = [version, "session-1", sequence, "request", "{}"]
+        requests["reviewQrRequest"] = [version, "session-1", sequence, "{}"]
+        requests["openQrCapture"] = [version, "session-1", sequence, 1]
+        requests["setQrCaptureTorch"] = [version, "session-1", sequence, "owned", true]
+        requests["qrDecodeImage"] = [version, "session-1", sequence, FlutterStandardTypedData(bytes: Data([1])), 1]
+
         XCTAssertEqual(Set(requests.keys), exactMethods)
         for (method, tuple) in requests {
-            XCTAssertNoThrow(try CitizenSdkFlutterCodec.decode(method: method, arguments: tuple), method)
+            // 全闭集同时穿过官方编解码，覆盖NSNull/NSNumber/TypedData的实际边界。
+            let wire = FlutterStandardMethodCodec.sharedInstance()
+            let decoded = wire.decodeMethodCall(wire.encode(
+                FlutterMethodCall(methodName: method, arguments: tuple)))
+            XCTAssertNoThrow(try CitizenSdkFlutterCodec.decode(method: method, arguments: decoded.arguments), method)
             XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(
                 method: method, arguments: tuple + ["forbidden-extra-position"]
             ), method)
+        }
+    }
+
+    func testInspectionFactsAndOwnedRequestsDoNotConstructNormalAccounts() throws {
+        let id = Data(repeating: 1, count: 32)
+        let diagnostic = CitizenWalletDiagnostic(walletIndex: 0, walletName: "异常", accountID: id,
+            ss58Address: nil, diagnosticReason: 3, signMode: .hot,
+            cleanupTargets: CitizenWalletCleanupTargets(accountIDs: [id, Data(repeating: 2, count: 32)], deleteWalletWideKey: true))
+        let state = CitizenWalletState(revision: 7, hotProfile: nil, accounts: [], initializationState: 1,
+            cleanupPending: false, activeWalletIndex: 0, diagnostics: [diagnostic])
+        let tuple = CitizenSdkFlutterCodec.walletState(state)
+        XCTAssertEqual(tuple.count, 7)
+        let records = try XCTUnwrap(tuple[6] as? [[Any?]])
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records.first?.count, 7)
+        XCTAssertEqual(records.first?[5] as? String, "hot")
+        XCTAssertNil(records.first?[3])
+        for method in ["repairHotWallet", "deleteDiagnosticWallet", "renameDiagnosticWallet"] {
+            let fields: [Any?] = [2, "sdk", 1, "inspection-owned", Int64(UInt32.max)] +
+                (method == "renameDiagnosticWallet" ? ["名字"] : [])
+            let request = try CitizenSdkFlutterCodec.decode(method: method, arguments: fields)
+            guard case let .walletInspection(actual, _, _, resource, index, _) = request else { return XCTFail("检查引用") }
+            XCTAssertEqual(actual, method); XCTAssertEqual(resource, "inspection-owned"); XCTAssertEqual(index, UInt32.max)
+            XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: method, arguments: fields + [true]))
         }
     }
 
@@ -294,7 +485,7 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
             ss58Address: "w5CZACAABUbK4jspzPB5be9trhtSgRCRZFafGe7kvFPvxq8M2",
             name: "cold", createdAtMillis: 2, isDefault: true)
         let tuple = CitizenSdkFlutterCodec.walletState(
-            CitizenWalletState(revision: 7, hotProfile: nil, accounts: [cold]))
+            CitizenWalletState(revision: 7, hotProfile: nil, accounts: [cold], initializationState: 1, cleanupPending: false, activeWalletIndex: 1))
         XCTAssertEqual(tuple[0] as? String, "7")
         XCTAssertNil(tuple[1])
         let accounts = tuple[2] as? [[Any?]]
@@ -308,7 +499,7 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
         let uppercase = "0x" + String(repeating: "AA", count: 32)
         XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(
             method: "getAccountBalance",
-            arguments: [NSNumber(value: 1), "session-a", NSNumber(value: 7), uppercase]
+            arguments: [NSNumber(value: 2), "session-a", NSNumber(value: 7), uppercase]
         )) { error in
             guard let failure = error as? CitizenSdkFlutterCodec.ContractFailure else {
                 return XCTFail("expected correlated contract failure")
@@ -321,7 +512,7 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
 
     func testSigningBytesRejectNonUInt8TypedData() throws {
         let account = "0x" + String(repeating: "11", count: 32)
-        let prefix: [Any?] = [NSNumber(value: 1), "session", NSNumber(value: 1), account]
+        let prefix: [Any?] = [NSNumber(value: 2), "session", NSNumber(value: 1), account]
         XCTAssertNoThrow(try CitizenSdkFlutterCodec.decode(
             method: "signWalletPayload",
             arguments: prefix + [FlutterStandardTypedData(bytes: Data([1, 2, 3, 4]))]
@@ -335,7 +526,7 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
     func testHistoryCursorFailurePreservesSessionAndSequence() {
         XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(
             method: "getTransactionHistory",
-            arguments: [NSNumber(value: 1), "session-b", NSNumber(value: 8),
+            arguments: [NSNumber(value: 2), "session-b", NSNumber(value: 8),
                         "0X00112233445566778899aabbccddeeff", NSNumber(value: 100)]
         )) { error in
             let failure = error as? CitizenSdkFlutterCodec.ContractFailure
@@ -346,7 +537,7 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
     }
 
     func testSessionUsesExactUtf16BoundaryWithoutNormalization() throws {
-        let version = NSNumber(value: 1)
+        let version = NSNumber(value: 2)
         let sequence = NSNumber(value: 1)
         let allowed = String(repeating: "😀", count: 64)
         let request = try CitizenSdkFlutterCodec.decode(
@@ -387,8 +578,8 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
 
     func testEventVocabularyIsClosed() throws {
         XCTAssertEqual(CitizenSdkFlutterCodec.eventTypes,
-                       ["lifecycleChanged", "capabilitiesChanged", "historyChanged",
-                        "finalizedBlockChanged"])
+                       ["lifecycleChanged", "capabilitiesChanged", "historyChanged", "walletChanged",
+                        "finalizedBlockChanged", "qrCaptureResult", "qrCaptureError", "qrCapturePreview", "qrCaptureClosed", "privateKeyClosed"])
         XCTAssertNoThrow(try CitizenSdkFlutterCodec.event(
             session: "s", sequence: 1, type: "lifecycleChanged", payload: ["running"]
         ))

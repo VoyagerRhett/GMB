@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -21,6 +22,19 @@ String walletOperationErrorMessage(Object error) {
   return '$error';
 }
 
+/// 只负责原备份界面的可见期；系统认证尚未显示秘密时允许临时失焦。
+class _WalletBackupLifecycle extends WidgetsBindingObserver {
+  _WalletBackupLifecycle(this.revoke, this.isVisible);
+  final VoidCallback revoke;
+  final bool Function() isVisible;
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) return;
+    if (state == AppLifecycleState.inactive && !isVisible()) return;
+    revoke();
+  }
+}
+
 /// 保留原创建成功后显示备份的顺序；准备、派生和持久提交全部由SDK执行。
 /// 备份文本只在原弹窗存续期使用，不持久化、不复制到日志；普通签名不走此通道。
 Future<CitizenWalletProfile> runCreateWalletFlow(
@@ -28,33 +42,92 @@ Future<CitizenWalletProfile> runCreateWalletFlow(
   required int wordCount,
   String password = '',
 }) async {
-  final wallet = context.read<CitizenSdk>().wallet;
+  final sdk = context.read<CitizenSdk>();
+  final wallet = sdk.wallet;
   CitizenSdkPreparedWallet? prepared;
   CitizenSdkRecoveryPhrase? phrase;
   var protected = false;
   var mnemonic = '';
+  var revoked = false;
+  ModalRoute<void>? backupRoute;
+  StreamSubscription<CitizenSdkEvent>? walletEvents;
+  BigInt? baselineRevision;
+  BigInt? observedRevision;
+  void revoke() {
+    revoked = true;
+    mnemonic = '';
+    final route = backupRoute;
+    if (route != null && route.isActive) route.navigator?.removeRoute(route);
+    final owned = phrase;
+    if (owned != null) unawaited(owned.release().catchError((Object _) {}));
+  }
+  final lifecycle = _WalletBackupLifecycle(revoke, () => backupRoute != null);
+  WidgetsBinding.instance.addObserver(lifecycle);
   try {
     prepared = await wallet.prepareCreation(
       wordCount: CitizenWalletWordCount.values.singleWhere((value) => value.value == wordCount),
       password: password,
     ).result;
-    if (!context.mounted) throw const CitizenSdkException(
-      code: CitizenSdkErrorCode.cancelled, message: '创建页面已关闭',
-    );
+    if (!context.mounted || revoked) {
+      throw const CitizenSdkException(
+        code: CitizenSdkErrorCode.cancelled, message: '创建页面已关闭',
+      );
+    }
     phrase = await prepared.recoveryPhrase();
-    if (!context.mounted) throw const CitizenSdkException(
-      code: CitizenSdkErrorCode.cancelled, message: '创建页面已关闭',
-    );
+    if (!context.mounted || revoked) {
+      throw const CitizenSdkException(
+        code: CitizenSdkErrorCode.cancelled, message: '创建页面已关闭',
+      );
+    }
     final created = await prepared.commit().result;
-    if (!context.mounted) return created;
+    if (!context.mounted || revoked) return created;
+    bool isOwner(CitizenWalletState state) =>
+        state.hotProfile?.walletIndex == created.walletIndex &&
+        state.hotProfile?.masterAccountId == created.masterAccountId &&
+        state.hotProfile?.createdAtMillis == created.createdAtMillis;
+    Future<void> checkOwner() async {
+      try {
+        final state = await wallet.getState().result;
+        if (revoked) return;
+        if (observedRevision == null || state.revision > observedRevision!) {
+          observedRevision = state.revision;
+        }
+        if (!isOwner(state) ||
+            (baselineRevision != null && state.revision > baselineRevision)) {
+          revoke();
+        }
+      } catch (_) {
+        // 无法确认归属时关闭显示；不把读取失败当成空钱包或撤销真实提交。
+        revoke();
+      }
+    }
+    walletEvents = sdk.events.listen((event) {
+      if (event is CitizenSdkWalletChanged) unawaited(checkOwner());
+    }, onError: (Object _) => revoke());
+    final CitizenWalletState state;
+    try {
+      state = await wallet.getState().result;
+    } catch (_) {
+      revoke();
+      return created;
+    }
+    baselineRevision = state.revision;
+    if (!isOwner(state) ||
+        (observedRevision != null && observedRevision! > state.revision)) {
+      revoke();
+    }
+    if (!context.mounted || revoked) return created;
     mnemonic = utf8.decode(phrase.bytes);
     await ScreenshotGuard.enable();
     protected = true;
-    if (!context.mounted) return created;
+    if (!context.mounted || revoked) return created;
     await showDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (context) {
+        backupRoute = ModalRoute.of<void>(context);
+        // showDialog接纳与首次build之间也可能退后台；不得再展示迟到秘密。
+        if (revoked) scheduleMicrotask(revoke);
         return AlertDialog(
           title: const Text('请备份助记词'),
           content: Column(
@@ -85,7 +158,11 @@ Future<CitizenWalletProfile> runCreateWalletFlow(
     );
     return created;
   } finally {
+    revoked = true;
     mnemonic = '';
+    WidgetsBinding.instance.removeObserver(lifecycle);
+    await walletEvents?.cancel();
+    backupRoute = null;
     try {
       await phrase?.release();
     } finally {

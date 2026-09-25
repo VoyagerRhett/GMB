@@ -142,12 +142,13 @@ class _QrScanPageState extends State<QrScanPage> {
   Future<void> _scanFromGallery() async {
     final picker = ImagePicker();
     final image = await picker.pickImage(source: ImageSource.gallery);
-    if (image == null) return;
+    if (image == null || !mounted || _closing) return;
     try {
       final results = await _qr.decodeImage(await image.readAsBytes(), _capturePurpose);
       if (results.isEmpty) {
         throw const ScannerFailure(kind: ScannerFailureKind.noQrCode, message: '图片中未识别到二维码');
       }
+      if (!mounted || _closing) return;
       await _handleCode(results.first.canonicalText);
     } on ScannerFailure catch (failure) {
       _showScannerFailure(failure);
@@ -159,7 +160,9 @@ class _QrScanPageState extends State<QrScanPage> {
   /// 切换手电筒
   Future<void> _toggleTorch() async {
     try {
-      await _capture?.setTorch(!_torchOn);
+      final capture = _capture;
+      if (capture == null) return;
+      await capture.setTorch(!_torchOn);
       if (!mounted) return;
       setState(() => _torchOn = !_torchOn);
     } on ScannerFailure catch (failure) {
@@ -177,6 +180,7 @@ class _QrScanPageState extends State<QrScanPage> {
 
     try {
       await _capture?.pause();
+      if (!mounted || _closing) return;
       if (widget.mode == QrScanMode.coldAccountImport) {
         try {
           final result = await (widget.qr ?? context.read<CitizenSdk>().qr)
@@ -320,8 +324,11 @@ class _QrScanPageState extends State<QrScanPage> {
         case QrScanMode.accountTarget:
           await _showExpectedCode('请扫描用户码或账户码');
           return true;
-        case QrScanMode.contact || QrScanMode.userContactValue:
-          await _showExpectedCode('请扫描当前入口支持的二维码');
+        case QrScanMode.contact:
+          await _showUnrecognized();
+          return true;
+        case QrScanMode.userContactValue:
+          await _showNotAContactCode();
           return true;
       }
     }
@@ -334,9 +341,9 @@ class _QrScanPageState extends State<QrScanPage> {
     final message = failure.kind == ScannerFailureKind.noQrCode
         ? '未识别到二维码'
         : failure.message;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
   }
 
   /// 页级返回：先置 _closing，让 _handleCode 的 finally 不再重启相机
@@ -577,9 +584,8 @@ class _QrScanPageState extends State<QrScanPage> {
               child: Text(
                 _hintText,
                 style: TextStyle(
-                  color: Colors.white70,
-                  fontSize: AppLayout.scaled(context, 14),
-                ),
+                    color: Colors.white70,
+                    fontSize: AppLayout.scaled(context, 14)),
               ),
             ),
           ),
@@ -589,10 +595,9 @@ class _QrScanPageState extends State<QrScanPage> {
             alignment: Alignment.bottomCenter,
             child: Padding(
               padding: EdgeInsets.only(
-                bottom: AppLayout.scaled(context, 60),
-                left: AppLayout.scaled(context, 48),
-                right: AppLayout.scaled(context, 48),
-              ),
+                  bottom: AppLayout.scaled(context, 60),
+                  left: AppLayout.scaled(context, 48),
+                  right: AppLayout.scaled(context, 48)),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -609,9 +614,8 @@ class _QrScanPageState extends State<QrScanPage> {
                       Text(
                         '相册',
                         style: TextStyle(
-                          color: Colors.white,
-                          fontSize: AppLayout.scaled(context, 12),
-                        ),
+                            color: Colors.white,
+                            fontSize: AppLayout.scaled(context, 12)),
                       ),
                     ],
                   ),

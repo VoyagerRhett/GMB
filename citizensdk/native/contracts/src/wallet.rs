@@ -261,6 +261,7 @@ fn normalize_wallet_account_name(name: String) -> ContractResult<String> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WalletProfile {
     wallet_index: u32,
+    wallet_name: String,
     generation: VaultGeneration,
     master_account_id: AccountId32,
     origin: WalletOrigin,
@@ -334,6 +335,7 @@ impl WalletProfile {
         }
         Ok(Self {
             wallet_index,
+            wallet_name: format!("钱包{wallet_index}"),
             generation,
             master_account_id,
             origin,
@@ -345,6 +347,15 @@ impl WalletProfile {
 
     pub const fn wallet_index(&self) -> u32 {
         self.wallet_index
+    }
+
+    /// 钱包级本机名称独立于每个账户的name，不影响任何链上身份。
+    pub fn wallet_name(&self) -> &str { &self.wallet_name }
+
+    pub fn try_with_wallet_name(&self, wallet_name: impl Into<String>) -> ContractResult<Self> {
+        let mut next = self.clone();
+        next.wallet_name = normalize_wallet_account_name(wallet_name.into())?;
+        Ok(next)
     }
 
     pub const fn generation(&self) -> VaultGeneration {
@@ -393,7 +404,7 @@ impl WalletProfile {
             self.created_at_millis,
             active_account_id,
             self.accounts.clone(),
-        )
+        )?.try_with_wallet_name(self.wallet_name.clone())
     }
 
     /// 只重命名一个已存在账户，不触碰任何秘密或链上身份。
@@ -422,7 +433,7 @@ impl WalletProfile {
             self.created_at_millis,
             self.active_account_id,
             accounts,
-        )
+        )?.try_with_wallet_name(self.wallet_name.clone())
     }
 
     /// 生成删除一个非锚点账户后的公开 profile，并返回被移除账户供 Engine 建立 exact cleanup。
@@ -463,7 +474,7 @@ impl WalletProfile {
             self.created_at_millis,
             active_account_id,
             accounts,
-        )?;
+        )?.try_with_wallet_name(self.wallet_name.clone())?;
         Ok((next, removed))
     }
 }
@@ -546,14 +557,8 @@ pub struct WalletCleanupPlan {
     delete_wallet_key: bool,
 }
 
-impl WalletCleanupPlan {
-    pub fn try_new(
-        operation_id: [u8; 16],
-        wallet_index: u32,
-        generation: VaultGeneration,
-        secret_refs: Vec<SecretRef>,
-        delete_wallet_key: bool,
-    ) -> ContractResult<Self> {
+/// 实际cleanup计划和只读目标投影共用这一条精确引用边界；不构造假operation_id。
+fn validate_cleanup_refs(wallet_index: u32, generation: VaultGeneration, secret_refs: &[SecretRef]) -> ContractResult<()> {
         let unique_refs: HashSet<_> = secret_refs.iter().copied().collect();
         if wallet_index != CITIZEN_WALLET_INDEX
             || secret_refs.is_empty()
@@ -567,6 +572,18 @@ impl WalletCleanupPlan {
                 "cleanup 计划不得命中其它钱包生命周期",
             ));
         }
+    Ok(())
+}
+
+impl WalletCleanupPlan {
+    pub fn try_new(
+        operation_id: [u8; 16],
+        wallet_index: u32,
+        generation: VaultGeneration,
+        secret_refs: Vec<SecretRef>,
+        delete_wallet_key: bool,
+    ) -> ContractResult<Self> {
+        validate_cleanup_refs(wallet_index, generation, &secret_refs)?;
         Ok(Self {
             operation_id,
             wallet_index,
@@ -597,12 +614,223 @@ impl WalletCleanupPlan {
     }
 }
 
+
+/// 诊断只描述不合法事实，不新增第三种可签名模式。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum WalletDiagnosticReason {
+    InvalidSignMode = 1,
+    InvalidIdentity = 2,
+    InvalidStructure = 3,
+}
+
+/// 持久槽中的原始公开账户。不能直接用于签名；有效性仍由WalletAccount唯一校验器裁决。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WalletRecordAccount {
+    pub index: u32,
+    pub account_id: AccountId32,
+    pub secret_ref: SecretRef,
+    pub ss58_address: String,
+    pub name: String,
+    pub created_at_millis: u64,
+}
+impl WalletRecordAccount {
+    fn validate_shape(&self) -> ContractResult<()> {
+        if self.ss58_address.len() > 128 || self.name.len() > 120 || normalize_wallet_account_name(self.name.clone())? != self.name {
+            return Err(invalid_wallet_record());
+        }
+        Ok(())
+    }
+    fn validated(&self) -> ContractResult<WalletAccount> {
+        self.validate_shape()?;
+        WalletAccount::try_new(self.index, self.account_id, self.secret_ref,
+            self.ss58_address.clone(), self.name.clone(), self.created_at_millis)
+    }
+    fn from_account(value: &WalletAccount) -> Self {
+        Self { index: value.index(), account_id: value.account_id(), secret_ref: value.secret_ref(),
+            ss58_address: value.ss58_address().to_owned(), name: value.name().to_owned(),
+            created_at_millis: value.created_at_millis() }
+    }
+}
+
+/// Profile/Account只表示唯一v3的原持久槽形状，绝不依据形状猜测hot/cold授权。
+/// 异常原文只保存在原槽，正常投影仍使用既有严格模型，不建立另一份持久目录。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WalletRecord {
+    Profile {
+        wallet_index: u32,
+        wallet_name: String,
+        sign_mode: String,
+        generation: VaultGeneration,
+        master_account_id: AccountId32,
+        origin: WalletOrigin,
+        created_at_millis: u64,
+        active_account_id: AccountId32,
+        accounts: Vec<WalletRecordAccount>,
+    },
+    Account {
+        wallet_index: u32,
+        sign_mode: String,
+        account_id: AccountId32,
+        ss58_address: String,
+        name: String,
+        created_at_millis: u64,
+    },
+}
+impl WalletRecord {
+    pub fn from_profile(value: &WalletProfile) -> Self {
+        Self::Profile { wallet_index: value.wallet_index(), wallet_name: value.wallet_name().to_owned(),
+            sign_mode: "hot".to_owned(), generation: value.generation(), master_account_id: value.master_account_id(),
+            origin: value.origin(), created_at_millis: value.created_at_millis(),
+            active_account_id: value.active_account_id(), accounts: value.accounts().iter().map(WalletRecordAccount::from_account).collect() }
+    }
+    pub fn from_cold_account(value: &ColdWalletAccount) -> Self {
+        Self::Account { wallet_index: value.wallet_index(), sign_mode: "cold".to_owned(),
+            account_id: value.account_id(), ss58_address: value.ss58_address().to_owned(),
+            name: value.name().to_owned(), created_at_millis: value.created_at_millis() }
+    }
+    pub fn validate_shape(&self) -> ContractResult<()> {
+        if self.sign_mode().len() > 32 || self.wallet_name().len() > 120 || normalize_wallet_account_name(self.wallet_name().to_owned())? != self.wallet_name() {
+            return Err(invalid_wallet_record());
+        }
+        match self {
+            Self::Profile { wallet_index, accounts, .. } => {
+                if *wallet_index != CITIZEN_WALLET_INDEX || accounts.len() > MAX_WALLET_ACCOUNT_INDEX as usize + 1 {
+                    return Err(invalid_wallet_record());
+                }
+                for account in accounts { account.validate_shape()?; }
+            }
+            Self::Account { wallet_index, ss58_address, .. } => {
+                if *wallet_index < FIRST_COLD_WALLET_INDEX || ss58_address.len() > 128 { return Err(invalid_wallet_record()); }
+            }
+        }
+        Ok(())
+    }
+    pub fn wallet_index(&self) -> u32 {
+        match self { Self::Profile { wallet_index, .. } | Self::Account { wallet_index, .. } => *wallet_index }
+    }
+    pub fn wallet_name(&self) -> &str {
+        match self { Self::Profile { wallet_name, .. } => wallet_name, Self::Account { name, .. } => name }
+    }
+    pub fn account_id(&self) -> AccountId32 {
+        match self { Self::Profile { master_account_id, .. } => *master_account_id, Self::Account { account_id, .. } => *account_id }
+    }
+    pub fn sign_mode(&self) -> &str {
+        match self { Self::Profile { sign_mode, .. } | Self::Account { sign_mode, .. } => sign_mode }
+    }
+    pub fn mode_is_invalid(&self) -> bool { !matches!(self.sign_mode(), "hot" | "cold") }
+    /// 仅投影原文的已知模式供宿主展示；异常记录仍不进入普通签名目录。
+    pub fn known_sign_mode(&self) -> Option<WalletSignMode> {
+        match self.sign_mode() { "hot" => Some(WalletSignMode::Hot), "cold" => Some(WalletSignMode::Cold), _ => None }
+    }
+    /// 公开关联清理只投影精确拥有的账户，不携带秘密引用或把SS58别名扩大成目标。
+    pub fn cleanup_targets(&self) -> ContractResult<(Vec<AccountId32>, bool)> {
+        self.validate_shape()?;
+        match self {
+            Self::Profile { .. } => {
+                let refs = self.cleanup_refs()?;
+                let ids: BTreeSet<_> = refs.iter().copied().map(SecretRef::account_id).collect();
+                Ok((ids.into_iter().collect(), true))
+            }
+            Self::Account { account_id, .. } => Ok((vec![*account_id], false)),
+        }
+    }
+    pub fn generation(&self) -> Option<VaultGeneration> {
+        match self { Self::Profile { generation, .. } => Some(*generation), Self::Account { .. } => None }
+    }
+    pub fn ss58_address(&self) -> Option<&str> {
+        match self {
+            Self::Account { ss58_address, .. } => Some(ss58_address),
+            Self::Profile { accounts, .. } => {
+                let mut anchors = accounts.iter().filter(|account| account.index == 0);
+                let first = anchors.next()?;
+                if anchors.next().is_some() { None } else { Some(first.ss58_address.as_str()) }
+            }
+        }
+    }
+
+    /// 修复和普通解码共用原严格身份校验；本函数本身不授予合法模式或设备控制权。
+    pub fn validate_profile_identity(&self) -> ContractResult<WalletProfile> {
+        self.validate_shape()?;
+        let Self::Profile { wallet_index, wallet_name, generation, master_account_id, origin,
+            created_at_millis, active_account_id, accounts, .. } = self else { return Err(invalid_wallet_record()); };
+        let accounts = accounts.iter().map(WalletRecordAccount::validated).collect::<ContractResult<Vec<_>>>()?;
+        WalletProfile::try_new(*wallet_index, *generation, *master_account_id, *origin,
+            *created_at_millis, *active_account_id, accounts)?.try_with_wallet_name(wallet_name.clone())
+    }
+    pub fn validate_cold_identity(&self) -> ContractResult<ColdWalletAccount> {
+        self.validate_shape()?;
+        let Self::Account { wallet_index, account_id, ss58_address, name, created_at_millis, .. } = self else {
+            return Err(invalid_wallet_record());
+        };
+        ColdWalletAccount::try_new(*wallet_index, *account_id, ss58_address.clone(), name.clone(), *created_at_millis)
+    }
+    pub fn diagnostic_reason(&self) -> Option<WalletDiagnosticReason> {
+        if self.validate_shape().is_err() { return Some(WalletDiagnosticReason::InvalidStructure); }
+        if self.mode_is_invalid() { return Some(WalletDiagnosticReason::InvalidSignMode); }
+        if self.ss58_address().is_some_and(|address| address != citizen_ss58_address(self.account_id())) {
+            return Some(WalletDiagnosticReason::InvalidIdentity);
+        }
+        if let Self::Profile { accounts, .. } = self {
+            if accounts.iter().any(|account| account.account_id != account.secret_ref.account_id() ||
+                account.ss58_address != citizen_ss58_address(account.account_id)) {
+                return Some(WalletDiagnosticReason::InvalidIdentity);
+            }
+        }
+        let valid = match self {
+            Self::Profile { sign_mode, .. } => sign_mode == "hot" && self.validate_profile_identity().is_ok(),
+            Self::Account { sign_mode, .. } => sign_mode == "cold" && self.validate_cold_identity().is_ok(),
+        };
+        (!valid).then_some(WalletDiagnosticReason::InvalidStructure)
+    }
+    pub fn try_with_wallet_name(&self, value: &str) -> ContractResult<Self> {
+        let value = normalize_wallet_account_name(value.to_owned())?;
+        let mut next = self.clone();
+        match &mut next { Self::Profile { wallet_name, .. } => *wallet_name = value, Self::Account { name, .. } => *name = value }
+        Ok(next)
+    }
+
+    /// 清理只接受同一完整wallet/generation的精确引用；展示地址损坏不允许改指其它秘密。
+    pub fn cleanup_refs(&self) -> ContractResult<Vec<SecretRef>> {
+        self.validate_shape()?;
+        let Self::Profile { wallet_index, generation, accounts, .. } = self else { return Err(invalid_wallet_record()); };
+        let refs: Vec<_> = accounts.iter().map(|account| account.secret_ref).collect();
+        validate_cleanup_refs(*wallet_index, *generation, &refs)?;
+        if accounts.iter().any(|account| account.secret_ref.wallet_index() != *wallet_index ||
+            account.secret_ref.generation() != *generation || account.secret_ref.account_id() != account.account_id) {
+            return Err(invalid_wallet_record());
+        }
+        Ok(refs)
+    }
+    pub fn account_ids(&self) -> BTreeSet<AccountId32> {
+        let mut ids = BTreeSet::from([self.account_id()]);
+        if let Some(address) = self.ss58_address() {
+            if let Ok(account_id) = parse_citizen_ss58_address(address) { ids.insert(account_id); }
+        }
+        if let Self::Profile { accounts, .. } = self {
+            for account in accounts {
+                ids.insert(account.account_id); ids.insert(account.secret_ref.account_id());
+                if let Ok(account_id) = parse_citizen_ss58_address(&account.ss58_address) { ids.insert(account_id); }
+            }
+        }
+        ids
+    }
+    pub fn contains_account(&self, account_id: AccountId32) -> bool { self.account_ids().contains(&account_id) }
+}
+
+fn invalid_wallet_record() -> ContractError {
+    ContractError::new(ContractErrorCode::InvalidArgument, "钱包记录边界或身份归属无效")
+}
+
+
 /// 钱包公开事实、在途所有权和补偿队列的一次原子快照。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WalletState {
     revision: u64,
+    active_wallet_index: Option<u32>,
     profile: Option<WalletProfile>,
     cold_accounts: Vec<ColdWalletAccount>,
+    diagnostics: Vec<WalletRecord>,
     ordered_account_ids: Vec<AccountId32>,
     next_cold_wallet_index: u32,
     provisioning: Option<WalletProvisioningPlan>,
@@ -614,8 +842,10 @@ impl WalletState {
     pub const fn empty() -> Self {
         Self {
             revision: 0,
+            active_wallet_index: None,
             profile: None,
             cold_accounts: Vec::new(),
+            diagnostics: Vec::new(),
             ordered_account_ids: Vec::new(),
             next_cold_wallet_index: FIRST_COLD_WALLET_INDEX,
             provisioning: None,
@@ -821,14 +1051,87 @@ impl WalletState {
 
         Ok(Self {
             revision,
+            active_wallet_index: None,
             profile,
             cold_accounts,
+            diagnostics: Vec::new(),
             ordered_account_ids,
             next_cold_wallet_index,
             provisioning,
             cleanup,
             cleanup_queue,
         })
+    }
+
+    /// 将原槽中的异常记录附着到同一快照；禁止把合法记录复制成第二目录。
+    pub fn try_with_diagnostics(&self, mut diagnostics: Vec<WalletRecord>) -> ContractResult<Self> {
+        if diagnostics.len() > MAX_COLD_WALLET_ACCOUNTS + 1 { return Err(invalid_wallet_record()); }
+        let cold_count = self.cold_accounts.len() + diagnostics.iter().filter(|record| matches!(record, WalletRecord::Account { .. })).count();
+        if cold_count > MAX_COLD_WALLET_ACCOUNTS || diagnostics.len() > MAX_COLD_WALLET_ACCOUNTS + 1 {
+            return Err(invalid_wallet_record());
+        }
+        let mut indices: BTreeSet<_> = self.profile.iter().map(WalletProfile::wallet_index)
+            .chain(self.cold_accounts.iter().map(ColdWalletAccount::wallet_index)).collect();
+        let mut accounts: BTreeSet<_> = self.profile.iter().flat_map(WalletProfile::accounts).map(WalletAccount::account_id)
+            .chain(self.cold_accounts.iter().map(ColdWalletAccount::account_id)).collect();
+        for record in &diagnostics {
+            record.validate_shape()?;
+            if record.diagnostic_reason().is_none() || !indices.insert(record.wallet_index()) ||
+                (matches!(record, WalletRecord::Account { .. }) && record.wallet_index() >= self.next_cold_wallet_index) {
+                return Err(invalid_wallet_record());
+            }
+            let record_accounts = record.account_ids();
+            if record_accounts.iter().any(|account| accounts.contains(account)) { return Err(invalid_wallet_record()); }
+            accounts.extend(record_accounts);
+            if let Some(generation) = record.generation() {
+                // 异常热槽也不能与在途写入/清理争夺同一生命周期；这种状态无法局部修复。
+                if self.provisioning.is_some() || self.cleanup.iter().chain(self.cleanup_queue.iter())
+                    .any(|plan| plan.generation() == generation) { return Err(invalid_wallet_record()); }
+            }
+        }
+        diagnostics.sort_by_key(WalletRecord::wallet_index);
+        let mut next = self.clone();
+        next.diagnostics = diagnostics;
+        if next.active_wallet_index.is_some_and(|index| !next.contains_wallet(index)) {
+            return Err(ContractError::new(ContractErrorCode::NotFound, "付款钱包不存在"));
+        }
+        Ok(next)
+    }
+    pub fn diagnostics(&self) -> &[WalletRecord] { &self.diagnostics }
+    pub fn diagnostic(&self, wallet_index: u32) -> Option<&WalletRecord> {
+        self.diagnostics.iter().find(|record| record.wallet_index() == wallet_index)
+    }
+    pub fn diagnostic_for_account(&self, account_id: AccountId32) -> Option<&WalletRecord> {
+        self.diagnostics.iter().find(|record| record.contains_account(account_id))
+    }
+    pub fn has_hot_wallet_record(&self) -> bool {
+        self.profile.is_some() || self.diagnostics.iter().any(|record| matches!(record, WalletRecord::Profile { .. }))
+    }
+
+    /// 付款钱包选择与全局默认账户、热钱包内部当前账户完全独立。
+    pub const fn active_wallet_index(&self) -> Option<u32> { self.active_wallet_index }
+
+    /// 从完整目录恢复/改变已选钱包，只接受当前存在的索引，不修改修订或账户顺序。
+    pub fn try_with_active_wallet(&self, wallet_index: Option<u32>) -> ContractResult<Self> {
+        if wallet_index.is_some_and(|index| !self.contains_wallet(index)) {
+            return Err(ContractError::new(ContractErrorCode::NotFound, "付款钱包不存在"));
+        }
+        let mut next = self.clone();
+        next.active_wallet_index = wallet_index;
+        Ok(next)
+    }
+
+    pub fn contains_wallet(&self, wallet_index: u32) -> bool {
+        self.profile.as_ref().is_some_and(|profile| profile.wallet_index() == wallet_index)
+            || self.cold_account_by_index(wallet_index).is_some()
+            || self.diagnostic(wallet_index).is_some()
+    }
+
+    /// 原删除交互选择剩余最后一个钱包，不按账户排序或冷热优先级重新定义。
+    pub fn last_wallet_index(&self) -> Option<u32> {
+        self.profile.iter().map(WalletProfile::wallet_index)
+            .chain(self.cold_accounts.iter().map(ColdWalletAccount::wallet_index))
+            .chain(self.diagnostics.iter().map(WalletRecord::wallet_index)).max()
     }
 
     pub const fn revision(&self) -> u64 {
@@ -961,6 +1264,7 @@ fn validate_account_catalog(
 /// 与已验证 Dart 钱包一致：追加账户只能在列表尾部扩展，既有 profile 字段与账户逐项不变。
 fn profile_is_exact_subset(previous: &WalletProfile, target: &WalletProfile) -> bool {
     previous.wallet_index() == target.wallet_index()
+        && previous.wallet_name() == target.wallet_name()
         && previous.generation() == target.generation()
         && previous.master_account_id() == target.master_account_id()
         && previous.origin() == target.origin()

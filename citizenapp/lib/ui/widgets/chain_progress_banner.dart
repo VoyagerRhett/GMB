@@ -120,8 +120,8 @@ class _ChainProgressBannerState extends State<ChainProgressBanner>
 
   /// 轮询常驻、永不自停:最终区块高度随链持续推进,同步完成(isUsable)后也按
   /// [ChainProgressBanner.pollInterval] 继续轮询,顶部高度才能自动跟上链尖。
-  /// fetchChainProgress 只读原生内存状态快照,不发网络请求、不依赖 peer,常驻
-  /// 轮询零负担;若同步完成即停(旧行为),高度会冻结在启动时的值、只能靠下拉刷新。
+  /// getSyncStatus沿SDK读取当前轻节点快照，不另启节点；同步完成后仍按原周期刷新。
+  /// SDK finalized映射原current_verified_finalized_block_number，不用best高度冒充最终高度。
   void _scheduleNextPoll() {
     if (_isFlutterTest) return;
     _pollTimer = Timer(widget.pollInterval, () {

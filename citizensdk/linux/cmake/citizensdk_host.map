@@ -20,6 +20,9 @@
     citizensdk_host_cancel_credential;
     citizensdk_qr_image_decode_luminance_all;
     citizensdk_host_submit_request;
+    citizensdk_host_open_qr_capture;
+    citizensdk_host_control_qr_capture;
+    citizensdk_host_decode_qr_image;
   local:
     *;
 };

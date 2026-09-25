@@ -1,50 +1,52 @@
+// 显式输入、备份和私钥查看可有受控字节；路径/应用身份/裸句柄不能来自Dart。
 #include <cassert>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
 #include <vector>
-
+#include "citizen_sdk_flutter_codec.hpp"
 #include "citizen_sdk_flutter_test_support.hpp"
-
-#ifndef CITIZENSDK_WINDOWS_TEST_SOURCE_DIR
-#error "CITIZENSDK_WINDOWS_TEST_SOURCE_DIR must identify the Windows source tree"
+#ifdef NDEBUG
+#error "CitizenSDK contract assertions must remain enabled"
 #endif
-
+namespace csf = citizen_sdk::flutter;
 int main() {
-  namespace csf = citizen_sdk::flutter;
-  const auto creation = csf::test::fl(csf::test::list({csf::Value::integer(1),
-      csf::Value::string("session"), csf::Value::integer(1), csf::Value::integer(24)}));
-  const auto created = csf::decode_request("createWallet", &creation);
-  assert(created.method == csf::Method::create_wallet && created.word_count == 24);
-  assert(created.payload.empty() && created.name.empty());
-  const auto import_arguments = csf::test::fl(csf::test::list({csf::Value::integer(1),
-      csf::Value::string("session"), csf::Value::integer(2)}));
-  const auto imported = csf::decode_request("importWallet", &import_arguments);
-  assert(imported.method == csf::Method::import_wallet && imported.payload.empty());
-  const auto extra = csf::test::fl(csf::test::list({csf::Value::integer(1),
-      csf::Value::string("session"), csf::Value::integer(2), csf::Value::null()}));
-  csf::test::expect_failure([&] { (void)csf::decode_request("importWallet", &extra); },
-                           CITIZENSDK_ERROR_INVALID_ARGUMENT);
-  const auto open_extra = csf::test::fl(csf::test::list({csf::Value::integer(1),
-      csf::Value::string("org.example.caller")}));
-  csf::test::expect_failure([&] { (void)csf::decode_request("open", &open_extra); },
-                           CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  const auto decode = [](const char *method, csf::Value value) {
+    auto native = csf::test::fl(value);
+    return csf::decode_request(method, &native);
+  };
+  auto input = decode("importWallet", csf::test::list({csf::Value::integer(2), csf::Value::string("sdk"),
+      csf::Value::integer(1), csf::Value::string("synthetic"), csf::Value::string("password")}));
+  assert(input.mnemonic && input.password);
+  assert(input.mnemonic->value.size() == 9 && input.password->value.size() == 8);
+  assert(input.payload.empty()); // 不把输入复用成普通签名载荷或输出槽。
+  auto owned = *input.password;
+  input.password.reset();
+  assert(owned.value == csf::Value::Bytes({'p','a','s','s','w','o','r','d'}));
+  owned = csf::CredentialBytes(csf::Value::Bytes{});
+  assert(owned.value.empty());
+  csf::test::expect_failure([&] {
+    (void)decode("open", csf::test::list({csf::Value::integer(2), csf::Value::integer(63),
+        csf::Value::boolean(false), csf::Value::string("org.example.injected")}));
+  }, CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  csf::test::expect_failure([&] {
+    (void)decode("revealPrivateKey", csf::test::list({csf::Value::integer(2), csf::Value::string("sdk"),
+        csf::Value::integer(2), csf::Value::integer(7)}));
+  }, CITIZENSDK_ERROR_INVALID_ARGUMENT);
 
-  // 实际解码验证在上；以下源码扫描只是额外防止秘密/裸句柄/路径入口重新出现。
+  // 下面只是源码额外门禁；上面实际生产解码和所有权断言才验证行为。
   const std::filesystem::path root(CITIZENSDK_WINDOWS_TEST_SOURCE_DIR);
-  for (const auto *relative : {"include/citizen_sdk/citizen_sdk_plugin.h",
-       "src/citizen_sdk_plugin.cc", "src/citizen_sdk_flutter_environment.hpp",
-       "src/citizen_sdk_flutter_environment.cc", "src/citizen_sdk_flutter_codec.hpp",
-       "src/citizen_sdk_flutter_sessions.hpp", "src/citizen_sdk_flutter_wallet_flow.hpp"}) {
+  for (const auto *relative : {"include/citizen_sdk/citizen_sdk_plugin.h", "src/citizen_sdk_plugin.cc",
+      "src/citizen_sdk_flutter_environment.hpp", "src/citizen_sdk_flutter_environment.cc",
+      "src/citizen_sdk_flutter_codec.hpp", "src/citizen_sdk_flutter_sessions.hpp"}) {
     std::ifstream stream(root / relative, std::ios::binary);
     assert(stream.good());
     const std::string source((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
     for (const auto *forbidden : {"dart_asset_root", "dart_storage_root", "dart_application_id",
-         "dart_hwnd", "exportMnemonic", "exportPrivateKey", "prepared_wallet_handle",
-         "plaintext_dek", "citizen_sdk_secret_vault.hpp", "citizen_sdk_cng.hpp"}) {
+        "dart_hwnd", "dart_gtk_parent", "exportMnemonic", "exportPrivateKey", "prepared_wallet_handle",
+        "plaintext_dek", "citizen_sdk_secret_vault.hpp", "citizen_sdk_cng.hpp"})
       assert(source.find(forbidden) == std::string::npos);
-    }
   }
   return 0;
 }

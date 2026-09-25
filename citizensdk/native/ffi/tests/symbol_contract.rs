@@ -1,6 +1,33 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-const EXPECTED_EXPORTS: [&str; 121] = [
+// 独立显式金标：保留原119项与本步26项无UI入口，不从生产头动态生成预期。
+const EXPECTED_EXPORTS: [&str; 146] = [
+    "citizensdk_add_next_wallet_account",
+    "citizensdk_delete_diagnostic_wallet",
+    "citizensdk_encode_signing_payload",
+    "citizensdk_encrypted_secret_record_has_secret",
+    "citizensdk_private_key_cancel",
+    "citizensdk_private_key_finish",
+    "citizensdk_private_key_open",
+    "citizensdk_private_key_reveal",
+    "citizensdk_qr_encode_document",
+    "citizensdk_qr_prepare_account_authorization",
+    "citizensdk_qr_validate_sign_response",
+    "citizensdk_rename_diagnostic_wallet",
+    "citizensdk_rename_wallet",
+    "citizensdk_repair_hot_wallet",
+    "citizensdk_set_active_wallet",
+    "citizensdk_set_secret_presence_provider",
+    "citizensdk_sign_and_delete_wallet",
+    "citizensdk_validate_wallet_input",
+    "citizensdk_wallet_profile_copy_name",
+    "citizensdk_wallet_state_copy_diagnostic_text",
+    "citizensdk_wallet_state_get_active_wallet",
+    "citizensdk_wallet_state_get_diagnostic_at",
+    "citizensdk_wallet_state_get_diagnostic_cleanup_account",
+    "citizensdk_wallet_state_get_diagnostic_count",
+    "citizensdk_wallet_state_get_initialization",
+    "citizensdk_wallet_state_retain",
     "citizensdk_abi_version",
     "citizensdk_add_wallet_accounts",
     "citizensdk_begin_default_account_change",
@@ -16,6 +43,7 @@ const EXPECTED_EXPORTS: [&str; 121] = [
     "citizensdk_create_with_host",
     "citizensdk_create_with_modules",
     "citizensdk_validate_modules",
+    "citizensdk_accept_request_sequence",
     "citizensdk_verify_signature",
     "citizensdk_delete_wallet",
     "citizensdk_delete_wallet_account",
@@ -118,8 +146,6 @@ const EXPECTED_EXPORTS: [&str; 121] = [
     "citizensdk_transaction_execution_consume_qr_response",
     "citizensdk_unsubscribe_capability_changes",
     "citizensdk_verify_transaction_at",
-    "citizensdk_validate_wallet_password",
-    "citizensdk_validate_wallet_mnemonic",
     "citizensdk_wallet_word_suggestions",
     "citizensdk_watch_extrinsic",
 ];
@@ -154,31 +180,21 @@ fn rust_exports(source: &str) -> BTreeSet<String> {
             "duplicate export {function}"
         );
     }
-    exports.retain(|name| !name.starts_with("citizensdk_internal_"));
     exports
 }
 
 #[test]
-fn private_bridge_has_exactly_four_separate_exports_and_no_public_declarations() {
+fn retired_private_view_exports_are_absent() {
     let source = include_str!("../src/wallet_abi.rs");
-    let exports: BTreeSet<_> = source
-        .lines()
-        .filter_map(|line| line.split("fn citizensdk_internal_").nth(1))
-        .map(|tail| format!("citizensdk_internal_{}", tail.split('(').next().unwrap()))
-        .collect();
-    assert_eq!(
-        exports,
-        BTreeSet::from([
-            "citizensdk_internal_private_key_view_open".to_owned(),
-            "citizensdk_internal_private_key_view_reveal".to_owned(),
-            "citizensdk_internal_private_key_view_cancel".to_owned(),
-            "citizensdk_internal_private_key_view_finish".to_owned(),
-        ])
-    );
+    assert!(!source.contains("fn citizensdk_internal_"));
+    for name in ["citizensdk_private_key_open", "citizensdk_private_key_reveal",
+        "citizensdk_private_key_cancel", "citizensdk_private_key_finish"] {
+        assert!(EXPECTED_EXPORTS.contains(&name));
+    }
     assert!(!include_str!("../../../include/citizensdk.h").contains("citizensdk_internal_"));
     assert!(!include_str!("../../../include/citizensdk_types.h").contains("citizensdk_internal_"));
-    assert!(!include_str!("../src/abi.rs").contains("PrivateKeyView"));
 }
+
 
 fn without_block_comments(source: &str) -> String {
     let mut output = String::with_capacity(source.len());
@@ -243,15 +259,15 @@ fn rust_and_c_publish_exactly_the_reviewed_product_symbols() {
     let wallet = rust_exports(include_str!("../src/wallet_abi.rs"));
     let qr = rust_exports(include_str!("../src/qr_abi.rs"));
     let transaction = rust_exports(include_str!("../src/transaction_abi.rs"));
-    assert_eq!(rust.len(), 52, "base Rust export count changed");
-    assert_eq!(wallet.len(), 50, "wallet Rust export count changed");
+    assert_eq!(rust.len(), 53, "base Rust export count changed");
+    assert_eq!(wallet.len(), 69, "wallet Rust export count changed");
     for export in wallet {
         assert!(
             rust.insert(export.clone()),
             "duplicate Rust export {export}"
         );
     }
-    assert_eq!(qr.len(), 8, "QR Rust export count changed");
+    assert_eq!(qr.len(), 11, "QR Rust export count changed");
     for export in qr {
         assert!(
             rust.insert(export.clone()),
@@ -269,12 +285,17 @@ fn rust_and_c_publish_exactly_the_reviewed_product_symbols() {
             "duplicate Rust export {export}"
         );
     }
+    let presence = rust_exports(include_str!("../src/host_providers.rs"));
+    assert_eq!(presence.len(), 2);
+    for export in presence {
+        assert!(rust.insert(export.clone()), "duplicate Rust export {export}");
+    }
     let header: BTreeSet<_> = header_declarations(include_str!("../../../include/citizensdk.h"))
         .into_keys()
         .collect();
 
-    assert_eq!(rust.len(), 121, "Rust export count changed");
-    assert_eq!(header.len(), 121, "C declaration count changed");
+    assert_eq!(rust.len(), 146, "Rust export count changed");
+    assert_eq!(header.len(), 146, "C declaration count changed");
     assert_eq!(rust, expected, "Rust export set changed");
     assert_eq!(header, expected, "C declaration set changed");
     assert!(!rust.contains("citizensdk_set_default_wallet_account"));
@@ -295,11 +316,11 @@ fn product_header_has_only_the_reviewed_mnemonic_crossings() {
             "citizensdk_add_wallet_accounts",
             "citizensdk_import_wallet",
             "citizensdk_prepared_wallet_copy_mnemonic",
-            "citizensdk_validate_wallet_mnemonic",
+            "citizensdk_add_next_wallet_account",
         ])
     );
 
-    for name in ["citizensdk_add_wallet_accounts", "citizensdk_import_wallet"] {
+    for name in ["citizensdk_add_wallet_accounts", "citizensdk_add_next_wallet_account", "citizensdk_import_wallet"] {
         let declaration = &declarations[name];
         assert!(declaration.contains("citizensdk_bytes_view_t mnemonic"));
         assert!(!declaration.contains("uint8_t *buffer"));
@@ -315,9 +336,7 @@ fn product_header_has_only_the_reviewed_mnemonic_crossings() {
     assert!(release.contains("citizensdk_handle_t handle"));
     assert!(release.contains("citizensdk_prepared_wallet_handle_t prepared_wallet"));
 
-    // Freeze the Rust side too: the owner handle is part of both prepared
-    // operations, while mnemonic input remains confined to the two audited
-    // zeroizing import/derivation entry points.
+    // 同时冻结Rust的准备资源owner；三种导入/追加都使用原受控输入与Core校验。
     let wallet_source = include_str!("../src/wallet_abi.rs")
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -343,8 +362,18 @@ fn product_header_has_only_the_reviewed_mnemonic_crossings() {
 fn product_exports_have_no_provider_rpc_or_secret_escape_hatch() {
     let header = include_str!("../../../include/citizensdk.h");
     let declarations = header_declarations(header);
+    // 只允许绑定实例与receiver的既定四签名；同名改参数也必须失败。
+    assert_eq!(declarations["citizensdk_private_key_open"],
+        "CITIZENSDK_API citizensdk_error_code_t citizensdk_private_key_open( citizensdk_handle_t handle, const citizensdk_account_id_t *account_id, const citizensdk_private_key_receiver_v1_t *receiver, uint64_t *out_secret_id, citizensdk_request_id_t *out_request_id)");
+    for name in ["citizensdk_private_key_reveal", "citizensdk_private_key_cancel", "citizensdk_private_key_finish"] {
+        assert_eq!(declarations[name],
+            format!("CITIZENSDK_API citizensdk_error_code_t {name}( citizensdk_handle_t handle, uint64_t secret_id)"));
+    }
     let exported_surface = declarations
         .iter()
+        // 仅既定四项receiver允许私钥词项，下面独立核对完整签名，不能按前缀放行。
+        .filter(|(name, _)| !["citizensdk_private_key_open", "citizensdk_private_key_reveal",
+            "citizensdk_private_key_cancel", "citizensdk_private_key_finish"].contains(&name.as_str()))
         .map(|(name, declaration)| format!("{name} {declaration}"))
         .collect::<Vec<_>>()
         .join("\n")

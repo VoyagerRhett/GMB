@@ -6,6 +6,8 @@ import AppKit
 @preconcurrency import FlutterMacOS
 #endif
 
+import CitizenSDK
+
 /// v2仅注册数据通道与宿主纹理，不提供SDK业务界面。
 @MainActor
 public final class CitizenSdkPlugin: NSObject, @preconcurrency FlutterPlugin {
@@ -51,16 +53,26 @@ public final class CitizenSdkPlugin: NSObject, @preconcurrency FlutterPlugin {
     }
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        var envelope: CitizenSdkFlutterCodec.Request?
         do {
+            // 参数失败不能使发送/接收序号失步；外壳接纳归SDK唯一Core实现。
+            envelope = try CitizenSdkFlutterCodec.envelope(method: call.method, arguments: call.arguments)
+            if let envelope { try sessions.acceptRequestSequence(envelope) }
             sessions.dispatch(try CitizenSdkFlutterCodec.decode(method: call.method, arguments: call.arguments), result: result)
         } catch let failure as CitizenSdkFlutterCodec.ContractFailure {
             result(FlutterError(
                 code: "citizensdk.\(CitizenSdkFlutterCodec.errorName(failure.code))",
                 message: failure.message,
                 details: CitizenSdkFlutterCodec.error(failure.code, failure.message,
-                                                      session: failure.session, sequence: failure.sequence,
+                                                      session: failure.session ?? envelope?.sessionID, sequence: failure.sequence ?? envelope?.sequence,
                                                       method: call.method, stage: failure.stage)
             ))
+        } catch let error as CitizenSDKError {
+            result(FlutterError(code: "citizensdk.\(CitizenSdkFlutterCodec.errorName(error.code))",
+                                message: "CitizenSDK request admission failed",
+                                details: CitizenSdkFlutterCodec.error(error.code, "CitizenSDK request admission failed",
+                                    session: envelope?.sessionID, sequence: envelope?.sequence,
+                                    method: call.method, stage: error.stage)))
         } catch {
             result(FlutterError(code: "citizensdk.internal", message: "CitizenSDK Flutter request decoding failed",
                                 details: CitizenSdkFlutterCodec.error(.internalFailure,

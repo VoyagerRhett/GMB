@@ -1,22 +1,23 @@
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:citizenapp/signer/signing.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
+import '../support/fake_citizen_sdk.dart';
 import 'package:citizenapp/signer/square_action_payload.dart';
 
-String _payloadHex({
+Future<String> _payloadHex({
   required String action,
   required String accountId,
   required String challengeId,
   String? level,
   required int expiresAt,
-}) {
+}) async {
   final bytes = <int>[
-    ...scaleString(action),
-    ...scaleString(accountId),
-    ...scaleString(challengeId),
-    if (level != null) ...scaleString(level),
-    ...u64Le(expiresAt),
+    ...(await CitizenSigning.encodePayload(CitizenSigningPayload.scaleString(action))),
+    ...(await CitizenSigning.encodePayload(CitizenSigningPayload.scaleString(accountId))),
+    ...(await CitizenSigning.encodePayload(CitizenSigningPayload.scaleString(challengeId))),
+    if (level != null) ...(await CitizenSigning.encodePayload(CitizenSigningPayload.scaleString(level))),
+    ...(await CitizenSigning.encodePayload(CitizenSigningPayload.u64Le(BigInt.from(expiresAt)))),
   ];
   return Uint8List.fromList(bytes)
       .map((b) => b.toRadixString(16).padLeft(2, '0'))
@@ -24,11 +25,23 @@ String _payloadHex({
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  late TestCitizenSdkTransport encodingTransport;
+  late CitizenSdk encodingSdk;
+  setUp(() async {
+    encodingTransport = TestCitizenSdkTransport({}, useCore: true);
+    encodingSdk = await encodingTransport.open();
+  });
+  tearDown(() async {
+    await encodingSdk.close();
+    await encodingTransport.dispose();
+  });
+
   const accountId =
       '0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d';
 
-  test('decodes cancel_membership (no context) byte-for-byte', () {
-    final hex = _payloadHex(
+  test('decodes cancel_membership (no context) byte-for-byte', () async {
+    final hex = await _payloadHex(
       action: 'cancel_membership',
       accountId: accountId,
       challengeId: 'sqa_abc',
@@ -48,8 +61,8 @@ void main() {
     );
   });
 
-  test('decodes subscribe_membership with level context', () {
-    final hex = _payloadHex(
+  test('decodes subscribe_membership with level context', () async {
+    final hex = await _payloadHex(
       action: 'subscribe_membership',
       accountId: accountId,
       challengeId: 'sqa_xyz',
@@ -67,8 +80,8 @@ void main() {
     );
   });
 
-  test('rejects unknown action → null (no blind sign)', () {
-    final hex = _payloadHex(
+  test('rejects unknown action → null (no blind sign)', () async {
+    final hex = await _payloadHex(
       action: 'transfer_all_funds',
       accountId: accountId,
       challengeId: 'sqa_evil',
@@ -77,8 +90,8 @@ void main() {
     expect(decodeSquareActionPayload(hex), isNull);
   });
 
-  test('rejects trailing-byte / truncated payload → null', () {
-    final hex = _payloadHex(
+  test('rejects trailing-byte / truncated payload → null', () async {
+    final hex = await _payloadHex(
       action: 'cancel_membership',
       accountId: accountId,
       challengeId: 'sqa_abc',

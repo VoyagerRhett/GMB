@@ -26,22 +26,18 @@ _Static_assert(_Generic(&citizensdk_result_get_account_balance_at,
     citizensdk_error_code_t (*)(citizensdk_result_handle_t, uint32_t,
                                citizensdk_account_balance_info_t *): 1, default: 0),
     "batch balance element signature");
-_Static_assert(_Generic(&citizensdk_host_view_account_private_key,
-    citizensdk_error_code_t (*)(citizensdk_host_handle_t, const citizensdk_account_id_t *,
-        void *, citizensdk_wallet_flow_completion_v1_t,
-        citizensdk_wallet_flow_handle_t *): 1, default: 0),
-    "private-key view returns only a public flow handle");
+_Static_assert(_Generic(&citizensdk_private_key_open,
+    citizensdk_error_code_t (*)(citizensdk_handle_t, const citizensdk_account_id_t *,
+        const citizensdk_private_key_receiver_v1_t *, uint64_t *, citizensdk_request_id_t *): 1, default: 0),
+    "private key uses an owned receiver, not a window");
+_Static_assert(_Generic(&citizensdk_host_open_qr_capture,
+    citizensdk_error_code_t (*)(citizensdk_host_handle_t, uint32_t,
+        const citizensdk_qr_capture_callbacks_v1_t *, uint64_t *): 1, default: 0),
+    "QR capture exposes data and lifetime callbacks");
+_Static_assert(_Generic(&citizensdk_wallet_state_get_diagnostic_cleanup_account,
+    citizensdk_error_code_t (*)(citizensdk_result_handle_t, uint32_t, uint32_t,
+        citizensdk_account_id_t *): 1, default: 0), "diagnostic cleanup targets are typed public accounts");
 _Static_assert(CITIZENSDK_RESULT_ACCOUNT_BALANCES == 18, "batch balance result kind");
-
-
-_Static_assert(_Generic(&citizensdk_host_scan_qr,
-    citizensdk_error_code_t (*)(citizensdk_host_handle_t, void *,
-        citizensdk_qr_completion_v1_t, citizensdk_wallet_flow_handle_t *): 1, default: 0),
-    "QR scan uses the native flow cancellation handle");
-_Static_assert(_Generic(&citizensdk_host_sign_qr_request,
-    citizensdk_error_code_t (*)(citizensdk_host_handle_t, citizensdk_bytes_view_t,
-        void *, citizensdk_qr_completion_v1_t, citizensdk_wallet_flow_handle_t *): 1, default: 0),
-    "QR review and signing expose only public Core documents");
 
 #ifdef NDEBUG
 #error "CitizenSDK consumer checks must remain enabled in Release"

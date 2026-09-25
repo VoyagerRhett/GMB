@@ -4,7 +4,7 @@ import XCTest
 
 final class CitizenSDKSensitiveBufferTests: XCTestCase {
     func testPrivateAuthorizationBindsOnlyThisViewAndRejectsLateOrUnrelatedOperations() {
-        let display = CitizenSDKPrivateKeyDisplayBuffer()
+        let display = CitizenSDKPrivateKeyReceiver()
         display.bind(7)
         var registered: [UInt64] = []
         display.bindAuthenticationRegistry { registered.append($0); return 0 }
@@ -20,32 +20,27 @@ final class CitizenSDKSensitiveBufferTests: XCTestCase {
         XCTAssertEqual(registered, [19], "late or unrelated authentication must never register")
     }
 
-    func testPrivateViewBufferHasBoundedHexRenderingAndRejectsLateDisplay() {
-        let display = CitizenSDKPrivateKeyDisplayBuffer()
+    func testPrivateViewBufferHasBoundedHexRenderingAndRejectsLateDisplay() throws {
+        let display = CitizenSDKPrivateKeyReceiver()
         display.bind(7)
         // 仅构造公开合成字节验证显示边界，不创建或读取钱包/真实密钥。
         let source = (0..<32).map(UInt8.init)
-        source.withUnsafeBufferPointer { bytes in
+        // XCTest断言所在借用闭包可抛错；经try传回测试运行器，不吞掉失败或延长指针寿命。
+        try source.withUnsafeBufferPointer { bytes in
             let borrowed = citizensdk_bytes_view_t(data: bytes.baseAddress, len: 32)
-            XCTAssertEqual(display.display(viewID: 8, bytes: borrowed), CitizenSDKErrorCode.cancelled.rawValue)
-            XCTAssertEqual(display.display(viewID: 7, bytes: borrowed), 0)
-            XCTAssertEqual(display.display(viewID: 7, bytes: borrowed), CitizenSDKErrorCode.cancelled.rawValue)
-            display.withCharacters { characters in
-                XCTAssertEqual(characters.count, 66)
-                XCTAssertEqual(characters[0], 48); XCTAssertEqual(characters[1], 120)
-                XCTAssertTrue(characters.dropFirst(2).allSatisfy { (48...57).contains($0) || (97...102).contains($0) })
-            }
+            XCTAssertEqual(display.receive(viewID: 8, bytes: borrowed), CitizenSDKErrorCode.cancelled.rawValue)
+            XCTAssertEqual(display.receive(viewID: 7, bytes: borrowed), 0)
+            XCTAssertEqual(display.receive(viewID: 7, bytes: borrowed), CitizenSDKErrorCode.cancelled.rawValue)
+            XCTAssertEqual(try? display.copyBytes(), Data(source))
             display.clear()
             XCTAssertTrue(display.isClearedForTesting)
-            XCTAssertEqual(display.display(viewID: 7, bytes: borrowed), CitizenSDKErrorCode.cancelled.rawValue)
-            var drew = false
-            display.withCharacters { _ in drew = true }
-            XCTAssertFalse(drew)
+            XCTAssertEqual(display.receive(viewID: 7, bytes: borrowed), CitizenSDKErrorCode.cancelled.rawValue)
+            XCTAssertThrowsError(try display.copyBytes())
         }
     }
 
     func testPrivateViewBufferRejectsMalformedLengthBeforeReadingAndHandlesEarlySettlement() {
-        let display = CitizenSDKPrivateKeyDisplayBuffer()
+        let display = CitizenSDKPrivateKeyReceiver()
         display.settled(viewID: 9, code: CitizenSDKErrorCode.notFound.rawValue)
         display.bind(9)
         let notified = expectation(description: "early no-secret settlement")
@@ -53,7 +48,7 @@ final class CitizenSDKSensitiveBufferTests: XCTestCase {
             XCTAssertEqual(code, CitizenSDKErrorCode.notFound.rawValue)
             notified.fulfill()
         }
-        XCTAssertEqual(display.display(viewID: 9, bytes: .init(data: nil, len: 32)), CitizenSDKErrorCode.integrity.rawValue)
+        XCTAssertEqual(display.receive(viewID: 9, bytes: .init(data: nil, len: 32)), CitizenSDKErrorCode.integrity.rawValue)
         wait(for: [notified], timeout: 1)
         display.clear()
         XCTAssertTrue(display.isClearedForTesting)
@@ -65,16 +60,11 @@ final class CitizenSDKSensitiveBufferTests: XCTestCase {
         XCTAssertEqual(first.copyData(), Data([1, 2, 3]))
         XCTAssertFalse(first.isClearedForTesting)
 
-        var callbackObservedClear = false
-        citizenSDKAfterClearingSecrets([first, second]) {
-            callbackObservedClear = first.isClearedForTesting && second.isClearedForTesting
-        }
-
-        XCTAssertTrue(callbackObservedClear)
+        first.clear(); second.clear()
+        XCTAssertTrue(first.isClearedForTesting && second.isClearedForTesting)
     }
 
     func testSensitiveTextRejectsOversizedUtf8() {
-        XCTAssertThrowsError(try citizenSDKSensitiveText(String(repeating: "a", count: 1_025),
-                                                         label: "password"))
+        XCTAssertEqual(try? CitizenSDKNative.validateWalletInput(String(repeating: "a", count: 1_025), kind: 1, wordCount: 0).reason, .inputTooLong)
     }
 }

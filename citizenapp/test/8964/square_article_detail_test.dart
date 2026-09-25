@@ -1,3 +1,4 @@
+import '../support/fake_citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -11,7 +12,17 @@ import 'package:citizenapp/8964/widgets/article_rich_text_view.dart';
 
 import 'profile/fake_profile.dart';
 
+// 标题/正文实际出现才算加载完成；同时推进HTTP/SDK回包，不能用无限动画的settle判成功。
+Future<void> _pumpArticle(WidgetTester tester) async {
+  for (var attempt = 0; find.byType(ArticleRichTextView).evaluate().isEmpty && attempt < 50; attempt++) {
+    await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+    await tester.pump(const Duration(milliseconds: 20));
+  }
+  expect(find.byType(ArticleRichTextView), findsWidgets);
+}
+
 void main() {
+  TestCitizenSdkHarness();
   testWidgets('renders the article title and body', (tester) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -35,7 +46,7 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    await _pumpArticle(tester);
 
     expect(find.text('标题X'), findsOneWidget);
     expect(find.byType(ArticleRichTextView), findsOneWidget);
@@ -65,7 +76,7 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    await _pumpArticle(tester);
 
     expect(find.byType(SquareMediaCarousel), findsOneWidget);
     expect(

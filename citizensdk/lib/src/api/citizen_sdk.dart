@@ -414,6 +414,10 @@ final class _CitizenSdkWallet implements CitizenSdkWallet {
   @override
   CitizenSdkOperation<CitizenWalletState> getState() => _state('getWalletState', const []);
   @override
+  CitizenSdkOperation<CitizenWalletInspection> inspect() => _session.operation(
+    'inspectWallets', decode: (value) => _CitizenWalletInspection(
+      _session, _codec, _resourceId(value[0]), _codec.decodeWalletState(value[1])));
+  @override
   Future<CitizenWalletInputValidation> validatePassword(String password) async {
     if (!_codec.walletInputWithinLimit(password)) return const CitizenWalletInputValidation(reason: CitizenWalletInputReason.inputTooLong);
     return _codec.decodeWalletInputValidation(await _session.invoke('validateWalletPassword', fields: [password]));
@@ -463,6 +467,12 @@ final class _CitizenSdkWallet implements CitizenSdkWallet {
   @override
   CitizenSdkOperation<CitizenWalletProfile> setActiveAccount(String accountId) =>
       _profile('setActiveWalletAccount', [accountId]);
+  @override
+  CitizenSdkOperation<CitizenWalletState> setActiveWallet({required BigInt expectedRevision, required int walletIndex}) =>
+      _state('setActiveWallet', [expectedRevision.toString(), walletIndex]);
+  @override
+  CitizenSdkOperation<CitizenWalletState> renameWallet({required BigInt expectedRevision, required int walletIndex, required String name}) =>
+      _state('renameWallet', [expectedRevision.toString(), walletIndex, name.trim()]);
   @override
   CitizenSdkOperation<CitizenWalletState> renameAccount({required String accountId, required String name}) =>
       _state('renameAccount', [accountId, name.trim()]);
@@ -820,6 +830,46 @@ final class _CitizenSigning implements CitizenSigning {
   @override
   Future<bool> cancel(String sessionId) async =>
       (await _session.invoke('cancelSigning', fields: [sessionId]))[0]! as bool;
+}
+
+final class _CitizenWalletInspection implements CitizenWalletInspection {
+  _CitizenWalletInspection(this._session, this._codec, this._id, this.state) {
+    _session.registerResource(release);
+  }
+  final CitizenSdkFlutterSession _session;
+  final CitizenSdkFlutterCodec _codec;
+  final String _id;
+  @override final CitizenWalletState state;
+  bool _released = false;
+  Future<void>? _releasing;
+
+  CitizenSdkOperation<CitizenWalletState> _change(String method, int index, [String? name]) {
+    if (_released || _releasing != null) throw const CitizenSdkException(
+      code: CitizenSdkErrorCode.invalidState, message: '钱包检查资源正在释放或已释放');
+    if (!state.diagnostics.any((record) => record.walletIndex == index)) throw const CitizenSdkException(
+      code: CitizenSdkErrorCode.notFound, message: '检查快照中没有该异常钱包');
+    // 只交不透明资源号和目标索引；原记录、修订与授权由Core保有并重新核实。
+    return _session.operation(method, fields: [_id, index, if (name != null) name.trim()],
+      decode: (value) => _codec.decodeWalletState(value[0]));
+  }
+  @override
+  CitizenSdkOperation<CitizenWalletState> repairHot(int walletIndex) => _change('repairHotWallet', walletIndex);
+  @override
+  CitizenSdkOperation<CitizenWalletState> rename({required int walletIndex, required String name}) => _change('renameDiagnosticWallet', walletIndex, name);
+  @override
+  CitizenSdkOperation<CitizenWalletState> delete(int walletIndex) => _change('deleteDiagnosticWallet', walletIndex);
+  @override
+  Future<void> release() {
+    if (_released) return Future<void>.value();
+    return _releasing ??= _release();
+  }
+  Future<void> _release() async {
+    try {
+      await _session.invoke('releaseWalletInspection', fields: [_id]);
+      _released = true;
+      _session.unregisterResource(release);
+    } on Object { _releasing = null; rethrow; }
+  }
 }
 
 final class _CitizenQrReview implements CitizenQrReview {

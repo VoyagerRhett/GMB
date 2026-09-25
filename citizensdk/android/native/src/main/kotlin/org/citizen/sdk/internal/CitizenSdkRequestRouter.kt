@@ -128,10 +128,23 @@ internal class CitizenSdkRequestRouter(
             entry.future.completeExceptionally(decoded.error)
             return
         }
+        var projected: Any? = null
+        var cleanupAttempted = false
+        fun releaseOwned() {
+            if (cleanupAttempted) return
+            cleanupAttempted = true
+            val owned = projected
+            // 已构造公开资源时从其唯一close路径归还，避免Core已释放而门面登记仍存活。
+            if (owned is AutoCloseable) owned.close() else decoded.result?.let(releaseResult)
+        }
         try {
-            if (!entry.future.complete(entry.decode(checkNotNull(decoded.result)))) decoded.result?.let(releaseResult)
+            if (entry.future.isDone) { releaseOwned(); return }
+            projected = entry.decode(checkNotNull(decoded.result))
+            if (!entry.future.complete(projected)) releaseOwned()
         } catch (error: Throwable) {
-            decoded.result?.let(releaseResult)
+            try { releaseOwned() } catch (cleanup: Throwable) {
+                if (cleanup !== error) error.addSuppressed(cleanup)
+            }
             entry.future.completeExceptionally(
                 if (error is CitizenSdkException) error else CitizenSdkException(
                     CitizenSdkErrorCode.INTEGRITY,

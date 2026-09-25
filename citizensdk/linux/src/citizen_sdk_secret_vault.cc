@@ -66,6 +66,11 @@ void SecretVault::ensure_wallet_kek(
   }
 }
 
+bool SecretVault::has_any_wallet_key(uint32_t wallet_index) {
+  std::lock_guard<std::recursive_mutex> guard(generation_lock_);
+  return secure_store_.has_any_wallet_key(wallet_index);
+}
+
 bool SecretVault::has_wallet_kek(const WalletKey &key) {
   std::lock_guard<std::recursive_mutex> guard(generation_lock_);
   if (!secure_store_.is_generation_active(key)) return false;

@@ -19,10 +19,13 @@ class WalletIdentityCard extends StatefulWidget {
   const WalletIdentityCard({
     super.key,
     required this.wallet,
+    required this.walletName,
     required this.onNameChanged,
   });
 
   final CitizenWalletStateAccount wallet;
+  /// SDK目录的钱包级名称，不能用热账户0的name代替。
+  final String walletName;
 
   /// 钱包名提交回调。外层负责持久化,Widget 内部已做 trim 和空值回滚。
   final Future<void> Function(String) onNameChanged;
@@ -32,7 +35,7 @@ class WalletIdentityCard extends StatefulWidget {
 }
 
 class _WalletIdentityCardState extends State<WalletIdentityCard> {
-  /// 当前展示态的钱包名(与 widget.wallet.name 同步,编辑提交后更新)。
+  /// 当前展示态的钱包名(与 widget.walletName 同步,编辑提交后更新)。
   late String _walletName;
 
   /// 是否处于编辑态。
@@ -44,7 +47,7 @@ class _WalletIdentityCardState extends State<WalletIdentityCard> {
   @override
   void initState() {
     super.initState();
-    _walletName = widget.wallet.name;
+    _walletName = widget.walletName;
     _nameController = TextEditingController(text: _walletName);
   }
 

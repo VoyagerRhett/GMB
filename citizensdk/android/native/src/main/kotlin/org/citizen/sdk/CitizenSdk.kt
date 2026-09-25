@@ -15,6 +15,33 @@ import java.util.concurrent.ExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.ConcurrentHashMap
 
+/** 同实例真实快照的受控资源；方法接纳和释放互斥，句柄不进入公开接口。 */
+class CitizenWalletInspection internal constructor(
+    private val native: CitizenSdkNative,
+    result: Long,
+    val state: CitizenWalletState,
+    private val change: (CitizenWalletInspection, Int, Long, String?) -> CitizenSdkOperation<CitizenWalletState>,
+    private val released: (CitizenWalletInspection) -> Unit,
+) : AutoCloseable {
+    private val gate = Any()
+    private var handle = result
+    @JvmSynthetic internal fun <T> withHandle(owner: CitizenSdkNative, body: (Long) -> T): T = synchronized(gate) {
+        if (owner !== native || handle == 0L) throw CitizenSdkException(CitizenSdkErrorCode.INVALID_STATE, "钱包检查资源已释放或跨实例")
+        body(handle)
+    }
+    fun repairHot(walletIndex: Long): CitizenSdkOperation<CitizenWalletState> = change(this, 1, walletIndex, null)
+    fun rename(walletIndex: Long, name: String): CitizenSdkOperation<CitizenWalletState> = change(this, 2, walletIndex, name)
+    fun delete(walletIndex: Long): CitizenSdkOperation<CitizenWalletState> = change(this, 3, walletIndex, null)
+    fun release() = close()
+    override fun close() = synchronized(gate) {
+        if (handle != 0L) {
+            native.releaseWalletInspection(handle)
+            handle = 0
+            released(this)
+        }
+    }
+}
+
 /**
  * Java/Kotlin facade for the one CitizenSDK Core instance.
  *
@@ -41,13 +68,20 @@ class CitizenSdk private constructor(
         hostServices = hostServices,
     )
     private val requests = CitizenSdkRequestRouter(native::cancel) {
-        if (it is CitizenSdkNativeResult.QrReview) native.releaseQrReview(it.token)
+        when (it) {
+            is CitizenSdkNativeResult.QrReview -> native.releaseQrReview(it.token)
+            is CitizenSdkNativeResult.WalletState -> if (it.inspectionToken != 0L) native.releaseWalletInspection(it.inspectionToken)
+            is CitizenSdkNativeResult.Prepared -> native.releasePreparedWallet(it.token)
+            is CitizenSdkNativeResult.ApplicationKey -> it.value.fill(0)
+            else -> Unit
+        }
     }
     /** Only native handles are retained; the public preparation identity is never a Core handle. */
     private val preparedTransactions = ConcurrentHashMap<String, Long>()
     private val privateKeys = ConcurrentHashMap.newKeySet<CitizenSdkPrivateKey>()
     private val preparedWallets = ConcurrentHashMap.newKeySet<CitizenSdkPreparedWallet>()
     private val qrReviews = ConcurrentHashMap.newKeySet<CitizenQrReview>()
+    private val walletInspections = ConcurrentHashMap.newKeySet<CitizenWalletInspection>()
     private val qrCaptures = ConcurrentHashMap.newKeySet<CitizenSdkQrCapture>()
 
     @Volatile
@@ -116,9 +150,18 @@ class CitizenSdk private constructor(
         }
     }
 
-    fun start(): CompletableFuture<Void> = exclusiveAfterReadiness { native.start() }
+    /** 与其他平台一致，直接提交原生启动；并发准入及失败由Core判断，不等待能力刷新。 */
+    fun start(): CompletableFuture<Void> = unitRequest({ native.start() })
 
-    fun stop(): CompletableFuture<Void> = exclusiveAfterReadiness { native.stop() }
+    /** 直接提交原生停止，Future仍等待原生检查点及排空完成，不把提交当作停止成功。 */
+    fun stop(): CompletableFuture<Void> = unitRequest({ native.stop() })
+
+    /** 通道关联仅由Core接纳；绑定不保存第二份接收序号。 */
+    @JvmSynthetic
+    internal fun acceptRequestSequence(sequence: Long) = synchronized(lifecycleGate) {
+        requireOpen()
+        native.acceptRequestSequence(sequence)
+    }
 
     fun getCapabilities(): CitizenSdkCapabilities {
         return synchronized(lifecycleGate) {
@@ -305,6 +348,27 @@ class CitizenSdk private constructor(
     fun getWalletState(): CitizenSdkOperation<CitizenWalletState> =
         requestOperation({ native.getWalletState() }) { (it as CitizenSdkNativeResult.WalletState).value }
 
+    fun inspectWallets(): CitizenSdkOperation<CitizenWalletInspection> =
+        requestOperation({ native.inspectWallets() }) { result ->
+            val value = result as CitizenSdkNativeResult.WalletState
+            check(value.inspectionToken > 0) { "检查结果缺少真实资源" }
+            CitizenWalletInspection(native, value.inspectionToken, value.value, ::changeDiagnostic) { walletInspections.remove(it) }
+                .also { walletInspections.add(it) }
+        }
+
+    private fun changeDiagnostic(inspection: CitizenWalletInspection, action: Int, index: Long, name: String?): CitizenSdkOperation<CitizenWalletState> =
+        synchronized(lifecycleGate) {
+            requireOpen()
+            require(index in 0..0xffffffffL)
+            val normalized = name?.let(::checkedAccountName)
+            // 锁顺序与close一致：实例生命周期门在前，资源门在后。
+            inspection.withHandle(native) { token ->
+                requestOperation({ native.changeDiagnostic(token, index, action, normalized) }) {
+                    (it as CitizenSdkNativeResult.WalletState).value
+                }
+            }
+        }
+
     fun importColdAccount(accountId: ByteArray, name: String = ""): CitizenSdkOperation<CitizenWalletState> {
         val normalized = if (name.isEmpty()) "" else checkedAccountName(name)
         return requestOperation({ native.importColdAccountId(accountId.requireSize(32, "accountId"), normalized) }) {
@@ -340,6 +404,22 @@ class CitizenSdk private constructor(
         return requestOperation({ native.reorderWalletAccounts(revision, checked) }) {
             (it as CitizenSdkNativeResult.WalletState).value
         }
+    }
+
+    /** 唯一Core同修订CAS；不触发默认账户授权或金库访问。 */
+    fun setActiveWallet(expectedRevision: String, walletIndex: Long): CitizenSdkOperation<CitizenWalletState> {
+        require(walletIndex in 0..0xffffffffL)
+        require(Regex("^(0|[1-9][0-9]*)$").matches(expectedRevision))
+        val revision = java.lang.Long.parseUnsignedLong(expectedRevision)
+        return requestOperation({ native.setActiveWallet(revision, walletIndex) }) { (it as CitizenSdkNativeResult.WalletState).value }
+    }
+
+    fun renameWallet(expectedRevision: String, walletIndex: Long, name: String): CitizenSdkOperation<CitizenWalletState> {
+        require(walletIndex in 0..0xffffffffL)
+        require(Regex("^(0|[1-9][0-9]*)$").matches(expectedRevision))
+        val revision = java.lang.Long.parseUnsignedLong(expectedRevision)
+        val normalized = checkedAccountName(name)
+        return requestOperation({ native.renameWallet(revision, walletIndex, normalized) }) { (it as CitizenSdkNativeResult.WalletState).value }
     }
 
     fun renameAccount(accountId: ByteArray, name: String): CitizenSdkOperation<CitizenWalletState> {
@@ -818,6 +898,7 @@ class CitizenSdk private constructor(
                 requests.requireIdle()
                 preparedWallets.toList().forEach { it.close() }
                 qrReviews.toList().forEach { it.close() }
+                walletInspections.toList().forEach { it.close() }
                 CitizenSdkClosePolicy.validate(native.lifecycle())
             }
             closing.set(true)
@@ -829,6 +910,7 @@ class CitizenSdk private constructor(
             preparedTransactions.clear()
             preparedWallets.clear()
             qrReviews.clear()
+            walletInspections.clear()
             requests.close()
             eventListener = null
             try {
@@ -942,38 +1024,6 @@ class CitizenSdk private constructor(
             }
             if (synchronized(lifecycleGate) { closed.get() || readinessSettledLocked() }) return
         }
-    }
-
-    private fun exclusiveAfterReadiness(begin: () -> Long): CompletableFuture<Void> {
-        val result = CompletableFuture<Void>()
-        lateinit var attempt: () -> Unit
-        attempt = {
-            val barrier = synchronized(lifecycleGate) { readinessBarrierLocked() }
-            barrier.whenComplete { _, barrierFailure ->
-                if (barrierFailure != null) {
-                    result.completeExceptionally(unwrapCompletion(barrierFailure))
-                } else {
-                    val operation = try {
-                        synchronized(lifecycleGate) {
-                            if (!readinessSettledLocked()) null else unitRequest(begin)
-                        }
-                    } catch (error: Throwable) {
-                        result.completeExceptionally(error)
-                        null
-                    }
-                    if (operation == null && !result.isDone) {
-                        attempt()
-                    } else {
-                        operation?.whenComplete { _, error ->
-                            if (error == null) result.complete(null)
-                            else result.completeExceptionally(unwrapCompletion(error))
-                        }
-                    }
-                }
-            }
-        }
-        attempt()
-        return result
     }
 
     private fun unwrapCompletion(error: Throwable): Throwable = when (error) {

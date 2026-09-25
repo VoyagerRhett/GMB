@@ -14,6 +14,26 @@ import java.util.concurrent.atomic.AtomicReference
 
 class CitizenSdkHardwareVaultTest {
     @Test
+    fun physicalKeyPresenceRejectsUnknownSdkAliases() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val directory = File(context.noBackupFilesDir, "citizensdk-test/aliases-" + System.nanoTime())
+        try {
+            CitizenSdkSecureStore(directory).use { store ->
+                val vault = CitizenSdkHardwareVault(context, store)
+                val first = "citizensdk_wallet_first"; val second = "citizensdk_wallet_second"
+                val known = mapOf(first to 0, second to -1) // -1只承载u32最大值的位，不改变系统别名。
+                assertTrue(!vault.walletKeyPresent(0, known, emptyList()))
+                assertTrue(!vault.walletKeyPresent(0, known, listOf(second)))
+                assertTrue(vault.walletKeyPresent(-1, known, listOf(second)))
+                assertTrue(vault.walletKeyPresent(0, known, listOf(first)))
+                assertTrue(runCatching { vault.walletKeyPresent(0, known, listOf("citizensdk_wallet_unknown")) }.isFailure)
+                assertTrue(runCatching { vault.walletKeyPresent(0, known, List(65537) { first }) }.isFailure)
+                assertTrue(!vault.walletKeyPresent(0, known, listOf("another-product")))
+            }
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test
     fun `vault mutation lock serializes independent stores`() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val directory = File(context.noBackupFilesDir, "citizensdk-test/lock-${System.nanoTime()}")

@@ -129,6 +129,7 @@ typedef uint32_t citizensdk_result_kind_t;
 #define CITIZENSDK_RESULT_ACCOUNT_NONCE 10U
 #define CITIZENSDK_RESULT_FEE_SNAPSHOT 11U
 #define CITIZENSDK_RESULT_WALLET_PROFILE 12U
+/* 原ABI数值保留且不复用；现行追加只产生完整WalletProfile结果。 */
 #define CITIZENSDK_RESULT_WALLET_ACCOUNTS 13U
 #define CITIZENSDK_RESULT_SIGNATURE 14U
 #define CITIZENSDK_RESULT_PREPARED_WALLET 15U
@@ -495,6 +496,23 @@ typedef struct citizensdk_host_services_v1 {
   const citizensdk_host_secret_vault_v1_t *secret_vault;
 } citizensdk_host_services_v1_t;
 
+/* 只读跨代际存在性，不改变原HostServices/SecureStore/Vault v1结构。
+ * 输入按值传递，回调/context必须保有至SDK成功销毁；输出复用原BoolResult。 */
+typedef citizensdk_error_code_t (*citizensdk_host_has_account_secret_v1_t)(
+    void *context, uint64_t host_operation_id, citizensdk_account_id_t account_id,
+    void *sdk_context, citizensdk_host_bool_completion_v1_t completion);
+typedef citizensdk_error_code_t (*citizensdk_host_has_any_wallet_key_v1_t)(
+    void *context, uint64_t host_operation_id, uint32_t wallet_index,
+    void *sdk_context, citizensdk_host_bool_completion_v1_t completion);
+typedef struct citizensdk_host_secret_presence_v1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  void *context;
+  citizensdk_host_has_account_secret_v1_t has_account_secret;
+  citizensdk_host_has_any_wallet_key_v1_t has_any_wallet_key;
+} citizensdk_host_secret_presence_v1_t;
+
+
 typedef struct citizensdk_create_options {
   uint32_t struct_size;
   uint32_t abi_version;
@@ -731,6 +749,22 @@ typedef struct citizensdk_wallet_state_info {
   uint32_t has_default_account;
   citizensdk_account_id_t default_account_id;
 } citizensdk_wallet_state_info_t;
+
+/* 同次快照中的只读异常事实，不可用于普通签名；原因1=模式、2=身份、3=结构。
+ * has_ss58_address=0表示原记录不能提供唯一地址，不以空串伪造地址。 */
+typedef struct citizensdk_wallet_diagnostic_info_v1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t wallet_index;
+  uint32_t diagnostic_reason;
+  uint32_t has_ss58_address;
+  uint32_t sign_mode; /* 0=原文无已知值；1=hot、2=cold，仅展示事实。 */
+  citizensdk_account_id_t account_id;
+  uint64_t wallet_name_len;
+  uint64_t ss58_address_len;
+  uint32_t cleanup_account_count; /* 0=无可信目标，非空最多1990项。 */
+  uint32_t delete_wallet_wide_key;
+} citizensdk_wallet_diagnostic_info_v1_t;
 
 typedef struct citizensdk_wallet_state_account_info {
   uint32_t struct_size;

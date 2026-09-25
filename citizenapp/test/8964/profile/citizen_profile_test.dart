@@ -1,3 +1,4 @@
+import '../../support/fake_citizen_sdk.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -81,6 +82,7 @@ SquareSession _session() => SquareSession(
     );
 
 void main() {
+  TestCitizenSdkHarness();
   useIsolatedIsar();
   group('CitizenProfile model', () {
     test('maps counts, certification and follow state from json', () {

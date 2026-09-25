@@ -81,7 +81,7 @@ void main() {
     );
   });
 
-  test('CitizenApp 业务 storage、RuntimeCall 和事件解码全部留在消费夹具', () async {
+  test('SDK合成夹具的storage、RuntimeCall和事件字段保持独立', () async {
     final destination = Uint8List.fromList(
       List<int>.generate(32, (index) => index),
     );
@@ -104,7 +104,7 @@ void main() {
     );
   });
 
-  test('第三方业务使用独立字节结构且仍只调用通用链和交易端口', () async {
+  test('第三方合成夹具使用独立字节结构验证通用链和交易端口', () async {
     final chain = RecordingChain();
     final transactions = RecordingTransactions();
     final history = RecordingHistory();
@@ -135,16 +135,20 @@ void main() {
   });
 
   test('通用 QR_V1 签名器绑定请求、响应、账户和签名字节', () async {
+    final signing = RecordingSigning();
     final signer = GenericQrV1Signer(
       qr: RecordingQr(),
-      signing: RecordingSigning(),
+      signing: signing,
+      confirm: (_) async => true,
     );
     final response = await signer.respond('QR_V1 request');
 
     expect(response.canonicalResponse, 'QR_V1 response');
-    expect(response.requestId, 'request-1');
+    expect(response.requestId, 'request-00000001');
     expect(response.signerAccountId, testAccountId);
     expect(response.signature, hasLength(64));
+    expect(signing.signCalls, 1);
+    expect(signing.reviews.single.released, isTrue);
     expect(() => response.signature[0] = 1, throwsUnsupportedError);
   });
 
@@ -153,6 +157,7 @@ void main() {
       GenericQrV1Signer(
         qr: RecordingQr(),
         signing: RecordingSigning(mismatchedBinding: true),
+        confirm: (_) async => true,
       ).respond('QR_V1 request'),
       throwsFormatException,
     );
@@ -160,9 +165,23 @@ void main() {
       GenericQrV1Signer(
         qr: RecordingQr(mismatchedResponseSignature: true),
         signing: RecordingSigning(),
+        confirm: (_) async => true,
       ).respond('QR_V1 request'),
       throwsFormatException,
     );
+  });
+
+
+  test('调用方拒绝或确认抛错不签名，审阅资源仍然释放', () async {
+    for (final throwsDuringConfirmation in [false, true]) {
+      final signing = RecordingSigning();
+      final signer = GenericQrV1Signer(qr: RecordingQr(), signing: signing,
+        confirm: (_) async { if (throwsDuringConfirmation) throw StateError('synthetic rejection'); return false; });
+      await expectLater(signer.respond('QR_V1 request'), throwsDuringConfirmation ? throwsStateError : throwsA(
+        isA<CitizenSdkException>().having((error) => error.code, 'code', CitizenSdkErrorCode.cancelled)));
+      expect(signing.signCalls, 0);
+      expect(signing.reviews.single.released, isTrue);
+    }
   });
 
   test('公共钱包词数与唯一 QR_V1 kind 数值闭集保持固定', () {
@@ -171,14 +190,14 @@ void main() {
       18,
       24,
     ]);
-    expect(CitizenQrKind.values.map((value) => value.value), <int>[1, 2, 5]);
-    expect(CitizenQrKind.values.any((value) => value.value == 4), isFalse);
+    expect(CitizenQrKind.values.map((value) => value.value), <int>[1, 2, 3, 4, 5, 6]);
+    expect(CitizenQrKind.values.any((value) => value.value == 4), isTrue);
     expect(CitizenExternalSignerTransport.values, <Object>[
       CitizenExternalSignerTransport.qrV1,
     ]);
   });
 
-  test('消费端业务边界自身拒绝无效长度和数值', () {
+  test('SDK合成夹具拒绝无效长度和数值，不作为真实业务验收', () {
     expect(
       () => CitizenAppTransferDraft(
         destination: Uint8List(31),

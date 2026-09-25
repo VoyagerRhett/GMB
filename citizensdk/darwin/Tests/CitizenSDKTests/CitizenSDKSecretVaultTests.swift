@@ -3,6 +3,21 @@ import XCTest
 @testable import CitizenSDK
 
 final class CitizenSDKSecretVaultTests: XCTestCase {
+    func testPhysicalPresenceDoesNotGuessUnknownAliasesOrOtherWallets() throws {
+        // 调用生产归属判断；这里只提供系统属性的合成返回，不接触Keychain。
+        let first = Data("citizensdk_wallet_first".utf8), second = Data("citizensdk_wallet_second".utf8)
+        let known: [Data: UInt32] = [first: 0, second: UInt32.max]
+        XCTAssertFalse(try CitizenSDKSecretVault.walletKeyPresent(walletIndex: 0, known: known, tags: []))
+        XCTAssertFalse(try CitizenSDKSecretVault.walletKeyPresent(walletIndex: 0, known: known, tags: [second]))
+        XCTAssertTrue(try CitizenSDKSecretVault.walletKeyPresent(walletIndex: UInt32.max, known: known, tags: [second]))
+        XCTAssertTrue(try CitizenSDKSecretVault.walletKeyPresent(walletIndex: 0, known: known, tags: [first]))
+        XCTAssertThrowsError(try CitizenSDKSecretVault.walletKeyPresent(walletIndex: 0, known: known,
+            tags: [Data("citizensdk_wallet_unknown".utf8)]))
+        XCTAssertThrowsError(try CitizenSDKSecretVault.walletKeyPresent(walletIndex: 0, known: known,
+            tags: Array(repeating: first, count: 65537)))
+        XCTAssertFalse(try CitizenSDKSecretVault.walletKeyPresent(walletIndex: 0, known: known, tags: [Data("another-product".utf8)]))
+    }
+
     func testAcceptedOwnerCopiesExactDekThenCompletes() throws {
         let output = UnsafeMutableRawPointer.allocate(byteCount: 32, alignment: 16)
         defer { output.deallocate() }

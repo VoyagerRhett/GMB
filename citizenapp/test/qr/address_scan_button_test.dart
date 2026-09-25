@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
+import '../support/fake_citizen_sdk.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:citizenapp/qr/pages/qr_scan_page.dart';
@@ -9,8 +12,20 @@ import 'package:citizenapp/qr/widgets/address_scan_button.dart';
 /// 三处调用方(链上支付、多签转账、安全基金转账)都只经此组件扫码,所以这里钉住的
 /// 是全仓行为:只进 [QrScanMode.transfer](绝不进签名分支)、只回传 SS58、空结果不回调。
 void main() {
+  late TestCitizenSdkTransport transport;
+  late CitizenSdk sdk;
+  setUp(() async {
+    transport = TestCitizenSdkTransport({
+      'openQrCapture': (_) => ['capture-1', 42, 640, 480, 90],
+      'pauseQrCapture': (_) => [],
+      'resumeQrCapture': (_) => [],
+      'closeQrCapture': (_) => [],
+    });
+    sdk = await transport.open();
+  });
+  tearDown(() async { await sdk.close(); await transport.dispose(); });
   Widget host({required ValueChanged<String> onAddressScanned}) {
-    return MaterialApp(
+    return Provider<CitizenSdk>.value(value: sdk, child: MaterialApp(
       home: Scaffold(
         body: TextField(
           decoration: InputDecoration(
@@ -18,7 +33,7 @@ void main() {
           ),
         ),
       ),
-    );
+    ));
   }
 
   testWidgets('渲染为带扫码提示的按钮', (tester) async {
@@ -44,7 +59,7 @@ void main() {
     final navigatorKey = GlobalKey<NavigatorState>();
     final scanned = <String>[];
     await tester.pumpWidget(
-      MaterialApp(
+      Provider<CitizenSdk>.value(value: sdk, child: MaterialApp(
         navigatorKey: navigatorKey,
         home: Scaffold(
           body: TextField(
@@ -55,7 +70,7 @@ void main() {
             ),
           ),
         ),
-      ),
+      )),
     );
 
     await tester.tap(find.byType(IconButton));
@@ -79,7 +94,7 @@ void main() {
     final navigatorKey = GlobalKey<NavigatorState>();
     var callCount = 0;
     await tester.pumpWidget(
-      MaterialApp(
+      Provider<CitizenSdk>.value(value: sdk, child: MaterialApp(
         navigatorKey: navigatorKey,
         home: Scaffold(
           body: TextField(
@@ -90,7 +105,7 @@ void main() {
             ),
           ),
         ),
-      ),
+      )),
     );
 
     await tester.tap(find.byType(IconButton));

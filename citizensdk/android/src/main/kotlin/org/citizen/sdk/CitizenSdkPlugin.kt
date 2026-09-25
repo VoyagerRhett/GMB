@@ -65,17 +65,29 @@ class CitizenSdkPlugin :
             )
             return
         }
+        var envelope: CitizenSdkFlutterCodec.Request.Empty? = null
         try {
+            // 只解外壳并调用Core接纳，再解方法参数；参数拒绝也消耗这一准确序号。
+            envelope = CitizenSdkFlutterCodec.envelope(call.method, call.arguments)
+            envelope?.let(registry::acceptRequestSequence)
             registry.dispatch(CitizenSdkFlutterCodec.decode(call.method, call.arguments), result)
+        } catch (error: CitizenSdkException) {
+            result.error(
+                "citizensdk.${CitizenSdkFlutterCodec.errorName(error.code)}",
+                "CitizenSDK request admission failed",
+                CitizenSdkFlutterCodec.errorDetails(error.code, "CitizenSDK request admission failed",
+                    envelope?.sessionId, envelope?.requestSequence, call.method, error.stage),
+            )
         } catch (failure: CitizenSdkFlutterCodec.ContractFailure) {
+            registry.diagnoseRejected(envelope, CitizenSdkErrorCode.fromValue(failure.errorCode), failure.stage)
             result.error(
                 "citizensdk.${failure.stableName}",
                 failure.message,
                 CitizenSdkFlutterCodec.errorDetails(
                     CitizenSdkErrorCode.fromValue(failure.errorCode),
                     failure.message,
-                    failure.sessionId,
-                    failure.requestSequence,
+                    failure.sessionId ?: envelope?.sessionId,
+                    failure.requestSequence ?: envelope?.requestSequence,
                     call.method,
                     failure.stage,
                 ),

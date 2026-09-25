@@ -1,4 +1,5 @@
 #include "citizen_sdk_flutter_codec.hpp"
+#include "citizen_sdk/citizen_sdk.hpp"
 
 #include <algorithm>
 #include <array>
@@ -25,6 +26,7 @@ bool trim_space(uint32_t scalar) noexcept;
 const std::string &string(const Value &value, std::size_t minimum,
                           std::size_t maximum_utf16);
 citizensdk_account_id_t account(const Value &value);
+const Value::List &bounded_list(const Value &value, std::size_t maximum, std::size_t minimum);
 
 uint64_t u64_text(const Value &value) {
   const auto &text = string(value, 1, 20);
@@ -126,7 +128,11 @@ bool contains_non_whitespace(const std::string &text) {
 }
 void validate_profile(const Value &value) {
   if (null_value(value)) return;
-  const auto &profile = semantic_tuple(value, 6);
+  const auto &profile = semantic_tuple(value, 7);
+  const auto wallet_name = semantic_text(profile[6]); UnicodeInfo name_info;
+  require(inspect_utf8(wallet_name, &name_info) && name_info.scalars >= 1 && name_info.scalars <= 30 &&
+              !name_info.controls && !trim_space(name_info.first) && !trim_space(name_info.last),
+          CITIZENSDK_ERROR_INTEGRITY, "Wallet name is invalid");
   require(semantic_int(profile[0], UINT32_MAX) == 0,
           CITIZENSDK_ERROR_INTEGRITY, "Wallet index must be zero");
   const auto origin = semantic_text(profile[1]);
@@ -166,8 +172,8 @@ void validate_profile(const Value &value) {
 }
 
 void validate_wallet_state(const Value &value) {
-  const auto &state = semantic_tuple(value, 5); (void)u64_text(state[0]);
-  const auto initialization = integer(state[3]);
+  const auto &state = semantic_tuple(value, 7); (void)u64_text(state[0]);
+  const auto initialization = semantic_int(state[3], 2);
   const auto *cleanup = std::get_if<bool>(&state[4].data);
   require(initialization >= 0 && initialization <= 2 && cleanup != nullptr,
           CITIZENSDK_ERROR_INTEGRITY, "Wallet initialization flags are invalid");
@@ -175,13 +181,20 @@ void validate_wallet_state(const Value &value) {
   const auto *accounts = std::get_if<Value::List>(&state[2].data);
   require(accounts != nullptr && accounts->size() <= 3980,
           CITIZENSDK_ERROR_INTEGRITY, "Wallet state account collection is invalid");
+  const auto *diagnostics = std::get_if<Value::List>(&state[6].data);
+  require(diagnostics != nullptr && diagnostics->size() <= 1991,
+          CITIZENSDK_ERROR_INTEGRITY, "Wallet diagnostic collection is invalid");
+  require(((initialization == 1) == (!accounts->empty() || !diagnostics->empty())) && !(initialization == 0 && *cleanup),
+          CITIZENSDK_ERROR_INTEGRITY, "Wallet initialization disagrees with catalog");
   std::set<std::array<uint8_t, 32>> ids;
   std::set<int64_t> cold_indices;
+  std::set<int64_t> wallet_indices;
   std::set<std::array<uint8_t, 32>> hot_ids;
   for (std::size_t index = 0; index < accounts->size(); ++index) {
     const auto &fields = semantic_tuple((*accounts)[index], 8);
     const auto mode = semantic_text(fields[0]);
     const auto wallet_index = semantic_int(fields[1], UINT32_MAX);
+    wallet_indices.insert(wallet_index);
     const bool has_account_index = !null_value(fields[2]);
     if (has_account_index) (void)semantic_int(fields[2], 1989);
     const auto id = account(fields[3]); std::array<uint8_t, 32> key{};
@@ -205,8 +218,38 @@ void validate_wallet_state(const Value &value) {
               CITIZENSDK_ERROR_INTEGRITY, "Cold wallet state account indices are invalid");
     }
   }
+  // 诊断不是正常账户；只验证有界事实与同快照唯一归属，不重新解释非法模式。
+  for (const auto &raw : *diagnostics) {
+    const auto &fields = semantic_tuple(raw, 7);
+    const auto index = semantic_int(fields[0], UINT32_MAX);
+    const auto name = semantic_text(fields[1]); UnicodeInfo unicode;
+    const auto id = account(fields[2]); std::array<uint8_t, 32> key{};
+    std::copy(std::begin(id.bytes), std::end(id.bytes), key.begin());
+    const auto reason = semantic_int(fields[4], 3);
+    require(wallet_indices.insert(index).second && ids.insert(key).second &&
+            inspect_utf8(name, &unicode) && unicode.scalars >= 1 && unicode.scalars <= 30 &&
+            !unicode.controls && !trim_space(unicode.first) && !trim_space(unicode.last) &&
+            reason >= 1 && (null_value(fields[3]) || semantic_text(fields[3]).size() <= 128),
+            CITIZENSDK_ERROR_INTEGRITY, "Wallet diagnostic facts are inconsistent");
+    require(null_value(fields[5]) || semantic_text(fields[5]) == "hot" || semantic_text(fields[5]) == "cold",
+            CITIZENSDK_ERROR_INTEGRITY, "Diagnostic sign mode is invalid");
+    if (!null_value(fields[6])) {
+      const auto &targets = semantic_tuple(fields[6], 2);
+      const auto &accounts = bounded_list(targets[0], 1990, 1);
+      (void)semantic_bool(targets[1]);
+      std::optional<std::array<uint8_t, 32>> previous;
+      for (const auto &value : accounts) {
+        const auto id = account(value); std::array<uint8_t, 32> current{};
+        std::copy(std::begin(id.bytes), std::end(id.bytes), current.begin());
+        require(!previous || *previous < current, CITIZENSDK_ERROR_INTEGRITY, "Cleanup accounts are not uniquely ordered");
+        previous = current;
+      }
+    }
+  }
+  if (!null_value(state[5])) require(wallet_indices.count(semantic_int(state[5], UINT32_MAX)) == 1,
+      CITIZENSDK_ERROR_INTEGRITY, "Payment wallet is outside current catalog");
   if (!null_value(state[1])) {
-    const auto &profile = semantic_tuple(state[1], 6);
+    const auto &profile = semantic_tuple(state[1], 7);
     const auto *hot = std::get_if<Value::List>(&profile[5].data);
     std::set<std::array<uint8_t, 32>> profile_hot_ids;
     if (hot != nullptr) for (const auto &item : *hot) {
@@ -214,6 +257,15 @@ void validate_wallet_state(const Value &value) {
       std::array<uint8_t, 32> key{};
       std::copy(std::begin(id.bytes), std::end(id.bytes), key.begin());
       profile_hot_ids.insert(key);
+      const auto projected = std::find_if(accounts->begin(), accounts->end(), [&](const Value &candidate) {
+        const auto &record = semantic_tuple(candidate, 8);
+        return semantic_text(record[0]) == "hot" && same_id(account(record[3]), id);
+      });
+      require(projected != accounts->end(), CITIZENSDK_ERROR_INTEGRITY, "Missing hot account projection");
+      const auto &record = semantic_tuple(*projected, 8);
+      require(semantic_int(record[2], 1989) == semantic_int(fields[0], 1989) &&
+              semantic_text(record[4]) == semantic_text(fields[2]) && semantic_text(record[5]) == semantic_text(fields[3]) &&
+              u64_text(record[6]) == u64_text(fields[4]), CITIZENSDK_ERROR_INTEGRITY, "Hot account projection drifted");
     }
     require(hot != nullptr && profile_hot_ids == hot_ids,
             CITIZENSDK_ERROR_INTEGRITY, "Wallet state hot profile closure is inconsistent");
@@ -293,30 +345,102 @@ constexpr std::size_t kMaximumTransactionCallDataBytes = 1024 * 1024;
 constexpr std::size_t kMaximumExportedStateBytes = 256 * 1024;
 constexpr int kLengthPreservingString = 0x43535331;
 constexpr const char *kMethods[] = {
-    "open", "start", "stop", "close", "getCapabilities", "getFinalizedHead",
-    "getSyncStatus", "getBestHead", "getFinalizedBlockAt", "resolveFinalizedBlock",
-    "getBlockHeader", "getBlockBody", "getRuntimeContext", "getStorage", "getStorageBatch",
-    "getStorageKeysPaged", "callRuntimeApi",
-    "getSystemEvents", "exportState", "importState", "getGenesisHash",
-    "getAccountBalance", "getAccountBalances", "getAccountNonce", "getFeeSnapshot", "getWalletProfile", "viewAccountPrivateKey",
-    "getWalletState", "initializeWallet", "importColdAccountWithUi", "importColdAccountId", "importColdAccountSs58",
-    "reorderWalletAccountsWithoutDefaultChange", "renameAccount", "deleteAccount",
-    "createWallet", "importWallet", "addWalletAccounts", "setActiveWalletAccount",
-    "renameWalletAccount", "deleteWalletAccount", "deleteWallet",
-    "reconcileWalletCleanup", "signWalletPayload", "deriveApplicationKey", "beginSigning",
-    "consumeExternalSignature", "cancelSigning", "beginDefaultAccountChange",
-    "consumeDefaultAccountChange", "verifySignature", "prepareTransaction",
-    "cancelPreparedTransaction", "executePreparedTransaction",
-    "consumePreparedTransactionQrResponse", "cancelPreparedTransactionExecution",
-    "getTransactionHistory", "syncTransactionHistory",
-    "qrParse", "qrCreateSignRequest",
-    "qrConsumeSignResponse", "qrCancelSignRequest", "qrEncodeAccountId",
-    "qrDecodeLuminance", "qrEncode", "qrScan", "signQrRequest",
-    "respondCredential", "cancelCredential",
-    "qrEncodeDocument", "qrPrepareAccountAuthorization", "encodeSigningPayload",
+    "open",
+    "start",
+    "stop",
+    "close",
+    "getCapabilities",
+    "getFinalizedHead",
+    "getSyncStatus",
+    "getBestHead",
+    "getFinalizedBlockAt",
+    "resolveFinalizedBlock",
+    "getBlockHeader",
+    "getBlockBody",
+    "getRuntimeContext",
+    "getStorage",
+    "getStorageBatch",
+    "getStorageKeysPaged",
+    "callRuntimeApi",
+    "getSystemEvents",
+    "exportState",
+    "importState",
+    "getGenesisHash",
+    "getAccountBalance",
+    "getAccountBalances",
+    "getAccountNonce",
+    "getFeeSnapshot",
+    "getWalletState",
+    "inspectWallets",
+    "releaseWalletInspection",
+    "repairHotWallet",
+    "renameDiagnosticWallet",
+    "deleteDiagnosticWallet",
+    "validateWalletPassword",
+    "validateWalletMnemonic",
+    "walletWordSuggestions",
+    "prepareWalletCreation",
+    "copyRecoveryPhrase",
+    "commitWalletCreation",
+    "releasePreparedWallet",
+    "openPrivateKey",
+    "revealPrivateKey",
+    "closePrivateKey",
+    "cancelOperation",
+    "respondCredential",
+    "cancelCredential",
+    "addNextWalletAccount",
+    "signAndDeleteWallet",
+    "importColdAccountCode",
+    "importColdAccountId",
+    "importColdAccountSs58",
+    "reorderWalletAccountsWithoutDefaultChange",
+    "setActiveWallet",
+    "renameWallet",
+    "renameAccount",
+    "deleteAccount",
+    "importWallet",
+    "addWalletAccounts",
+    "setActiveWalletAccount",
+    "deleteWallet",
+    "reconcileWalletCleanup",
+    "signWalletPayload",
+    "deriveApplicationKey",
+    "beginSigning",
+    "consumeExternalSignature",
+    "cancelSigning",
+    "beginDefaultAccountChange",
+    "consumeDefaultAccountChange",
+    "verifySignature",
+    "encodeSigningPayload",
+    "qrEncodeDocument",
+    "qrPrepareAccountAuthorization",
+    "prepareTransaction",
+    "cancelPreparedTransaction",
+    "executePreparedTransaction",
+    "consumePreparedTransactionQrResponse",
+    "cancelPreparedTransactionExecution",
+    "getTransactionHistory",
+    "syncTransactionHistory",
+    "qrParse",
+    "qrCreateSignRequest",
     "qrValidateSignResponse",
+    "qrConsumeSignResponse",
+    "qrCancelSignRequest",
+    "qrEncodeAccountId",
+    "qrDecodeLuminance",
+    "qrEncode",
+    "reviewQrRequest",
+    "releaseQrReview",
+    "openQrCapture",
+    "closeQrCapture",
+    "pauseQrCapture",
+    "resumeQrCapture",
+    "setQrCaptureTorch",
+    "qrDecodeImage",
+    "signQrRequest",
 };
-static_assert(std::size(kMethods) == 67);
+static_assert(std::size(kMethods) == 94);
 
 [[noreturn]] void fail(citizensdk_error_code_t code, const char *message) {
   throw ContractFailure(code, message);
@@ -516,7 +640,12 @@ void debit_bytes(std::size_t count, std::size_t &remaining) {
   remaining -= count;
 }
 Value from_fl(FlValue *value, unsigned depth, std::size_t &remaining_nodes,
-              std::size_t &remaining_bytes) {
+              std::size_t &remaining_bytes, bool sensitive) {
+  // 逐叶标记：后续字段复制失败时，已取得的敏感叶也会随栈展开擦除。
+  auto owned = [sensitive](Value value) {
+    if (sensitive) value.mark_sensitive();
+    return value;
+  };
   require(value != nullptr && depth <= 32 && remaining_nodes > 0,
           CITIZENSDK_ERROR_INVALID_ARGUMENT,
           "Invalid or excessively nested tuple");
@@ -531,7 +660,7 @@ Value from_fl(FlValue *value, unsigned depth, std::size_t &remaining_nodes,
               "String is not valid UTF-8");
       const std::size_t length = std::strlen(text);
       debit_bytes(length, remaining_bytes);
-      return Value::string(std::string(text, length));
+      return owned(Value::string(std::string(text, length)));
     }
     case FL_VALUE_TYPE_CUSTOM: {
       require(fl_value_get_custom_type(value) == kLengthPreservingString,
@@ -540,7 +669,7 @@ Value from_fl(FlValue *value, unsigned depth, std::size_t &remaining_nodes,
       require(text != nullptr && valid_utf8(*text), CITIZENSDK_ERROR_INVALID_ARGUMENT,
               "String is not valid UTF-8");
       debit_bytes(text->size(), remaining_bytes);
-      return Value::string(*text);
+      return owned(Value::string(*text));
     }
     case FL_VALUE_TYPE_UINT8_LIST: {
       const auto count = fl_value_get_length(value);
@@ -548,7 +677,7 @@ Value from_fl(FlValue *value, unsigned depth, std::size_t &remaining_nodes,
               "Byte value exceeds 16 MiB");
       debit_bytes(count, remaining_bytes);
       const auto *bytes = fl_value_get_uint8_list(value);
-      return Value::bytes(count == 0 ? Value::Bytes{} : Value::Bytes(bytes, bytes + count));
+      return owned(Value::bytes(count == 0 ? Value::Bytes{} : Value::Bytes(bytes, bytes + count)));
     }
     case FL_VALUE_TYPE_LIST: {
       const auto count = fl_value_get_length(value);
@@ -558,7 +687,7 @@ Value from_fl(FlValue *value, unsigned depth, std::size_t &remaining_nodes,
       list.reserve(count);
       for (std::size_t i = 0; i < count; ++i) {
         list.push_back(from_fl(fl_value_get_list_value(value, i), depth + 1,
-                               remaining_nodes, remaining_bytes));
+                               remaining_nodes, remaining_bytes, sensitive));
       }
       return Value::list(std::move(list));
     }
@@ -726,7 +855,7 @@ FlStandardMethodCodec *new_method_codec() {
   g_object_unref(message_codec);
   return codec;
 }
-Value from_fl_value(FlValue *value) {
+Value from_fl_value(FlValue *value, bool sensitive) {
   // 总节点/总字节共享递归预算，先扣减再复制；保留 16 MiB payload 的固定 tuple 余量。
   // The largest valid request has 1,995 nodes. A 4,096-node budget rejects
   // exponentially nested or irrelevant input before copying it. The byte
@@ -734,7 +863,7 @@ Value from_fl_value(FlValue *value) {
   // tuple fields, while rejecting aggregate bulk values above that contract.
   std::size_t remaining_nodes = 4096;
   std::size_t remaining_bytes = kMaximumRequestCopiedBytes;
-  return from_fl(value, 0, remaining_nodes, remaining_bytes);
+  return from_fl(value, 0, remaining_nodes, remaining_bytes, sensitive);
 }
 FlValuePtr to_fl_value(const Value &value) {
   if (std::holds_alternative<std::monostate>(value.data)) return FlValuePtr(fl_value_new_null());
@@ -788,6 +917,20 @@ std::string decimal_u128(citizensdk_u128_t value) {
   return result;
 }
 
+std::optional<RequestEnvelope> decode_request_envelope(const std::string &name, FlValue *arguments) {
+  if (name == "open" || name == "verifySignature" || name == "encodeSigningPayload") return std::nullopt;
+  // 平台仅转换三个外壳字段；原子序号接纳在Core，不提前解码方法参数。
+  require(arguments != nullptr && fl_value_get_type(arguments) == FL_VALUE_TYPE_LIST &&
+              fl_value_get_length(arguments) >= 3, CITIZENSDK_ERROR_INVALID_ARGUMENT, "Invalid request envelope");
+  const auto version = from_fl_value(fl_value_get_list_value(arguments, 0));
+  const auto session = from_fl_value(fl_value_get_list_value(arguments, 1));
+  const auto sequence = from_fl_value(fl_value_get_list_value(arguments, 2));
+  require(integer(version) == kProtocolVersion, CITIZENSDK_ERROR_UNSUPPORTED, "Unsupported protocol version");
+  RequestEnvelope result{string(session, 1, 128), integer(sequence)};
+  require(result.sequence > 0, CITIZENSDK_ERROR_INVALID_ARGUMENT, "requestSequence must be positive");
+  return result;
+}
+
 DecodedRequest decode_request(const std::string &name, FlValue *arguments) {
   const auto found = std::find(std::begin(kMethods), std::end(kMethods), name);
   require(found != std::end(kMethods), CITIZENSDK_ERROR_UNSUPPORTED, "Unsupported method");
@@ -800,21 +943,17 @@ DecodedRequest decode_request(const std::string &name, FlValue *arguments) {
   const auto count = fl_value_get_length(arguments);
   require(count >= 1 && count <= 10, CITIZENSDK_ERROR_INVALID_ARGUMENT,
           "Invalid request tuple length");
-  Value root = from_fl_value(arguments);
-  const auto &fields = std::get<Value::List>(root.data);
-  struct CredentialInputGuard final {
-    Value::Bytes *bytes{};
-    ~CredentialInputGuard() {
-      if (bytes == nullptr) return;
-      volatile uint8_t *data = bytes->data();
-      for (std::size_t i = 0; i < bytes->size(); ++i) data[i] = 0;
-    }
-  } credential_guard;
-  if (result.method == Method::respond_credential) {
-    auto &owned_fields = std::get<Value::List>(root.data);
-    if (owned_fields.size() > 4)
-      credential_guard.bytes = std::get_if<Value::Bytes>(&owned_fields[4].data);
+  bool sensitive = false;
+  switch (result.method) {
+    case Method::respond_credential:
+    case Method::validate_wallet_password: case Method::validate_wallet_mnemonic:
+    case Method::wallet_word_suggestions: case Method::prepare_wallet_creation:
+    case Method::import_wallet: case Method::add_wallet_accounts:
+    case Method::add_next_wallet_account: sensitive = true; break;
+    default: break;
   }
+  Value root = from_fl_value(arguments, sensitive);
+  const auto &fields = std::get<Value::List>(root.data);
 
   require(integer(fields[0]) == kProtocolVersion, CITIZENSDK_ERROR_UNSUPPORTED,
           "Unsupported protocol version");
@@ -894,9 +1033,9 @@ DecodedRequest decode_request(const std::string &name, FlValue *arguments) {
       case Method::get_capabilities: case Method::get_finalized_head:
       case Method::get_sync_status: case Method::get_best_head:
       case Method::export_state: case Method::get_genesis_hash:
-      case Method::get_fee_snapshot: case Method::get_wallet_profile:
-      case Method::get_wallet_state:
-      case Method::import_wallet: case Method::delete_wallet:
+      case Method::get_fee_snapshot:
+      case Method::get_wallet_state: case Method::inspect_wallets:
+      case Method::sign_and_delete_wallet: case Method::delete_wallet:
       case Method::reconcile_wallet_cleanup:
         (void)list(root, 3); break;
       case Method::get_finalized_block_at: {
@@ -988,8 +1127,8 @@ DecodedRequest decode_request(const std::string &name, FlValue *arguments) {
         result.state_database = *database; break;
       }
       case Method::get_account_balance: case Method::get_account_nonce:
-      case Method::view_account_private_key:
-      case Method::set_active_wallet_account: case Method::delete_wallet_account:
+      case Method::open_private_key:
+      case Method::set_active_wallet_account:
       case Method::delete_account:
         (void)list(root, 4); result.account_id = account(fields[3]); break;
       case Method::get_account_balances: {
@@ -999,70 +1138,138 @@ DecodedRequest decode_request(const std::string &name, FlValue *arguments) {
           result.account_ids.push_back(account(item));
         break;
       }
-      case Method::create_wallet: {
-        (void)list(root, 4); const auto words = integer(fields[3]);
-        require(words == 12 || words == 18 || words == 24,
-                CITIZENSDK_ERROR_INVALID_ARGUMENT,
-                "wordCount must be 12, 18, or 24");
-        result.word_count = static_cast<uint32_t>(words); break;
+      case Method::validate_wallet_password:
+      case Method::validate_wallet_mnemonic:
+      case Method::wallet_word_suggestions: {
+        (void)list(root, result.method == Method::validate_wallet_mnemonic ? 5 : 4);
+        const auto &input = string(fields[3], 0, 1024);
+        require(input.size() <= 1024, CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                "Wallet input exceeds UTF-8 boundary");
+        if (result.method == Method::validate_wallet_password) result.password.emplace(input);
+        else result.mnemonic.emplace(input);
+        if (result.method == Method::validate_wallet_mnemonic) {
+          const auto words = integer(fields[4]);
+          require(words == 12 || words == 18 || words == 24,
+                  CITIZENSDK_ERROR_INVALID_ARGUMENT, "Invalid word count");
+          result.word_count = static_cast<uint32_t>(words);
+        }
+        break;
       }
-      case Method::initialize_wallet: {
-        (void)list(root, 9); const auto words = integer(fields[3]);
+      case Method::prepare_wallet_creation: {
+        (void)list(root, 5); const auto words = integer(fields[3]);
         require(words == 12 || words == 18 || words == 24,
-                CITIZENSDK_ERROR_INVALID_ARGUMENT,
-                "wordCount must be 12, 18, or 24");
+                CITIZENSDK_ERROR_INVALID_ARGUMENT, "Invalid word count");
         result.word_count = static_cast<uint32_t>(words);
-        for (std::size_t index = 4; index <= 8; ++index) {
-          auto text = string(fields[index], 1, 768); UnicodeInfo unicode;
-          (void)inspect_utf8(text, &unicode);
-          require(unicode.scalars <= 256 && !unicode.controls &&
-                      !trim_space(unicode.first) && !trim_space(unicode.last),
-                  CITIZENSDK_ERROR_INVALID_ARGUMENT,
-                  "wallet initialization text is invalid");
-          result.wallet_initialization_text.push_back(std::move(text));
+        const auto &password = string(fields[4], 0, 1024);
+        require(password.size() <= 1024, CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                "Wallet input exceeds UTF-8 boundary");
+        result.password.emplace(password); break;
+      }
+      case Method::import_wallet: case Method::add_wallet_accounts:
+      case Method::add_next_wallet_account: {
+        (void)list(root, result.method == Method::add_wallet_accounts ? 6 : 5);
+        const auto &mnemonic = string(fields[3], 0, 1024);
+        const auto &password = string(fields[4], 0, 1024);
+        require(mnemonic.size() <= 1024 && password.size() <= 1024,
+                CITIZENSDK_ERROR_INVALID_ARGUMENT, "Wallet input exceeds UTF-8 boundary");
+        result.mnemonic.emplace(mnemonic); result.password.emplace(password);
+        if (result.method == Method::add_wallet_accounts) {
+          std::set<uint32_t> unique;
+          for (const auto &item : bounded_list(fields[5], 1989)) {
+            const auto index = integer(item);
+            require(index >= 1 && index <= 1989 && unique.insert(static_cast<uint32_t>(index)).second,
+                    CITIZENSDK_ERROR_INVALID_ARGUMENT, "indices must be unique values in 1...1989");
+            result.indices.push_back(static_cast<uint32_t>(index));
+          }
         }
         break;
       }
-      case Method::import_cold_account_with_ui: {
-        (void)list(root, 4); auto text = string(fields[3], 1, 768); UnicodeInfo unicode;
-        (void)inspect_utf8(text, &unicode);
-        require(unicode.scalars <= 256 && !unicode.controls &&
-                    !trim_space(unicode.first) && !trim_space(unicode.last),
-                CITIZENSDK_ERROR_INVALID_ARGUMENT,
-                "wallet cold account text is invalid");
-        result.wallet_initialization_text.push_back(std::move(text));
-        break;
-      }
-      case Method::add_wallet_accounts: {
-        (void)list(root, 4); std::set<uint32_t> unique;
-        for (const auto &item : bounded_list(fields[3], 1989)) {
-          const auto index = integer(item);
-          require(index >= 1 && index <= 1989 &&
-                      unique.insert(static_cast<uint32_t>(index)).second,
-                  CITIZENSDK_ERROR_INVALID_ARGUMENT, "indices must be unique values in 1...1989");
-          result.indices.push_back(static_cast<uint32_t>(index));
+      // 资源是同实例不透明文本；只有操作取消使用规范十进制序列，不泄露Core句柄。
+      case Method::copy_recovery_phrase: case Method::commit_wallet_creation:
+      case Method::release_prepared_wallet: case Method::reveal_private_key:
+      case Method::close_private_key: case Method::cancel_operation:
+      case Method::sign_qr_request: case Method::release_qr_review:
+      case Method::release_wallet_inspection:
+      case Method::close_qr_capture: case Method::pause_qr_capture:
+      case Method::resume_qr_capture: case Method::set_qr_capture_torch: {
+        (void)list(root, result.method == Method::set_qr_capture_torch ? 5 : 4);
+        result.resource_id = string(fields[3], 1, 128);
+        require(std::all_of(result.resource_id.begin(), result.resource_id.end(), [](char c) {
+          return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                 (c >= '0' && c <= '9') || c == '_' || c == '-';
+        }), CITIZENSDK_ERROR_INVALID_ARGUMENT, "Invalid resource identity");
+        if (result.method == Method::cancel_operation)
+          require(request_u64(fields[3], "operationId must be canonical uint64") != 0,
+                  CITIZENSDK_ERROR_INVALID_ARGUMENT, "operationId must be nonzero");
+        if (result.method == Method::set_qr_capture_torch) {
+          const auto *torch = std::get_if<bool>(&fields[4].data);
+          require(torch != nullptr, CITIZENSDK_ERROR_INVALID_ARGUMENT, "Torch must be boolean");
+          result.torch = *torch;
         }
         break;
       }
-      case Method::rename_wallet_account: case Method::rename_account:
-      case Method::import_cold_account_id: {
-        (void)list(root, 5); result.account_id = account(fields[3]);
-        result.name = string(fields[4], 1, 128); UnicodeInfo unicode;
-        (void)inspect_utf8(result.name, &unicode);
-        require(unicode.scalars <= 30 && !unicode.controls &&
-                    !trim_space(unicode.first) && !trim_space(unicode.last),
-                CITIZENSDK_ERROR_INVALID_ARGUMENT,
-                "name must be trimmed 1...30 Unicode scalars without controls");
+      case Method::open_qr_capture: case Method::qr_decode_image: {
+        (void)list(root, result.method == Method::qr_decode_image ? 5 : 4);
+        if (result.method == Method::qr_decode_image) {
+          const auto *image = std::get_if<Value::Bytes>(&fields[3].data);
+          require(image != nullptr && !image->empty() && image->size() <= 16U * 1024U * 1024U,
+                  CITIZENSDK_ERROR_INVALID_ARGUMENT, "Encoded image exceeds boundary");
+          result.payload = *image;
+        }
+        const auto purpose = integer(fields[result.method == Method::qr_decode_image ? 4 : 3]);
+        require(purpose >= 1 && purpose <= 8, CITIZENSDK_ERROR_INVALID_ARGUMENT, "Invalid scan purpose");
+        result.qr_purpose = static_cast<uint32_t>(purpose); break;
+      }
+      case Method::repair_hot_wallet: case Method::rename_diagnostic_wallet: case Method::delete_diagnostic_wallet: {
+        (void)list(root, result.method == Method::rename_diagnostic_wallet ? 6 : 5);
+        result.resource_id = string(fields[3], 1, 128);
+        require(std::all_of(result.resource_id.begin(), result.resource_id.end(), [](char c) {
+          return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                 (c >= '0' && c <= '9') || c == '_' || c == '-';
+        }), CITIZENSDK_ERROR_INVALID_ARGUMENT, "Invalid inspection identity");
+        const auto index = integer(fields[4]);
+        require(index >= 0 && static_cast<uint64_t>(index) <= UINT32_MAX,
+                CITIZENSDK_ERROR_INVALID_ARGUMENT, "Wallet index is invalid");
+        result.wallet_index = static_cast<uint32_t>(index);
+        if (result.method == Method::rename_diagnostic_wallet) {
+          result.name = string(fields[5], 1, 120); UnicodeInfo unicode;
+          require(inspect_utf8(result.name, &unicode) && unicode.scalars <= 30 &&
+                  !unicode.controls && !trim_space(unicode.first) && !trim_space(unicode.last),
+                  CITIZENSDK_ERROR_INVALID_ARGUMENT, "Wallet name is invalid");
+        }
         break;
       }
-      case Method::import_cold_account_ss58: {
+      case Method::set_active_wallet: case Method::rename_wallet: {
+        (void)list(root, result.method == Method::rename_wallet ? 6 : 5);
+        result.wallet_revision = request_u64(fields[3], "Wallet revision is outside canonical uint64");
+        const auto index = integer(fields[4]);
+        require(index >= 0 && static_cast<uint64_t>(index) <= UINT32_MAX, CITIZENSDK_ERROR_INVALID_ARGUMENT, "Wallet index is outside uint32");
+        result.wallet_index = static_cast<uint32_t>(index);
+        if (result.method == Method::rename_wallet) {
+          result.name = string(fields[5], 1, 120); UnicodeInfo unicode;
+          require(inspect_utf8(result.name, &unicode) && unicode.scalars <= 30 &&
+                  !unicode.controls && !trim_space(unicode.first) && !trim_space(unicode.last),
+                  CITIZENSDK_ERROR_INVALID_ARGUMENT, "Wallet name is invalid");
+        }
+        break;
+      }
+      case Method::rename_account: case Method::import_cold_account_id:
+      case Method::import_cold_account_ss58: case Method::import_cold_account_code: {
         (void)list(root, 5);
-        result.qr_text = string(fields[3], 1, 64);
-        result.name = string(fields[4], 1, 128); UnicodeInfo unicode;
-        require(inspect_utf8(result.name, &unicode) && unicode.scalars <= 30 &&
-                    !unicode.controls && !trim_space(unicode.first) && !trim_space(unicode.last),
-                CITIZENSDK_ERROR_INVALID_ARGUMENT,
-                "name must be trimmed 1...30 Unicode scalars without controls");
+        if (result.method == Method::import_cold_account_ss58)
+          result.qr_text = string(fields[3], 1, 64);
+        else if (result.method == Method::import_cold_account_code) {
+          result.qr_text = string(fields[3], 1, 2331);
+          require(result.qr_text.size() <= 2331, CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                  "QR text exceeds UTF-8 boundary");
+        } else result.account_id = account(fields[3]);
+        result.name = string(fields[4], result.method == Method::rename_account ? 1 : 0, 128);
+        if (!result.name.empty()) {
+          UnicodeInfo unicode;
+          require(inspect_utf8(result.name, &unicode) && unicode.scalars <= 30 &&
+                      !unicode.controls && !trim_space(unicode.first) && !trim_space(unicode.last),
+                  CITIZENSDK_ERROR_INVALID_ARGUMENT, "Invalid account name");
+        }
         break;
       }
       case Method::reorder_wallet_accounts_without_default_change: {
@@ -1213,8 +1420,7 @@ DecodedRequest decode_request(const std::string &name, FlValue *arguments) {
       }
       case Method::sync_transaction_history:
         (void)list(root, 3); break;
-      case Method::qr_scan: (void)list(root, 3); break;
-      case Method::qr_parse: case Method::sign_qr_request:
+      case Method::qr_parse: case Method::review_qr_request:
       case Method::qr_consume_sign_response: {
         (void)list(root, 4); result.qr_text = string(fields[3], 1, 2331);
         require(result.qr_text.size() <= 2331, CITIZENSDK_ERROR_INVALID_ARGUMENT,
@@ -1297,6 +1503,26 @@ Value response(const std::string &session, int64_t sequence, Value value) {
 }
 Value event(const std::string &session, int64_t sequence,
             const std::string &type, Value payload) {
+  const bool capture = type == "qrCaptureResult" || type == "qrCaptureError" ||
+      type == "qrCapturePreview" || type == "qrCaptureClosed";
+  if (capture) {
+    const auto &fields = semantic_tuple(payload, type == "qrCaptureClosed" ? 1 :
+        type == "qrCaptureResult" ? 3 : 4);
+    validate_public_value(Method::open_private_key, Value::list({fields[0]}));
+    if (type == "qrCapturePreview") {
+      validate_public_value(Method::open_qr_capture, Value::list({
+          fields[0], Value::integer(0), fields[1], fields[2], fields[3]}));
+    } else if (type == "qrCaptureResult") {
+      require(semantic_int(fields[1], 8) > 0, CITIZENSDK_ERROR_INTEGRITY, "采集用途无效");
+      // 文档是Core输出，绑定只检查有界UTF-8；不在此再解析QR_V1。
+      validate_public_value(Method::qr_parse, Value::list({fields[2]}));
+    } else if (type == "qrCaptureError") {
+      const auto code = semantic_int(fields[1], 22), stage = semantic_int(fields[3], 8);
+      require(code > 0 && stage > 0 && semantic_text(fields[2]) == error_name(static_cast<citizensdk_error_code_t>(code)),
+          CITIZENSDK_ERROR_INTEGRITY, "采集错误投影不一致");
+    }
+  }
+  if (type == "privateKeyClosed") validate_public_value(Method::open_private_key, payload);
   if (type == "credentialRequest" || type == "credentialCancelled") {
     const auto &fields = list(payload, type == "credentialRequest" ? 3 : 1);
     require(u64_text(fields[0]) != 0, CITIZENSDK_ERROR_INTEGRITY, "Invalid credential identity");
@@ -1313,10 +1539,10 @@ Value event(const std::string &session, int64_t sequence,
     require(semantic_block(items[0]).finalized, CITIZENSDK_ERROR_INTEGRITY,
             "Finalized event must carry one finalized block");
   }
-  require(sequence > 0 && (type == "historyChanged" || type == "walletChanged" || type == "lifecycleChanged" ||
+  require(sequence > 0 && (capture || type == "historyChanged" || type == "walletChanged" || type == "lifecycleChanged" ||
                           type == "capabilitiesChanged" ||
                           type == "finalizedBlockChanged" || type == "credentialRequest" ||
-                          type == "credentialCancelled"),
+                          type == "credentialCancelled" || type == "privateKeyClosed"),
           CITIZENSDK_ERROR_INTEGRITY, "Invalid event envelope");
   (void)response(session, sequence, payload);
   return tuple({Value::integer(kProtocolVersion), Value::string(session), Value::integer(sequence),
@@ -1327,8 +1553,8 @@ Value error_details(citizensdk_error_code_t code, const std::string &message,
                     const std::string &method, citizensdk_failure_stage_t stage) {
   if (stage == 0) stage = flutter_default_failure_stage(code);
   bool known_method = false;
-  for (std::size_t index = 0; index <= static_cast<std::size_t>(Method::encode_signing_payload); ++index)
-    known_method = known_method || method == method_name(static_cast<Method>(index));
+  // 错误也遍历完整唯一方法表，不能按某个枚举位置截断后续QR/资源方法。
+  for (const auto *candidate : kMethods) known_method = known_method || method == candidate;
   require(code >= 1 && code <= 22 && stage >= 1 && stage <= 8 && known_method &&
               (!sequence || *sequence > 0) && valid_utf8(message),
           CITIZENSDK_ERROR_INTEGRITY, "Invalid error envelope");
@@ -1443,119 +1669,48 @@ Value execution(const citizensdk_execution_info_t &value) {
                 module ? Value::integer(value.error_index) : Value::null()});
 }
 
-Value profile(citizensdk_result_handle_t result) {
-  auto info = prepared<citizensdk_wallet_profile_info_t>();
-  check_code(citizensdk_result_get_wallet_profile(result, &info)); check_abi(info);
-  require(info.present <= 1, CITIZENSDK_ERROR_INTEGRITY,
-          "Core wallet profile presence is invalid");
-  if (info.present == 0) return Value::null();
-  require(info.account_count <= 1990 && info.wallet_index == 0 &&
-              (info.origin == CITIZENSDK_WALLET_ORIGIN_CREATED ||
-               info.origin == CITIZENSDK_WALLET_ORIGIN_IMPORTED),
-          CITIZENSDK_ERROR_INTEGRITY, "Core wallet profile descriptor is invalid");
-  uint32_t count = 0;
-  check_code(citizensdk_result_get_wallet_account_count(result, &count));
-  require(count == info.account_count && count <= 1990,
-          CITIZENSDK_ERROR_INTEGRITY, "Core wallet account count drifted");
-  Value::List accounts; accounts.reserve(count);
-  for (uint32_t index = 0; index < count; ++index) {
-    auto account_info = prepared<citizensdk_wallet_account_info_t>();
-    uint64_t ss58_required = 0, name_required = 0;
-    check_code(citizensdk_result_get_wallet_account(
-        result, index, &account_info, nullptr, 0, &ss58_required,
-        nullptr, 0, &name_required));
-    check_abi(account_info);
-    Value::Bytes ss58(copy_size(ss58_required)), name(copy_size(name_required));
-    uint64_t ss58_confirmed = ss58_required, name_confirmed = name_required;
-    check_code(citizensdk_result_get_wallet_account(
-        result, index, &account_info, ss58.empty() ? nullptr : ss58.data(),
-        ss58_required, &ss58_confirmed, name.empty() ? nullptr : name.data(),
-        name_required, &name_confirmed));
-    require(ss58_confirmed == ss58_required && name_confirmed == name_required &&
-                account_info.index <= 1989,
-            CITIZENSDK_ERROR_INTEGRITY, "Core wallet account changed during copy");
-    const bool active = flag(account_info.is_active);
-    accounts.push_back(tuple({Value::integer(account_info.index), hex(account_info.account_id.bytes),
-        Value::string(copied_text(ss58)),
-        Value::string(name.empty() ? "" : copied_text(name)),
-        Value::string(std::to_string(account_info.created_at_millis)), Value::boolean(active)}));
-  }
-  return tuple({Value::integer(info.wallet_index),
-      Value::string(info.origin == CITIZENSDK_WALLET_ORIGIN_CREATED ? "created" : "imported"),
-      Value::string(std::to_string(info.created_at_millis)), hex(info.master_account_id.bytes),
-      hex(info.active_account_id.bytes), Value::list(std::move(accounts))});
-}
+// 同一Core结果有界复制独立名称，不另查目录或使用账户0标签。
 
+Value public_profile(const std::optional<citizen_sdk::WalletProfile> &profile) {
+  if (!profile) return Value::null();
+  Value::List accounts; accounts.reserve(profile->accounts.size());
+  for (const auto &account : profile->accounts)
+    accounts.push_back(tuple({Value::integer(account.index), hex(account.account_id.bytes.data()),
+      Value::string(account.ss58_address), Value::string(account.name),
+      Value::string(std::to_string(account.created_at_millis)), Value::boolean(account.is_active)}));
+  return tuple({Value::integer(profile->wallet_index),
+      Value::string(profile->origin == CITIZENSDK_WALLET_ORIGIN_CREATED ? "created" : "imported"),
+      Value::string(std::to_string(profile->created_at_millis)), hex(profile->master_account_id.bytes.data()),
+      hex(profile->active_account_id.bytes.data()), Value::list(std::move(accounts)), Value::string(profile->wallet_name)});
+}
+Value profile(citizensdk_result_handle_t result) {
+  return public_profile(citizen_sdk::detail::read_wallet_profile(result));
+}
 Value wallet_state(citizensdk_result_handle_t result) {
-  auto state = prepared<citizensdk_wallet_state_info_t>();
-  auto profile_info = prepared<citizensdk_wallet_profile_info_t>();
-  check_code(citizensdk_result_get_wallet_state(result, &state)); check_abi(state);
-  check_code(citizensdk_result_get_wallet_profile(result, &profile_info)); check_abi(profile_info);
-  require(state.account_count <= 3980 && profile_info.account_count <= 1990 &&
-              state.has_default_account <= 1 &&
-              ((state.account_count == 0) == (state.has_default_account == 0)),
-          CITIZENSDK_ERROR_INTEGRITY, "Core wallet state descriptor is invalid");
-  Value::List accounts; accounts.reserve(state.account_count);
-  Value::List hot_accounts; hot_accounts.reserve(profile_info.account_count);
-  for (uint32_t index = 0; index < state.account_count; ++index) {
-    auto info = prepared<citizensdk_wallet_state_account_info_t>();
-    uint64_t ss58_required = 0, name_required = 0;
-    check_code(citizensdk_result_get_wallet_state_account(
-        result, index, &info, nullptr, 0, &ss58_required, nullptr, 0, &name_required));
-    check_abi(info);
-    Value::Bytes ss58(copy_size(ss58_required)), name(copy_size(name_required));
-    uint64_t ss58_confirmed = ss58_required, name_confirmed = name_required;
-    check_code(citizensdk_result_get_wallet_state_account(
-        result, index, &info, ss58.empty() ? nullptr : ss58.data(), ss58_required,
-        &ss58_confirmed, name.empty() ? nullptr : name.data(), name_required, &name_confirmed));
-    require(ss58_confirmed == ss58_required && name_confirmed == name_required &&
-                info.has_account_index <= 1 && info.is_default == (index == 0 ? 1U : 0U),
-            CITIZENSDK_ERROR_INTEGRITY, "Core wallet state account changed during copy");
-    require(index != 0 || state.has_default_account == 0 ||
-                std::equal(std::begin(info.account_id.bytes), std::end(info.account_id.bytes),
-                           std::begin(state.default_account_id.bytes)),
-            CITIZENSDK_ERROR_INTEGRITY, "Core wallet state default account drifted");
-    const auto ss58_text = copied_text(ss58), name_text = copied_text(name);
-    const bool hot = info.sign_mode == CITIZENSDK_WALLET_SIGN_HOT;
-    require((hot && info.wallet_index == 0 && info.has_account_index == 1) ||
-                (info.sign_mode == CITIZENSDK_WALLET_SIGN_COLD && info.wallet_index > 0 &&
-                 info.has_account_index == 0),
-            CITIZENSDK_ERROR_INTEGRITY, "Core wallet state signing mode is invalid");
-    if (hot) {
-      bool active = false;
-      if (profile_info.present != 0)
-        active = std::equal(std::begin(info.account_id.bytes), std::end(info.account_id.bytes),
-                            std::begin(profile_info.active_account_id.bytes));
-      hot_accounts.push_back(tuple({Value::integer(info.account_index), hex(info.account_id.bytes),
-          Value::string(ss58_text), Value::string(name_text),
-          Value::string(std::to_string(info.created_at_millis)), Value::boolean(active)}));
+  const auto state = citizen_sdk::detail::read_wallet_state(result);
+  Value::List accounts; accounts.reserve(state.accounts.size());
+  for (const auto &account : state.accounts)
+    accounts.push_back(tuple({Value::string(account.sign_mode == CITIZENSDK_WALLET_SIGN_HOT ? "hot" : "cold"),
+      Value::integer(account.wallet_index), account.account_index ? Value::integer(*account.account_index) : Value::null(),
+      hex(account.account_id.bytes.data()), Value::string(account.ss58_address), Value::string(account.name),
+      Value::string(std::to_string(account.created_at_millis)), Value::boolean(account.is_default)}));
+  Value::List diagnostics; diagnostics.reserve(state.diagnostics.size());
+  for (const auto &record : state.diagnostics) {
+    Value targets = Value::null();
+    if (record.cleanup_targets) {
+      Value::List ids; ids.reserve(record.cleanup_targets->account_ids.size());
+      for (const auto &account : record.cleanup_targets->account_ids) ids.push_back(hex(account.bytes.data()));
+      targets = tuple({Value::list(std::move(ids)), Value::boolean(record.cleanup_targets->delete_wallet_wide_key)});
     }
-    accounts.push_back(tuple({Value::string(hot ? "hot" : "cold"),
-        Value::integer(info.wallet_index),
-        hot ? Value::integer(info.account_index) : Value::null(), hex(info.account_id.bytes),
-        Value::string(ss58_text), Value::string(name_text),
-        Value::string(std::to_string(info.created_at_millis)), Value::boolean(index == 0)}));
+    diagnostics.push_back(tuple({Value::integer(record.wallet_index), Value::string(record.wallet_name),
+      hex(record.account_id.bytes.data()), record.ss58_address ? Value::string(*record.ss58_address) : Value::null(),
+      Value::integer(record.diagnostic_reason),
+      record.sign_mode ? Value::string(*record.sign_mode == CITIZENSDK_WALLET_SIGN_HOT ? "hot" : "cold") : Value::null(),
+      std::move(targets)}));
   }
-  Value profile_value = Value::null();
-  if (profile_info.present != 0) {
-    require(profile_info.present == 1 && profile_info.wallet_index == 0 &&
-                (profile_info.origin == CITIZENSDK_WALLET_ORIGIN_CREATED ||
-                 profile_info.origin == CITIZENSDK_WALLET_ORIGIN_IMPORTED) &&
-                hot_accounts.size() == profile_info.account_count,
-            CITIZENSDK_ERROR_INTEGRITY, "Core wallet state hot profile is invalid");
-    profile_value = tuple({Value::integer(profile_info.wallet_index),
-        Value::string(profile_info.origin == CITIZENSDK_WALLET_ORIGIN_CREATED ? "created" : "imported"),
-        Value::string(std::to_string(profile_info.created_at_millis)), hex(profile_info.master_account_id.bytes),
-        hex(profile_info.active_account_id.bytes), Value::list(std::move(hot_accounts))});
-  }
-  uint32_t initialization = 0;
-  uint8_t cleanup = 0;
-  check_code(citizensdk_wallet_state_get_initialization(result, &initialization, &cleanup));
-  require(initialization <= 2 && cleanup <= 1 &&
-          ((initialization == 1) == !accounts.empty()) && !(initialization == 0 && cleanup != 0),
-          CITIZENSDK_ERROR_INTEGRITY, "Core wallet initialization flags disagree with catalog");
-  return tuple({Value::string(std::to_string(state.revision)), std::move(profile_value),
-                Value::list(std::move(accounts)), Value::integer(initialization), Value::boolean(cleanup != 0)});
+  return tuple({Value::string(std::to_string(state.revision)), public_profile(state.hot_profile),
+      Value::list(std::move(accounts)), Value::integer(state.initialization_state), Value::boolean(state.cleanup_pending),
+      state.active_wallet_index ? Value::integer(*state.active_wallet_index) : Value::null(), Value::list(std::move(diagnostics))});
 }
 
 Value balance(const citizensdk_account_balance_info_t &value) {
@@ -1720,70 +1875,20 @@ Value copy_exported_state(citizensdk_result_handle_t result) {
 }
 
 Value copy_signing_outcome(citizensdk_result_handle_t result) {
-  auto info = prepared<citizensdk_signing_outcome_info_t>();
-  uint64_t signature_required = 0, session_required = 0, request_required = 0;
-  check_code(citizensdk_result_get_signing_outcome(
-      result, &info, nullptr, 0, &signature_required, nullptr, 0,
-      &session_required, nullptr, 0, &request_required));
-  check_abi(info);
-  require(signature_required <= 64 && session_required <= 128 && request_required <= 2331,
-          CITIZENSDK_ERROR_INTEGRITY, "Core signing outcome exceeds its limits");
-  Value::Bytes signature(copy_size(signature_required)), session(copy_size(session_required)),
-               request(copy_size(request_required));
-  uint64_t signature_confirmed = signature_required, session_confirmed = session_required,
-           request_confirmed = request_required;
-  check_code(citizensdk_result_get_signing_outcome(
-      result, &info, signature.empty() ? nullptr : signature.data(), signature.size(),
-      &signature_confirmed, session.empty() ? nullptr : session.data(), session.size(),
-      &session_confirmed, request.empty() ? nullptr : request.data(), request.size(),
-      &request_confirmed));
-  require(signature_confirmed == signature_required && session_confirmed == session_required &&
-              request_confirmed == request_required,
-          CITIZENSDK_ERROR_INTEGRITY, "Core signing outcome changed during copy");
-  if (info.status == CITIZENSDK_SIGNING_COMPLETED) {
-    require(signature.size() == 64 && session.empty() && request.empty(),
-            CITIZENSDK_ERROR_INTEGRITY, "Core completed signing outcome is inconsistent");
-    return tuple({Value::string("completed"), hex(info.account_id.bytes), hex(info.payload_hash),
-                  Value::bytes(std::move(signature)), Value::null(), Value::null(), Value::null()});
-  }
-  require(info.status == CITIZENSDK_SIGNING_EXTERNAL_PENDING && signature.empty() &&
-              session.size() >= 16 && !request.empty() &&
-              info.transport == CITIZENSDK_EXTERNAL_SIGNER_QR_V1,
-          CITIZENSDK_ERROR_INTEGRITY, "Core pending signing outcome is inconsistent");
-  return tuple({Value::string("externalPending"), hex(info.account_id.bytes), hex(info.payload_hash),
-                Value::null(), Value::string(std::to_string(info.expires_at)),
-                Value::string(copied_text(session)), Value::string(copied_text(request))});
+  const auto value = citizen_sdk::detail::read_signing(result);
+  if (value.status == CITIZENSDK_SIGNING_COMPLETED)
+    return tuple({Value::string("completed"), hex(value.account_id.bytes.data()), hex(value.payload_hash.data()),
+      Value::bytes(Value::Bytes(value.signature->begin(), value.signature->end())), Value::null(), Value::null(), Value::null()});
+  return tuple({Value::string("externalPending"), hex(value.account_id.bytes.data()), hex(value.payload_hash.data()),
+    Value::null(), Value::string(std::to_string(value.expires_at)), Value::string(value.session_id), Value::string(value.transport_request)});
 }
-
 Value copy_default_account_change(citizensdk_result_handle_t result) {
-  auto info = prepared<citizensdk_default_account_change_info_t>();
-  uint64_t session_required = 0, request_required = 0;
-  check_code(citizensdk_result_get_default_account_change(
-      result, &info, nullptr, 0, &session_required, nullptr, 0, &request_required));
-  check_abi(info);
-  require(session_required <= 128 && request_required <= 2331,
-          CITIZENSDK_ERROR_INTEGRITY, "Core default-account change exceeds its limits");
-  Value::Bytes session(copy_size(session_required)), request(copy_size(request_required));
-  uint64_t session_confirmed = session_required, request_confirmed = request_required;
-  check_code(citizensdk_result_get_default_account_change(
-      result, &info, session.empty() ? nullptr : session.data(), session.size(),
-      &session_confirmed, request.empty() ? nullptr : request.data(), request.size(),
-      &request_confirmed));
-  require(session_confirmed == session_required && request_confirmed == request_required,
-          CITIZENSDK_ERROR_INTEGRITY, "Core default-account change changed during copy");
-  if (info.status == CITIZENSDK_SIGNING_COMPLETED) {
-    require(session.empty() && request.empty(), CITIZENSDK_ERROR_INTEGRITY,
-            "Core completed default-account change is inconsistent");
-    return tuple({Value::string("completed"), hex(info.current_default_account_id.bytes),
-                  hex(info.payload_hash), Value::string(std::to_string(info.committed_revision)),
-                  Value::null(), Value::null(), Value::null()});
-  }
-  require(info.status == CITIZENSDK_SIGNING_EXTERNAL_PENDING && session.size() >= 16 &&
-              !request.empty() && info.transport == CITIZENSDK_EXTERNAL_SIGNER_QR_V1,
-          CITIZENSDK_ERROR_INTEGRITY, "Core pending default-account change is inconsistent");
-  return tuple({Value::string("externalPending"), hex(info.current_default_account_id.bytes),
-                hex(info.payload_hash), Value::null(), Value::string(std::to_string(info.expires_at)),
-                Value::string(copied_text(session)), Value::string(copied_text(request))});
+  const auto value = citizen_sdk::detail::read_default_change(result);
+  if (value.status == CITIZENSDK_SIGNING_COMPLETED)
+    return tuple({Value::string("completed"), hex(value.current_default_account_id.bytes.data()), hex(value.payload_hash.data()),
+      Value::string(std::to_string(value.committed_revision)), Value::null(), Value::null(), Value::null()});
+  return tuple({Value::string("externalPending"), hex(value.current_default_account_id.bytes.data()), hex(value.payload_hash.data()),
+    Value::null(), Value::string(std::to_string(value.expires_at)), Value::string(value.session_id), Value::string(value.transport_request)});
 }
 
 Value copy_prepared_transaction(citizensdk_result_handle_t result) {
@@ -2018,20 +2123,20 @@ Value copy_public_result(Method method, citizensdk_result_handle_t result) {
     case Method::get_fee_snapshot:
       (void)inspect_result(result, CITIZENSDK_RESULT_FEE_SNAPSHOT);
       return checked(tuple({copy_fee(result)}));
-    case Method::get_wallet_profile: case Method::create_wallet: case Method::import_wallet:
+    case Method::commit_wallet_creation: case Method::add_next_wallet_account: case Method::import_wallet:
     case Method::add_wallet_accounts: case Method::set_active_wallet_account:
-    case Method::rename_wallet_account:
       (void)inspect_result(result, CITIZENSDK_RESULT_WALLET_PROFILE);
       return checked(tuple({profile(result)}));
-    case Method::get_wallet_state: case Method::initialize_wallet: case Method::import_cold_account_with_ui: case Method::import_cold_account_id:
+    case Method::repair_hot_wallet: case Method::rename_diagnostic_wallet: case Method::delete_diagnostic_wallet:
+    case Method::get_wallet_state: case Method::import_cold_account_code: case Method::import_cold_account_id:
     case Method::import_cold_account_ss58:
     case Method::reorder_wallet_accounts_without_default_change:
+    case Method::set_active_wallet: case Method::rename_wallet:
     case Method::rename_account: case Method::delete_account:
       (void)inspect_result(result, CITIZENSDK_RESULT_WALLET_STATE);
       return checked(tuple({wallet_state(result)}));
-    // The public session gate chains these Core UNIT mutations to one
-    // get_wallet_profile request before replying to Dart.
-    case Method::delete_wallet_account: case Method::delete_wallet:
+    // 删除只交付真实空终态；仅reconcile在同一路由读取收敛后的目录事实。
+    case Method::sign_and_delete_wallet: case Method::delete_wallet:
     case Method::reconcile_wallet_cleanup:
       (void)inspect_result(result, CITIZENSDK_RESULT_EMPTY);
       return Value::list({});
@@ -2062,19 +2167,37 @@ Value copy_public_result(Method method, citizensdk_result_handle_t result) {
     case Method::get_transaction_history: case Method::sync_transaction_history:
       (void)inspect_result(result, CITIZENSDK_RESULT_TRANSACTION_HISTORY_PAGE);
       return checked(tuple({copy_history(result)}));
-    case Method::view_account_private_key:
+    case Method::open_private_key:
     case Method::cancel_prepared_transaction:
     case Method::cancel_prepared_transaction_execution:
     case Method::cancel_signing:
     case Method::verify_signature:
     case Method::open: case Method::close: case Method::get_capabilities: case Method::get_genesis_hash:
     case Method::qr_parse: case Method::qr_create_sign_request:
-    case Method::qr_scan: case Method::sign_qr_request:
+    case Method::sign_qr_request:
     case Method::qr_validate_sign_response: case Method::qr_consume_sign_response: case Method::qr_cancel_sign_request:
     case Method::qr_encode_account_id:
     case Method::qr_decode_luminance: case Method::qr_encode:
     case Method::respond_credential: case Method::cancel_credential:
     case Method::qr_encode_document: case Method::qr_prepare_account_authorization: case Method::encode_signing_payload:
+    case Method::validate_wallet_password:
+    case Method::validate_wallet_mnemonic:
+    case Method::wallet_word_suggestions:
+    case Method::prepare_wallet_creation:
+    case Method::copy_recovery_phrase:
+    case Method::release_prepared_wallet:
+    case Method::reveal_private_key:
+    case Method::close_private_key:
+    case Method::cancel_operation:
+    case Method::review_qr_request:
+    case Method::release_qr_review:
+    case Method::inspect_wallets: case Method::release_wallet_inspection:
+    case Method::open_qr_capture:
+    case Method::close_qr_capture:
+    case Method::pause_qr_capture:
+    case Method::resume_qr_capture:
+    case Method::set_qr_capture_torch:
+    case Method::qr_decode_image:
       fail(CITIZENSDK_ERROR_INVALID_STATE, "This method has no borrowed Core result");
   }
   fail(CITIZENSDK_ERROR_UNSUPPORTED, "Unsupported result method");
@@ -2092,6 +2215,95 @@ void validate_account_balances(const DecodedRequest &request, const Value &value
 }
 
 void validate_public_value(Method method, const Value &value) {
+  try {
+  // 与Dart相同的不透明资源文本；是否归属当前实例由资源表裁决。
+  auto resource = [](const Value &id) {
+    const auto &text = string(id, 1, 128);
+    require(std::all_of(text.begin(), text.end(), [](char c) {
+      return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+             (c >= '0' && c <= '9') || c == '_' || c == '-';
+    }), CITIZENSDK_ERROR_INTEGRITY, "Invalid resource identity");
+  };
+  switch (method) {
+    case Method::delete_wallet: case Method::sign_and_delete_wallet:
+    case Method::release_prepared_wallet: case Method::close_private_key:
+    case Method::release_wallet_inspection:
+    case Method::release_qr_review: case Method::close_qr_capture:
+    case Method::pause_qr_capture: case Method::resume_qr_capture:
+    case Method::set_qr_capture_torch:
+      (void)semantic_tuple(value, 0); return;
+    case Method::inspect_wallets: {
+      const auto &fields = semantic_tuple(value, 2);
+      resource(fields[0]); validate_wallet_state(fields[1]); return;
+    }
+    case Method::validate_wallet_password: case Method::validate_wallet_mnemonic: {
+      const auto &fields = semantic_tuple(value, 2);
+      const auto reason = semantic_int(fields[0], 8);
+      require((reason == 3) == !null_value(fields[1]), CITIZENSDK_ERROR_INTEGRITY,
+              "Wallet input position disagrees with reason");
+      if (reason == 3) (void)semantic_int(fields[1], 23);
+      return;
+    }
+    case Method::wallet_word_suggestions: {
+      const auto &fields = semantic_tuple(value, 1);
+      const auto *words = std::get_if<Value::List>(&fields[0].data);
+      require(words != nullptr && words->size() <= 6, CITIZENSDK_ERROR_INTEGRITY,
+              "Wallet word suggestion count is invalid");
+      for (const auto &word : *words) {
+        const auto &text = string(word, 1, 1024);
+        require(std::all_of(text.begin(), text.end(), [](char c) { return c >= 'a' && c <= 'z'; }),
+                CITIZENSDK_ERROR_INTEGRITY, "Wallet word suggestion is invalid");
+      }
+      return;
+    }
+    case Method::prepare_wallet_creation: case Method::open_private_key:
+      resource(semantic_tuple(value, 1)[0]); return;
+    case Method::copy_recovery_phrase: case Method::reveal_private_key: {
+      const auto &secret = semantic_tuple(value, 1)[0];
+      secret.mark_sensitive();
+      const auto *bytes = std::get_if<Value::Bytes>(&secret.data);
+      require(bytes != nullptr && (method == Method::reveal_private_key
+                  ? bytes->size() == 32 : !bytes->empty() && bytes->size() <= 1024),
+              CITIZENSDK_ERROR_INTEGRITY, "Sensitive result length is invalid");
+      return;
+    }
+    case Method::cancel_operation:
+      (void)semantic_bool(semantic_tuple(value, 1)[0]); return;
+    case Method::review_qr_request: {
+      const auto &fields = semantic_tuple(value, 2);
+      resource(fields[0]);
+      require(string(fields[1], 1, 65536).size() <= 65536, CITIZENSDK_ERROR_INTEGRITY,
+              "QR review projection exceeds boundary");
+      return;
+    }
+    case Method::sign_qr_request: {
+      const auto &fields = semantic_tuple(value, 4);
+      require(string(fields[0], 1, 65536).size() <= 65536, CITIZENSDK_ERROR_INTEGRITY,
+              "Signed QR projection exceeds boundary");
+      validate_public_value(Method::qr_encode, Value::list({fields[1], fields[2], fields[3]}));
+      return;
+    }
+    case Method::qr_decode_image: {
+      const auto &fields = semantic_tuple(value, 1);
+      const auto *documents = std::get_if<Value::List>(&fields[0].data);
+      require(documents != nullptr && documents->size() <= 64, CITIZENSDK_ERROR_INTEGRITY,
+              "QR image result count exceeds boundary");
+      for (const auto &document : *documents)
+        require(string(document, 1, 65536).size() <= 65536, CITIZENSDK_ERROR_INTEGRITY,
+                "QR document projection exceeds boundary");
+      return;
+    }
+    case Method::open_qr_capture: {
+      const auto &fields = semantic_tuple(value, 5);
+      resource(fields[0]); (void)semantic_int(fields[1]);
+      require(semantic_int(fields[2], 4096) > 0 && semantic_int(fields[3], 4096) > 0,
+              CITIZENSDK_ERROR_INTEGRITY, "QR preview dimensions are invalid");
+      const auto rotation = semantic_int(fields[4], 270);
+      require(rotation % 90 == 0, CITIZENSDK_ERROR_INTEGRITY, "QR preview rotation is invalid");
+      return;
+    }
+    default: break;
+  }
   if (method == Method::qr_validate_sign_response) { (void)semantic_tuple(value, 0); return; }
   if (method == Method::qr_encode_document || method == Method::qr_prepare_account_authorization) {
     const auto &fields = semantic_tuple(value, 1);
@@ -2103,7 +2315,10 @@ void validate_public_value(Method method, const Value &value) {
     (void)semantic_tuple(value, 0);
     return;
   }
-  if (method >= Method::qr_parse && method <= Method::sign_qr_request) {
+  if (method == Method::qr_parse || method == Method::qr_create_sign_request ||
+      method == Method::qr_consume_sign_response || method == Method::qr_cancel_sign_request ||
+      method == Method::qr_encode_account_id || method == Method::qr_decode_luminance ||
+      method == Method::qr_encode) {
     const auto &fields = semantic_tuple(value, method == Method::qr_encode ? 3 : 1);
     if (method == Method::qr_consume_sign_response) {
       const auto *bytes = std::get_if<Value::Bytes>(&fields[0].data);
@@ -2120,19 +2335,14 @@ void validate_public_value(Method method, const Value &value) {
               CITIZENSDK_ERROR_INTEGRITY, "QR image dimensions do not match luminance");
     } else {
       const auto &text = string(fields[0], 1, 65536);
-      const bool document = method == Method::qr_parse || method == Method::qr_scan ||
-          method == Method::qr_decode_luminance || method == Method::sign_qr_request;
+      const bool document = method == Method::qr_parse || method == Method::qr_decode_luminance;
       require(text.size() <= (document ? 65536U : 2331U), CITIZENSDK_ERROR_INTEGRITY,
               "QR public text exceeds its UTF-8 limit");
     }
     return;
   }
 
-  try {
-    if (method == Method::view_account_private_key) {
-      (void)semantic_tuple(value, 0);
-      return;
-    }
+
     if (method == Method::import_state) {
       (void)semantic_tuple(value, 0);
       return;
@@ -2278,15 +2488,16 @@ void validate_public_value(Method method, const Value &value) {
                 CITIZENSDK_ERROR_INTEGRITY, "Fee snapshot finality, Perbill or minimum is invalid");
         (void)semantic_u128(fee[3]); return;
       }
-      case Method::get_wallet_profile: case Method::create_wallet: case Method::import_wallet:
+      case Method::commit_wallet_creation: case Method::add_next_wallet_account: case Method::import_wallet:
       case Method::add_wallet_accounts: case Method::set_active_wallet_account:
-      case Method::rename_wallet_account: case Method::delete_wallet_account:
-      case Method::delete_wallet: case Method::reconcile_wallet_cleanup:
+      case Method::reconcile_wallet_cleanup:
         validate_profile(item); return;
-      case Method::get_wallet_state: case Method::initialize_wallet: case Method::import_cold_account_with_ui: case Method::import_cold_account_id:
+      case Method::repair_hot_wallet: case Method::rename_diagnostic_wallet: case Method::delete_diagnostic_wallet:
+    case Method::get_wallet_state: case Method::import_cold_account_code: case Method::import_cold_account_id:
       case Method::import_cold_account_ss58:
       case Method::reorder_wallet_accounts_without_default_change:
-      case Method::rename_account: case Method::delete_account:
+      case Method::set_active_wallet: case Method::rename_wallet:
+    case Method::rename_account: case Method::delete_account:
         validate_wallet_state(item); return;
       case Method::sign_wallet_payload: {
         const auto *bytes = std::get_if<Value::Bytes>(&item.data);
@@ -2413,16 +2624,38 @@ void validate_public_value(Method method, const Value &value) {
         return;
       case Method::get_transaction_history: case Method::sync_transaction_history:
         validate_history(item); return;
-      case Method::view_account_private_key:
+      case Method::open_private_key:
       case Method::open: case Method::start: case Method::stop: case Method::close:
       case Method::get_capabilities:
       case Method::import_state:
       case Method::qr_parse: case Method::qr_create_sign_request:
-      case Method::qr_scan: case Method::sign_qr_request:
+      case Method::sign_qr_request:
       case Method::qr_validate_sign_response: case Method::qr_consume_sign_response: case Method::qr_cancel_sign_request:
       case Method::qr_encode_account_id:
       case Method::qr_decode_luminance: case Method::qr_encode:
       case Method::qr_encode_document: case Method::qr_prepare_account_authorization: case Method::encode_signing_payload:
+      case Method::validate_wallet_password:
+      case Method::validate_wallet_mnemonic:
+      case Method::wallet_word_suggestions:
+      case Method::prepare_wallet_creation:
+      case Method::copy_recovery_phrase:
+      case Method::release_prepared_wallet:
+      case Method::reveal_private_key:
+      case Method::close_private_key:
+      case Method::cancel_operation:
+      case Method::review_qr_request:
+      case Method::release_qr_review:
+    case Method::inspect_wallets: case Method::release_wallet_inspection:
+      case Method::open_qr_capture:
+      case Method::close_qr_capture:
+      case Method::pause_qr_capture:
+      case Method::resume_qr_capture:
+      case Method::set_qr_capture_torch:
+      case Method::qr_decode_image:
+      case Method::delete_wallet:
+      case Method::sign_and_delete_wallet:
+      case Method::respond_credential:
+      case Method::cancel_credential:
         fail(CITIZENSDK_ERROR_INVALID_STATE, "This method uses its dedicated lifecycle/capability encoder");
     }
   } catch (const ContractFailure &error) {

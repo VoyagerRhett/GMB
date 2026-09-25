@@ -339,7 +339,9 @@ class _SimpleScannerState extends State<_SimpleScanner> {
 
   Future<void> _toggleTorch() async {
     try {
-      await _capture?.setTorch(!_torchOn);
+      final capture = _capture;
+      if (capture == null) return;
+      await capture.setTorch(!_torchOn);
       if (!mounted) return;
       setState(() => _torchOn = !_torchOn);
     } on ScannerFailure catch (failure) {
@@ -352,12 +354,13 @@ class _SimpleScannerState extends State<_SimpleScanner> {
   Future<void> _scanFromGallery() async {
     final picker = ImagePicker();
     final image = await picker.pickImage(source: ImageSource.gallery);
-    if (image == null) return;
+    if (image == null || !mounted || _closing) return;
     try {
       final results = await _qr.decodeImage(await image.readAsBytes(), _purpose);
       if (results.isEmpty) {
         throw const ScannerFailure(kind: ScannerFailureKind.noQrCode, message: '图片中未识别到二维码');
       }
+      if (!mounted || _closing) return;
       await _handleCode(results.first.canonicalText);
     } on ScannerFailure catch (failure) {
       _showScannerFailure(failure);
@@ -371,6 +374,7 @@ class _SimpleScannerState extends State<_SimpleScanner> {
     _handled = true;
     try {
       await _capture?.pause();
+      if (!mounted || _closing) return;
       try {
         await context.read<CitizenSdk>().qr.parseForPurpose(
           raw,

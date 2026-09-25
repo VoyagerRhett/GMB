@@ -3,6 +3,7 @@
 #include <flutter/method_result.h>
 #include <flutter/plugin_registrar.h>
 #include <flutter/standard_method_codec.h>
+#include <flutter/texture_registrar.h>
 #include <windows.h>
 
 #include <cassert>
@@ -18,7 +19,8 @@
 namespace citizen_sdk::flutter {
 // 私有符号直接连接正式生产实现，不把测试注入入口放进安装头或 DLL 导出。
 std::unique_ptr<::flutter::Plugin> register_plugin(::flutter::BinaryMessenger *, HWND,
-    EnvironmentFactory, TransportFactory);
+    EnvironmentFactory, TransportFactory, ::flutter::TextureRegistrar * = nullptr);
+TextureRegistration create_texture_registration(::flutter::TextureRegistrar *);
 std::size_t plugin_pending_reply_count(const ::flutter::Plugin &);
 std::size_t plugin_dispatcher_count() noexcept;
 }  // namespace citizen_sdk::flutter
@@ -26,6 +28,88 @@ std::size_t plugin_dispatcher_count() noexcept;
 namespace csf = citizen_sdk::flutter;
 namespace {
 const auto &codec() { return ::flutter::StandardMethodCodec::GetInstance(); }
+
+
+class TextureRegistrarFixture final : public ::flutter::TextureRegistrar {
+ public:
+  ::flutter::TextureVariant *texture{};
+  std::function<void()> unregister;
+  bool reject_register{}, reject_frame{};
+  int registrations{}, frames{}, unregistrations{};
+  int64_t RegisterTexture(::flutter::TextureVariant *value) override {
+    if (reject_register) return -1;
+    assert(!texture); texture = value; ++registrations; return 11;
+  }
+  bool MarkTextureFrameAvailable(int64_t id) override {
+    assert(id == 11 && texture); ++frames; return !reject_frame;
+  }
+  void UnregisterTexture(int64_t id, std::function<void()> done) override {
+    assert(id == 11 && texture && !unregister); ++unregistrations; unregister = std::move(done);
+  }
+  bool UnregisterTexture(int64_t) override { assert(false); return false; }
+  const FlutterDesktopPixelBuffer *copy() {
+    return std::get<::flutter::PixelBufferTexture>(*texture).CopyPixelBuffer(2, 2);
+  }
+  void finish_unregister() {
+    texture = nullptr; auto done = std::move(unregister); done();
+  }
+};
+void texture_contract() {
+  TextureRegistrarFixture registrar;
+  auto registration = csf::create_texture_registration(&registrar);
+  for (const uint32_t width : {0U, 4097U}) {
+    bool invalid = false;
+    try { (void)registration.open(width, 2); } catch (const csf::ContractFailure &) { invalid = true; }
+    assert(invalid);
+  }
+  registrar.reject_register = true;
+  bool refused = false;
+  try { (void)registration.open(2, 2); } catch (const csf::ContractFailure &) { refused = true; }
+  assert(refused && !registrar.texture);
+  registrar.reject_register = false;
+  auto texture = registration.open(2, 2);
+  assert(!registrar.copy()); // 无首帧时不伪造设备像素。
+  texture->update(std::make_shared<const std::vector<uint8_t>>(16, 3));
+  const auto *first = registrar.copy();
+  assert(first && first->width == 2 && first->height == 2 && first->buffer[0] == 3);
+  texture->update(std::make_shared<const std::vector<uint8_t>>(16, 9));
+  const auto *second = registrar.copy(), *third = registrar.copy();
+  assert(second && third && !registrar.copy() && first->buffer[0] == 3 && second->buffer[0] == 9);
+  bool wrong_size = false;
+  try { texture->update(std::make_shared<const std::vector<uint8_t>>(15)); }
+  catch (const csf::ContractFailure &) { wrong_size = true; }
+  assert(wrong_size);
+  registrar.reject_frame = true;
+  bool frame_failed = false;
+  try { texture->update(std::make_shared<const std::vector<uint8_t>>(16)); }
+  catch (const csf::ContractFailure &) { frame_failed = true; }
+  assert(frame_failed);
+  int drained = 0;
+  texture->close([&] { ++drained; });
+  assert(drained == 0 && registrar.unregistrations == 1);
+  first->release_callback(first->release_context);
+  registrar.finish_unregister();
+  assert(drained == 0 && second->buffer[0] == 9);
+  second->release_callback(second->release_context);
+  assert(drained == 0);
+  third->release_callback(third->release_context);
+  assert(drained == 1);
+  registration.detach();
+  bool late = false;
+  try { (void)registration.open(2, 2); } catch (const csf::ContractFailure &) { late = true; }
+  assert(late && registrar.registrations == 1);
+
+  // detach必须在registrar仍活着时发起异步注销；迟到资源不再使用该注册器。
+  TextureRegistrarFixture second_registrar;
+  auto other = csf::create_texture_registration(&second_registrar);
+  auto active = other.open(1, 1);
+  active->update(std::make_shared<const std::vector<uint8_t>>(4));
+  other.detach();
+  assert(second_registrar.unregistrations == 1);
+  int detached = 0; active->close([&] { ++detached; });
+  assert(detached == 0);
+  second_registrar.finish_unregister(); assert(detached == 1);
+}
 
 class Response final : public ::flutter::MethodResult<::flutter::EncodableValue> {
  public:
@@ -129,6 +213,7 @@ void exactly(const std::shared_ptr<Response> &response, bool success, const char
 }  // namespace
 
 int main() {
+  texture_contract();
   const auto initial_dispatchers = csf::plugin_dispatcher_count();
   {
     Messenger messenger;
@@ -224,29 +309,26 @@ int main() {
   {
     Messenger messenger;
     auto native = std::make_shared<csf::test::FakeTransport>();
-    native->defer_wallet = true;
+    native->defer_prepared = true;
+    native->complete_on_cancel = false;
     auto plugin = attach(messenger, native);
     const auto session = session_of(*messenger.call(csf::kMethodChannel, "open", open_request));
-    const auto pending = messenger.call(csf::kMethodChannel, "createWallet",
-        csf::test::list({csf::Value::integer(1), csf::Value::string(session),
-                         csf::Value::integer(1), csf::Value::integer(12)}));
-    assert(native->wallet_presented == 1 && pending->wire_calls == 0);
+    const auto pending = messenger.call(csf::kMethodChannel, "prepareWalletCreation",
+        csf::test::list({csf::Value::integer(2), csf::Value::string(session),
+                         csf::Value::integer(1), csf::Value::integer(12), csf::Value::string("")}));
+    assert(native->accepted.size() == 1 && native->accepted[0] == csf::Method::prepare_wallet_creation && pending->wire_calls == 0);
     // 替换事件端同样撤销整个旧实例；取消是请求，原生真实终态仍由旧队列收口。
     messenger.SetMessageHandler(csf::kEventChannel,
         [](const uint8_t *, std::size_t, ::flutter::BinaryReply reply) {
           const auto response = codec().EncodeSuccessEnvelope();
           reply(response->data(), response->size());
         });
-    assert(native->wallet_cancelled == 1 && pending->wire_calls == 0);
+    assert(native->cancelled == 1 && pending->wire_calls == 0);
     pump();
     exactly(pending, false, "citizensdk.invalidState");
     assert(native->retired == 0 && messenger.handlers.count(csf::kMethodChannel) == 0);
     assert(messenger.handlers.count(csf::kEventChannel) == 1);
-    auto completed = std::move(native->wallet_completion);
-    assert(completed);
-    std::thread worker([completed = std::move(completed)] {
-      completed({citizen_sdk::WalletFlowStatus::Cancelled, CITIZENSDK_ERROR_CANCELLED});
-    });
+    std::thread worker([native] { native->complete_deferred(); });
     worker.join();
     pump();
     exactly(pending, false, "citizensdk.invalidState");

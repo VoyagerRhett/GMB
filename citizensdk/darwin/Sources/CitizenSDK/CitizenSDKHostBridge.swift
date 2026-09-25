@@ -113,6 +113,20 @@ internal final class CitizenSDKHostBridge {
         }
     }
 
+    func registerSecretPresence(handle: UInt64) throws {
+        guard modules.usesSecrets else { return }
+        var provider = citizensdk_host_secret_presence_v1_t()
+        provider.struct_size = UInt32(MemoryLayout<citizensdk_host_secret_presence_v1_t>.size)
+        provider.abi_version = 1
+        provider.context = Unmanaged.passUnretained(self).toOpaque()
+        provider.has_account_secret = citizenSDKAccountSecretPresence
+        provider.has_any_wallet_key = citizenSDKWalletKeyPresence
+        try CitizenSDKChecks.requireOK(citizensdk_set_secret_presence_provider(handle, &provider), "秘密存在性提供者登记失败")
+    }
+
+    func hasAccountSecret(_ accountID: Data) throws -> Bool { try secureStore().hasAccountSecret(accountID: accountID) }
+    func hasAnyWalletKey(_ walletIndex: UInt32) throws -> Bool { try vault().hasAnyWalletKey(walletIndex: walletIndex) }
+
     private func configureVTables() {
         let context = Unmanaged.passUnretained(self).toOpaque()
         publicVTable.struct_size = UInt32(MemoryLayout<citizensdk_host_public_store_v1_t>.size)
@@ -408,6 +422,31 @@ private func citizenSDKEncryptedSecretCAS(_ context: UnsafeMutableRawPointer?, _
     guard let host = citizenSDKHost(context), completion != nil else { return CitizenSDKErrorCode.invalidArgument.rawValue }
     do { citizenSDKCompleteRecord(operationID, sdkContext, completion, try host.secretCAS(citizenSDKSecret(secret), expected: expected, candidate: citizenSDKData(candidate))); return 0 }
     catch { return citizenSDKCode(error) }
+}
+
+private func citizenSDKAccountSecretPresence(_ context: UnsafeMutableRawPointer?, _ operationID: UInt64,
+    _ account: citizensdk_account_id_t, _ sdkContext: UnsafeMutableRawPointer?,
+    _ completion: citizensdk_host_bool_completion_v1_t?) -> Int32 {
+    guard let host = citizenSDKHost(context), completion != nil else { return CitizenSDKErrorCode.invalidArgument.rawValue }
+    do {
+        var result = citizensdk_host_bool_result_v1_t()
+        result.struct_size = UInt32(MemoryLayout<citizensdk_host_bool_result_v1_t>.size)
+        result.abi_version = 1; result.host_operation_id = operationID; result.error_code = 0
+        result.value = try host.hasAccountSecret(citizenSDKFixedData(account.bytes, count: 32)) ? 1 : 0
+        completion?(sdkContext, &result); return 0
+    } catch { return citizenSDKCode(error) }
+}
+private func citizenSDKWalletKeyPresence(_ context: UnsafeMutableRawPointer?, _ operationID: UInt64,
+    _ walletIndex: UInt32, _ sdkContext: UnsafeMutableRawPointer?,
+    _ completion: citizensdk_host_bool_completion_v1_t?) -> Int32 {
+    guard let host = citizenSDKHost(context), completion != nil else { return CitizenSDKErrorCode.invalidArgument.rawValue }
+    do {
+        var result = citizensdk_host_bool_result_v1_t()
+        result.struct_size = UInt32(MemoryLayout<citizensdk_host_bool_result_v1_t>.size)
+        result.abi_version = 1; result.host_operation_id = operationID; result.error_code = 0
+        result.value = try host.hasAnyWalletKey(walletIndex) ? 1 : 0
+        completion?(sdkContext, &result); return 0
+    } catch { return citizenSDKCode(error) }
 }
 
 private func citizenSDKVaultAvailability(_ context: UnsafeMutableRawPointer?, _ operationID: UInt64,

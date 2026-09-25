@@ -87,7 +87,10 @@ internal object CitizenSdkNativeCodec {
             20L -> CitizenSdkNativeResult.QrSigned(CitizenQrDocument.parse(reader.text()).also {
                 check(it.kind == 2 && (it.signRequest?.toByteArray(Charsets.UTF_8)?.size ?: 0) in 1..2331)
             })
-            21L -> CitizenSdkNativeResult.WalletState(reader.walletState())
+            21L -> {
+                val token = reader.i64().also { check(it >= 0) }
+                CitizenSdkNativeResult.WalletState(reader.walletState(), token)
+            }
             22L -> CitizenSdkNativeResult.SigningOutcome(reader.signingOutcome())
             23L -> CitizenSdkNativeResult.DefaultAccountChange(reader.defaultAccountChange())
             24L -> CitizenSdkNativeResult.SyncStatus(
@@ -240,7 +243,7 @@ internal object CitizenSdkNativeCodec {
             val active = fixed(32)
             val count = boundedCount(1990, "wallet account count")
             val accounts = walletAccounts(count)
-            return CitizenWalletProfile(origin, walletIndex, created, master, active, accounts)
+            return CitizenWalletProfile(origin, walletIndex, created, master, active, accounts, text())
         }
 
         fun walletState(): CitizenWalletState {
@@ -252,11 +255,12 @@ internal object CitizenSdkNativeCodec {
                 val master: ByteArray,
                 val active: ByteArray,
                 val count: Int,
+                val walletName: String,
             )
             val header = if (bool()) ProfileHeader(
                 oneBasedEnum(CitizenWalletOrigin.entries, "wallet origin"),
                 u32Long(), u64Text(), fixed(32), fixed(32),
-                boundedCount(1990, "hot wallet account count"),
+                boundedCount(1990, "hot wallet account count"), text(),
             ) else null
             val count = boundedCount(3980, "wallet state account count")
             val accounts = ArrayList<CitizenWalletStateAccount>(count)
@@ -292,14 +296,46 @@ internal object CitizenSdkNativeCodec {
                 check(hot.count { it.active } == 1 && hot.any { it.active && it.accountId().contentEquals(value.active) })
                 check(hot.any { it.index == 0L && it.accountId().contentEquals(value.master) })
                 CitizenWalletProfile(value.origin, value.walletIndex, value.created,
-                    value.master, value.active, hot)
+                    value.master, value.active, hot, value.walletName)
             }
             check(profile != null || accounts.none { it.signMode == CitizenWalletSignMode.HOT })
             val initialization = u32Long().toInt()
-            val cleanup = u8()
-            check(initialization in 0..2 && cleanup in 0..1)
-            check((initialization == 1) == accounts.isNotEmpty() && !(initialization == 0 && cleanup != 0))
-            return CitizenWalletState(revision, profile, accounts, initialization, cleanup != 0)
+            // 清理标记沿用同一严格布尔解码；非法字节不得被投影为有效状态。
+            val cleanup = bool()
+            check(initialization in 0..2)
+            val activeWalletIndex = if (bool()) u32Long() else null
+            val walletIndices = accounts.map { it.walletIndex }.toMutableSet()
+            val identities = accounts.map { key(it.accountId()) }.toMutableSet()
+            val diagnostics = List(boundedCount(1991, "wallet diagnostic count")) {
+                val index = u32Long()
+                val name = text()
+                val account = fixed(32)
+                val address = if (bool()) text() else null
+                val reason = boundedU32Long(3, "wallet diagnostic reason").toInt()
+                check(reason >= 1 && walletIndices.add(index) && identities.add(key(account)))
+                check(name.isNotEmpty() && name.toByteArray(Charsets.UTF_8).size <= 120 && name == name.trim())
+                check(name.codePointCount(0, name.length) <= 30 && name.none { it.code <= 31 || it.code in 127..159 })
+                check(address == null || address.toByteArray(Charsets.UTF_8).size <= 128)
+                val rawMode = boundedU32Long(2, "diagnostic sign mode").toInt()
+                val mode = if (rawMode == 0) null else CitizenWalletSignMode.entries[rawMode - 1]
+                val targetCount = boundedCount(1990, "cleanup account count")
+                val wide = bool()
+                check(targetCount > 0 || !wide)
+                val ids = List(targetCount) { fixed(32) }
+                fun less(a: ByteArray, b: ByteArray): Boolean {
+                    for (i in a.indices) {
+                        val first = a[i].toInt() and 255; val second = b[i].toInt() and 255
+                        if (first != second) return first < second
+                    }
+                    return false
+                }
+                check(ids.zipWithNext().all { (a, b) -> less(a, b) })
+                val targets = if (ids.isEmpty()) null else CitizenWalletCleanupTargets(ids, wide)
+                CitizenWalletDiagnostic(index, name, account, address, reason, mode, targets)
+            }
+            check((initialization == 1) == (accounts.isNotEmpty() || diagnostics.isNotEmpty()) && !(initialization == 0 && cleanup))
+            check(activeWalletIndex == null || walletIndices.contains(activeWalletIndex))
+            return CitizenWalletState(revision, profile, accounts, initialization, cleanup, activeWalletIndex, diagnostics)
         }
 
         fun signingOutcome(): CitizenSigningOutcome {

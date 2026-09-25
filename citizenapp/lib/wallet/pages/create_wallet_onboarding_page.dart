@@ -34,6 +34,7 @@ class _CreateWalletOnboardingPageState extends State<CreateWalletOnboardingPage>
   /// null = 检测中；createWallet 前置要求系统锁屏已开启，未开启时禁用创建。
   bool? _deviceSecure;
   bool _creating = false;
+  bool _createInFlight = false;
   int _wordCount = 12;
   String? _error;
   final TextEditingController _passwordController = TextEditingController();
@@ -80,56 +81,64 @@ class _CreateWalletOnboardingPageState extends State<CreateWalletOnboardingPage>
   }
 
   Future<void> _create() async {
-    late final String password;
+    // SDK校验是异步的；只锁住本次入口，不提前改变原按钮文案或密码确认时序。
+    if (_createInFlight) return;
+    _createInFlight = true;
     try {
-      password = _passwordController.text;
-      await validateWalletPasswordInput(context, password);
-      if (!mounted) return;
-    } catch (e) {
-      setState(() => _error = '$e');
-      return;
-    }
-    if (!await confirmWalletPasswordUse(context, password) || !mounted) return;
-    // 确认后立即清空可见输入；派生只使用当前作用域中的规范化值，不把 password
-    // 留在页面 controller、钱包数据库或安全存储。
-    _passwordController.clear();
-    setState(() {
-      _creating = true;
-      _error = null;
-    });
-    try {
-      await runCreateWalletFlow(
-        context,
-        wordCount: _wordCount,
-        password: password,
-      );
-      if (!mounted) return;
-      widget.onCreated();
-    } catch (e) {
-      AppLog.d('onboarding wallet create failed');
-      if (!mounted) return;
-      setState(() => _error = walletOperationErrorMessage(e));
-      // 创建失败常见原因是锁屏状态变化，顺手复检刷新警示卡。
-      _probeDeviceSecure();
-      // fail-closed：钱包失败及恢复事实由SDK维护，弹窗提示后停留创建页可重试。
-      if (!mounted) return;
-      await showDialog<void>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('创建钱包失败'),
-          content: Text(walletOperationErrorMessage(e)),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('重试'),
-            ),
-          ],
-        ),
-      );
-    } finally {
-      if (mounted) {
-        setState(() => _creating = false);
+      late final String password;
+      try {
+        password = _passwordController.text;
+        await validateWalletPasswordInput(context, password);
+        if (!mounted) return;
+      } catch (e) {
+        if (!mounted) return;
+        setState(() => _error = '$e');
+        return;
       }
+      if (!await confirmWalletPasswordUse(context, password) || !mounted) return;
+      // 确认后立即清空可见输入；原始输入只交SDK校验和规范化，不把 password
+      // 留在页面 controller、钱包数据库或安全存储。
+      _passwordController.clear();
+      setState(() {
+        _creating = true;
+        _error = null;
+      });
+      try {
+        await runCreateWalletFlow(
+          context,
+          wordCount: _wordCount,
+          password: password,
+        );
+        if (!mounted) return;
+        widget.onCreated();
+      } catch (e) {
+        AppLog.d('onboarding wallet create failed');
+        if (!mounted) return;
+        setState(() => _error = walletOperationErrorMessage(e));
+        // 创建失败常见原因是锁屏状态变化，顺手复检刷新警示卡。
+        _probeDeviceSecure();
+        // fail-closed：钱包失败及恢复事实由SDK维护，弹窗提示后停留创建页可重试。
+        if (!mounted) return;
+        await showDialog<void>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('创建钱包失败'),
+            content: Text(walletOperationErrorMessage(e)),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('重试'),
+              ),
+            ],
+          ),
+        );
+      } finally {
+        if (mounted) {
+          setState(() => _creating = false);
+        }
+      }
+    } finally {
+      _createInFlight = false;
     }
   }
 

@@ -5,11 +5,11 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
 #include "citizen_sdk_assets.hpp"
-#include "citizen_sdk_gtk_parent.hpp"
 #include "citizen_sdk_lifecycle.hpp"
 #include "citizen_sdk_operation.hpp"
 #include "citizen_sdk_public_store.hpp"
@@ -17,6 +17,46 @@
 #include "citizen_sdk/citizensdk_host.h"
 
 namespace citizen_sdk::linux {
+
+class QrCapture;
+
+// 宿主GTK对象的短期强引用仅在捕获的宿主线程创建/归还；不绘制SDK界面。
+class GtkParentLease final {
+ public:
+  GtkParentLease() = default;
+  GtkParentLease(void *window, std::thread::id ui_thread) noexcept;
+  GtkParentLease(const GtkParentLease &) = delete;
+  GtkParentLease &operator=(const GtkParentLease &) = delete;
+  GtkParentLease(GtkParentLease &&other) noexcept;
+  GtkParentLease &operator=(GtkParentLease &&other) noexcept;
+  ~GtkParentLease();
+
+  void *get() const noexcept { return window_; }
+  explicit operator bool() const noexcept { return window_ != nullptr; }
+
+ private:
+  void clear() noexcept;
+  void *window_{};
+  std::thread::id ui_thread_{};
+};
+
+// 宿主对象只以GWeakRef保存，宿主销毁窗口时自动失效；短期提升不改变宿主所有权。
+class GtkParentRef final {
+ public:
+  GtkParentRef(void *window, std::thread::id ui_thread);
+  GtkParentRef(const GtkParentRef &) = delete;
+  GtkParentRef &operator=(const GtkParentRef &) = delete;
+  ~GtkParentRef();
+
+  citizensdk_error_code_t set(void *window) noexcept;
+  GtkParentLease acquire() const noexcept;
+  bool on_ui_thread() const noexcept;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+  std::thread::id ui_thread_;
+};
 
 class HostBridge final : public std::enable_shared_from_this<HostBridge> {
  public:
@@ -41,6 +81,10 @@ class HostBridge final : public std::enable_shared_from_this<HostBridge> {
   citizensdk_error_code_t respond_credential(uint64_t host_operation_id, citizensdk_bytes_view_t credential);
   citizensdk_error_code_t cancel_credential(uint64_t host_operation_id);
 
+  citizensdk_error_code_t open_qr_capture(uint32_t purpose, const citizensdk_qr_capture_callbacks_v1_t &, uint64_t *out_resource);
+  citizensdk_error_code_t control_qr_capture(uint64_t resource, uint64_t operation, uint32_t action, uint8_t enabled);
+  Bytes decode_qr_image(citizensdk_bytes_view_t encoded, uint32_t purpose);
+
   RequestRouter &private_requests() noexcept { return private_requests_; }
   citizensdk_error_code_t submit_private(
       const std::function<citizensdk_error_code_t(citizensdk_request_id_t *)> &accept,
@@ -57,6 +101,8 @@ class HostBridge final : public std::enable_shared_from_this<HostBridge> {
   HostRecord history_mutate(uint64_t expected, const Bytes &mutation);
   HostRecord profile_load();
   HostRecord profile_cas(uint64_t expected, const Bytes &candidate);
+  bool has_account_secret(const std::array<uint8_t, 32> &account_id);
+  bool has_any_wallet_key(uint32_t wallet_index);
   HostRecord secret_load(const SecretIdentity &identity);
   HostRecord secret_cas(const SecretIdentity &identity, uint64_t expected,
                         const Bytes &candidate);
@@ -72,6 +118,11 @@ class HostBridge final : public std::enable_shared_from_this<HostBridge> {
                     const std::array<uint8_t, 16> &operation_id);
 
  private:
+  struct CaptureOwner;
+  void close_qr_captures();
+  std::map<uint64_t, std::shared_ptr<QrCapture>> captures_;
+  uint64_t next_capture_{1};
+  bool capture_ids_exhausted_{};
   static void receive_core_event(void *context,
                                  const citizensdk_event_t *event) noexcept;
   void dispatch_core_event(const citizensdk_event_t &event) noexcept;

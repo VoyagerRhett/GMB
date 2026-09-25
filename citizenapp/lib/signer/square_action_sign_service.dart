@@ -99,6 +99,11 @@ class SquareActionSignService {
     final signBytes = await CitizenSigning.encodePayload(CitizenSigningPayload.message(
       opTag: kOpSignSquareAction, scalePayload: prep.request.reviewPayload!,
     ));
+    if (context != null && !context.mounted) {
+      throw const SquareActionSignException(
+        SquareActionSignError.invalidRequest, '当前签名页面已经关闭',
+      );
+    }
     final signature = await signCitizenPayload(
       signing: signing,
       context: context,

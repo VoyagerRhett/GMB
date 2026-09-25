@@ -34,29 +34,26 @@ final class CitizenSDKNativeAbiTests: XCTestCase {
         }
     }
 
-    @MainActor
-    func testQrWindowCancellationBeforeStartDoesNotAcquireCameraOrReview() async throws {
-        let sdk = try CitizenSdk.open(modules: .qr)
-        let flow = try CitizenSDKQrFlow(sdk: sdk, signText: nil)
-        var clears = 0; var dismissals = 0
-        flow.onClear = { clears += 1 }
-        flow.onDismiss = { completion in dismissals += 1; completion() }
-        XCTAssertThrowsError(try sdk.close()) { XCTAssertEqual(($0 as? CitizenSDKError)?.code, .busy) }
-        flow.cancel(); flow.cancel()
-        XCTAssertNil(flow.start())
-        do { _ = try await flow.operation.value(); XCTFail("取消不得成功") }
+    func testClosedCaptureRejectsLateStartWithoutRequestingCamera() async throws {
+        let native = try CitizenSDKNative.open(assets: nil, modules: .qr)
+        let closed = expectation(description: "采集关闭通知")
+        let ended = expectation(description: "采集所有权结束")
+        let camera = CitizenSDKQrCapture(native: native,
+            purpose: try XCTUnwrap(CitizenQRScanPurpose(rawValue: 1)),
+            listener: .init(result: { _ in XCTFail("关闭后不得识别") },
+                            error: { _ in XCTFail("关闭后不得请求权限") },
+                            frame: { _ in XCTFail("关闭后不得交付帧") },
+                            closed: { closed.fulfill() }),
+            ended: { _ in ended.fulfill() })
+        camera.requestClose()
+        do { try await camera.start(); XCTFail("已撤销资源不能打开") }
         catch { XCTAssertEqual((error as? CitizenSDKError)?.code, .cancelled) }
-        XCTAssertEqual(clears, 1); XCTAssertEqual(dismissals, 1)
-        try sdk.close()
-    }
-
-    func testRevokedCameraNeverStartsFromALateStartCall() async {
-        let closed = expectation(description: "相机串行队列已排空")
-        let camera = CitizenSDKQrCapture(frame: { _, _, _, _ in XCTFail("关闭后不得交付帧") },
-                                        failure: { _ in XCTFail("关闭后不得重新授权或失败交付") })
-        camera.close { closed.fulfill() }
-        camera.start()
-        await fulfillment(of: [closed], timeout: 2)
+        try await camera.close()
+        try await camera.close()
+        await fulfillment(of: [closed, ended], timeout: 2)
+        XCTAssertNil(camera.preview)
+        XCTAssertNil(camera.copyPixelBuffer())
+        try native.close()
     }
 
     func testCreatedChainRejectsEmptyBatchWithNotReadyBeforeClosing() async throws {
@@ -86,6 +83,7 @@ final class CitizenSDKNativeAbiTests: XCTestCase {
     func testImportedCoreAbiStructuresAreVersioned() {
         XCTAssertGreaterThan(MemoryLayout<citizensdk_create_options_t>.size, 0)
         XCTAssertGreaterThan(MemoryLayout<citizensdk_host_services_v1_t>.size, 0)
+        XCTAssertEqual(MemoryLayout<citizensdk_host_secret_presence_v1_t>.size, 32)
         XCTAssertGreaterThan(MemoryLayout<citizensdk_event_t>.size, 0)
         XCTAssertEqual(CITIZENSDK_HOST_BYTES_WRAPPED_DEK, 1)
         XCTAssertEqual(CITIZENSDK_OK, 0)
@@ -109,7 +107,8 @@ final class CitizenSDKNativeAbiTests: XCTestCase {
                 $0.trimmingCharacters(in: .whitespacesAndNewlines)
             }
         })
-        XCTAssertEqual(names.count, 121)
+        XCTAssertEqual(names.count, 146)
+        XCTAssertTrue(names.isSuperset(of: ["citizensdk_set_secret_presence_provider", "citizensdk_encrypted_secret_record_has_secret"]))
         XCTAssertTrue(names.isSuperset(of: ["citizensdk_review_qr_sign_request", "citizensdk_sign_qr_request", "citizensdk_result_copy_qr"]))
         XCTAssertFalse(names.contains("citizensdk_qr_signing_bytes"))
         XCTAssertFalse(names.contains("citizensdk_qr_create_sign_response"))

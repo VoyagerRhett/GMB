@@ -625,18 +625,16 @@ fn synchronous_wallet_input_never_needs_a_runtime_or_returns_secrets() {
             len: bytes.len() as u64,
         }
     }
-    // SAFETY: every input/output buffer remains valid for the entire synchronous call.
+    // 安全边界：仅合成输入，缓冲覆盖整个同步调用；无效输入通过原因而非秘密回显。
     unsafe {
-        assert_eq!(super::citizensdk_validate_wallet_password(view(b"")), 0);
-        assert_eq!(
-            super::citizensdk_validate_wallet_password(view(b"abcdef")),
-            0
-        );
+        let mut validation = crate::abi::CitizenSdkWalletInputValidationV1::default();
+        for accepted in [b"".as_slice(), b"abcdef"] {
+            assert_eq!(super::citizensdk_validate_wallet_input(1, view(accepted), 0, &mut validation), 0);
+            assert_eq!(validation.reason, 0);
+        }
         for rejected in [b"short".as_slice(), b"abcdef ", &[0xff]] {
-            assert_eq!(
-                super::citizensdk_validate_wallet_password(view(rejected)),
-                CitizenSdkErrorCode::InvalidArgument.as_i32()
-            );
+            assert_eq!(super::citizensdk_validate_wallet_input(1, view(rejected), 0, &mut validation), 0);
+            assert_ne!(validation.reason, 0);
         }
         let mut required = u64::MAX;
         assert_eq!(
@@ -691,8 +689,12 @@ fn synchronous_wallet_input_never_needs_a_runtime_or_returns_secrets() {
             ),
             0
         );
-        assert_ne!(super::citizensdk_validate_wallet_mnemonic(view(b""), 18), 0);
-        assert_ne!(super::citizensdk_validate_wallet_mnemonic(view(b""), 15), 0);
+        assert_eq!(super::citizensdk_validate_wallet_input(2, view(b""), 18, &mut validation), 0);
+        assert_ne!(validation.reason, 0);
+        let previous = validation;
+        assert_eq!(super::citizensdk_validate_wallet_input(2, view(b""), 15, &mut validation),
+            CitizenSdkErrorCode::InvalidArgument.as_i32());
+        assert_eq!(validation, previous);
     }
 }
 
@@ -745,6 +747,81 @@ fn absent_wallet_profile_is_a_successful_zeroed_projection() {
     assert_eq!(info.account_count, 0);
     assert_eq!(info.master_account_id.bytes, [0; 32]);
     assert_eq!(info.active_account_id.bytes, [0; 32]);
+}
+
+#[test]
+fn diagnostic_projection_and_record_ownership_are_exact_and_atomic() {
+    use crate::{abi::CitizenSdkWalletDiagnosticInfoV1, ownership::{self, OwnedResult, ResultPayload}};
+    use citizen_sdk_contracts::WalletRecord;
+    use std::mem::{offset_of, size_of};
+
+    assert_eq!(size_of::<CitizenSdkWalletDiagnosticInfoV1>(), 80);
+    assert_eq!(offset_of!(CitizenSdkWalletDiagnosticInfoV1, account_id), 24);
+    assert_eq!(offset_of!(CitizenSdkWalletDiagnosticInfoV1, wallet_name_len), 56);
+    assert_eq!(offset_of!(CitizenSdkWalletDiagnosticInfoV1, ss58_address_len), 64);
+    assert_eq!(offset_of!(CitizenSdkWalletDiagnosticInfoV1, cleanup_account_count), 72);
+    assert_eq!(offset_of!(CitizenSdkWalletDiagnosticInfoV1, delete_wallet_wide_key), 76);
+    // 公开合成坏模式，不使用真实钱包；空原地址仍有值，不能当作缺失。
+    let record = WalletRecord::Account { wallet_index: 1, sign_mode: "invalid".into(),
+        account_id: AccountId32::from_bytes([0x41; 32]), ss58_address: String::new(),
+        name: "异常钱包".into(), created_at_millis: 17 };
+    let state = WalletState::try_from_catalog_parts(3, None, vec![], vec![], 2, None, None, vec![])
+        .unwrap().try_with_diagnostics(vec![record.clone()]).unwrap();
+    let result = ownership::insert(OwnedResult::success(71, ResultPayload::WalletState(
+        Box::new(citizen_sdk_engine::WalletStateSnapshot::from_state(&state).unwrap())))).unwrap();
+    assert_eq!(super::inspected_record(71, result, 1).unwrap(), (3, record));
+    assert_eq!(super::inspected_record(72, result, 1).unwrap_err().code, CitizenSdkErrorCode::InvalidArgument);
+    assert_eq!(super::inspected_record(71, result, 0).unwrap_err().code, CitizenSdkErrorCode::NotFound);
+    let mut count = 99;
+    let mut info = CitizenSdkWalletDiagnosticInfoV1::default();
+    let mut required = 99;
+    let mut bytes = [0xa5; 32];
+    unsafe {
+        assert_eq!(super::citizensdk_wallet_state_get_diagnostic_count(result, &mut count), 0);
+        assert_eq!(count, 1);
+        assert_eq!(super::citizensdk_wallet_state_get_diagnostic_at(result, 0, &mut info), 0);
+        assert_eq!((info.wallet_index, info.diagnostic_reason, info.has_ss58_address, info.ss58_address_len), (1, 1, 1, 0));
+        assert_eq!(info.account_id.bytes, [0x41; 32]);
+        assert_eq!((info.sign_mode, info.cleanup_account_count, info.delete_wallet_wide_key), (0, 1, 0));
+        let mut cleanup = crate::abi::CitizenSdkAccountId { bytes: [0xa5; 32] };
+        assert_ne!(super::citizensdk_wallet_state_get_diagnostic_cleanup_account(result, 0, 1, &mut cleanup), 0);
+        assert_eq!(cleanup.bytes, [0xa5; 32]);
+        assert_ne!(super::citizensdk_wallet_state_get_diagnostic_cleanup_account(result, 1, 0, &mut cleanup), 0);
+        assert_eq!(cleanup.bytes, [0xa5; 32]);
+        assert_eq!(super::citizensdk_wallet_state_get_diagnostic_cleanup_account(result, 0, 0, &mut cleanup), 0);
+        assert_eq!(cleanup.bytes, [0x41; 32]);
+        let before = info;
+        assert_ne!(super::citizensdk_wallet_state_get_diagnostic_at(result, 1, &mut info), 0);
+        assert_eq!(info, before);
+        assert_ne!(super::citizensdk_wallet_state_copy_diagnostic_text(result, 0, 1, bytes.as_mut_ptr(), 1, &mut required), 0);
+        assert_eq!((bytes, required), ([0xa5; 32], 99));
+        for field in [0, 3, u32::MAX] {
+            assert_ne!(super::citizensdk_wallet_state_copy_diagnostic_text(result, 0, field, bytes.as_mut_ptr(), 32, &mut required), 0);
+            assert_eq!((bytes, required), ([0xa5; 32], 99));
+        }
+        assert_eq!(super::citizensdk_wallet_state_copy_diagnostic_text(result, 0, 1, bytes.as_mut_ptr(), 32, &mut required), 0);
+        assert_eq!(&bytes[..required as usize], "异常钱包".as_bytes());
+        assert_eq!(super::citizensdk_wallet_state_copy_diagnostic_text(result, 0, 2, std::ptr::null_mut(), 0, &mut required), 0);
+        assert_eq!(required, 0);
+        info.struct_size = 8;
+        let invalid = info;
+        assert_ne!(super::citizensdk_wallet_state_get_diagnostic_at(result, 0, &mut info), 0);
+        assert_eq!(info, invalid);
+        assert_ne!(super::citizensdk_wallet_state_get_diagnostic_count(result, std::ptr::null_mut()), 0);
+    }
+    ownership::release(result).unwrap();
+    assert!(super::inspected_record(71, result, 1).is_err());
+    count = 99;
+    assert_ne!(unsafe { super::citizensdk_wallet_state_get_diagnostic_count(result, &mut count) }, 0);
+    assert_eq!(count, 99);
+    for wrong in [OwnedResult::success(71, ResultPayload::Empty),
+        OwnedResult::failure(71, crate::error::FfiError::invalid("合成失败"))] {
+        let result = ownership::insert(wrong).unwrap();
+        assert!(super::inspected_record(71, result, 1).is_err());
+        assert_ne!(unsafe { super::citizensdk_wallet_state_get_diagnostic_count(result, &mut count) }, 0);
+        assert_eq!(count, 99);
+        ownership::release(result).unwrap();
+    }
 }
 
 #[test]
@@ -893,4 +970,58 @@ fn prepared_wallet_owner_is_checked_even_while_the_handle_is_claimed() {
     lock_prepared_wallets()
         .unwrap_or_else(|error| panic!("prepared registry cleanup failed: {error:?}"))
         .remove(&handle);
+}
+
+#[test]
+fn wallet_metadata_result_projection_is_atomic_and_rejects_wrong_or_released_handles() {
+    use crate::ownership::{self, OwnedResult, ResultPayload};
+    use citizen_sdk_contracts::{WalletAccount, WalletProfile, WalletOrigin, SecretRef, SecretOwner, VaultGeneration};
+    let account_id = AccountId32::from_bytes([0xe7; 32]);
+    let generation = VaultGeneration::from_bytes([1; 16]);
+    let reference = SecretRef::account_mini_secret(0, generation, SecretOwner::from_bytes([2; 16]), account_id);
+    let account = WalletAccount::try_new(0, account_id, reference, citizen_ss58_address(account_id), "账户", 1).unwrap();
+    let profile = WalletProfile::try_new(0, generation, account_id, WalletOrigin::Created, 1, account_id, vec![account])
+        .and_then(|profile| profile.try_with_wallet_name("钱包级名称")).unwrap();
+    let state = WalletState::try_from_parts(9, Some(profile.clone()), None, None, Vec::new())
+        .and_then(|state| state.try_with_active_wallet(Some(0))).unwrap();
+    let result = ownership::insert(OwnedResult::success(0, ResultPayload::WalletState(
+        Box::new(citizen_sdk_engine::WalletStateSnapshot::from_state(&state).unwrap())))).unwrap();
+    let hot = ownership::insert(OwnedResult::success(0, ResultPayload::WalletProfile(Some(profile)))).unwrap();
+    let empty = ownership::insert(OwnedResult::success(0, ResultPayload::WalletProfile(None))).unwrap();
+    unsafe {
+        let mut present = 9;
+        let mut index = 99;
+        assert_eq!(super::citizensdk_wallet_state_get_active_wallet(result, &mut present, &mut index), 0);
+        assert_eq!((present, index), (1, 0), "零号热钱包不是缺省空值");
+        present = 9;
+        assert_eq!(super::citizensdk_wallet_state_get_active_wallet(result, &mut present, std::ptr::null_mut()),
+            CitizenSdkErrorCode::InvalidArgument.as_i32());
+        assert_eq!(present, 9);
+        assert_ne!(super::citizensdk_wallet_state_get_active_wallet(hot, &mut present, &mut index), 0);
+        assert_eq!(present, 9);
+        for handle in [result, hot] {
+            let mut required = 99;
+            assert_eq!(super::citizensdk_wallet_profile_copy_name(handle, std::ptr::null_mut(), 0, &mut required), 0);
+            assert_eq!(required, "钱包级名称".len() as u64);
+            let mut bytes = vec![0xa5; required as usize];
+            let capacity = bytes.len() as u64;
+            required = 99;
+            assert_eq!(super::citizensdk_wallet_profile_copy_name(handle, bytes.as_mut_ptr(), capacity - 1, &mut required),
+                CitizenSdkErrorCode::InvalidArgument.as_i32());
+            assert_eq!(required, 99);
+            assert!(bytes.iter().all(|byte| *byte == 0xa5));
+            assert_eq!(super::citizensdk_wallet_profile_copy_name(handle, bytes.as_mut_ptr(), capacity, &mut required), 0);
+            assert_eq!(bytes, "钱包级名称".as_bytes());
+        }
+        let mut required = 99;
+        assert_eq!(super::citizensdk_wallet_profile_copy_name(empty, std::ptr::null_mut(), 0, &mut required), 0);
+        assert_eq!(required, 0);
+        // 合成投影结果未登记runtime；沿同一内部拥有者归还，不伪造公开异步请求。
+        ownership::release(result).unwrap();
+        assert!(ownership::release(result).is_err());
+        assert_ne!(super::citizensdk_wallet_state_get_active_wallet(result, &mut present, &mut index), 0);
+        assert_eq!(present, 9);
+        ownership::release(hot).unwrap();
+        ownership::release(empty).unwrap();
+    }
 }

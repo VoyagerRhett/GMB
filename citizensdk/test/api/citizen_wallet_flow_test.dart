@@ -1,483 +1,344 @@
 import 'dart:async';
 import 'dart:typed_data';
-
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizen_sdk/src/crypto/account_codec.dart';
 import 'package:citizen_sdk/src/platform/citizen_sdk_flutter_codec.dart';
 import 'package:citizen_sdk/src/platform/citizen_sdk_platform.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+/// 使用真实Dart门面与严格通道夹具；合成数据不冒充Core密码学、设备认证或真实钱包。
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late _WalletPlatform platform;
-
-  setUp(() {
-    platform = _WalletPlatform();
-    CitizenSdkPlatform.instance = platform;
-  });
-
+  CitizenSdk? opened;
+  Future<CitizenSdk> open({int modules = CitizenSdkModules.full}) async {
+    final sdk = await CitizenSdk.open(modules: modules);
+    opened = sdk;
+    return sdk;
+  }
+  setUp(() { opened = null; platform = _WalletPlatform(); CitizenSdkPlatform.instance = platform; });
   tearDown(() async {
+    await opened?.close();
     CitizenSdkPlatform.instance = null;
     await platform.dispose();
   });
 
-  test('create/import/add只启动原生安全流程并返回公开profile', () async {
-    final sdk = await CitizenSdk.open();
-    final created = await sdk.wallet.create(
-      wordCount: CitizenWalletWordCount.words24,
-    );
-    final imported = await sdk.wallet.importWallet();
-    final expanded = await sdk.wallet.addAccounts(const <int>[1, 2]);
-
-    expect(created.origin, CitizenWalletOrigin.created);
-    expect(imported.origin, CitizenWalletOrigin.imported);
-    expect(expanded.accounts, hasLength(3));
-    expect(platform.argumentsByMethod['createWallet'], <Object?>[
-      1,
-      'session-a',
-      1,
-      24,
-    ]);
-    expect(platform.argumentsByMethod['importWallet'], <Object?>[
-      1,
-      'session-a',
-      2,
-    ]);
-    expect(platform.argumentsByMethod['addWalletAccounts'], <Object?>[
-      1,
-      'session-a',
-      3,
-      const <int>[1, 2],
-    ]);
+  test('钱包检查资源只接真实引用、准确索引，释放幂等且SDK关闭回收', () async {
+    final id = _account(1);
+    final state = <Object?>['1', null, <Object?>[], 1, false, 0,
+      <Object?>[<Object?>[0, '异常', id, null, 3, 'hot', <Object?>[<Object?>[id], true]]]];
+    platform.handlers['inspectWallets'] = (_) => ['inspection-1', state];
+    platform.handlers['releaseWalletInspection'] = (_) => [];
+    platform.handlers['repairHotWallet'] = (_) => [_state()];
+    platform.handlers['renameDiagnosticWallet'] = (_) => [state];
+    platform.handlers['deleteDiagnosticWallet'] = (_) => [<Object?>['2', null, <Object?>[], 0, false, null, <Object?>[]]];
+    final sdk = await open();
+    final inspection = await sdk.wallet.inspect().result;
+    expect(inspection.state.diagnostics.single.walletName, '异常');
+    expect(() => inspection.delete(99), throwsA(isA<CitizenSdkException>()));
+    await inspection.rename(walletIndex: 0, name: '新名字').result;
+    expect(platform.arguments['renameDiagnosticWallet']!.sublist(3), ['inspection-1', 0, '新名字']);
+    await inspection.repairHot(0).result;
+    await inspection.delete(0).result;
+    await inspection.release(); await inspection.release();
+    expect(platform.calls.where((m) => m == 'releaseWalletInspection'), hasLength(1));
+    expect(() => inspection.repairHot(0), throwsA(isA<CitizenSdkException>()));
+    await sdk.wallet.inspect().result;
     await sdk.close();
+    expect(platform.calls.where((m) => m == 'releaseWalletInspection'), hasLength(2));
   });
 
-  test('三种助记词数量使用准确数值且默认十二词，不向Dart传递秘密', () async {
-    expect(CitizenWalletWordCount.values.map((value) => value.value), [
-      12,
-      18,
-      24,
-    ]);
-    final sdk = await CitizenSdk.open();
-    await sdk.wallet.create();
-    expect(platform.argumentsByMethod['createWallet']!.last, 12);
-    for (final count in CitizenWalletWordCount.values) {
-      await sdk.wallet.create(wordCount: count);
-      final request = platform.argumentsByMethod['createWallet']!;
-      expect(request, hasLength(4));
-      expect(request.last, count.value);
-    }
+  test('检查资源释放失败保留所有权可重试，不使SDK关闭跳过结果', () async {
+    final state = <Object?>['1', null, <Object?>[], 1, false, 0,
+      <Object?>[<Object?>[0, '异常', _account(1), null, 3, null, null]]];
+    platform.handlers['inspectWallets'] = (_) => ['inspection-1', state];
+    var attempts = 0;
+    platform.handlers['releaseWalletInspection'] = (_) {
+      if (++attempts == 1) throw const CitizenSdkException(code: CitizenSdkErrorCode.busy, message: '合成忙碌');
+      return [];
+    };
+    final inspection = await (await open()).wallet.inspect().result;
+    await expectLater(inspection.release(), throwsA(isA<CitizenSdkException>()));
+    await inspection.release();
+    expect(attempts, 2);
+  });
+
+  test('准备、备份副本、真实提交、释放分离且SDK无窗口', () async {
+    platform.handlers['prepareWalletCreation'] = (_) => ['prepared-1'];
+    final raw = Uint8List.fromList([115, 121, 110, 116, 104, 101, 116, 105, 99]);
+    platform.handlers['copyRecoveryPhrase'] = (_) => [raw];
+    platform.handlers['commitWalletCreation'] = (_) => [_profile('created', 1)];
+    platform.handlers['releasePreparedWallet'] = (_) => [];
+    final sdk = await open();
+    final prepared = await sdk.wallet.prepareCreation(wordCount: CitizenWalletWordCount.words18).result;
+    final recovery = await prepared.recoveryPhrase();
+    final visible = recovery.bytes;
+    expect(visible, [115, 121, 110, 116, 104, 101, 116, 105, 99]);
+    expect(raw, everyElement(0));
+    expect(() => visible[0] = 1, throwsUnsupportedError);
+    expect(recovery.toString(), isNot(contains('synthetic')));
+    expect((await prepared.commit().result).walletName, '钱包0');
+    expect(platform.arguments['prepareWalletCreation']!.sublist(3), [18, '']);
+    expect(() => prepared.commit(), throwsA(isA<CitizenSdkException>()));
+    await recovery.release();
+    expect(visible, everyElement(0));
+    expect(() => recovery.bytes, throwsA(isA<CitizenSdkException>()));
+    await prepared.release();
+    await prepared.release();
+    expect(platform.calls.where((method) => method == 'releasePreparedWallet'), hasLength(1));
+  });
+
+  test('未提交关闭只归还准备资源，不删除钱包或伪造创建', () async {
+    platform.handlers['prepareWalletCreation'] = (_) => ['prepared-1'];
+    platform.handlers['releasePreparedWallet'] = (_) => [];
+    final sdk = await open();
+    final prepared = await sdk.wallet.prepareCreation(wordCount: CitizenWalletWordCount.words12).result;
     await sdk.close();
+    expect(platform.calls, contains('releasePreparedWallet'));
+    expect(platform.calls, isNot(contains('commitWalletCreation')));
+    expect(platform.calls, isNot(contains('deleteWallet')));
+    expect(() => prepared.commit(), throwsA(isA<CitizenSdkException>()));
   });
 
-  test('唯一初始化与冷账户界面只传非秘密文案并返回统一冷热目录', () async {
-    final sdk = await CitizenSdk.open();
-    final initialized = await sdk.wallet.initialize(
-      wordCount: CitizenWalletWordCount.words18,
-      content: _initializationContent(),
-    );
-    final importedCold = await sdk.wallet.importColdAccountWithUi(
-      walletColdAccountText: '冷账户只保存公开账户标识',
-    );
-
-    expect(initialized.accounts, isNotEmpty);
-    expect(importedCold.accounts.last.signMode, CitizenWalletSignMode.cold);
-    expect(platform.argumentsByMethod['initializeWallet'], <Object?>[
-      1,
-      'session-a',
-      1,
-      18,
-      '账户角色说明',
-      '授权说明',
-      '完成说明',
-      '备份说明',
-      '冷账户说明',
-    ]);
-    expect(platform.argumentsByMethod['importColdAccountWithUi']!.last,
-        '冷账户只保存公开账户标识');
-    await sdk.close();
+  test('导入和指定追加保留原输入，下一个编号不由Dart推算', () async {
+    platform.handlers['importWallet'] = (_) => [_profile('imported', 1)];
+    platform.handlers['addWalletAccounts'] = (_) => [_profile('imported', 3)];
+    platform.handlers['addNextWalletAccount'] = (_) => [_profile('imported', 4)];
+    final sdk = await open();
+    expect((await sdk.wallet.importWallet(mnemonic: 'synthetic input', password: 'example').result).origin, CitizenWalletOrigin.imported);
+    expect((await sdk.wallet.addAccounts(mnemonic: 'synthetic input', password: 'example', indices: [1, 2]).result).accounts, hasLength(3));
+    expect((await sdk.wallet.addNextAccount(mnemonic: 'synthetic input').result).accounts, hasLength(4));
+    expect(platform.arguments['importWallet']!.sublist(3), ['synthetic input', 'example']);
+    expect(platform.arguments['addWalletAccounts']!.sublist(3), ['synthetic input', 'example', [1, 2]]);
+    expect(platform.arguments['addNextWalletAccount']!.sublist(3), ['synthetic input', '']);
   });
 
-  test('初始化展示文字拒绝空值、控制字符和超限输入', () {
-    for (final invalid in <String>[
-      '',
-      ' 含空格',
-      '含\n换行',
-      List<String>.filled(257, '字').join(),
-    ]) {
-      expect(
-        () => CitizenWalletInitializationContent(
-          walletAccountRoleText: invalid,
-          walletAuthorizationText: '授权',
-          walletCompletionText: '完成',
-          walletBackupText: '备份',
-          walletColdAccountText: '冷账户',
-        ),
-        throwsArgumentError,
-      );
-    }
-  });
-
-  test('原生输入合同拒绝十五词、二十一词及任意其他数量', () {
+  test('12/18/24词准确值，旧UI方法及额外文案槽均拒绝', () {
     const codec = CitizenSdkFlutterCodec();
+    expect(CitizenWalletWordCount.values.map((value) => value.value), [12, 18, 24]);
     for (final count in [0, 11, 15, 21, 25]) {
-      expect(
-        () => codec.encodeRequest(
-          method: 'createWallet',
-          sessionId: 'session-a',
-          requestSequence: 1,
-          fields: [count],
-        ),
-        throwsA(
-          isA<CitizenSdkException>().having(
-            (error) => error.code,
-            'code',
-            CitizenSdkErrorCode.invalidArgument,
-          ),
-        ),
-      );
+      expect(() => codec.encodeRequest(method: 'prepareWalletCreation', sessionId: 's',
+        requestSequence: 1, fields: [count, '']), throwsA(isA<CitizenSdkException>()));
     }
-  });
-
-  test('签名模块独立选择而不合并钱包门面', () async {
-    final sdk = await CitizenSdk.open(modules: CitizenSdkModules.signing);
-    expect(platform.argumentsByMethod['open'], <Object?>[1, 2]);
-    expect(sdk.signing, isA<CitizenSigning>());
-    await sdk.close();
-  });
-
-  test('私钥查看只传账户，等真实完成后返回void，不提前结束', () async {
-    final sdk = await CitizenSdk.open(modules: CitizenSdkModules.wallet);
-    platform.viewCompletion = Completer<void>();
-    var completed = false;
-    final Future<void> viewing = sdk.wallet.viewAccountPrivateKey(_account(1));
-    final completion = viewing.then((_) => completed = true);
-    await Future<void>.delayed(Duration.zero);
-    expect(completed, isFalse);
-    expect(platform.argumentsByMethod['viewAccountPrivateKey'], <Object?>[
-      1,
-      'session-a',
-      1,
-      _account(1),
-    ]);
-    platform.viewCompletion!.complete();
-    await completion;
-    expect(completed, isTrue);
-    await sdk.close();
-  });
-
-  test('私钥查看拒绝额外响应槽，取消和认证失败保留原错误', () async {
-    final sdk = await CitizenSdk.open(modules: CitizenSdkModules.wallet);
-    platform.viewResponse = <Object?>[Uint8List(32)];
-    await expectLater(
-      sdk.wallet.viewAccountPrivateKey(_account(1)),
-      throwsA(isA<CitizenSdkException>()),
-    );
-    platform.viewResponse = null;
-    for (final code in <CitizenSdkErrorCode>[
-      CitizenSdkErrorCode.cancelled,
-      CitizenSdkErrorCode.unavailable,
-    ]) {
-      platform.viewError = CitizenSdkException(
-        code: code,
-        message: '原生安全流程未完成',
-      );
-      await expectLater(
-        sdk.wallet.viewAccountPrivateKey(_account(1)),
-        throwsA(
-          isA<CitizenSdkException>().having(
-            (error) => error.code,
-            'code',
-            code,
-          ),
-        ),
-      );
+    for (final method in ['createWallet', 'initializeWallet', 'importColdAccountWithUi', 'viewAccountPrivateKey', 'qrScan']) {
+      expect(CitizenSdkFlutterCodec.methods, isNot(contains(method)));
+      expect(() => codec.encodeRequest(method: method, sessionId: 's', requestSequence: 1),
+        throwsA(isA<CitizenSdkException>()));
     }
-    platform.viewError = null;
-    await sdk.close();
+    expect(() => codec.encodeRequest(method: 'prepareWalletCreation', sessionId: 's',
+      requestSequence: 1, fields: [18, '', '界面文案']), throwsA(isA<CitizenSdkException>()));
   });
 
-  test('未open纯验签无需事件订阅或任何会话资源，原生true/false原样返回', () async {
-    for (final valid in <bool>[false, true]) {
-      platform.verificationResult = valid;
-      expect(
-        await CitizenSigning.verify(
-          accountId: _account(1),
-          signature: Uint8List(64),
-          payload: Uint8List(0),
-        ),
-        valid,
-      );
+  test('输入原因和候选来自SDK，过长输入不进入平台', () async {
+    platform.handlers['validateWalletPassword'] = (_) => [7, null];
+    platform.handlers['validateWalletMnemonic'] = (_) => [3, 2];
+    platform.handlers['walletWordSuggestions'] = (_) => [['word']];
+    final sdk = await open();
+    expect((await sdk.wallet.validatePassword('abc')).reason, CitizenWalletInputReason.passwordLength);
+    final mnemonic = await sdk.wallet.validateMnemonic('synthetic', CitizenWalletWordCount.words18);
+    expect(mnemonic.reason, CitizenWalletInputReason.unknownWord);
+    expect(mnemonic.position, 2);
+    expect(await sdk.wallet.wordSuggestions('wor'), ['word']);
+    final count = platform.calls.length;
+    expect((await sdk.wallet.validatePassword('a' * 1025)).reason, CitizenWalletInputReason.inputTooLong);
+    expect(platform.calls.length, count);
+  });
+
+  test('取消接纳不完成操作，真实终态后不再发送取消', () async {
+    final pending = Completer<List<Object?>>();
+    platform.handlers['importWallet'] = (_) => pending.future;
+    platform.handlers['cancelOperation'] = (_) => [true];
+    final sdk = await open();
+    final operation = sdk.wallet.importWallet(mnemonic: 'synthetic');
+    var settled = false;
+    final done = operation.result.then((_) => settled = true);
+    expect(await operation.cancel(), isTrue);
+    expect(platform.arguments['cancelOperation']!.last, operation.operationId);
+    expect(settled, isFalse);
+    pending.complete([_profile('imported', 1)]);
+    await done;
+    expect(await operation.cancel(), isFalse);
+    expect(platform.calls.where((method) => method == 'cancelOperation'), hasLength(1));
+  });
+
+  test('私钥交付不等于关闭，关闭清零副本并等待真实回包', () async {
+    final closeGate = Completer<List<Object?>>();
+    final raw = Uint8List.fromList(List.filled(32, 7));
+    platform.handlers['openPrivateKey'] = (_) => ['private-1'];
+    platform.handlers['revealPrivateKey'] = (_) => [raw];
+    platform.handlers['closePrivateKey'] = (_) => closeGate.future;
+    final sdk = await open();
+    final resource = await sdk.wallet.openPrivateKey(_account(1));
+    final visible = await resource.reveal();
+    expect(visible, everyElement(7));
+    expect(raw, everyElement(0));
+    expect(() => visible[0] = 2, throwsUnsupportedError);
+    await expectLater(resource.reveal(), throwsA(isA<CitizenSdkException>()));
+    var closed = false;
+    final terminal = resource.closed.then((_) => closed = true);
+    final closing = resource.close();
+    expect(visible, everyElement(0));
+    expect(closed, isFalse);
+    closeGate.complete([]);
+    await closing;
+    await terminal;
+    expect(closed, isTrue);
+    await resource.close();
+    expect(platform.calls.where((method) => method == 'closePrivateKey'), hasLength(1));
+  });
+
+  test('关闭后迟到私钥不展示，排空后平台字节也被擦除', () async {
+    final reveal = Completer<List<Object?>>();
+    platform.handlers['openPrivateKey'] = (_) => ['private-2'];
+    platform.handlers['revealPrivateKey'] = (_) => reveal.future;
+    platform.handlers['closePrivateKey'] = (_) => [];
+    final sdk = await open();
+    final resource = await sdk.wallet.openPrivateKey(_account(1));
+    final rejected = expectLater(resource.reveal(), throwsA(isA<CitizenSdkException>().having(
+      (error) => error.code, 'code', CitizenSdkErrorCode.cancelled)));
+    final closing = resource.close();
+    final bytes = Uint8List.fromList(List.filled(32, 8));
+    reveal.complete([bytes]);
+    await rejected;
+    await closing;
+    await resource.closed;
+    expect(bytes, everyElement(0));
+  });
+
+  test('查看失败不妨碍真实排空，关闭失败可重试', () async {
+    platform.handlers['openPrivateKey'] = (_) => ['private-3'];
+    platform.handlers['revealPrivateKey'] = (_) => throw const CitizenSdkException(
+      code: CitizenSdkErrorCode.cancelled, message: '合成认证取消');
+    var closes = 0;
+    platform.handlers['closePrivateKey'] = (_) {
+      if (++closes == 1) throw const CitizenSdkException(code: CitizenSdkErrorCode.busy, message: '合成未排空');
+      return [];
+    };
+    final sdk = await open();
+    final resource = await sdk.wallet.openPrivateKey(_account(1));
+    await expectLater(resource.reveal(), throwsA(isA<CitizenSdkException>().having(
+      (error) => error.code, 'code', CitizenSdkErrorCode.cancelled)));
+    await expectLater(resource.close(), throwsA(isA<CitizenSdkException>().having(
+      (error) => error.code, 'code', CitizenSdkErrorCode.busy)));
+    await resource.close();
+    await resource.closed;
+    expect(closes, 2);
+  });
+
+  test('纯验签不open不订阅事件，true和false准确返回', () async {
+    for (final valid in [false, true]) {
+      platform.verifyResult = valid;
+      expect(await CitizenSigning.verify(accountId: _account(1), signature: Uint8List(64), payload: Uint8List(0)), valid);
     }
-    expect(platform.argumentsByMethod.keys, <String>['verifySignature']);
-    expect(platform.argumentsByMethod['verifySignature'], <Object?>[
-      1,
-      _account(1),
-      Uint8List(64),
-      Uint8List(0),
-    ]);
     expect(platform.eventReads, 0);
-    await expectLater(
-      CitizenSigning.verify(
-        accountId: _account(1),
-        signature: Uint8List(63),
-        payload: Uint8List(0),
-      ),
-      throwsA(isA<CitizenSdkException>()),
-    );
-    expect(platform.eventReads, 0);
-    expect(platform.verificationCalls, 2);
+    expect(platform.calls, ['verifySignature', 'verifySignature']);
+    await expectLater(CitizenSigning.verify(accountId: _account(1), signature: Uint8List(63), payload: Uint8List(0)),
+      throwsA(isA<CitizenSdkException>()));
+    expect(platform.calls, hasLength(2));
   });
 
-  test('sign消息使用临时副本并仅返回公开sr25519签名', () async {
-    final sdk = await CitizenSdk.open();
-    final callerPayload = Uint8List.fromList(<int>[1, 2, 3]);
-    final signature = await sdk.signing.sign(
-      accountId: _account(1),
-      payload: callerPayload,
-    );
-
-    expect(callerPayload, <int>[1, 2, 3]);
-    expect(signature.bytes, hasLength(64));
-    expect(platform.borrowedPayloadAfterReturn, everyElement(0));
-    await sdk.close();
+  test('普通签名只交公开消息副本，结束擦除副本不改调用方', () async {
+    Uint8List? borrowed;
+    platform.handlers['signWalletPayload'] = (fields) { borrowed = fields[1]! as Uint8List; return [Uint8List(64)]; };
+    final sdk = await open(modules: CitizenSdkModules.signing);
+    final source = Uint8List.fromList([1, 2, 3]);
+    expect((await sdk.signing.sign(accountId: _account(1), payload: source).result).bytes, hasLength(64));
+    expect(source, [1, 2, 3]);
+    expect(borrowed, everyElement(0));
+    expect(platform.calls, isNot(contains('openPrivateKey')));
+    expect(platform.arguments['open'], [2, CitizenSdkModules.signing, false]);
   });
 
-  test('空签名载荷有效且账户名在编码前统一修剪', () async {
-    final sdk = await CitizenSdk.open();
-    await sdk.signing.sign(accountId: _account(1), payload: Uint8List(0));
-    await sdk.wallet.renameAccount(accountId: _account(1), name: '  旅行钱包  ');
-
-    expect(
-      platform.argumentsByMethod['signWalletPayload']![4],
-      isA<Uint8List>().having((value) => value.length, 'length', 0),
-    );
-    expect(platform.argumentsByMethod['renameAccount']![4], '旅行钱包');
-    await sdk.close();
+  test('冷热目录、独立钱包名、付款选择和账户名精确接线', () async {
+    platform.handlers['getWalletState'] = (_) => [_state()];
+    platform.handlers['importColdAccountId'] = (_) => [_state(includeCold: true)];
+    platform.handlers['setActiveWallet'] = (_) => [_state(includeCold: true, selected: 1)];
+    platform.handlers['renameWallet'] = (_) => [_state(includeCold: true, walletName: '独立名称')];
+    platform.handlers['renameAccount'] = (_) => [_state(includeCold: true, coldName: '冷账户名')];
+    platform.handlers['deleteAccount'] = (_) => [_state()];
+    platform.handlers['reorderWalletAccountsWithoutDefaultChange'] = (_) => [_state(includeCold: true)];
+    final sdk = await open();
+    expect((await sdk.wallet.getState().result).defaultAccount!.accountId, _account(1));
+    await sdk.wallet.importColdAccount(accountId: _account(2), name: ' 冷钱包 ').result;
+    expect(platform.arguments['importColdAccountId']!.sublist(3), [_account(2), '冷钱包']);
+    final selected = await sdk.wallet.setActiveWallet(expectedRevision: BigInt.one, walletIndex: 1).result;
+    expect(selected.activeWalletAccount!.accountId, _account(2));
+    expect(selected.defaultAccount!.accountId, _account(1));
+    final renamed = await sdk.wallet.renameWallet(expectedRevision: BigInt.one, walletIndex: 0, name: ' 独立名称 ').result;
+    expect(renamed.hotProfile!.walletName, '独立名称');
+    expect(renamed.accounts.first.name, '账户0');
+    expect((await sdk.wallet.renameAccount(accountId: _account(2), name: ' 冷账户名 ').result).accounts.last.name, '冷账户名');
+    expect(platform.arguments['renameWallet']!.sublist(3), ['1', 0, '独立名称']);
+    await sdk.wallet.reorderAccountsWithoutDefaultChange(expectedRevision: BigInt.one, accountIds: [_account(1), _account(2)]).result;
+    expect((await sdk.wallet.deleteAccount(_account(2)).result).accounts, hasLength(1));
   });
 
-  test('统一钱包状态包含冷热账户且默认账户只从首项读取', () async {
-    final sdk = await CitizenSdk.open();
-    final initial = await sdk.wallet.getState();
-    final imported = await sdk.wallet.importColdAccount(
-      accountId: _account(2),
-      name: '  冷钱包  ',
-    );
-    final reordered = await sdk.wallet.reorderAccountsWithoutDefaultChange(
-      expectedRevision: imported.revision,
-      accountIds: <String>[_account(1), _account(2)],
-    );
-    final renamed = await sdk.wallet.renameAccount(
-      accountId: _account(2),
-      name: '离线签名',
-    );
-    final deleted = await sdk.wallet.deleteAccount(_account(2));
-
-    expect(initial.defaultAccount?.accountId, _account(1));
-    expect(imported.accounts.last.signMode, CitizenWalletSignMode.cold);
-    expect(reordered.defaultAccount?.accountId, _account(1));
-    expect(renamed.accounts.last.name, '离线签名');
-    expect(deleted.accounts, hasLength(1));
-    expect(platform.argumentsByMethod['importColdAccountId']![4], '冷钱包');
-    expect(
-      platform.argumentsByMethod['reorderWalletAccountsWithoutDefaultChange']!
-          .sublist(3),
-      <Object?>[
-        '2',
-        <String>[_account(1), _account(2)],
-      ],
-    );
-    await sdk.close();
+  test('输入越界在接纳与序号分配前拒绝，读失败不当空钱包', () async {
+    final sdk = await open();
+    expect(() => sdk.wallet.addAccounts(mnemonic: 'synthetic', indices: List.filled(1991, 1)), throwsA(isA<CitizenSdkException>()));
+    expect(() => sdk.wallet.renameWallet(expectedRevision: BigInt.one, walletIndex: 0, name: '名' * 31), throwsA(isA<CitizenSdkException>()));
+    expect(() => sdk.wallet.setActiveWallet(expectedRevision: BigInt.from(-1), walletIndex: 0), throwsA(isA<CitizenSdkException>()));
+    expect(() => sdk.wallet.importColdAccount(accountId: _account(2), ss58Address: 'also-set'), throwsA(isA<CitizenSdkException>()));
+    expect(platform.calls, ['open']);
+    platform.handlers['getWalletState'] = (_) => throw const CitizenSdkException(code: CitizenSdkErrorCode.storage, message: '合成读取失败');
+    await expectLater(sdk.wallet.getState().result, throwsA(isA<CitizenSdkException>()));
+    expect(platform.arguments['getWalletState']![2], 1);
   });
 
-  test('钱包公开API在复制或递增请求序号前拒绝超界输入', () async {
-    final sdk = await CitizenSdk.open();
-    final invalid = isA<CitizenSdkException>().having(
-      (error) => error.code,
-      'code',
-      CitizenSdkErrorCode.invalidArgument,
-    );
-
-    await expectLater(
-      sdk.wallet.addAccounts(
-        List<int>.filled(
-          CitizenSdkFlutterCodec.maximumAdditionalWalletAccounts + 1,
-          1,
-          growable: false,
-        ),
-      ),
-      throwsA(invalid),
-    );
-    await expectLater(
-      sdk.signing.sign(
-        accountId: _account(1),
-        payload: Uint8List(
-          CitizenSdkFlutterCodec.maximumSigningPayloadBytes + 1,
-        ),
-      ),
-      throwsA(invalid),
-    );
-    await expectLater(
-      sdk.wallet.renameAccount(
-        accountId: _account(1),
-        name: List<String>.filled(129, 'a').join(),
-      ),
-      throwsA(invalid),
-    );
-    // Opening the session is expected; every rejected wallet operation must
-    // fail before it allocates a request sequence or reaches the platform.
-    expect(platform.argumentsByMethod.keys.toList(), <String>['open']);
-    await sdk.close();
-  });
-
-  test('delete返回null profile且不能把秘密放入Dart响应', () async {
-    final sdk = await CitizenSdk.open();
-    await sdk.wallet.delete();
-    expect(platform.argumentsByMethod['deleteWallet'], hasLength(3));
-    await sdk.close();
+  test('普通清除与签名并删除分开，空终态不接受旧null profile', () async {
+    platform.handlers['deleteWallet'] = (_) => [];
+    platform.handlers['signAndDeleteWallet'] = (_) => [];
+    final sdk = await open();
+    await sdk.wallet.delete().result;
+    await sdk.wallet.signAndDelete().result;
+    expect(platform.arguments['deleteWallet']!.sublist(3), isEmpty);
+    platform.handlers['deleteWallet'] = (_) => [null];
+    await expectLater(sdk.wallet.delete().result, throwsA(isA<CitizenSdkException>()));
   });
 }
 
 final class _WalletPlatform implements CitizenSdkPlatform {
-  final StreamController<Object?> _events =
-      StreamController<Object?>.broadcast();
-  final Map<String, List<Object?>> argumentsByMethod =
-      <String, List<Object?>>{};
-  Uint8List? borrowedPayloadAfterReturn;
+  final handlers = <String, FutureOr<List<Object?>> Function(List<Object?>)>{};
+  final calls = <String>[];
+  final arguments = <String, List<Object?>>{};
+  final _events = StreamController<Object?>.broadcast();
   int eventReads = 0;
-  int verificationCalls = 0;
-  bool verificationResult = false;
-  Completer<void>? viewCompletion;
-  CitizenSdkException? viewError;
-  List<Object?>? viewResponse;
-
-  @override
-  Stream<Object?> get events {
-    eventReads += 1;
-    return _events.stream;
+  int nextSequence = 1;
+  bool verifyResult = false;
+  @override Stream<Object?> get events { eventReads++; return _events.stream; }
+  @override Future<Object?> invoke(String method, List<Object?> values) async {
+    calls.add(method); arguments[method] = values;
+    expect(values.first, 2);
+    if (method == 'verifySignature') return [2, verifyResult];
+    if (method == 'open') return [2, 'session-a', 0, ['created', 1]];
+    expect(values[1], 'session-a'); expect(values[2], nextSequence++);
+    final sequence = values[2]! as int;
+    if (method == 'close') return [2, 'session-a', sequence, ['disposed']];
+    final handler = handlers[method];
+    if (handler == null) throw StateError('未配置方法：$method');
+    try {
+      return [2, 'session-a', sequence, await handler(values.sublist(3))];
+    } on CitizenSdkException catch (error) {
+      // 测试错误同样模拟平台精确关联，不绕过生产错误校验。
+      throw CitizenSdkException(code: error.code, stage: error.stage, message: error.message,
+        method: method, sessionId: 'session-a', requestSequence: sequence);
+    }
   }
-
-  @override
-  Future<Object?> invoke(String method, List<Object?> arguments) async {
-    argumentsByMethod[method] = arguments;
-    if (method == 'open') {
-      return <Object?>[
-        1,
-        'session-a',
-        0,
-        <Object?>['created', 1],
-      ];
-    }
-    if (method == 'verifySignature') {
-      verificationCalls += 1;
-      return <Object?>[1, verificationResult];
-    }
-    final sequence = arguments[2]! as int;
-    if (method == 'viewAccountPrivateKey') {
-      await viewCompletion?.future;
-      final error = viewError;
-      if (error != null) {
-        throw CitizenSdkException(
-          code: error.code,
-          stage: error.stage,
-          method: method,
-          message: error.message,
-          sessionId: 'session-a',
-          requestSequence: sequence,
-        );
-      }
-      return <Object?>[1, 'session-a', sequence, viewResponse ?? <Object?>[]];
-    }
-    final value = switch (method) {
-      'createWallet' => <Object?>[_profile('created', 1)],
-      'importWallet' => <Object?>[_profile('imported', 1)],
-      'addWalletAccounts' => <Object?>[_profile('imported', 3)],
-      'signWalletPayload' => <Object?>[Uint8List(64)],
-      'getWalletState' => <Object?>[_state(includeCold: false, revision: 1)],
-      'initializeWallet' => <Object?>[_state(includeCold: false, revision: 2)],
-      'importColdAccountWithUi' => <Object?>[
-        _state(includeCold: true, revision: 3),
-      ],
-      'importColdAccountId' => <Object?>[
-        _state(includeCold: true, revision: 2),
-      ],
-      'reorderWalletAccountsWithoutDefaultChange' => <Object?>[
-        _state(includeCold: true, revision: 3),
-      ],
-      'renameAccount' => <Object?>[
-        _state(includeCold: true, revision: 4, coldName: '离线签名'),
-      ],
-      'deleteAccount' => <Object?>[_state(includeCold: false, revision: 5)],
-      'deleteWallet' => const <Object?>[null],
-      'close' => <Object?>['disposed'],
-      _ => throw StateError('未预期 method：$method'),
-    };
-    if (method == 'signWalletPayload') {
-      borrowedPayloadAfterReturn = arguments[4]! as Uint8List;
-    }
-    return <Object?>[1, 'session-a', sequence, value];
-  }
-
   Future<void> dispose() => _events.close();
 }
 
-CitizenWalletInitializationContent _initializationContent() =>
-    CitizenWalletInitializationContent(
-      walletAccountRoleText: '账户角色说明',
-      walletAuthorizationText: '授权说明',
-      walletCompletionText: '完成说明',
-      walletBackupText: '备份说明',
-      walletColdAccountText: '冷账户说明',
-    );
-
-List<Object?> _profile(String origin, int accountCount) {
-  final accounts = List<List<Object?>>.generate(accountCount, (index) {
-    final accountId = _account(index + 1);
-    return <Object?>[
-      index,
-      accountId,
-      citizenSs58FromAccountId(accountId),
-      '账户$index',
-      '${index + 1}',
-      index == 0,
-    ];
-  });
-  return <Object?>[0, origin, '1', _account(1), _account(1), accounts];
-}
-
-List<Object?> _state({
-  required bool includeCold,
-  required int revision,
-  String coldName = '冷钱包',
-}) {
-  final hot = _profile('created', 1);
-  return <Object?>[
-    '$revision',
-    hot,
-    <Object?>[
-      <Object?>[
-        'hot',
-        0,
-        0,
-        _account(1),
-        citizenSs58FromAccountId(_account(1)),
-        '账户0',
-        '1',
-        true,
-      ],
-      if (includeCold)
-        <Object?>[
-          'cold',
-          1,
-          null,
-          _account(2),
-          citizenSs58FromAccountId(_account(2)),
-          coldName,
-          '2',
-          false,
-        ],
-    ],
-  ];
-}
-
-String _account(int byte) =>
-    '0x${List<String>.filled(32, byte.toRadixString(16).padLeft(2, '0')).join()}';
+List<Object?> _profile(String origin, int count, {String walletName = '钱包0'}) => [
+  0, origin, '1', _account(1), _account(1),
+  [for (var index = 0; index < count; index++)
+    [index, _account(index + 1), citizenSs58FromAccountId(_account(index + 1)), '账户$index', (index + 1).toString(), index == 0]],
+  walletName,
+];
+List<Object?> _state({bool includeCold = false, int selected = 0, String walletName = '钱包0', String coldName = '冷钱包'}) => [
+  '1', _profile('created', 1, walletName: walletName),
+  [
+    ['hot', 0, 0, _account(1), citizenSs58FromAccountId(_account(1)), '账户0', '1', true],
+    if (includeCold) ['cold', 1, null, _account(2), citizenSs58FromAccountId(_account(2)), coldName, '2', false],
+  ],
+  1, false, selected, <Object?>[],
+];
+String _account(int byte) => '0x' + List.filled(32, byte.toRadixString(16).padLeft(2, '0')).join();

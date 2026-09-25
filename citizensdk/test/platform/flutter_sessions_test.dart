@@ -48,8 +48,10 @@ void main() {
     final platform = _CredentialPlatform();
     final session = await CitizenSdkFlutterSession.open(platform: platform);
     addTearDown(() async { await session.close(); await platform.dispose(); });
+    // 替身同步回送取消事件；SDK必须先退出request事件派发再调用平台，避免流重入。
     platform.request('credentials-1', BigInt.from(31));
-    await platform.cancelled.future;
+    expect(platform.cancelIds, isEmpty);
+    await platform.cancelled.future.timeout(const Duration(seconds: 1));
     expect(platform.providerFlags, [false]);
     expect(platform.responses, isEmpty);
     expect(platform.cancelIds, ['credentials-1:31']);

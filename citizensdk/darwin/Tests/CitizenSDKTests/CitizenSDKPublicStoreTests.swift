@@ -5,20 +5,29 @@ import XCTest
 
 final class CitizenSDKPublicStoreTests: XCTestCase {
     func testMalformedPersistentRevisionFailsWithoutTrappingOrWriting() throws {
-        // A numeric-looking TEXT literal is converted by this column's SQLite
-        // INTEGER affinity, so use non-numeric TEXT to preserve the malformed
-        // storage class that the decoder must reject.
-        for literal in ["-1", "0", "1.5", "'broken'"] {
+        // 数字文本会被SQLite的INTEGER亲和性转换，因此文本边界使用非数字合成值。
+        for (literal, storageClass) in [("-1", "integer"), ("0", "integer"),
+                                        ("1.5", "real"), ("'broken'", "text")] {
             let directory = temporaryDirectory()
             defer { try? FileManager.default.removeItem(at: directory) }
             let store = try CitizenSDKPublicStore(directory: directory)
             store.close()
-            try corruptRevision(directory.appendingPathComponent("public-state-v1.sqlite3"),
+            let file = directory.appendingPathComponent("public-state-v1.sqlite3")
+            try corruptRevision(file,
                                 "INSERT INTO singleton_records(domain, revision, record) VALUES(1, \(literal), X'01')")
+            let expected = ["1", storageClass, literal, "01"]
+            XCTAssertEqual(try revisionRow(file), expected)
             let reopened = try CitizenSDKPublicStore(directory: directory)
-            XCTAssertThrowsError(try reopened.chainDatabaseLoad(), literal)
-            XCTAssertThrowsError(try reopened.chainDatabaseCAS(expected: 0, candidate: Data([2])), literal)
-            reopened.close()
+            defer { reopened.close() }
+            XCTAssertThrowsError(try reopened.chainDatabaseLoad(), literal) { error in
+                XCTAssertEqual((error as? CitizenSDKError)?.code, .storage)
+            }
+            XCTAssertEqual(try revisionRow(file), expected)
+            XCTAssertThrowsError(try reopened.chainDatabaseCAS(expected: 0, candidate: Data([2])), literal) { error in
+                XCTAssertEqual((error as? CitizenSDKError)?.code, .storage)
+            }
+            // 拒绝畸形revision后不能把损坏记录当空库覆盖，也不能偷偷改写原字节。
+            XCTAssertEqual(try revisionRow(file), expected)
         }
     }
     func testHostNamespacesDoNotShareChainOrHistoryState() throws {
@@ -103,6 +112,20 @@ final class CitizenSDKPublicStoreTests: XCTestCase {
         XCTAssertFalse(try CitizenSDKSQLite.classifyStepCode(SQLITE_DONE))
     }
 
+    func testFixtureSQLFailureThrowsAndDoesNotCreateOrChangeRecords() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try CitizenSDKPublicStore(directory: directory)
+        defer { store.close() }
+        let file = directory.appendingPathComponent("public-state-v1.sqlite3")
+        // 语句错误与缺失数据库都必须抛错，READWRITE不得悄悄创建另一份夹具。
+        XCTAssertThrowsError(try executeSQL(file, "INSERT INTO absent_fixture_table VALUES(1)"))
+        XCTAssertFalse(try store.chainDatabaseLoad().present)
+        let missing = directory.appendingPathComponent("missing.sqlite3")
+        XCTAssertThrowsError(try executeSQL(missing, "SELECT 1"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missing.path))
+    }
+
     private func temporaryDirectory() -> URL {
         FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
     }
@@ -138,15 +161,59 @@ final class CitizenSDKPublicStoreTests: XCTestCase {
         withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
     }
 
+    // 只在当前合成夹具连接内跳过CHECK以模拟磁盘中已有的畸形记录；
+    // 先证明正常连接确实拒绝，再注入，退出前恢复，不修改生产schema或全局设置。
     private func corruptRevision(_ file: URL, _ sql: String) throws {
-        try executeSQL(file, sql)
+        try withFixtureDatabase(file) { database in
+            try requireSQLite(sqlite3_exec(database, sql, nil, nil, nil), SQLITE_CONSTRAINT)
+            try executeSQL(database, "PRAGMA ignore_check_constraints = ON")
+            defer {
+                XCTAssertEqual(sqlite3_exec(database, "PRAGMA ignore_check_constraints = OFF",
+                                           nil, nil, nil), SQLITE_OK)
+            }
+            try executeSQL(database, sql)
+        }
+    }
+
+    private enum FixtureError: Error {
+        case sqlite(actual: Int32, expected: Int32)
+    }
+
+    private func requireSQLite(_ actual: Int32, _ expected: Int32 = SQLITE_OK) throws {
+        guard actual == expected else { throw FixtureError.sqlite(actual: actual, expected: expected) }
+    }
+
+    // 夹具打开/执行失败必须终止当前测试，不能在空数据库上继续做生产拒绝断言。
+    private func withFixtureDatabase<T>(_ file: URL, _ body: (OpaquePointer) throws -> T) throws -> T {
+        var database: OpaquePointer?
+        let result = sqlite3_open_v2(file.path, &database, SQLITE_OPEN_READWRITE, nil)
+        defer { if let database { XCTAssertEqual(sqlite3_close_v2(database), SQLITE_OK) } }
+        try requireSQLite(result)
+        return try body(XCTUnwrap(database))
+    }
+
+    private func executeSQL(_ database: OpaquePointer, _ sql: String) throws {
+        try requireSQLite(sqlite3_exec(database, sql, nil, nil, nil))
     }
 
     private func executeSQL(_ file: URL, _ sql: String) throws {
-        var database: OpaquePointer?
-        XCTAssertEqual(sqlite3_open_v2(file.path, &database, SQLITE_OPEN_READWRITE, nil), SQLITE_OK)
-        guard let database else { return XCTFail("SQLite fixture did not open") }
-        defer { sqlite3_close_v2(database) }
-        XCTAssertEqual(sqlite3_exec(database, sql, nil, nil, nil), SQLITE_OK)
+        try withFixtureDatabase(file) { try executeSQL($0, sql) }
+    }
+
+    private func revisionRow(_ file: URL) throws -> [String] {
+        try withFixtureDatabase(file) { database in
+            var statement: OpaquePointer?
+            try requireSQLite(sqlite3_prepare_v2(database,
+                "SELECT domain, typeof(revision), quote(revision), hex(record) FROM singleton_records ORDER BY domain",
+                -1, &statement, nil))
+            let query = try XCTUnwrap(statement)
+            defer { sqlite3_finalize(query) }
+            try requireSQLite(sqlite3_step(query), SQLITE_ROW)
+            let row = try (0..<4).map { column in
+                String(cString: try XCTUnwrap(sqlite3_column_text(query, Int32(column))))
+            }
+            try requireSQLite(sqlite3_step(query), SQLITE_DONE)
+            return row
+        }
     }
 }

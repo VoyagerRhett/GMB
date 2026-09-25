@@ -213,6 +213,10 @@ pub trait SecretVault: Send + Sync {
         envelope: EncryptedSecretEnvelope,
     ) -> ContractFuture<'_, SecretBuffer>;
 
+    /// 检查同一钱包索引全部实际物理钥，不因代际退休就忽略尚未删除的钥。
+    /// 只返回存在性，不解锁/导出钥；无法完整查询时必须报错，不能猜测不存在。
+    fn has_any_wallet_key(&self, wallet_index: u32) -> ContractFuture<'_, bool>;
+
     fn has_wallet_key(
         &self,
         wallet_index: u32,

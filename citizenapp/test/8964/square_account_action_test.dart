@@ -7,7 +7,8 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import 'package:citizenapp/8964/services/square_api_client.dart';
-import 'package:citizenapp/signer/signing.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
+import '../support/fake_citizen_sdk.dart';
 import 'package:citizenapp/security/device_subkey.dart'
     show bytesToHex, hexToBytes;
 
@@ -19,6 +20,18 @@ const _payloadHex = '73712d616374696f6e';
 const _cidNumber = 'CN220-CTZN2-198805200-2026';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  late TestCitizenSdkTransport encodingTransport;
+  late CitizenSdk encodingSdk;
+  setUp(() async {
+    encodingTransport = TestCitizenSdkTransport({}, useCore: true);
+    encodingSdk = await encodingTransport.open();
+  });
+  tearDown(() async {
+    await encodingSdk.close();
+    await encodingTransport.dispose();
+  });
+
   test('deleteAccount 钉死 op_tag 0x1D，走 challenge→sign→confirm', () async {
     Uint8List? signedMessage;
     Map<String, dynamic>? confirmBody;
@@ -92,10 +105,10 @@ void main() {
     expect(
       bytesToHex(signedMessage!),
       bytesToHex(
-        signingMessage(
+        (await CitizenSigning.encodePayload(CitizenSigningPayload.message(
           opTag: kOpSignSquareAction,
           scalePayload: hexToBytes(_payloadHex),
-        ),
+        ))),
       ),
     );
     expect(confirmBody, {

@@ -32,7 +32,7 @@ Future<bool?> showAddAccountSheet(
 /// 无根多账户追加面板：录入本钱包助记词与可选 password →（按固定 [mode]）添加账户。
 ///
 /// 无根设备不保存助记词或 password，追加账户须重新录入；[CitizenSdkWallet.addAccounts]
-/// 会先做归属校验（两者派生的账户0 必须等于 [masterId]）。
+/// SDK在真实操作门内核对输入归属当前唯一热钱包；[masterId]只标识原面板的展示上下文。
 class AddAccountSheet extends StatefulWidget {
   const AddAccountSheet({
     super.key,
@@ -71,7 +71,7 @@ class _AddAccountSheetState extends State<AddAccountSheet> {
   @override
   void dispose() {
     final operation = _operation;
-    if (operation != null) unawaited(operation.cancel().then<void>((_) {}, onError: (Object _, StackTrace __) {}));
+    if (operation != null) unawaited(operation.cancel().then<void>((_) {}, onError: (Object _, StackTrace _) {}));
     unawaited(ScreenshotGuard.disable());
     _mnemonicController.clear();
     _indexController.clear();

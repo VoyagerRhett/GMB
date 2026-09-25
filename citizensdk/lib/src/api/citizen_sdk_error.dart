@@ -68,7 +68,7 @@ final class CitizenSdkException implements Exception {
     _ => CitizenSdkFailureStage.admission,
   };
   final String message;
-  /// 失败跨公开调用边界后，必须是 62 项固定方法之一；边界前可为空。
+  /// 失败跨公开调用边界后，必须属于现行通道方法闭集；边界前可为空。
   final String? method;
   final String? sessionId;
   final int? requestSequence;

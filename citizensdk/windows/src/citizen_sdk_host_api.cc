@@ -1,6 +1,7 @@
 #include "citizen_sdk/citizensdk_host.h"
 
 #include <algorithm>
+#include <cstring>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -515,6 +516,43 @@ citizensdk_error_code_t citizensdk_host_last_error_copy(
   if (capacity < last_error.size()) return CITIZENSDK_ERROR_INVALID_ARGUMENT;
   std::copy(last_error.begin(), last_error.end(), buffer);
   return CITIZENSDK_OK;
+}
+
+
+citizensdk_error_code_t citizensdk_host_open_qr_capture(citizensdk_host_handle_t handle,
+    uint32_t purpose, const citizensdk_qr_capture_callbacks_v1_t *callbacks, uint64_t *out_resource) {
+  using namespace citizen_sdk::windows;
+  if (!out_resource) return expose(CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  *out_resource = 0;
+  if (!callbacks || callbacks->struct_size != sizeof(*callbacks) ||
+      callbacks->abi_version != CITIZENSDK_HOST_ABI_VERSION)
+    return expose(CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  auto host = acquire_host(handle);
+  if (!host) return expose(CITIZENSDK_ERROR_INVALID_HANDLE);
+  try { return expose(host->open_qr_capture(purpose, *callbacks, out_resource)); }
+  catch (...) { return expose(map_exception()); }
+}
+citizensdk_error_code_t citizensdk_host_control_qr_capture(citizensdk_host_handle_t handle,
+    uint64_t resource, uint64_t operation, uint32_t action, uint8_t enabled) {
+  using namespace citizen_sdk::windows;
+  auto host = acquire_host(handle);
+  if (!host) return expose(CITIZENSDK_ERROR_INVALID_HANDLE);
+  try { return expose(host->control_qr_capture(resource, operation, action, enabled)); }
+  catch (...) { return expose(map_exception()); }
+}
+citizensdk_error_code_t citizensdk_host_decode_qr_image(citizensdk_host_handle_t handle,
+    citizensdk_bytes_view_t encoded, uint32_t purpose, uint8_t *buffer, uint64_t capacity, uint64_t *out_required) {
+  using namespace citizen_sdk::windows;
+  if (!out_required || (!buffer && capacity != 0)) return expose(CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  auto host = acquire_host(handle);
+  if (!host) return expose(CITIZENSDK_ERROR_INVALID_HANDLE);
+  try {
+    const auto bytes = host->decode_qr_image(encoded, purpose);
+    if (buffer && capacity < bytes.size()) return expose(CITIZENSDK_ERROR_INVALID_ARGUMENT);
+    if (buffer && !bytes.empty()) std::memcpy(buffer, bytes.data(), bytes.size());
+    *out_required = static_cast<uint64_t>(bytes.size());
+    return expose(CITIZENSDK_OK);
+  } catch (...) { return expose(map_exception()); }
 }
 
 }  // extern "C"

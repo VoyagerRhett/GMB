@@ -30,7 +30,7 @@ final class CitizenSDKFlutterSessionsTests: XCTestCase {
             var response: [Any?]?
             sessions.dispatch(request) { response = $0 as? [Any?] }
             XCTAssertEqual(response?.count, 2)
-            XCTAssertEqual(response?[0] as? Int64, 1)
+            XCTAssertEqual(response?[0] as? Int64, 2)
             XCTAssertEqual(response?[1] as? Bool, false)
         }
         XCTAssertEqual(calls, 2)
@@ -56,9 +56,9 @@ final class CitizenSDKFlutterSessionsTests: XCTestCase {
     }
 
     func testProtocolVersionRejectsBoolAndFloatingNumbers() {
-        XCTAssertTrue(CitizenSdkFlutterSessions.exactProtocolVersion(NSNumber(value: 1)))
+        XCTAssertTrue(CitizenSdkFlutterSessions.exactProtocolVersion(NSNumber(value: 2)))
         XCTAssertFalse(CitizenSdkFlutterSessions.exactProtocolVersion(NSNumber(value: true)))
-        XCTAssertFalse(CitizenSdkFlutterSessions.exactProtocolVersion(NSNumber(value: 1.0)))
+        XCTAssertFalse(CitizenSdkFlutterSessions.exactProtocolVersion(NSNumber(value: 2.0)))
     }
 
     func testSubscriptionEpochRejectsStaleGenerationAndOverflow() throws {

@@ -34,11 +34,11 @@ void main() {
     expect(platform.calls, <List<Object?>>[
       <Object?>[
         'open',
-        <Object?>[1, CitizenSdkModules.full],
+        <Object?>[2, CitizenSdkModules.full, false],
       ],
       <Object?>[
         'close',
-        <Object?>[1, 'session-1', 1],
+        <Object?>[2, 'session-1', 1],
       ],
     ]);
   });
@@ -59,27 +59,28 @@ void main() {
     expect(platform.calls, <List<Object?>>[
       <Object?>[
         'open',
-        <Object?>[1, CitizenSdkModules.qr],
+        <Object?>[2, CitizenSdkModules.qr, false],
       ],
       <Object?>[
         'qrParse',
-        <Object?>[1, 'session-1', 1, 'QR_V1'],
+        <Object?>[2, 'session-1', 1, 'QR_V1'],
       ],
       <Object?>[
         'qrEncode',
-        <Object?>[1, 'session-1', 2, 'QR_V1', 3],
+        <Object?>[2, 'session-1', 2, 'QR_V1', 3],
       ],
       <Object?>[
         'close',
-        <Object?>[1, 'session-1', 3],
+        <Object?>[2, 'session-1', 3],
       ],
     ]);
   });
-  test('扫码返回 Core 结构，签名门面自动返回同一响应图像和签名', () async {
+  test('审阅与签名同一资源，响应图像由SDK返回并显式释放', () async {
     final sdk = await CitizenSdk.open();
-    final scanned = await sdk.qr.scan();
+    final scanned = await sdk.qr.parse('QR_V1');
     expect(scanned.accountId, _qrAccount);
-    final result = await sdk.signing.signQrRequest('request');
+    final review = await sdk.signing.reviewQrRequest('request').result;
+    final result = await sdk.signing.signQrRequest(review).result;
     expect(result.requestId, 'request-identifier');
     expect(result.signRequest, 'request');
     expect(result.canonicalText, 'response');
@@ -92,12 +93,12 @@ void main() {
     expect(() => signature[0] = 1, throwsUnsupportedError);
     expect(
       platform.calls.where((call) => call[0] == 'signQrRequest').single[1],
-      <Object?>[1, 'session-1', 2, 'request'],
+      <Object?>[2, 'session-1', 3, 'review-owned'],
     );
-    expect(
-      platform.calls.where((call) => call[0] == 'qrEncode').single[1],
-      <Object?>[1, 'session-1', 3, 'response', 4],
-    );
+    expect(platform.calls.where((call) => call[0] == 'qrEncode'), isEmpty);
+    await review.release();
+    expect(platform.calls.where((call) => call[0] == 'releaseQrReview').single[1],
+      <Object?>[2, 'session-1', 5, 'review-owned']);
     await sdk.close();
   });
 
@@ -122,7 +123,7 @@ void main() {
       accountId: '0x${'22' * 32}',
       salt: Uint8List(32),
       info: Uint8List.fromList(<int>[1]),
-    );
+    ).result;
     expect(keys, hasLength(2));
     expect(runtime, <int>[7, 8]);
     expect(key, hasLength(32));
@@ -145,53 +146,70 @@ final class _FacadePlatform implements CitizenSdkPlatform {
     calls.add(<Object?>[method, arguments]);
     return switch (method) {
       'open' => <Object?>[
-        1,
+        2,
         'session-1',
         0,
         <Object?>['created', 1],
       ],
       'close' => <Object?>[
-        1,
+        2,
         'session-1',
         arguments[2],
         <Object?>['disposed'],
       ],
-      'qrParse' || 'qrScan' || 'qrDecodeLuminance' => <Object?>[
-        1,
+      'qrParse' || 'qrDecodeLuminance' => <Object?>[
+        2,
         'session-1',
         arguments[2],
         <Object?>[
           jsonEncode(<String, Object?>{
             'kind': 5,
+            'scan_purpose_mask': 195,
             'canonical_text': 'QR_V1',
             'account_id': _qrAccount,
           }),
         ],
       ],
+      'reviewQrRequest' => <Object?>[
+        2, 'session-1', arguments[2],
+        <Object?>['review-owned', jsonEncode(<String, Object?>{
+          'kind': 1, 'scan_purpose_mask': 16, 'canonical_text': 'request',
+          'request_id': 'request-identifier', 'expires_at': 1700000000,
+          'action': 1, 'signer_account_id': _qrAccount, 'review_payload': '0x01',
+          'pallet_name': 'Synthetic', 'call_name': 'call', 'call_arguments': '{}',
+          'genesis_hash': _qrAccount, 'spec_version': 1, 'transaction_version': 1,
+          'era': 'immortal', 'nonce': '0', 'tip': '0', 'block_hash': _qrAccount,
+        })],
+      ],
+      'releaseQrReview' => <Object?>[2, 'session-1', arguments[2], <Object?>[]],
       'signQrRequest' => <Object?>[
-        1,
+        2,
         'session-1',
         arguments[2],
         <Object?>[
           jsonEncode(<String, Object?>{
             'kind': 2,
+            'scan_purpose_mask': 8,
             'canonical_text': 'response',
             'sign_request': 'request',
             'request_id': 'request-identifier',
             'expires_at': 1700000000,
             'signer_account_id': _qrAccount,
             'signature': '0x${'00' * 64}',
+            'current_account_id': null,
+            'current_account_signature': null,
           }),
+          2, 2, Uint8List.fromList(<int>[0, 255, 255, 0]),
         ],
       ],
       'qrConsumeSignResponse' => <Object?>[
-        1,
+        2,
         'session-1',
         arguments[2],
         <Object?>[Uint8List(64)],
       ],
       'qrEncode' => <Object?>[
-        1,
+        2,
         'session-1',
         arguments[2],
         <Object?>[
@@ -201,7 +219,7 @@ final class _FacadePlatform implements CitizenSdkPlatform {
         ],
       ],
       'getStorageKeysPaged' => <Object?>[
-        1,
+        2,
         'session-1',
         arguments[2],
         <Object?>[
@@ -212,13 +230,13 @@ final class _FacadePlatform implements CitizenSdkPlatform {
         ],
       ],
       'callRuntimeApi' => <Object?>[
-        1,
+        2,
         'session-1',
         arguments[2],
         <Object?>[Uint8List.fromList(<int>[7, 8])],
       ],
       'deriveApplicationKey' => <Object?>[
-        1,
+        2,
         'session-1',
         arguments[2],
         <Object?>[Uint8List(32)],

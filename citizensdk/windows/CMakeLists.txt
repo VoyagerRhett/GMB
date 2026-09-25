@@ -92,10 +92,7 @@ set(CITIZENSDK_HOST_SOURCES
   src/citizen_sdk_cng.cc
   src/citizen_sdk_user_auth.cc
   src/citizen_sdk_qr_camera.cc
-  src/citizen_sdk_qr_flow.cc
-  src/citizen_sdk_wallet_flow.cc
-  src/citizen_sdk_wallet_validation.cc
-  src/citizen_sdk_wallet_window.cc)
+)
 
 add_library(citizensdk_host SHARED ${CITIZENSDK_HOST_SOURCES} cmake/citizensdk_host.def)
 add_library(CitizenSDK::Host ALIAS citizensdk_host)
@@ -110,7 +107,7 @@ target_include_directories(citizensdk_host PUBLIC
   PRIVATE src "${CITIZENSDK_INTERNAL_INCLUDE_DIR}" "${CITIZENSDK_SQLITE_INCLUDE_DIR}")
 target_link_libraries(citizensdk_host PUBLIC
   "$<BUILD_INTERFACE:citizensdk_core>" "$<INSTALL_INTERFACE:CitizenSDK::Core>"
-  PRIVATE CitizenSDK::QrImage "${CITIZENSDK_SQLITE_ARCHIVE}" ncrypt bcrypt tbs advapi32 user32 gdi32 comctl32 ntdll wtsapi32 mfplat mfreadwrite mfuuid ole32)
+  PRIVATE CitizenSDK::QrImage "${CITIZENSDK_SQLITE_ARCHIVE}" ncrypt bcrypt tbs advapi32 user32 gdi32 comctl32 ntdll wtsapi32 mfplat mfreadwrite mfuuid ole32 windowscodecs)
 target_compile_options(citizensdk_host PRIVATE /W4 /permissive- /utf-8 /EHsc
   $<$<BOOL:${CITIZENSDK_WARNINGS_AS_ERRORS}>:/WX>)
 target_link_options(citizensdk_host PRIVATE /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA)

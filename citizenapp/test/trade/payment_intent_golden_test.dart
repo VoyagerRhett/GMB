@@ -2,7 +2,8 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:citizenapp/signer/signing.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
+import '../support/fake_citizen_sdk.dart';
 import 'package:citizenapp/transaction/offchain-transaction/models/payment_intent.dart';
 
 /// 扫码支付跨端 golden vectors。
@@ -19,8 +20,20 @@ import 'package:citizenapp/transaction/offchain-transaction/models/payment_inten
 /// - `signingHash()` = `blake2b_256(GMB(3B) || 0x15 || scaleEncode())`
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  late TestCitizenSdkTransport encodingTransport;
+  late CitizenSdk encodingSdk;
+  setUp(() async {
+    encodingTransport = TestCitizenSdkTransport({}, useCore: true);
+    encodingSdk = await encodingTransport.open();
+  });
+  tearDown(() async {
+    await encodingSdk.close();
+    await encodingTransport.dispose();
+  });
+
   group('PaymentIntent golden vectors (cross-Rust, CID 主键)', () {
-    test('fixture 1: simple same-bank payment', () {
+    test('fixture 1: simple same-bank payment', () async {
       final intent = NodePaymentIntent(
         txId: _filledBytes(32, 0x00),
         payer: _filledBytes(32, 0x01),
@@ -34,12 +47,12 @@ void main() {
       );
       _assertHexEq(
         'fixture1 signing_hash',
-        intent.signingHash(),
+        await intent.signingHash(),
         '4c0c52528976ee38e101769c27ee57a0e30e18939503271fb12a59b58df886fe',
       );
     });
 
-    test('fixture 2: cross-bank with u128/u64/u32 max values', () {
+    test('fixture 2: cross-bank with u128/u64/u32 max values', () async {
       final intent = NodePaymentIntent(
         txId: _filledBytes(32, 0xFF),
         payer: _filledBytes(32, 0x11),
@@ -53,12 +66,12 @@ void main() {
       );
       _assertHexEq(
         'fixture2 signing_hash',
-        intent.signingHash(),
+        await intent.signingHash(),
         '38ba8205abb84ec9121b65c3ee618626972710063e8e6c48cec29b1121460e72',
       );
     });
 
-    test('fixture 3: zero amount / fee, incrementing tx_id bytes', () {
+    test('fixture 3: zero amount / fee, incrementing tx_id bytes', () async {
       final txBytes = Uint8List(32);
       for (var i = 0; i < 32; i++) {
         txBytes[i] = i; // 0x00..0x1F
@@ -76,12 +89,12 @@ void main() {
       );
       _assertHexEq(
         'fixture3 signing_hash',
-        intent.signingHash(),
+        await intent.signingHash(),
         '62405346ffba9e0a4b9d785cf399bfdfcdc1033270dbc8a7b4cbc9ba4e052c9f',
       );
     });
 
-    test('signingHash 经统一原语 signingMessage(OP_SIGN_L3_PAY)', () {
+    test('signingHash 经统一原语 signingMessage(OP_SIGN_L3_PAY)', () async {
       final intent = NodePaymentIntent(
         txId: _filledBytes(32, 0x00),
         payer: _filledBytes(32, 0x01),
@@ -93,14 +106,14 @@ void main() {
         nonce: BigInt.from(1),
         expiresAt: 100,
       );
-      final viaPrimitive = signingMessage(
+      final viaPrimitive = (await CitizenSigning.encodePayload(CitizenSigningPayload.message(
         opTag: kOpSignL3Pay,
         scalePayload: intent.scaleEncode(),
-      );
-      expect(_hexLower(intent.signingHash()), _hexLower(viaPrimitive));
+      )));
+      expect(_hexLower(await intent.signingHash()), _hexLower(viaPrimitive));
     });
 
-    test('相同 PaymentIntent 在其它操作码下生成不同签名消息', () {
+    test('相同 PaymentIntent 在其它操作码下生成不同签名消息', () async {
       final intent = NodePaymentIntent(
         txId: _filledBytes(32, 0x00),
         payer: _filledBytes(32, 0x01),
@@ -112,17 +125,17 @@ void main() {
         nonce: BigInt.from(1),
         expiresAt: 100,
       );
-      final batchOperationMessage = signingMessage(
+      final batchOperationMessage = (await CitizenSigning.encodePayload(CitizenSigningPayload.message(
         opTag: kOpSignOffchainBatch,
         scalePayload: intent.scaleEncode(),
-      );
+      )));
       expect(
-        _hexLower(intent.signingHash()),
+        _hexLower(await intent.signingHash()),
         isNot(_hexLower(batchOperationMessage)),
       );
     });
 
-    test('scaleEncode bank 字段用 Compact(len)||bytes(变长)', () {
+    test('scaleEncode bank 字段用 Compact(len)||bytes(变长)', () async {
       final cid = _cid('LN001-NRC0G-944805165-2026'); // 26 字节
       final intent = NodePaymentIntent(
         txId: _filledBytes(32, 0),

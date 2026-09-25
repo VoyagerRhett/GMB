@@ -3,7 +3,7 @@ import 'dart:typed_data';
 
 import 'package:citizen_sdk/citizen_sdk.dart';
 
-/// Third-party-owned booking input, intentionally unrelated to CitizenApp.
+/// SDK内的第三方合成预订夹具，与真实产品和用户数据无关。
 final class TravelBookingDraft {
   TravelBookingDraft({
     required this.bookingId,
@@ -22,7 +22,7 @@ final class TravelBookingDraft {
   final int seatCount;
 }
 
-/// A third-party adapter whose business types and codecs never enter CitizenSDK.
+/// 测试不同字节结构复用同一公开端口，不定义生产App与SDK的业务归属。
 final class ThirdPartyTravelFixture {
   const ThirdPartyTravelFixture({
     required this.chain,

@@ -17,13 +17,23 @@ import java.util.UUID
 import org.citizen.sdk.internal.CitizenSdkSensitiveBytes
 
 /** Owns public Flutter session identities without exposing Core ownership IDs. */
-internal class CitizenSdkFlutterSequenceGate {
-    private var last = 0L
+/** 诊断只接受闭集事实；不接收异常、参数、账户或会话标识，最多3×8条。 */
+internal class CitizenSdkFlutterDiagnostics(private val emit: (String) -> Unit) {
+    enum class Phase { BEGIN, ADMISSION, DECODE, COMPLETE }
+    enum class Sync { UNKNOWN, SYNCING, USABLE, UNAVAILABLE }
+    private val seen = mutableMapOf<String, MutableSet<String>>()
+
     @Synchronized
-    fun accept(next: Long): Boolean {
-        if (next != last + 1) return false
-        last = next
-        return true
+    fun record(method: String, phase: Phase, code: CitizenSdkErrorCode = CitizenSdkErrorCode.OK,
+               stage: CitizenSdkFailureStage? = null, lifecycle: CitizenSdkLifecycle? = null,
+               elapsedNanos: Long = 0, sync: Sync = Sync.UNKNOWN) {
+        if (method !in setOf("open", "start", "getSyncStatus")) return
+        val signature = "phase=${phase.name} code=${code.name} stage=${stage?.name ?: "NONE"} lifecycle=${lifecycle?.name ?: "UNKNOWN"} sync=${sync.name}"
+        val entries = seen.getOrPut(method) { mutableSetOf() }
+        if (entries.size >= 8 || !entries.add(signature)) return
+        val millis = (elapsedNanos.coerceAtLeast(0) / 1_000_000).coerceAtMost(86_400_000)
+        // 诊断失效不得改变原请求结果；Android日志缓冲由系统管理，不另存文件。
+        try { emit("method=$method $signature elapsed_ms=$millis") } catch (_: Throwable) {}
     }
 }
 
@@ -216,8 +226,7 @@ internal class CitizenSdkFlutterSubscriptionGate<T : Any> {
 
 internal class CitizenSdkFlutterSessions(context: Context, private val textures: TextureRegistry? = null) : EventChannel.StreamHandler {
 
-    private inner class Session(val sdk: CitizenSdk) {
-        val requests = CitizenSdkFlutterSequenceGate()
+    private inner class Session(val sdk: CitizenSdk, val diagnostics: CitizenSdkFlutterDiagnostics) {
         val nextEvent = AtomicLong(1)
         private val stateLock = Any()
         private val inFlight = linkedMapOf<CompletableFuture<*>, CitizenSdkFlutterOutstanding>()
@@ -225,14 +234,19 @@ internal class CitizenSdkFlutterSessions(context: Context, private val textures:
         val prepared = ConcurrentHashMap<String, CitizenSdkPreparedWallet>()
         val privateKeys = ConcurrentHashMap<String, CitizenSdkPrivateKey>()
         val reviews = ConcurrentHashMap<String, CitizenQrReview>()
+        val inspections = ConcurrentHashMap<String, CitizenWalletInspection>()
         val captures = ConcurrentHashMap<String, CitizenSdkQrCapture>()
         private var closing = false
         private var closeCompletion: CompletableFuture<Void>? = null
 
-        fun dispatchAccepted(sequence: Long, action: () -> Unit): Boolean = synchronized(stateLock) {
-            if (closing || !requests.accept(sequence)) return false
-            // Admission, native begin and in-flight registration are one host
-            // critical section. Engine detach cannot snapshot between them.
+        fun acceptRequestSequence(sequence: Long) = synchronized(stateLock) {
+            if (closing) throw CitizenSdkException(CitizenSdkErrorCode.INVALID_STATE, "CitizenSDK session is closing")
+            sdk.acceptRequestSequence(sequence)
+        }
+
+        fun dispatchAccepted(action: () -> Unit): Boolean = synchronized(stateLock) {
+            if (closing) return false
+            // 接纳已在参数解码前由Core执行；本锁仅防detach穿过原生调用及在途登记。
             action()
             true
         }
@@ -304,6 +318,19 @@ internal class CitizenSdkFlutterSessions(context: Context, private val textures:
         snapshot().forEach { it.sdk.detachActivity(value) }
     }
 
+    fun acceptRequestSequence(request: CitizenSdkFlutterCodec.Request.Empty) {
+        val session = synchronized(lock) { sessions[request.sessionId] }
+            ?: throw CitizenSdkException(CitizenSdkErrorCode.NOT_FOUND, "CitizenSDK session was not found")
+        try {
+            session.acceptRequestSequence(request.requestSequence)
+            session.diagnostics.record(request.method, CitizenSdkFlutterDiagnostics.Phase.ADMISSION, lifecycle = session.sdk.lifecycle)
+        } catch (error: CitizenSdkException) {
+            session.diagnostics.record(request.method, CitizenSdkFlutterDiagnostics.Phase.ADMISSION,
+                error.code, error.stage, session.sdk.lifecycle)
+            throw error
+        }
+    }
+
     fun dispatch(request: CitizenSdkFlutterCodec.Request, result: MethodChannel.Result) {
         if (request is CitizenSdkFlutterCodec.Request.EncodePayload) {
             try { result.success(listOf(CitizenSdkFlutterCodec.PROTOCOL_VERSION,
@@ -328,14 +355,14 @@ internal class CitizenSdkFlutterSessions(context: Context, private val textures:
             return
         }
         try {
-            if (!session.dispatchAccepted(sessionRequest.requestSequence) {
+            if (!session.dispatchAccepted {
                     route(session, sessionRequest, result)
                 }
             ) {
                 fail(
                     result,
-                    CitizenSdkErrorCode.CONFLICT,
-                    "CitizenSDK request sequence is not the next session sequence",
+                    CitizenSdkErrorCode.INVALID_STATE,
+                    "CitizenSDK session is closing",
                     request,
                 )
             }
@@ -401,11 +428,16 @@ internal class CitizenSdkFlutterSessions(context: Context, private val textures:
     }
 
     private fun open(modules: Int, result: MethodChannel.Result) {
+        val diagnostics = CitizenSdkFlutterDiagnostics { android.util.Log.i("CitizenSDK", it) }
+        val started = System.nanoTime()
+        diagnostics.record("open", CitizenSdkFlutterDiagnostics.Phase.BEGIN)
         var sdk: CitizenSdk? = null
         try {
             val opened = CitizenSdk.open(applicationContext, null, modules)
             sdk = opened
-            val session = Session(opened)
+            val session = Session(opened, diagnostics)
+            diagnostics.record("open", CitizenSdkFlutterDiagnostics.Phase.COMPLETE,
+                lifecycle = opened.lifecycle, elapsedNanos = System.nanoTime() - started)
             opened.setEventListener { event -> onNativeEvent(session, event) }
             activity?.let(opened::attachActivity)
             synchronized(lock) {
@@ -437,6 +469,7 @@ internal class CitizenSdkFlutterSessions(context: Context, private val textures:
                 // an unavailable snapshot never transports Throwable details.
             }
         } catch (error: Throwable) {
+            diagnosticFailure(diagnostics, "open", error, sdk?.lifecycle, started)
             sdk?.close()
             fail(result, error, CitizenSdkFlutterCodec.Request.Open(modules))
         }
@@ -450,7 +483,7 @@ internal class CitizenSdkFlutterSessions(context: Context, private val textures:
         val sdk = session.sdk
         when (request) {
             is CitizenSdkFlutterCodec.Request.Empty -> when (request.method) {
-                "start" -> complete(session, request, result, sdk.start()) {
+                "start" -> complete(session, request, result, diagnosed(session, "start") { sdk.start() }) {
                     listOf(CitizenSdkFlutterCodec.lifecycle(sdk.lifecycle))
                 }
                 "stop" -> complete(session, request, result, sdk.stop()) {
@@ -466,7 +499,7 @@ internal class CitizenSdkFlutterSessions(context: Context, private val textures:
                 "getFinalizedHead" -> complete(session, request, result, sdk.getFinalizedHead()) {
                     listOf(CitizenSdkFlutterCodec.block(it))
                 }
-                "getSyncStatus" -> complete(session, request, result, sdk.getSyncStatus()) {
+                "getSyncStatus" -> complete(session, request, result, diagnosed(session, "getSyncStatus") { sdk.getSyncStatus() }) {
                     listOf(CitizenSdkFlutterCodec.syncStatus(it))
                 }
                 "getBestHead" -> complete(session, request, result, sdk.getBestHead()) {
@@ -479,6 +512,9 @@ internal class CitizenSdkFlutterSessions(context: Context, private val textures:
                     listOf(CitizenSdkFlutterCodec.encodeHash32(sdk.getGenesisHash())))
                 "getFeeSnapshot" -> complete(session, request, result, sdk.getFeeSnapshot()) {
                     listOf(CitizenSdkFlutterCodec.fee(it))
+                }
+                "inspectWallets" -> complete(session, request, result, sdk.inspectWallets()) {
+                    listOf(session.adopt(session.inspections, it), CitizenSdkFlutterCodec.walletState(it.state))
                 }
                 "getWalletState" -> complete(session, request, result, sdk.getWalletState()) {
                     listOf(CitizenSdkFlutterCodec.walletState(it))
@@ -576,6 +612,21 @@ internal class CitizenSdkFlutterSessions(context: Context, private val textures:
             is CitizenSdkFlutterCodec.Request.ImportState -> complete(
                 session, request, result, sdk.importState(request.state),
             ) { emptyList() }
+            is CitizenSdkFlutterCodec.Request.WalletInspection -> {
+                val inspection = session.inspections[request.resourceId]
+                    ?: throw CitizenSdkException(CitizenSdkErrorCode.NOT_FOUND, "检查资源不属于当前实例")
+                val operation = when (request.method) {
+                    "repairHotWallet" -> inspection.repairHot(request.walletIndex)
+                    "deleteDiagnosticWallet" -> inspection.delete(request.walletIndex)
+                    else -> inspection.rename(request.walletIndex, requireNotNull(request.name))
+                }
+                complete(session, request, result, operation) { listOf(CitizenSdkFlutterCodec.walletState(it)) }
+            }
+            is CitizenSdkFlutterCodec.Request.WalletMetadata -> {
+                val operation = if (request.method == "setActiveWallet") sdk.setActiveWallet(request.expectedRevision, request.walletIndex)
+                    else sdk.renameWallet(request.expectedRevision, request.walletIndex, requireNotNull(request.name))
+                complete(session, request, result, operation) { listOf(CitizenSdkFlutterCodec.walletState(it)) }
+            }
             is CitizenSdkFlutterCodec.Request.RenameWalletAccount -> {
                 val operation = if (request.method == "importColdAccountId") sdk.importColdAccount(request.accountId, request.name)
                     else sdk.renameAccount(request.accountId, request.name)
@@ -758,6 +809,12 @@ internal class CitizenSdkFlutterSessions(context: Context, private val textures:
                     Unit
                 }) { emptyList() }
             }
+            "releaseWalletInspection" -> {
+                val inspection = session.inspections[id] ?: missing()
+                inspection.release()
+                session.inspections.remove(id, inspection)
+                success(result, request.sessionId, request.requestSequence, emptyList())
+            }
             "releaseQrReview" -> {
                 val review = session.reviews[id] ?: missing()
                 review.close()
@@ -790,8 +847,8 @@ internal class CitizenSdkFlutterSessions(context: Context, private val textures:
         var published = false
         var owned: CitizenSdkQrCapture? = null
         val listener = object : CitizenSdkQrCapture.Listener {
-            override fun onResult(value: CitizenQrScanResult) {
-                if (published) emit(session, "qrCaptureResult", listOf(id, value.purpose.value, value.document.coreJson))
+            override fun onResult(result: CitizenQrScanResult) {
+                if (published) emit(session, "qrCaptureResult", listOf(id, result.purpose.value, result.document.coreJson))
             }
             override fun onError(error: CitizenSdkException) {
                 if (published) emit(session, "qrCaptureError", listOf(id, error.code.value, CitizenSdkFlutterCodec.errorName(error.code), error.stage.value))
@@ -894,6 +951,7 @@ internal class CitizenSdkFlutterSessions(context: Context, private val textures:
         settled.thenCompose {
             session.prepared.values.forEach { it.close() }
             session.reviews.values.forEach { it.close() }
+            session.inspections.values.forEach { it.close() }
             citizenSdkFlutterCloseLifecycle(
                 session.sdk.lifecycle,
                 session.sdk::stop,
@@ -903,6 +961,7 @@ internal class CitizenSdkFlutterSessions(context: Context, private val textures:
             session.prepared.clear()
             session.privateKeys.clear()
             session.reviews.clear()
+            session.inspections.clear()
             session.captures.clear()
             synchronized(lock) { sessions.remove(session.sdk.sessionId, session) }
         }.whenComplete { _, error ->
@@ -1066,6 +1125,46 @@ internal class CitizenSdkFlutterSessions(context: Context, private val textures:
             stage,
         ),
     )
+
+    /** 参数解码拒绝只记录闭集枚举，不保留输入或异常内容。 */
+    fun diagnoseRejected(request: CitizenSdkFlutterCodec.Request.Empty?, code: CitizenSdkErrorCode,
+                         stage: CitizenSdkFailureStage) {
+        if (request == null) return
+        val session = synchronized(lock) { sessions[request.sessionId] } ?: return
+        session.diagnostics.record(request.method, CitizenSdkFlutterDiagnostics.Phase.DECODE,
+            code, stage, session.sdk.lifecycle)
+    }
+
+    private fun diagnosticFailure(diagnostics: CitizenSdkFlutterDiagnostics, method: String,
+                                  error: Throwable, lifecycle: CitizenSdkLifecycle?, started: Long) {
+        val cause = unwrap(error) as? CitizenSdkException
+        diagnostics.record(method, CitizenSdkFlutterDiagnostics.Phase.COMPLETE,
+            cause?.code ?: CitizenSdkErrorCode.INTERNAL,
+            cause?.stage ?: CitizenSdkFailureStage.TEARDOWN, lifecycle, System.nanoTime() - started)
+    }
+
+    private fun <T> diagnosed(session: Session, method: String, begin: () -> CompletableFuture<T>): CompletableFuture<T> {
+        val started = System.nanoTime()
+        session.diagnostics.record(method, CitizenSdkFlutterDiagnostics.Phase.BEGIN, lifecycle = session.sdk.lifecycle)
+        val future = try { begin() } catch (error: Throwable) {
+            diagnosticFailure(session.diagnostics, method, error, session.sdk.lifecycle, started)
+            throw error
+        }
+        return future.whenComplete { value, error ->
+            if (error != null) diagnosticFailure(session.diagnostics, method, error, session.sdk.lifecycle, started)
+            else {
+                val status = value as? CitizenChainSyncStatus
+                val sync = when {
+                    status == null -> CitizenSdkFlutterDiagnostics.Sync.UNKNOWN
+                    status.isUsable -> CitizenSdkFlutterDiagnostics.Sync.USABLE
+                    status.isSyncing -> CitizenSdkFlutterDiagnostics.Sync.SYNCING
+                    else -> CitizenSdkFlutterDiagnostics.Sync.UNAVAILABLE
+                }
+                session.diagnostics.record(method, CitizenSdkFlutterDiagnostics.Phase.COMPLETE,
+                    lifecycle = session.sdk.lifecycle, elapsedNanos = System.nanoTime() - started, sync = sync)
+            }
+        }
+    }
 
     private fun snapshot(): List<Session> = synchronized(lock) { sessions.values.toList() }
 

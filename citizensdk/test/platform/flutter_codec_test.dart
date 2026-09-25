@@ -16,6 +16,74 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   const codec = CitizenSdkFlutterCodec();
 
+  test('钱包元数据请求严格绑定修订和u32索引，不携带签名或默认顺序', () {
+    expect(codec.encodeRequest(method: 'setActiveWallet', sessionId: 's', requestSequence: 1,
+      fields: ['18446744073709551615', 0xffffffff]), [2, 's', 1, '18446744073709551615', 0xffffffff]);
+    expect(codec.encodeRequest(method: 'renameWallet', sessionId: 's', requestSequence: 2,
+      fields: ['1', 0, '独立钱包名']), [2, 's', 2, '1', 0, '独立钱包名']);
+    for (final fields in <List<Object?>>[['01', 0], ['18446744073709551616', 0], ['1', -1],
+      ['1', 0x100000000], ['1', 0, 'unexpected']]) {
+      expect(() => codec.encodeRequest(method: 'setActiveWallet', sessionId: 's', requestSequence: 3,
+        fields: fields), throwsA(isA<CitizenSdkException>()));
+    }
+    for (final name in ['', '未修剪 ', '名' * 31, '坏\u0085名']) {
+      expect(() => codec.encodeRequest(method: 'renameWallet', sessionId: 's', requestSequence: 4,
+        fields: ['1', 0, name]), throwsA(isA<CitizenSdkException>()));
+    }
+  });
+
+  test('新profile和state只接受完整新元组，名称与选择分别保持', () {
+    final id = _account(1);
+    final address = citizenSs58FromAccountId(id);
+    final profile = <Object?>[0, 'created', '1', id, id,
+      <Object?>[<Object?>[0, id, address, '账户名称', '1', true]], '钱包名称'];
+    final state = <Object?>['7', profile,
+      <Object?>[<Object?>['hot', 0, 0, id, address, '账户名称', '1', true]], 1, false, 0, <Object?>[]];
+    final decoded = codec.decodeWalletState(state);
+    expect(decoded.hotProfile!.walletName, '钱包名称');
+    expect(decoded.accounts.single.name, '账户名称');
+    expect(decoded.activeWalletIndex, 0);
+    expect(codec.decodeWalletState([...state.take(5), null, <Object?>[]]).activeWalletIndex, isNull);
+    expect(() => codec.decodeWalletProfile(profile.take(6).toList()), throwsA(isA<CitizenSdkException>()));
+    expect(() => codec.decodeWalletState(state.take(5).toList()), throwsA(isA<CitizenSdkException>()));
+    expect(() => codec.decodeWalletState([...state.take(5), 1, <Object?>[]]), throwsA(isA<CitizenSdkException>()));
+    expect(() => codec.decodeWalletProfile([...profile.take(6), '']), throwsA(isA<CitizenSdkException>()));
+    final mismatched = <Object?>[...state];
+    mismatched[2] = <Object?>[<Object?>['hot', 0, 0, id, address, '另一个名称', '1', true]];
+    expect(() => codec.decodeWalletState(mismatched), throwsA(isA<CitizenSdkException>()));
+  });
+
+  test('异常钱包不是空目录或可签名账户，原模式和可信清理目标严格投影', () {
+    final id = _account(1);
+    List<Object?> diagnostic() => [0, '原钱包', id, null, 3, 'hot', [[id, _account(2)], true]];
+    List<Object?> snapshot(Object? value) => ['7', null, <Object?>[], 1, false, 0, [value]];
+    final state = codec.decodeWalletState(snapshot(diagnostic()));
+    expect(state.accounts, isEmpty); expect(state.defaultAccount, isNull); expect(state.activeWalletAccount, isNull);
+    expect(state.initializationState, CitizenWalletInitializationState.ready);
+    expect(state.diagnostics.single.signMode, CitizenWalletSignMode.hot);
+    expect(state.diagnostics.single.ss58Address, isNull);
+    expect(state.diagnostics.single.cleanupTargets!.accountIds, [id, _account(2)]);
+    expect(() => state.diagnostics.clear(), throwsUnsupportedError);
+    expect(() => state.diagnostics.single.cleanupTargets!.accountIds.clear(), throwsUnsupportedError);
+    final unknown = diagnostic(); unknown[5] = null; unknown[6] = null;
+    expect(codec.decodeWalletState(snapshot(unknown)).diagnostics.single.cleanupTargets, isNull);
+    for (final change in <void Function(List<Object?>)>[
+      (v) => v.removeLast(), (v) => v.add(1), (v) => v[4] = 0, (v) => v[4] = 4,
+      (v) => v[5] = 'legacy', (v) => v[3] = 'a' * 129, (v) => v[6] = [[], false],
+      (v) => v[6] = [[id, id], true], (v) => v[6] = [[_account(2), id], true],
+      (v) => v[6] = [[id], 1],
+    ]) {
+      final value = diagnostic(); change(value);
+      expect(() => codec.decodeWalletState(snapshot(value)), throwsA(isA<CitizenSdkException>()));
+    }
+    for (final method in ['repairHotWallet', 'deleteDiagnosticWallet', 'renameDiagnosticWallet']) {
+      final fields = <Object?>['inspection-owned', 0, if (method == 'renameDiagnosticWallet') '名字'];
+      expect(codec.encodeRequest(method: method, sessionId: 's', requestSequence: 1, fields: fields).sublist(3), fields);
+      expect(() => codec.encodeRequest(method: method, sessionId: 's', requestSequence: 2,
+        fields: [...fields, true]), throwsA(isA<CitizenSdkException>()));
+    }
+  });
+
   test('非消费验签只传会话与响应，不接受宿主时间或transform', () {
     expect(codec.encodeRequest(method: 'qrValidateSignResponse', sessionId: 'sdk', requestSequence: 1,
       fields: ['request', '{}']), [2, 'sdk', 1, 'request', '{}']);
@@ -50,7 +118,14 @@ void main() {
     expect(result.expectedBindingRevision, BigInt.parse('18446744073709551615'));
     expect(result.materializedPayload, [1, 2]);
     expect(() => result.materializedPayload![0] = 7, throwsUnsupportedError);
-    expect(() => codec.decodeQrAuthorization(jsonEncode({...value, 'reason': 2})), throwsA(isA<CitizenSdkException>()));
+    // 每一个成功字段独立污染失败结果时都必须拒绝，不能依赖JSON字段顺序。
+    for (final key in value.keys.where((key) => key != 'reason')) {
+      final invalid = <String, Object?>{for (final field in value.keys) field: null};
+      invalid['reason'] = 2;
+      invalid[key] = value[key] ?? '0x${'11' * 32}';
+      expect(() => codec.decodeQrAuthorization(jsonEncode(invalid)),
+        throwsA(isA<CitizenSdkException>()), reason: key);
+    }
     expect(() => codec.decodeQrAuthorization(jsonEncode({...value, 'reason': 4})), throwsA(isA<CitizenSdkException>()));
     final rejected = codec.decodeQrAuthorization(jsonEncode({for (final key in value.keys) key: key == 'reason' ? 2 : null}));
     expect(rejected.reason, CitizenQrAuthorizationReason.invalidAccountId);
@@ -73,10 +148,14 @@ void main() {
     final json = <String, Object?>{
       'kind': 2,
       'canonical_text': 'response',
+      'scan_purpose_mask': 8,
       'request_id': 'request-identifier',
       'expires_at': 1700000000,
       'signer_account_id': _account(1),
       'signature': '0x${'ab' * 64}',
+      // k2两项附加证明固定在公开闭集中；没有证明时必须成对为null。
+      'current_account_id': null,
+      'current_account_signature': null,
     };
     final document = codec.decodeQrDocument(jsonEncode(json));
     expect(document.signature, hasLength(64));
@@ -132,7 +211,7 @@ void main() {
 
   test('历史通知只含 sequence，拒绝额外 payload 与无效顺序号', () {
     final decoded = codec.decodeEvent(<Object?>[
-      1,
+      2,
       'session',
       7,
       'historyChanged',
@@ -142,7 +221,7 @@ void main() {
     expect(decoded.event.sequence, 7);
     expect(
       () => codec.decodeEvent(<Object?>[
-        1,
+        2,
         'session',
         8,
         'historyChanged',
@@ -152,7 +231,7 @@ void main() {
     );
     expect(
       () => codec.decodeEvent(<Object?>[
-        1,
+        2,
         'session',
         0,
         'historyChanged',
@@ -164,7 +243,7 @@ void main() {
 
   test('finalized 通知携带准确 finalized block，拒绝 best 冒充', () {
     final decoded = codec.decodeEvent(<Object?>[
-      1,
+      2,
       'session',
       9,
       'finalizedBlockChanged',
@@ -176,7 +255,7 @@ void main() {
     expect(event.finalized.number, BigInt.from(77));
     expect(
       () => codec.decodeEvent(<Object?>[
-        1,
+        2,
         'session',
         10,
         'finalizedBlockChanged',
@@ -215,32 +294,51 @@ void main() {
       'getAccountBalances',
       'getAccountNonce',
       'getFeeSnapshot',
-      'getWalletProfile',
       'getWalletState',
-      'initializeWallet',
-      'importColdAccountWithUi',
+      'inspectWallets',
+      'releaseWalletInspection',
+      'repairHotWallet',
+      'renameDiagnosticWallet',
+      'deleteDiagnosticWallet',
+      'validateWalletPassword',
+      'validateWalletMnemonic',
+      'walletWordSuggestions',
+      'prepareWalletCreation',
+      'copyRecoveryPhrase',
+      'commitWalletCreation',
+      'releasePreparedWallet',
+      'openPrivateKey',
+      'revealPrivateKey',
+      'closePrivateKey',
+      'cancelOperation',
+      'respondCredential',
+      'cancelCredential',
+      'addNextWalletAccount',
+      'signAndDeleteWallet',
+      'importColdAccountCode',
       'importColdAccountId',
       'importColdAccountSs58',
       'reorderWalletAccountsWithoutDefaultChange',
+      'setActiveWallet',
+      'renameWallet',
       'renameAccount',
       'deleteAccount',
-      'viewAccountPrivateKey',
-      'createWallet',
       'importWallet',
       'addWalletAccounts',
       'setActiveWalletAccount',
-      'renameWalletAccount',
-      'deleteWalletAccount',
       'deleteWallet',
       'reconcileWalletCleanup',
-      'deriveApplicationKey',
       'signWalletPayload',
+      'deriveApplicationKey',
       'beginSigning',
       'consumeExternalSignature',
       'cancelSigning',
       'beginDefaultAccountChange',
       'consumeDefaultAccountChange',
       'verifySignature',
+      'encodeSigningPayload',
+      'qrEncodeDocument',
+      'qrPrepareAccountAuthorization',
       'prepareTransaction',
       'cancelPreparedTransaction',
       'executePreparedTransaction',
@@ -250,17 +348,25 @@ void main() {
       'syncTransactionHistory',
       'qrParse',
       'qrCreateSignRequest',
+      'qrValidateSignResponse',
       'qrConsumeSignResponse',
       'qrCancelSignRequest',
       'qrEncodeAccountId',
       'qrDecodeLuminance',
       'qrEncode',
-      'qrScan',
+      'reviewQrRequest',
+      'releaseQrReview',
+      'openQrCapture',
+      'closeQrCapture',
+      'pauseQrCapture',
+      'resumeQrCapture',
+      'setQrCaptureTorch',
+      'qrDecodeImage',
       'signQrRequest',
     };
     expect(CitizenSdkFlutterCodec.methods, expectedMethods);
-    expect(codec.encodeOpen(), <Object?>[1, CitizenSdkModules.full]);
-    expect(codec.encodeOpen(CitizenSdkModules.signing), <Object?>[1, 2]);
+    expect(codec.encodeOpen(), <Object?>[2, CitizenSdkModules.full, false]);
+    expect(codec.encodeOpen(CitizenSdkModules.signing), <Object?>[2, 2, false]);
     for (final invalid in <int>[0, -1, 0x100000000]) {
       expect(
         () => codec.encodeOpen(invalid),
@@ -282,10 +388,10 @@ void main() {
         'exportState',
         'getGenesisHash',
         'getFeeSnapshot',
-        'getWalletProfile',
         'getWalletState',
-        'importWallet',
+        'inspectWallets',
         'deleteWallet',
+        'signAndDeleteWallet',
         'reconcileWalletCleanup',
       ])
         method: const <Object?>[],
@@ -325,29 +431,39 @@ void main() {
       for (final method in <String>[
         'getAccountBalance',
         'getAccountNonce',
-        'viewAccountPrivateKey',
         'setActiveWalletAccount',
-        'deleteWalletAccount',
         'deleteAccount',
       ])
         method: <Object?>[account],
       'getAccountBalances': <Object?>[
         <String>[account, account],
       ],
-      'createWallet': const <Object?>[24],
-      'initializeWallet': const <Object?>[
-        18,
-        '账户角色说明',
-        '授权说明',
-        '完成说明',
-        '备份说明',
-        '冷账户说明',
-      ],
-      'importColdAccountWithUi': const <Object?>['只接受账户码'],
-      'addWalletAccounts': const <Object?>[
-        <int>[1, 7],
-      ],
-      'renameWalletAccount': <Object?>[account, 'main'],
+      'validateWalletPassword': <Object?>[''],
+      'validateWalletMnemonic': <Object?>['synthetic', 18],
+      'walletWordSuggestions': <Object?>['aban'],
+      'prepareWalletCreation': <Object?>[18, ''],
+      'copyRecoveryPhrase': <Object?>['prepared-owned'],
+      'commitWalletCreation': <Object?>['prepared-owned'],
+      'releasePreparedWallet': <Object?>['prepared-owned'],
+      'releaseWalletInspection': <Object?>['inspection-owned'],
+      'repairHotWallet': <Object?>['inspection-owned', 0],
+      'renameDiagnosticWallet': <Object?>['inspection-owned', 0, 'wallet'],
+      'deleteDiagnosticWallet': <Object?>['inspection-owned', 0],
+      'openPrivateKey': <Object?>[account],
+      'revealPrivateKey': <Object?>['private-owned'],
+      'closePrivateKey': <Object?>['private-owned'],
+      'cancelOperation': <Object?>['1'],
+      'respondCredential': <Object?>['1', Uint8List(12)],
+      'cancelCredential': <Object?>['1'],
+      'importWallet': <Object?>['synthetic', ''],
+      'addWalletAccounts': <Object?>['synthetic', '', <int>[1, 7]],
+      'addNextWalletAccount': <Object?>['synthetic', ''],
+      'importColdAccountCode': <Object?>['{}', ''],
+      'setActiveWallet': <Object?>['7', 1],
+      'renameWallet': <Object?>['7', 1, 'wallet'],
+      'qrEncodeDocument': <Object?>['{}'],
+      'qrPrepareAccountAuthorization': <Object?>[10, Uint8List(1), account],
+      'qrValidateSignResponse': <Object?>['signing-session', '{}'],
       'renameAccount': <Object?>[account, 'main'],
       'importColdAccountId': <Object?>[_account(2), 'cold'],
       'importColdAccountSs58': <Object?>[
@@ -420,12 +536,20 @@ void main() {
         1,
       ],
       'qrEncode': <Object?>['{}', 4],
-      'qrScan': <Object?>[],
-      'signQrRequest': <Object?>['{}'],
+      'reviewQrRequest': <Object?>['{}'],
+      'releaseQrReview': <Object?>['review-owned'],
+      'signQrRequest': <Object?>['review-owned'],
+      'openQrCapture': <Object?>[1],
+      'closeQrCapture': <Object?>['capture-owned'],
+      'pauseQrCapture': <Object?>['capture-owned'],
+      'resumeQrCapture': <Object?>['capture-owned'],
+      'setQrCaptureTorch': <Object?>['capture-owned', true],
+      'qrDecodeImage': <Object?>[Uint8List(1), 1],
     };
     expect(<String>{
       'open',
       'verifySignature',
+      'encodeSigningPayload',
       ...requestFields.keys,
     }, expectedMethods);
     expect(
@@ -434,7 +558,7 @@ void main() {
         signature: Uint8List(64),
         payload: Uint8List(0),
       ),
-      <Object?>[1, account, Uint8List(64), Uint8List(0)],
+      <Object?>[2, account, Uint8List(64), Uint8List(0)],
     );
     expect(
       () => codec.encodeRequest(
@@ -445,19 +569,20 @@ void main() {
       ),
       throwsA(isA<CitizenSdkException>()),
     );
-    expect(codec.decodeVerification(<Object?>[1, false]), isFalse);
-    expect(codec.decodeVerification(<Object?>[1, true]), isTrue);
+    expect(codec.decodeVerification(<Object?>[2, false]), isFalse);
+    expect(codec.decodeVerification(<Object?>[2, true]), isTrue);
     for (final invalid in <Object?>[
       <Object?>[
-        1,
+        2,
         's',
         1,
         <Object?>[false],
       ],
-      <Object?>[1, 0],
+      <Object?>[2, 0],
       <Object?>[1],
-      <Object?>[1, false, null],
-      <Object?>[2, false],
+      <Object?>[2, false, null],
+      <Object?>[0, false],
+      <Object?>[1, false],
     ]) {
       expect(
         () => codec.decodeVerification(invalid),
@@ -472,7 +597,7 @@ void main() {
           requestSequence: 7,
           fields: entry.value,
         ),
-        <Object?>[1, 'session-a', 7, ...entry.value],
+        <Object?>[2, 'session-a', 7, ...entry.value],
       );
       expect(
         () => codec.encodeRequest(
@@ -485,13 +610,13 @@ void main() {
       );
     }
     expect(
-      () => codec.decodeEvent(<String, Object?>{'protocolVersion': 1}),
+      () => codec.decodeEvent(<String, Object?>{'protocolVersion': 2}),
       throwsA(isA<CitizenSdkException>()),
     );
     expect(
       () => codec.decodeResponse(
         method: 'close',
-        raw: <Object?>[1, 'session-a', 1, <String, Object?>{}],
+        raw: <Object?>[2, 'session-a', 1, <String, Object?>{}],
         expectedSessionId: 'session-a',
         expectedRequestSequence: 1,
       ),
@@ -707,6 +832,7 @@ void main() {
         <Object?>[
           <Object?>[0, hot, citizenSs58FromAccountId(hot), 'hot', '1', true],
         ],
+        '独立钱包名',
       ],
       <Object?>[
         <Object?>[
@@ -730,6 +856,7 @@ void main() {
           false,
         ],
       ],
+      1, false, 0, <Object?>[],
     ];
     final decoded = codec.decodeWalletState(state);
     expect(decoded.revision, BigInt.from(9));
@@ -744,6 +871,7 @@ void main() {
         state[0],
         state[1],
         <Object?>[(state[2]! as List<Object?>)[0], invalidCold],
+        1, false, 0, <Object?>[],
       ]),
       throwsA(isA<CitizenSdkException>()),
     );
@@ -782,7 +910,7 @@ void main() {
     expect(
       () => codec.decodeResponse(
         method: 'getFinalizedHead',
-        raw: const <Object?>[1, 'session-a', 1, <Object?>[]],
+        raw: const <Object?>[2, 'session-a', 1, <Object?>[]],
         expectedSessionId: 'session-a',
         expectedRequestSequence: 1,
       ),
@@ -801,7 +929,7 @@ void main() {
       () => codec.decodeResponse(
         method: 'close',
         raw: const <Object?>[
-          1.0,
+          2.0,
           'session-a',
           1,
           <Object?>['disposed'],
@@ -813,7 +941,7 @@ void main() {
     );
     expect(
       () => codec.decodeEvent(const <Object?>[
-        1.0,
+        2.0,
         'session-a',
         1,
         'lifecycleChanged',
@@ -826,7 +954,7 @@ void main() {
         PlatformException(
           code: 'citizensdk.cancelled',
           details: const <Object?>[
-            1.0,
+            2.0,
             'session-a',
             1,
             22,
@@ -853,7 +981,7 @@ void main() {
         sessionId: exactSurrogateBoundary,
         requestSequence: 1,
       ),
-      <Object?>[1, exactSurrogateBoundary, 1],
+      <Object?>[2, exactSurrogateBoundary, 1],
     );
     expect(
       () => codec.encodeRequest(
@@ -879,7 +1007,7 @@ void main() {
       () => codec.decodeResponse(
         method: 'close',
         raw: <Object?>[
-          1,
+          2,
           tooLong,
           1,
           const <Object?>['disposed'],
@@ -891,7 +1019,7 @@ void main() {
     );
     expect(
       () => codec.decodeEvent(<Object?>[
-        1,
+        2,
         tooLong,
         1,
         'lifecycleChanged',
@@ -903,7 +1031,7 @@ void main() {
       () => codec.decodePlatformException(
         PlatformException(
           code: 'citizensdk.cancelled',
-          details: <Object?>[1, tooLong, 1, 22, 7, 'close', 'cancelled'],
+          details: <Object?>[2, tooLong, 1, 22, 7, 'close', 'cancelled'],
         ),
       ),
       throwsA(isA<CitizenSdkException>()),
@@ -914,7 +1042,7 @@ void main() {
     final genesis = codec.decodeResponse(
       method: 'getGenesisHash',
       raw: <Object?>[
-        1,
+        2,
         's',
         1,
         <Object?>[_account(9)],
@@ -932,7 +1060,7 @@ void main() {
         () => codec.decodeResponse(
           method: 'getGenesisHash',
           raw: <Object?>[
-            1,
+            2,
             's',
             1,
             <Object?>[invalid],
@@ -965,7 +1093,7 @@ void main() {
 
   test('响应严格校验 session、request sequence、长度和整数规范形式', () {
     final valid = <Object?>[
-      1,
+      2,
       'session-a',
       3,
       <Object?>[_block(9)],
@@ -980,19 +1108,19 @@ void main() {
 
     for (final invalid in <Object?>[
       <Object?>[
-        1,
+        2,
         'other',
         3,
         <Object?>[_block(9)],
       ],
       <Object?>[
-        1,
+        2,
         'session-a',
         4,
         <Object?>[_block(9)],
       ],
       <Object?>[
-        1,
+        2,
         'session-a',
         3,
         <Object?>[_block(9)],
@@ -1013,7 +1141,7 @@ void main() {
       () => codec.decodeResponse(
         method: 'getAccountBalance',
         raw: <Object?>[
-          1,
+          2,
           'session-a',
           3,
           <Object?>[
@@ -1029,7 +1157,7 @@ void main() {
 
   test('事件与错误使用独立固定 tuple 并拒绝未知枚举', () {
     final lifecycle = codec.decodeEvent(<Object?>[
-      1,
+      2,
       'session-a',
       1,
       'lifecycleChanged',
@@ -1039,7 +1167,7 @@ void main() {
     expect(lifecycle.eventSequence, 1);
 
     final history = codec.decodeEvent(<Object?>[
-      1,
+      2,
       'session-a',
       2,
       'historyChanged',
@@ -1049,7 +1177,7 @@ void main() {
 
     expect(
       () => codec.decodeEvent(<Object?>[
-        1,
+        2,
         'session-a',
         3,
         'transferProgress',
@@ -1060,7 +1188,7 @@ void main() {
 
     expect(
       () => codec.decodeEvent(<Object?>[
-        1,
+        2,
         'session-a',
         2,
         'unknown',
@@ -1073,7 +1201,7 @@ void main() {
       PlatformException(
         code: 'citizensdk.authenticationCancelled',
         details: <Object?>[
-          1,
+          2,
           'session-a',
           8,
           10,
@@ -1091,7 +1219,7 @@ void main() {
 
   test('进程级事件先按session路由，foreign坏payload被忽略而本session失败关闭', () {
     final foreign = <Object?>[
-      1,
+      2,
       'foreign-session',
       'bad-sequence',
       'unknown',
@@ -1102,7 +1230,7 @@ void main() {
     expect(codec.decodeEventForSession(foreign, 'session-a'), isNull);
     expect(
       () => codec.decodeEventForSession(<Object?>[
-        1,
+        2,
         'session-a',
         1,
         'unknown',
@@ -1122,12 +1250,12 @@ void main() {
         requestSequence: 1,
         fields: <Object?>[_account(1), Uint8List(0)],
       ),
-      <Object?>[1, 'session-a', 1, _account(1), Uint8List(0)],
+      <Object?>[2, 'session-a', 1, _account(1), Uint8List(0)],
     );
     final response = codec.decodeResponse(
       method: 'signWalletPayload',
       raw: <Object?>[
-        1,
+        2,
         'session-a',
         1,
         <Object?>[Uint8List(64)],
@@ -1140,7 +1268,7 @@ void main() {
       () => codec.decodeResponse(
         method: 'signWalletPayload',
         raw: <Object?>[
-          1,
+          2,
           'session-a',
           2,
           <Object?>[List<int>.filled(64, 0)],
@@ -1184,6 +1312,7 @@ void main() {
         sessionId: 'session-a',
         requestSequence: 1,
         fields: <Object?>[
+          'synthetic', '',
           List<int>.filled(
             CitizenSdkFlutterCodec.maximumAdditionalWalletAccounts + 1,
             1,
@@ -1207,12 +1336,12 @@ void main() {
   test('账户名只编码已修剪的 1..30 个 Unicode scalar', () {
     expect(
       codec.encodeRequest(
-        method: 'renameWalletAccount',
+        method: 'renameAccount',
         sessionId: 'session-a',
         requestSequence: 1,
         fields: <Object?>[_account(1), '旅行钱包'],
       ),
-      <Object?>[1, 'session-a', 1, _account(1), '旅行钱包'],
+      <Object?>[2, 'session-a', 1, _account(1), '旅行钱包'],
     );
     for (final name in <String>[
       ' 旅行钱包',
@@ -1225,7 +1354,7 @@ void main() {
     ]) {
       expect(
         () => codec.encodeRequest(
-          method: 'renameWalletAccount',
+          method: 'renameAccount',
           sessionId: 'session-a',
           requestSequence: 1,
           fields: <Object?>[_account(1), name],
@@ -1239,7 +1368,7 @@ void main() {
         sessionId: 'session-a',
         requestSequence: 1,
         fields: const <Object?>[
-          <int>[0],
+          'synthetic', '', <int>[0],
         ],
       ),
       throwsA(isA<CitizenSdkException>()),
@@ -1251,7 +1380,7 @@ void main() {
       () => codec.decodeResponse(
         method: 'getFinalizedHead',
         raw: <Object?>[
-          1,
+          2,
           'session-a',
           1,
           <Object?>[
@@ -1304,6 +1433,7 @@ void main() {
         <Object?>[
           <Object?>[0, account, 'wrong-address', '账户0', '1', true],
         ],
+        '钱包0',
       ]),
       throwsA(isA<CitizenSdkException>()),
     );

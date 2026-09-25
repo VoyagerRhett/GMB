@@ -4,6 +4,33 @@ import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+
+  test('付款钱包读取不把默认账户当选择，也不把热当前账户当钱包锚点', () {
+    final master = CitizenAccount(index: 0, accountId: _account(1), ss58Address: 'master',
+      name: '账户0', createdAtMillis: BigInt.one, isActive: false);
+    final child = CitizenAccount(index: 1, accountId: _account(2), ss58Address: 'child',
+      name: '账户1', createdAtMillis: BigInt.one, isActive: true);
+    final profile = CitizenWalletProfile(walletIndex: 0, walletName: '独立钱包',
+      masterAccountId: master.accountId, origin: CitizenWalletOrigin.created,
+      createdAtMillis: BigInt.one, activeAccountId: child.accountId, accounts: [master, child]);
+    final rows = <CitizenWalletStateAccount>[
+      CitizenWalletStateAccount(signMode: CitizenWalletSignMode.cold, walletIndex: 2, accountIndex: null,
+        accountId: _account(3), ss58Address: 'cold', name: '冷钱包', createdAtMillis: BigInt.one, isDefault: true),
+      for (final account in [master, child]) CitizenWalletStateAccount(signMode: CitizenWalletSignMode.hot,
+        walletIndex: 0, accountIndex: account.index, accountId: account.accountId, ss58Address: account.ss58Address,
+        name: account.name, createdAtMillis: account.createdAtMillis, isDefault: false),
+    ];
+    CitizenWalletState snapshot(int? index) => CitizenWalletState(revision: BigInt.one,
+      hotProfile: profile, accounts: rows, initializationState: CitizenWalletInitializationState.ready,
+      cleanupPending: false, activeWalletIndex: index);
+    expect(snapshot(0).activeWalletAccount?.accountId, master.accountId);
+    expect(snapshot(0).defaultAccount?.accountId, _account(3));
+    expect(snapshot(0).hotProfile!.activeAccountId, child.accountId);
+    expect(snapshot(2).activeWalletAccount?.accountId, _account(3));
+    expect(snapshot(null).activeWalletAccount, isNull);
+  });
+
+
   test('钱包公开模型复制列表与签名字节', () {
     final accounts = <CitizenAccount>[
       CitizenAccount(
@@ -17,6 +44,7 @@ void main() {
     ];
     final profile = CitizenWalletProfile(
       walletIndex: 0,
+      walletName: '独立钱包名',
       masterAccountId: _account(1),
       origin: CitizenWalletOrigin.created,
       createdAtMillis: BigInt.one,
@@ -25,6 +53,8 @@ void main() {
     );
     accounts.clear();
     expect(profile.accounts, hasLength(1));
+    expect(profile.walletName, '独立钱包名');
+    expect(profile.accounts.single.name, '主账户');
 
     final source = Uint8List.fromList(List<int>.filled(64, 7));
     final signature = CitizenWalletSignature(
@@ -52,9 +82,14 @@ void main() {
       revision: BigInt.one,
       hotProfile: null,
       accounts: accounts,
+      activeWalletIndex: 1,
+      initializationState: CitizenWalletInitializationState.ready,
+      cleanupPending: false,
     );
     accounts.clear();
     expect(state.accounts, hasLength(1));
+    expect(state.activeWalletIndex, 1);
+    expect(state.activeWalletAccount?.accountId, _account(1));
     expect(state.defaultAccount?.signMode, CitizenWalletSignMode.cold);
   });
 

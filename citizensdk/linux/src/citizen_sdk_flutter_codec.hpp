@@ -40,12 +40,9 @@ inline constexpr const char *kMethodChannel = "citizen/sdk/core/v2";
 inline constexpr const char *kEventChannel = "citizen/sdk/events/v2";
 inline constexpr int64_t kProtocolVersion = 2;
 
-// Flutter 只接收固定 tuple 的公开值；禁止把秘密、裸句柄或指针混入该值树。
-// Only these explicitly contracted values may cross the Flutter boundary. No
-// native handle, pointer or prepared-wallet token exists here. The application
-// key result is the sole intentional secret and is copied directly to its caller.
-// Value owns its entire tree and can be moved from a Core callback to the UI
-// thread; FlValue and the Flutter messenger stay on the UI thread.
+// Flutter固定tuple只携带合同事实和非秘密关联号，绝不携带Core句柄或指针。
+// 显式输入、备份、取钥和应用派生钥允许短时敏感副本；Value标记在析构/覆盖时擦除。
+// 本机值树可跨线程转交；官方Flutter值和messenger只在平台线程访问。
 struct Value final {
   using Bytes = std::vector<uint8_t>;
   using List = std::vector<Value>;
@@ -101,29 +98,100 @@ struct Value final {
 };
 
 enum class Method {
-  open, start, stop, close, get_capabilities, get_finalized_head,
-  get_sync_status, get_best_head, get_finalized_block_at,
-  resolve_finalized_block, get_block_header, get_block_body,
-  get_runtime_context, get_storage, get_storage_batch, get_storage_keys_paged,
-  call_runtime_api, get_system_events,
-  export_state, import_state, get_genesis_hash,
-  get_account_balance, get_account_balances, get_account_nonce, get_fee_snapshot, get_wallet_profile, view_account_private_key,
-  get_wallet_state, initialize_wallet, import_cold_account_with_ui, import_cold_account_id, import_cold_account_ss58,
-  reorder_wallet_accounts_without_default_change, rename_account, delete_account,
-  create_wallet, import_wallet, add_wallet_accounts, set_active_wallet_account,
-  rename_wallet_account, delete_wallet_account, delete_wallet,
-  reconcile_wallet_cleanup, sign_wallet_payload, derive_application_key, begin_signing,
-  consume_external_signature, cancel_signing, begin_default_account_change,
-  consume_default_account_change, verify_signature, prepare_transaction,
-  cancel_prepared_transaction, execute_prepared_transaction,
-  consume_prepared_transaction_qr_response, cancel_prepared_transaction_execution,
-  get_transaction_history, sync_transaction_history,
-  qr_parse, qr_create_sign_request,
-  qr_consume_sign_response, qr_cancel_sign_request, qr_encode_account_id,
-  qr_decode_luminance, qr_encode, qr_scan, sign_qr_request,
-  respond_credential, cancel_credential,
-  qr_encode_document, qr_prepare_account_authorization, encode_signing_payload,
+  open,
+  start,
+  stop,
+  close,
+  get_capabilities,
+  get_finalized_head,
+  get_sync_status,
+  get_best_head,
+  get_finalized_block_at,
+  resolve_finalized_block,
+  get_block_header,
+  get_block_body,
+  get_runtime_context,
+  get_storage,
+  get_storage_batch,
+  get_storage_keys_paged,
+  call_runtime_api,
+  get_system_events,
+  export_state,
+  import_state,
+  get_genesis_hash,
+  get_account_balance,
+  get_account_balances,
+  get_account_nonce,
+  get_fee_snapshot,
+  get_wallet_state,
+  inspect_wallets,
+  release_wallet_inspection,
+  repair_hot_wallet,
+  rename_diagnostic_wallet,
+  delete_diagnostic_wallet,
+  validate_wallet_password,
+  validate_wallet_mnemonic,
+  wallet_word_suggestions,
+  prepare_wallet_creation,
+  copy_recovery_phrase,
+  commit_wallet_creation,
+  release_prepared_wallet,
+  open_private_key,
+  reveal_private_key,
+  close_private_key,
+  cancel_operation,
+  respond_credential,
+  cancel_credential,
+  add_next_wallet_account,
+  sign_and_delete_wallet,
+  import_cold_account_code,
+  import_cold_account_id,
+  import_cold_account_ss58,
+  reorder_wallet_accounts_without_default_change,
+  set_active_wallet,
+  rename_wallet,
+  rename_account,
+  delete_account,
+  import_wallet,
+  add_wallet_accounts,
+  set_active_wallet_account,
+  delete_wallet,
+  reconcile_wallet_cleanup,
+  sign_wallet_payload,
+  derive_application_key,
+  begin_signing,
+  consume_external_signature,
+  cancel_signing,
+  begin_default_account_change,
+  consume_default_account_change,
+  verify_signature,
+  encode_signing_payload,
+  qr_encode_document,
+  qr_prepare_account_authorization,
+  prepare_transaction,
+  cancel_prepared_transaction,
+  execute_prepared_transaction,
+  consume_prepared_transaction_qr_response,
+  cancel_prepared_transaction_execution,
+  get_transaction_history,
+  sync_transaction_history,
+  qr_parse,
+  qr_create_sign_request,
   qr_validate_sign_response,
+  qr_consume_sign_response,
+  qr_cancel_sign_request,
+  qr_encode_account_id,
+  qr_decode_luminance,
+  qr_encode,
+  review_qr_request,
+  release_qr_review,
+  open_qr_capture,
+  close_qr_capture,
+  pause_qr_capture,
+  resume_qr_capture,
+  set_qr_capture_torch,
+  qr_decode_image,
+  sign_qr_request,
 };
 
 const char *method_name(Method method) noexcept;
@@ -131,10 +199,12 @@ const char *method_name(Method method) noexcept;
 // Fields are copied from a validated fixed-position tuple. Signing payload and
 // payload bytes are public messages, never secret material. Unused fields
 // remain empty; method is the closed discriminant used by sessions.
-// 仅此字段拥有设备凭据；复制/移动赋值也先擦除旧值，不依赖请求如何被路由。
+// 设备凭据、助记词及密码的独立所有者；复制/移动赋值先擦除旧值。
 struct CredentialBytes final {
   std::vector<uint8_t> value;
   explicit CredentialBytes(const std::vector<uint8_t> &source) : value(source) {}
+  CredentialBytes(const uint8_t *source, std::size_t size) : value(source, source + size) {}
+  explicit CredentialBytes(const std::string &source) : value(source.begin(), source.end()) {}
   CredentialBytes(const CredentialBytes &other) : value(other.value) {}
   CredentialBytes(CredentialBytes &&other) noexcept : value(std::move(other.value)) {}
   CredentialBytes &operator=(const CredentialBytes &other) {
@@ -174,7 +244,12 @@ struct DecodedRequest final {
   std::vector<uint8_t> state_database;
   citizensdk_account_id_t account_id{};
   uint32_t word_count{};
-  std::vector<std::string> wallet_initialization_text;
+  // 输入只借入Core；接纳之后立即由路由释放这份可擦除副本。
+  std::optional<CredentialBytes> mnemonic;
+  std::optional<CredentialBytes> password;
+  std::string resource_id;
+  uint32_t qr_purpose{};
+  bool torch{false};
   std::vector<uint32_t> indices;
   std::string name;
   std::vector<uint8_t> payload;
@@ -194,6 +269,7 @@ struct DecodedRequest final {
   uint32_t history_limit{100};
   std::vector<citizensdk_account_id_t> account_ids;
   uint64_t wallet_revision{};
+  uint32_t wallet_index{};
   uint32_t qr_action{};
   uint64_t qr_ttl{};
   std::string qr_text;
@@ -230,7 +306,10 @@ using FlValuePtr = std::unique_ptr<FlValue, FlValueDeleter>;
 // Returned GObject has one owned reference; caller must g_object_unref it.
 FlStandardMethodCodec *new_method_codec();
 FlValuePtr to_fl_value(const Value &value);
-Value from_fl_value(FlValue *value);
+Value from_fl_value(FlValue *value, bool sensitive = false);
+// 外壳仅含公开关联字段，不携带或复制业务参数。
+struct RequestEnvelope { std::string session; int64_t sequence{}; };
+std::optional<RequestEnvelope> decode_request_envelope(const std::string &method, FlValue *arguments);
 DecodedRequest decode_request(const std::string &method, FlValue *arguments);
 bool decode_subscription(FlValue *arguments);
 
@@ -248,10 +327,8 @@ Value lifecycle(citizensdk_lifecycle_t value);
 Value block(const citizensdk_block_ref_t &value);
 Value capabilities(const citizensdk_capability_snapshot_t &value);
 
-// Synchronously copy only public result data while the observer's borrowed
-// result is alive. These functions never retain/release or publish its handle.
-// sessions supplies lifecycle after start/stop and fetches a profile after the
-// private native wallet UI completes; those operations do not expose tokens.
+// 在Core结果的有效借用期内复制合同数据；准备、审阅和私钥的所有权由资源路由管理。
+// 本函数不保留/释放结果句柄，也不在绑定层发起第二次钱包变更。
 // 创世身份同步读取，不借用异步 result，也不启动链或访问金库。
 Value copy_genesis_hash(citizensdk_handle_t sdk);
 Value copy_public_result(Method method, citizensdk_result_handle_t result);

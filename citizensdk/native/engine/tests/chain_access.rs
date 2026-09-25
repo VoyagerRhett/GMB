@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 use citizen_sdk_contracts::{
-    CapabilityName, ChainIdentity, ChainSigner, ContractError, ContractErrorCode, ContractFuture,
+    CapabilityName, ChainIdentity, ChainSigner, ChainSyncStatus, ContractError, ContractErrorCode, ContractFuture,
     ContractStream, ExportedChainState, ExtrinsicWatchEvent, FinalizedBlockRef, Hash32, Modules,
     RuntimeContext, SignedExtrinsic, StateImportReceipt, SubmittedExtrinsic, VerifiedBlockRef,
     VerifiedChainClient,
@@ -19,6 +19,7 @@ struct CountingClient {
     watches: AtomicUsize,
     block: FinalizedBlockRef,
     best_error: Option<ContractErrorCode>,
+    sync_ready: std::sync::atomic::AtomicBool,
 }
 
 impl CountingClient {
@@ -29,6 +30,7 @@ impl CountingClient {
             watches: AtomicUsize::new(0),
             block: FinalizedBlockRef::from_parts(Hash32::from_bytes([0x31; 32]), 31),
             best_error: None,
+            sync_ready: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -60,6 +62,15 @@ impl VerifiedChainClient for CountingClient {
     fn get_finalized_head(&self) -> ContractFuture<'_, FinalizedBlockRef> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move { Ok(self.block) })
+    }
+
+    fn get_sync_status(&self) -> ContractFuture<'_, ChainSyncStatus> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        let usable = self.sync_ready.load(Ordering::SeqCst);
+        Box::pin(async move {
+            ChainSyncStatus::try_new(0, !usable, usable,
+                VerifiedBlockRef::best(self.block.hash(), self.block.number()), self.block)
+        })
     }
 
     fn get_storage_at(
@@ -131,6 +142,52 @@ impl VerifiedChainClient for CountingClient {
                 "not used by this test",
             ))
         })
+    }
+}
+
+#[test]
+fn syncing_status_is_readable_without_opening_business_data_gates() {
+    let client = Arc::new(CountingClient::new());
+    let engine = engine(client.clone());
+    assert!(futures::executor::block_on(engine.chain_sync_status()).is_err());
+    engine.update_chain_readiness(false).unwrap_or_else(|e| panic!("{e}"));
+    engine.begin_provider_start().unwrap_or_else(|e| panic!("{e}"));
+    assert!(futures::executor::block_on(engine.chain_sync_status()).is_err());
+    futures::executor::block_on(engine.complete_provider_start()).unwrap_or_else(|e| panic!("{e}"));
+    let status = futures::executor::block_on(engine.chain_sync_status()).unwrap_or_else(|e| panic!("{e}"));
+    assert!(!status.is_usable());
+    assert!(status.is_syncing());
+    assert!(futures::executor::block_on(engine.finalized_head()).is_err(),
+        "读取同步状态不能放开链业务数据门禁");
+    client.sync_ready.store(true, Ordering::SeqCst);
+    engine.update_chain_readiness(true).unwrap_or_else(|e| panic!("{e}"));
+    assert!(futures::executor::block_on(engine.chain_sync_status()).unwrap_or_else(|e| panic!("{e}")).is_usable());
+    assert!(futures::executor::block_on(engine.finalized_head()).is_ok());
+    engine.mark_provider_stopped().unwrap_or_else(|e| panic!("{e}"));
+    assert!(futures::executor::block_on(engine.chain_sync_status()).is_err());
+    engine.dispose().unwrap_or_else(|e| panic!("{e}"));
+    assert!(futures::executor::block_on(engine.chain_sync_status()).is_err());
+}
+
+#[test]
+fn sync_status_still_rejects_disabled_or_unavailable_chain() {
+    for field in ["supported", "available", "enabled"] {
+        let client = Arc::new(CountingClient::new());
+        let engine = engine(client.clone());
+        let mut facts = probes();
+        let probe = facts.iter_mut().find(|p| p.name == CapabilityName::ChainRead)
+            .unwrap_or_else(|| panic!("missing chain probe"));
+        match field {
+            "supported" => probe.supported = false,
+            "available" => probe.available = false,
+            _ => probe.enabled = false,
+        }
+        engine.update_capabilities(facts).unwrap_or_else(|e| panic!("{e}"));
+        engine.begin_provider_start().unwrap_or_else(|e| panic!("{e}"));
+        futures::executor::block_on(engine.complete_provider_start()).unwrap_or_else(|e| panic!("{e}"));
+        let before = client.reads.load(Ordering::SeqCst);
+        assert!(futures::executor::block_on(engine.chain_sync_status()).is_err());
+        assert_eq!(client.reads.load(Ordering::SeqCst), before);
     }
 }
 

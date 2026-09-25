@@ -901,20 +901,7 @@ class _OnchainPaymentPanelState extends State<OnchainPaymentPanel>
                 child: Text(_submitting ? '签名中' : '签名交易'),
               ),
             ),
-            if (_submitBlockedReason != null &&
-                !_loadingWallet &&
-                _currentWallet != null)
-              Padding(
-                padding: EdgeInsets.only(top: AppLayout.scaledValue(8)),
-                child: Text(
-                  _submitBlockedReason!,
-                  style: TextStyle(
-                    fontSize: AppLayout.scaledValue(12),
-                    color: AppTheme.textSecondary,
-                    height: 1.4,
-                  ),
-                ),
-              ),
+            // 不展示底层能力诊断；_canSubmit仍保留原就绪/备注校验，不能用隐藏提示放行交易。
             Padding(
               padding: EdgeInsets.only(
                 top: AppLayout.scaledValue(18),

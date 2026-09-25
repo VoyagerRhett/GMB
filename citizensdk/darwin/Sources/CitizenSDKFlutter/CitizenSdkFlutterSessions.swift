@@ -15,7 +15,6 @@ import FlutterMacOS
 internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency FlutterStreamHandler {
     @MainActor private final class Session {
         let sdk: CitizenSdk
-        var nextRequest: Int64 = 1
         var nextEvent: Int64 = 1
         var closing = false
         var outstanding: [UUID: Outstanding] = [:]
@@ -23,6 +22,7 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
         var prepared: [String: CitizenSDKPreparedWallet] = [:]
         var privateKeys: [String: CitizenSDKPrivateKey] = [:]
         var reviews: [String: CitizenQRReview] = [:]
+        var inspections: [String: CitizenWalletInspection] = [:]
         var captures: [String: CaptureBinding] = [:]
         init(_ sdk: CitizenSdk) { self.sdk = sdk }
     }
@@ -74,6 +74,17 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
         super.init()
     }
 
+    /// 必须在参数解码之前调用；关闭检查留在宿主，序号判断只调用同一Core。
+    func acceptRequestSequence(_ request: CitizenSdkFlutterCodec.Request) throws {
+        guard !detached, !subscriptionEpoch.isInvalidated,
+              let id = request.sessionID, let sequence = request.sequence,
+              let session = sessions[id] else {
+            throw CitizenSDKError(.notFound, "CitizenSDK session was not found")
+        }
+        guard !session.closing else { throw CitizenSDKError(.invalidState, "CitizenSDK session is closing") }
+        try session.sdk.acceptRequestSequence(sequence)
+    }
+
     func dispatch(_ request: CitizenSdkFlutterCodec.Request, result: @escaping FlutterResult) {
         guard !detached, !subscriptionEpoch.isInvalidated else {
             fail(result, .unavailable, "CitizenSDK Flutter engine is detached", request)
@@ -92,19 +103,14 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
             return
         }
         if case let .open(modules) = request { open(modules, result); return }
-        guard let sessionID = request.sessionID, let sequence = request.sequence,
-              let session = sessions[sessionID] else {
+        guard let sessionID = request.sessionID, let session = sessions[sessionID] else {
             fail(result, .notFound, "CitizenSDK session was not found", request)
             return
         }
-        guard !session.closing, sequence == session.nextRequest else {
-            fail(result, .conflict, "CitizenSDK request sequence is not the next session sequence", request)
+        guard !session.closing else {
+            fail(result, .invalidState, "CitizenSDK session is closing", request)
             return
         }
-        guard session.nextRequest < Int64.max else {
-            fail(result, .integrity, "CitizenSDK request sequence space is exhausted", request); return
-        }
-        session.nextRequest += 1
         route(session, request: request, result: result)
     }
 
@@ -266,6 +272,11 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
             case "getFeeSnapshot": run(session, request, result) {
                 [CitizenSdkFlutterCodec.fee(try await session.sdk.feeSnapshot())]
             }
+            case "inspectWallets": runOperation(session, request, result, { try session.sdk.inspectWallets() }) { inspection in
+                let id = UUID().uuidString
+                session.inspections[id] = inspection
+                return [id, CitizenSdkFlutterCodec.walletState(inspection.state)]
+            }
             case "getWalletState": runOperation(session, request, result, { try session.sdk.walletState() }) {
                 [CitizenSdkFlutterCodec.walletState($0)]
             }
@@ -278,7 +289,8 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
             }
         case let .account(method, _, _, accountID):
             switch method {
-            case "openPrivateKey": run(session, request, result) {
+            // 请求执行期显式保有上下文；下面的终态监听保持弱引用，避免资源闭环。
+            case "openPrivateKey": run(session, request, result) { [self, session] in
                 let resource = try await session.sdk.openPrivateKey(accountID: accountID)
                 guard !session.closing else { try await resource.close(); throw CitizenSDKError(.cancelled, "session is closing") }
                 let id = UUID().uuidString
@@ -352,6 +364,18 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
         case let .coldCode(_, _, code, name): runOperation(session, request, result, { try session.sdk.importColdAccountCode(code, name: name) }) {
             [CitizenSdkFlutterCodec.walletState($0)]
         }
+        case let .walletInspection(method, _, _, id, index, name): runOperation(session, request, result, {
+            guard let inspection = session.inspections[id] else { throw CitizenSDKError(.notFound, "检查资源不属于当前实例") }
+            if method == "repairHotWallet" { return try inspection.repairHot(walletIndex: index) }
+            if method == "deleteDiagnosticWallet" { return try inspection.delete(walletIndex: index) }
+            guard let name else { throw CitizenSDKError(.invalidArgument, "钱包名称缺失") }
+            return try inspection.rename(walletIndex: index, name: name)
+        }) { [CitizenSdkFlutterCodec.walletState($0)] }
+        case let .walletMetadata(method, _, _, revision, index, name): runOperation(session, request, result, {
+            if method == "setActiveWallet" { return try session.sdk.setActiveWallet(expectedRevision: revision, walletIndex: index) }
+            guard let name else { throw CitizenSDKError(.integrity, "wallet name missing") }
+            return try session.sdk.renameWallet(expectedRevision: revision, walletIndex: index, name: name)
+        }) { [CitizenSdkFlutterCodec.walletState($0)] }
         case let .rename(method, _, _, accountID, name): runOperation(session, request, result, {
             if method == "importColdAccountId" { return try session.sdk.importColdAccount(accountID: accountID, name: name) }
             return try session.sdk.renameAccount(accountID: accountID, name: name)
@@ -448,7 +472,8 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
                              _ result: @escaping FlutterResult, purpose: CitizenQRScanPurpose) {
         guard let textures else { fail(result, .unavailable, "texture registry is unavailable", request); return }
         let id = UUID().uuidString
-        run(session, request, result) { [weak self] in
+        // 接纳中的请求保有session；长期采集监听只弱引用session/self。
+        run(session, request, result) { [weak self, session] in
             guard let self else { throw CitizenSDKError(.cancelled, "engine is detached") }
             // run已通过接纳检查后才注册；尚未开始便取消的请求不遗留空纹理。
             let texture = CaptureTexture()
@@ -519,7 +544,7 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
         case "validateWalletPassword", "validateWalletMnemonic":
             do {
                 let value = try method == "validateWalletPassword" ? session.sdk.validatePassword(text) : session.sdk.validateMnemonic(text, wordCount: wordCount)
-                success(result, request, [Int64(value.reason.rawValue), value.position.map(Int64.init)])
+                success(result, request, [Int64(value.reason.rawValue), value.position.map { Int64($0) }])
             } catch { fail(result, error, request) }
         case "walletWordSuggestions":
             do { success(result, request, [try session.sdk.wordSuggestions(text)]) }
@@ -568,6 +593,9 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
                     defer { bytes.resetBytes(in: 0..<bytes.count) }
                     return [FlutterStandardTypedData(bytes: bytes)]
                 }
+            case "releaseWalletInspection":
+                guard let inspection = session.inspections[id] else { throw CitizenSDKError(.notFound, "检查资源不属于当前实例") }
+                try inspection.release(); session.inspections.removeValue(forKey: id); success(result, request, [])
             case "releaseQrReview":
                 guard let review = session.reviews[id] else { throw CitizenSDKError(.notFound, "review is not owned by this session") }
                 try review.release(); session.reviews.removeValue(forKey: id); success(result, request, [])
@@ -706,7 +734,7 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
         // truly running Core, and resumes partial teardown monotonically.
         try await session.sdk.supervisedClose()
         for id in Array(session.captures.keys) { releaseCapture(session, id: id) }
-        session.prepared.removeAll(); session.privateKeys.removeAll(); session.reviews.removeAll()
+        session.prepared.removeAll(); session.privateKeys.removeAll(); session.reviews.removeAll(); session.inspections.removeAll()
         sessions.removeValue(forKey: session.sdk.sessionID)
     }
 

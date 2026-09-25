@@ -11,6 +11,7 @@ use citizensdk::{
     CitizenSdkHostId128, CitizenSdkHostPublicStoreV1, CitizenSdkHostRecordDomain,
     CitizenSdkHostRecordResultV1, CitizenSdkHostSecretKind, CitizenSdkHostSecretRefV1,
     CitizenSdkHostSecretVaultV1, CitizenSdkHostSecureStoreV1, CitizenSdkHostServicesV1,
+    CitizenSdkHostSecretPresenceV1,
     CitizenSdkHostStatusResultV1, CitizenSdkHostVaultAvailability,
     CitizenSdkHostVaultAvailabilityResultV1, CitizenSdkHostWalletKeyRefV1,
     CitizenSdkMutableBytesView, CitizenSdkPreparedTransactionInfo, CitizenSdkPreparedWalletInfo,
@@ -299,6 +300,9 @@ fn host_v1_layout_and_constants_are_exact() {
         wrap_dek: 40,
         unwrap_dek: 48,
         retire_wallet_kek: 56,
+    });
+    assert_layout!(CitizenSdkHostSecretPresenceV1, 32, 8, {
+        struct_size: 0, abi_version: 4, context: 8, has_account_secret: 16, has_any_wallet_key: 24,
     });
     assert_layout!(CitizenSdkHostServicesV1, 32, 8, {
         struct_size: 0,

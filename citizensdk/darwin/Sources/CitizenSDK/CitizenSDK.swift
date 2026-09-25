@@ -2,6 +2,46 @@ import Foundation
 import CoreGraphics
 import ImageIO
 
+/// 同实例真实钱包快照的拥有者；释放与接纳共用锁，不暴露Core句柄。
+public final class CitizenWalletInspection: @unchecked Sendable {
+    public let state: CitizenWalletState
+    private let owner: CitizenSDKNative
+    private let lock = NSLock()
+    private var result: UInt64
+    private var released: ((CitizenWalletInspection) -> Void)?
+    internal init(owner: CitizenSDKNative, result: UInt64, state: CitizenWalletState) {
+        self.owner = owner; self.result = result; self.state = state
+    }
+    internal func withResult<T>(owner: CitizenSDKNative, _ body: (UInt64) throws -> T) throws -> T {
+        lock.lock(); defer { lock.unlock() }
+        guard self.owner === owner, result != 0 else { throw CitizenSDKError(.invalidState, "钱包检查资源已释放或跨实例") }
+        return try body(result)
+    }
+    internal func onRelease(_ handler: @escaping (CitizenWalletInspection) -> Void) {
+        lock.lock(); defer { lock.unlock() }; released = handler
+    }
+    public func repairHot(walletIndex: UInt32) throws -> CitizenSDKOperation<CitizenWalletState> {
+        try owner.repairHotWallet(self, walletIndex: walletIndex)
+    }
+    public func rename(walletIndex: UInt32, name: String) throws -> CitizenSDKOperation<CitizenWalletState> {
+        try owner.renameDiagnosticWallet(self, walletIndex: walletIndex, name: CitizenSDKInputLimits.accountName(name))
+    }
+    public func delete(walletIndex: UInt32) throws -> CitizenSDKOperation<CitizenWalletState> {
+        try owner.deleteDiagnosticWallet(self, walletIndex: walletIndex)
+    }
+    public func release() throws {
+        lock.lock()
+        if result != 0 {
+            do { try owner.releaseWalletInspection(result) }
+            catch { lock.unlock(); throw error }
+            result = 0
+        }
+        let handler = released; released = nil; lock.unlock()
+        handler?(self)
+    }
+    deinit { try? release() }
+}
+
 /// Native Swift facade for one CitizenSDK Core instance.
 ///
 /// 不暴露Core裸句柄，不提供页面或窗口。显式钱包输入和受控备份资源可短时
@@ -16,6 +56,7 @@ public final class CitizenSdk: @unchecked Sendable {
     private var preparedWallets: [ObjectIdentifier: CitizenSDKPreparedWallet] = [:]
     private var privateKeys: [ObjectIdentifier: CitizenSDKPrivateKey] = [:]
     private var qrReviews: [ObjectIdentifier: CitizenQRReview] = [:]
+    private var walletInspections: [ObjectIdentifier: CitizenWalletInspection] = [:]
     private var qrCaptures: [ObjectIdentifier: CitizenSDKQrCapture] = [:]
     private var eventHandler: ((CitizenSDKEvent) -> Void)?
 
@@ -103,6 +144,11 @@ public final class CitizenSdk: @unchecked Sendable {
         try await native.start().value()
     }
 
+    /// Flutter薄绑定在参数解码前调用；公共接纳算法只在Rust Core实现。
+    @_spi(CitizenSDKFlutter) public func acceptRequestSequence(_ sequence: Int64) throws {
+        try native.acceptRequestSequence(sequence)
+    }
+
     public func stop() async throws {
         try await native.stop().value()
     }
@@ -184,6 +230,28 @@ public final class CitizenSdk: @unchecked Sendable {
     public func feeSnapshot() async throws -> CitizenFeeSnapshot { try await native.feeSnapshot().value() }
     public func walletState() throws -> CitizenSDKOperation<CitizenWalletState> { try native.walletState() }
 
+    public func inspectWallets() throws -> CitizenSDKOperation<CitizenWalletInspection> {
+        try resourceOperation {
+            try native.inspectWallets().map { [self] inspection in
+                inspection.onRelease { [weak self] value in
+                    guard let self else { return }
+                    self.stateLock.lock(); defer { self.stateLock.unlock() }
+                    self.walletInspections.removeValue(forKey: ObjectIdentifier(value))
+                }
+                self.stateLock.lock()
+                let accepting = !self.closed && !self.resourcesClosing
+                let available = self.walletInspections.count < 64
+                if accepting && available { self.walletInspections[ObjectIdentifier(inspection)] = inspection }
+                self.stateLock.unlock()
+                guard accepting && available else {
+                    try inspection.release()
+                    throw CitizenSDKError(accepting ? .queueFull : .cancelled, "钱包检查资源不能接纳")
+                }
+                return inspection
+            }
+        }
+    }
+
     public func deriveApplicationKey(accountID: Data, salt: Data, info: Data) throws -> CitizenSDKOperation<Data> {
         let account = try CitizenSDKInputLimits.accountID(accountID)
         guard salt.count == 32, (1...256).contains(info.count) else {
@@ -237,6 +305,15 @@ public final class CitizenSdk: @unchecked Sendable {
     public func consumeDefaultAccountChange(sessionID: String, response: String) throws -> CitizenSDKOperation<CitizenDefaultAccountChangeOutcome> {
         try CitizenSigning.validateExternal(sessionID: sessionID, response: response)
         return try native.consumeDefaultAccountChange(sessionID: sessionID, response: response)
+    }
+
+    /// 付款选择与钱包级改名不进入签名/默认账户变更；原子修订由Core验证。
+    public func setActiveWallet(expectedRevision: UInt64, walletIndex: UInt32) throws -> CitizenSDKOperation<CitizenWalletState> {
+        try native.setActiveWallet(expectedRevision: expectedRevision, walletIndex: walletIndex)
+    }
+
+    public func renameWallet(expectedRevision: UInt64, walletIndex: UInt32, name: String) throws -> CitizenSDKOperation<CitizenWalletState> {
+        try native.renameWallet(expectedRevision: expectedRevision, walletIndex: walletIndex, name: CitizenSDKInputLimits.accountName(name))
     }
 
     public func renameAccount(accountID: Data, name: String) throws -> CitizenSDKOperation<CitizenWalletState> {
@@ -481,7 +558,7 @@ public final class CitizenSdk: @unchecked Sendable {
     }
 
     /// Destroys only checkpoint-safe Core state. A running instance must first
-    /// complete `stop`; accepted requests and secure wallet UI fail BUSY.
+    /// complete `stop`; accepted requests and owned resources fail BUSY.
     public func close() throws {
         stateLock.lock()
         if closed { stateLock.unlock(); return }
@@ -523,7 +600,7 @@ public final class CitizenSdk: @unchecked Sendable {
     }
 
     /// Used only by the detach supervisor. Unlike Native-only recovery this
-    /// retains the facade, respects active SDK wallet UI ownership, and runs a
+    /// retains the facade, respects active resource ownership, and runs a
     /// normal checkpointing stop before close when the Core is running.
     @_spi(CitizenSDKFlutter)
     public func supervisedClose() async throws {
@@ -646,9 +723,11 @@ public final class CitizenSdk: @unchecked Sendable {
         stateLock.lock()
         let owned = Array(preparedWallets.values)
         let reviews = Array(qrReviews.values)
+        let inspections = Array(walletInspections.values)
         stateLock.unlock()
         try owned.forEach { try $0.release() }
         try reviews.forEach { try $0.release() }
+        try inspections.forEach { try $0.release() }
     }
 
     /// 接纳至资源登记之间持有短生命周期票据；不是UI窗口所有权，不禁止同实例其它资源。
@@ -800,7 +879,10 @@ internal final class CitizenSDKCloseGate: @unchecked Sendable {
     func reserve(_ sdk: AnyObject) throws -> UUID {
         lock.lock(); defer { lock.unlock() }
         let key = ObjectIdentifier(sdk)
-        guard case var .open(tickets) = states[key] else { throw CitizenSDKError(.busy, "SDK is closing or closed") }
+        guard case var .open(tickets) = states[key] else {
+            if case .closing = states[key] { throw CitizenSDKError(.busy, "SDK is closing") }
+            throw CitizenSDKError(.invalidState, "SDK is closed or unregistered")
+        }
         let token = UUID(); tickets.insert(token); states[key] = .open(tickets)
         return token
     }

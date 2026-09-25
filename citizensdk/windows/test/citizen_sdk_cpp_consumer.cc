@@ -28,26 +28,26 @@ static_assert(std::is_same_v<decltype(&citizensdk_result_get_account_balance_cou
 static_assert(std::is_same_v<decltype(&citizensdk_result_get_account_balance_at),
     citizensdk_error_code_t (*)(citizensdk_result_handle_t, uint32_t,
                                citizensdk_account_balance_info_t *)>);
-static_assert(std::is_same_v<decltype(&citizensdk_host_view_account_private_key),
-    citizensdk_error_code_t (*)(citizensdk_host_handle_t, const citizensdk_account_id_t *,
-        void *, citizensdk_wallet_flow_completion_v1_t,
-        citizensdk_wallet_flow_handle_t *)>);
-static_assert(std::is_same_v<decltype(&citizen_sdk::Host::view_account_private_key),
-    citizen_sdk::WalletFlow (citizen_sdk::Host::*)(const citizensdk_account_id_t &,
-                                                citizen_sdk::WalletFlowCompletion)>);
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::getState),
+    citizen_sdk::Operation<citizen_sdk::WalletState> (citizen_sdk::Host::*)()>);
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::inspect),
+    citizen_sdk::Operation<std::shared_ptr<citizen_sdk::WalletInspection>> (citizen_sdk::Host::*)()>);
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::openPrivateKey),
+    std::shared_future<std::shared_ptr<citizen_sdk::PrivateKey>> (citizen_sdk::Host::*)(citizen_sdk::AccountId)>);
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::openCapture),
+    std::shared_future<std::shared_ptr<citizen_sdk::QrCapture>> (citizen_sdk::Host::*)(uint32_t, citizen_sdk::QrCapture::Listener)>);
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::reviewQrRequest),
+    citizen_sdk::Operation<std::shared_ptr<citizen_sdk::QrReview>> (citizen_sdk::Host::*)(std::string)>);
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::signQrRequest),
+    citizen_sdk::Operation<citizen_sdk::QrSigned> (citizen_sdk::Host::*)(const std::shared_ptr<citizen_sdk::QrReview> &)>);
+// C++关键字映射及Core真实终态保持唯一接口，不增加兼容删除/消费别名。
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::erase),
+    citizen_sdk::Operation<void> (citizen_sdk::Host::*)()>);
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::reconcileCleanup),
+    citizen_sdk::Operation<void> (citizen_sdk::Host::*)()>);
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::consumeExternalSignature),
+    citizen_sdk::Operation<citizen_sdk::SigningOutcome> (citizen_sdk::Host::*)(std::string, std::string)>);
 static_assert(CITIZENSDK_RESULT_ACCOUNT_BALANCES == 18);
-
-
-static_assert(std::is_same_v<decltype(&citizensdk_host_scan_qr),
-    citizensdk_error_code_t (*)(citizensdk_host_handle_t, void *,
-        citizensdk_qr_completion_v1_t, citizensdk_wallet_flow_handle_t *)>);
-static_assert(std::is_same_v<decltype(&citizensdk_host_sign_qr_request),
-    citizensdk_error_code_t (*)(citizensdk_host_handle_t, citizensdk_bytes_view_t,
-        void *, citizensdk_qr_completion_v1_t, citizensdk_wallet_flow_handle_t *)>);
-static_assert(std::is_same_v<decltype(&citizen_sdk::Host::scan_qr),
-    citizen_sdk::WalletFlow (citizen_sdk::Host::*)(citizen_sdk::QrFlowCompletion)>);
-static_assert(std::is_same_v<decltype(&citizen_sdk::Host::sign_qr_request),
-    citizen_sdk::WalletFlow (citizen_sdk::Host::*)(const std::string &, citizen_sdk::QrFlowCompletion)>);
 static_assert(CITIZENSDK_RESULT_QR_REVIEW == 19 && CITIZENSDK_RESULT_QR_SIGNED == 20);
 
 #ifdef NDEBUG
@@ -248,6 +248,22 @@ int wmain(int argc, wchar_t **argv) {
     CHECK(citizensdk_get_lifecycle(sdk, &lifecycle) == CITIZENSDK_OK);
     CHECK(lifecycle == CITIZENSDK_LIFECYCLE_CREATED);
     check_capabilities(host.capabilities());
+    // 当前实例未选择钱包/签名；实际Cpp请求必须给出Core拒绝且不留资源。
+    {
+      const auto operation = host.getState();
+      CHECK(operation.operationId() == "1");
+      CHECK(operation.result().wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+      bool rejected = false;
+      try { (void)operation.result().get(); } catch (const citizen_sdk::Error &error) { rejected = error.code() == CITIZENSDK_ERROR_UNSUPPORTED; }
+      CHECK(rejected && !operation.cancel());
+      const auto private_key = host.openPrivateKey(citizen_sdk::AccountId{});
+      CHECK(private_key.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+      rejected = false;
+      try { (void)private_key.get(); } catch (const citizen_sdk::Error &error) {
+        rejected = error.code() == CITIZENSDK_ERROR_UNSUPPORTED || error.code() == CITIZENSDK_ERROR_NOT_READY;
+      }
+      CHECK(rejected);
+    }
 
     completion.prepare(host);
     auto request = accept_request(sdk, citizensdk_get_finalized_head);

@@ -5,37 +5,7 @@
 
 namespace citizen_sdk::linux {
 
-uint64_t Lifecycle::reserve_wallet_flow() {
-  std::lock_guard<std::mutex> guard(lock_);
-  if (state_ == State::kWalletOwned) {
-    throw HostError(CITIZENSDK_ERROR_BUSY,
-                    "a CitizenSDK wallet flow is already active");
-  }
-  if (state_ != State::kOpen) {
-    throw HostError(CITIZENSDK_ERROR_INVALID_STATE,
-                    "CitizenSDK Host is closing or closed");
-  }
-  if (token_identity_exhausted_) {
-    throw HostError(CITIZENSDK_ERROR_UNAVAILABLE,
-                    "CitizenSDK wallet-flow token space is exhausted");
-  }
-  wallet_token_ = next_token_;
-  if (next_token_ == std::numeric_limits<uint64_t>::max()) {
-    token_identity_exhausted_ = true;
-  } else {
-    ++next_token_;
-  }
-  state_ = State::kWalletOwned;
-  return wallet_token_;
-}
 
-void Lifecycle::finish_wallet_flow(uint64_t token) noexcept {
-  std::lock_guard<std::mutex> guard(lock_);
-  if (state_ == State::kWalletOwned && wallet_token_ == token) {
-    wallet_token_ = 0;
-    state_ = State::kOpen;
-  }
-}
 
 void Lifecycle::begin_service() {
   std::lock_guard<std::mutex> guard(lock_);
@@ -59,10 +29,9 @@ void Lifecycle::finish_service() noexcept {
 bool Lifecycle::begin_close() {
   std::lock_guard<std::mutex> guard(lock_);
   if (state_ == State::kClosed) return false;
-  if (state_ == State::kWalletOwned || close_attempt_active_ ||
-      active_services_ != 0) {
+  if (close_attempt_active_ || active_services_ != 0) {
     throw HostError(CITIZENSDK_ERROR_BUSY,
-                    "CitizenSDK Host still owns a wallet flow, service, or close attempt");
+                    "CitizenSDK Host still owns a service or close attempt");
   }
   state_ = State::kClosing;
   close_attempt_active_ = true;
@@ -81,9 +50,5 @@ void Lifecycle::commit_closed() noexcept {
   state_ = State::kClosed;
 }
 
-bool Lifecycle::wallet_active() const noexcept {
-  std::lock_guard<std::mutex> guard(lock_);
-  return state_ == State::kWalletOwned;
-}
 
 }  // namespace citizen_sdk::linux

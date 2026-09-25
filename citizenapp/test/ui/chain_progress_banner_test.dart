@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:collection';
 
 import 'package:citizenapp/ui/app_theme.dart';
@@ -7,6 +8,66 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('已验证最终高度持续更新，失败保留高度，恢复后仍按原状态呈现', (tester) async {
+    var fail = false;
+    var height = 33;
+    var calls = 0;
+    await tester.pumpWidget(MaterialApp(home: Scaffold(
+      body: ChainProgressBanner(
+        showInlineStatus: true,
+        pollInterval: const Duration(milliseconds: 10),
+        progressLoader: () async {
+          calls++;
+          if (fail) throw StateError('合成断开');
+          final original = _snapshot(isSyncing: false, isUsable: true);
+          return CitizenChainSyncStatus(
+            peerCount: original.peerCount, isSyncing: false, isUsable: true,
+            best: CitizenBlockRef(hash: original.best.hash,
+                number: BigInt.from(999), finality: CitizenBlockFinality.best),
+            finalized: CitizenBlockRef(hash: original.finalized.hash,
+                number: BigInt.from(height), finality: CitizenBlockFinality.finalized),
+          );
+        },
+      ),
+    )));
+    await tester.pump();
+    expect(find.text('最终区块 33'), findsOneWidget);
+    expect(find.text('最终区块 999'), findsNothing);
+    fail = true;
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+    expect(tester.widget<Text>(find.text('最终区块 33')).style?.color, AppTheme.danger);
+    fail = false;
+    height = 34;
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+    expect(tester.widget<Text>(find.text('最终区块 34')).style?.color, AppTheme.success);
+    await tester.pumpWidget(const SizedBox.shrink());
+    final callsAtExit = calls;
+    await tester.pump(const Duration(seconds: 1));
+    expect(calls, callsAtExit);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('轻节点读取退出后才完成，不回调页面也不恢复轮询', (tester) async {
+    final pending = Completer<CitizenChainSyncStatus>();
+    var calls = 0;
+    var callbacks = 0;
+    await tester.pumpWidget(MaterialApp(home: ChainProgressBanner(
+      showInlineStatus: true,
+      pollInterval: const Duration(milliseconds: 10),
+      progressLoader: () { calls++; return pending.future; },
+      onProgressChanged: (_) => callbacks++,
+      onErrorChanged: (_) => callbacks++,
+    )));
+    await tester.pumpWidget(const SizedBox.shrink());
+    pending.complete(_snapshot(isSyncing: false, isUsable: true));
+    await tester.pump(const Duration(seconds: 1));
+    expect(calls, 1);
+    expect(callbacks, 0);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('交易顶栏只用整组颜色表达连接状态', (tester) async {
     final snapshots = Queue<CitizenChainSyncStatus>.from([
       _snapshot(

@@ -2,7 +2,7 @@
 
 use crate::{
     ContractError, ContractErrorCode, ContractFuture, ContractResult, EncryptedSecretEnvelope,
-    SecretRef,
+    SecretRef, AccountId32,
 };
 
 /// 一个 SecretRef 的持久状态。
@@ -124,6 +124,10 @@ impl EncryptedSecretBlobSnapshot {
 
 /// 已加密秘密的精确身份仓储；API 在类型上拒绝 `SecretBuffer` 和普通明文字节。
 pub trait EncryptedSecretBlobStore: Send + Sync {
+    /// 只读检查该账户在当前仓储全部钱包/代际/owner下是否仍有sealed秘密。
+    /// Vacant/Tombstone不算秘密；失败、取消或不可证明完整范围必须报错，不能返回false。
+    fn has_account_secret(&self, account_id: AccountId32) -> ContractFuture<'_, bool>;
+
     fn load(&self, secret_ref: SecretRef) -> ContractFuture<'_, EncryptedSecretBlobSnapshot>;
 
     /// 实现必须以 [`EncryptedSecretBlobSnapshot::try_advance`] 校验状态迁移；cleanup

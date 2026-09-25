@@ -57,28 +57,29 @@ int32_t exception_code(JNIEnv *env) {
   jthrowable failure = env->ExceptionOccurred();
   env->ExceptionClear();
   int32_t code = kInternal;
-  jclass vault_failure = env->FindClass(
-      "org/citizen/sdk/internal/CitizenSdkHardwareVault$VaultFailure");
-  if (!env->ExceptionCheck() && vault_failure != nullptr &&
-      env->IsInstanceOf(failure, vault_failure)) {
-    jmethodID get_code = env->GetMethodID(
-        vault_failure, "getCode", "()Lorg/citizen/sdk/CitizenSdkErrorCode;");
-    jobject code_value = get_code == nullptr
-                             ? nullptr
-                             : env->CallObjectMethod(failure, get_code);
-    if (!env->ExceptionCheck() && code_value != nullptr) {
-      jclass code_class = env->GetObjectClass(code_value);
-      jmethodID get_value = env->GetMethodID(code_class, "getValue", "()I");
-      if (get_value != nullptr)
-        code = env->CallIntMethod(code_value, get_value);
-      env->DeleteLocalRef(code_class);
-      env->DeleteLocalRef(code_value);
+  // 密文Core投影抛公开SDK异常，设备金库抛VaultFailure；共享错误提取，绝不把异常映射成OK。
+  const char *classes[] = {"org/citizen/sdk/internal/CitizenSdkHardwareVault$VaultFailure",
+                          "org/citizen/sdk/CitizenSdkException"};
+  for (const char *name : classes) {
+    jclass type = env->FindClass(name);
+    const bool match = !env->ExceptionCheck() && type && env->IsInstanceOf(failure, type);
+    if (match) {
+      jmethodID getter = env->GetMethodID(type, "getCode", "()Lorg/citizen/sdk/CitizenSdkErrorCode;");
+      jobject value = getter ? env->CallObjectMethod(failure, getter) : nullptr;
+      if (!env->ExceptionCheck() && value) {
+        jclass value_type = env->GetObjectClass(value);
+        jmethodID number = value_type ? env->GetMethodID(value_type, "getValue", "()I") : nullptr;
+        if (number) code = env->CallIntMethod(value, number);
+        if (value_type) env->DeleteLocalRef(value_type);
+        env->DeleteLocalRef(value);
+      }
     }
+    if (env->ExceptionCheck()) { env->ExceptionClear(); code = kInternal; }
+    if (type) env->DeleteLocalRef(type);
+    if (match) break;
   }
-  if (env->ExceptionCheck()) env->ExceptionClear();
-  if (vault_failure != nullptr) env->DeleteLocalRef(vault_failure);
-  if (failure != nullptr) env->DeleteLocalRef(failure);
-  return code;
+  if (failure) env->DeleteLocalRef(failure);
+  return code >= 1 && code <= CITIZENSDK_ERROR_CANCELLED ? code : kInternal;
 }
 
 void complete_status(uint64_t operation_id, void *sdk_context,
@@ -517,6 +518,43 @@ int32_t vault_has(void *context, uint64_t operation_id,
   return kOk;
 }
 
+int32_t account_secret_presence(void *context, uint64_t operation_id, citizensdk_account_id_t account,
+    void *sdk_context, citizensdk_host_bool_completion_v1_t completion) {
+  if (!context || !completion) return CITIZENSDK_ERROR_INVALID_ARGUMENT;
+  auto *bridge = static_cast<CitizenSdkHostBridge *>(context);
+  ScopedEnv scoped(bridge->vm());
+  if (!scoped.env) return kInternal;
+  auto *env = scoped.env;
+  jclass type = env->GetObjectClass(bridge->host_services());
+  if (!type) return exception_code(env);
+  jmethodID method = env->GetMethodID(type, "hasAccountSecret", "([B)Z");
+  if (!method) { env->DeleteLocalRef(type); return exception_code(env); }
+  auto bytes = java_bytes(env, account.bytes, 32);
+  if (!bytes) { env->DeleteLocalRef(type); return exception_code(env); }
+  const auto present = env->CallBooleanMethod(bridge->host_services(), method, bytes);
+  env->DeleteLocalRef(bytes); env->DeleteLocalRef(type);
+  if (env->ExceptionCheck()) return exception_code(env);
+  complete_bool(operation_id, sdk_context, completion, kOk, present == JNI_TRUE);
+  return kOk;
+}
+int32_t wallet_key_presence(void *context, uint64_t operation_id, uint32_t wallet_index,
+    void *sdk_context, citizensdk_host_bool_completion_v1_t completion) {
+  if (!context || !completion) return CITIZENSDK_ERROR_INVALID_ARGUMENT;
+  auto *bridge = static_cast<CitizenSdkHostBridge *>(context);
+  ScopedEnv scoped(bridge->vm());
+  if (!scoped.env) return kInternal;
+  auto *env = scoped.env;
+  jclass type = env->GetObjectClass(bridge->host_services());
+  if (!type) return exception_code(env);
+  jmethodID method = env->GetMethodID(type, "hasAnyWalletKey", "(I)Z");
+  if (!method) { env->DeleteLocalRef(type); return exception_code(env); }
+  const auto present = env->CallBooleanMethod(bridge->host_services(), method, static_cast<jint>(wallet_index));
+  env->DeleteLocalRef(type);
+  if (env->ExceptionCheck()) return exception_code(env);
+  complete_bool(operation_id, sdk_context, completion, kOk, present == JNI_TRUE);
+  return kOk;
+}
+
 int32_t vault_wrap(void *context, uint64_t operation_id,
                    citizensdk_host_wallet_key_ref_v1_t wallet,
                    citizensdk_host_id128_t provisioning,
@@ -705,7 +743,12 @@ bool CitizenSdkHostBridge::create(JNIEnv *env,
     public_store_.transaction_history_query = nullptr;
     public_store_.transaction_history_mutate = nullptr;
   }
-  const int32_t code = citizensdk_create_with_modules(&options, &services_, modules, &handle_);
+  int32_t code = citizensdk_create_with_modules(&options, &services_, modules, &handle_);
+  if (code == kOk && secrets) {
+    const citizensdk_host_secret_presence_v1_t provider{sizeof(citizensdk_host_secret_presence_v1_t),
+        CITIZENSDK_ABI_VERSION, this, account_secret_presence, wallet_key_presence};
+    code = citizensdk_set_secret_presence_provider(handle_, &provider);
+  }
   if (code != kOk) {
     throw_sdk(env, code, "CitizenSDK Core creation failed");
     return false;
@@ -743,6 +786,18 @@ bool CitizenSdkHostBridge::bind(JNIEnv *env, jobject native_owner) {
 }
 
 bool CitizenSdkHostBridge::destroy(JNIEnv *env) {
+  {
+    std::lock_guard<std::mutex> lock(inspection_mutex_);
+    if (!inspection_requests_.empty()) {
+      throw_sdk(env, CITIZENSDK_ERROR_BUSY, "钱包检查请求尚未排空"); return false;
+    }
+    // SDK关闭也回收未被上层领取的检查结果，避免丢失页面引用后永久BUSY。
+    for (auto it = wallet_inspections_.begin(); it != wallet_inspections_.end();) {
+      const auto code = citizensdk_result_release(*it);
+      if (code != kOk) { throw_sdk(env, code, "钱包检查资源释放失败"); return false; }
+      it = wallet_inspections_.erase(it);
+    }
+  }
   {
     std::lock_guard<std::mutex> lock(qr_mutex_);
     if (!qr_reviews_.empty()) {
@@ -868,6 +923,28 @@ void CitizenSdkHostBridge::complete_unwrap(uint64_t operation_id,
                   error_code);
 }
 
+int32_t CitizenSdkHostBridge::inspect_wallets(citizensdk_request_id_t *out) {
+  // 与真实请求接纳共锁，完成回调不能早于标记登记；不分配第二请求编号。
+  std::lock_guard<std::mutex> lock(inspection_mutex_);
+  if (inspection_requests_.size() + wallet_inspections_.size() >= 64) return CITIZENSDK_ERROR_QUEUE_FULL;
+  const auto code = citizensdk_get_wallet_state(handle_, out);
+  if (code == kOk) inspection_requests_.insert(*out);
+  return code;
+}
+
+bool CitizenSdkHostBridge::has_wallet_inspection(uint64_t result) const {
+  std::lock_guard<std::mutex> lock(inspection_mutex_);
+  return wallet_inspections_.count(result) != 0;
+}
+
+int32_t CitizenSdkHostBridge::release_wallet_inspection(uint64_t result) {
+  std::lock_guard<std::mutex> lock(inspection_mutex_);
+  if (wallet_inspections_.count(result) == 0) return CITIZENSDK_ERROR_NOT_FOUND;
+  const auto code = citizensdk_result_release(result);
+  if (code == kOk) wallet_inspections_.erase(result);
+  return code;
+}
+
 bool CitizenSdkHostBridge::has_qr_review(uint64_t result) const {
   std::lock_guard<std::mutex> lock(qr_mutex_);
   return qr_reviews_.count(result) != 0;
@@ -893,18 +970,33 @@ void CitizenSdkHostBridge::dispatch_event(const citizensdk_event_t &event) {
         citizensdk_result_get_info(event.result, &result_info) == kOk &&
         result_info.error_code == kOk &&
         result_info.kind == CITIZENSDK_RESULT_PREPARED_WALLET;
+    bool inspection = false;
+    {
+      std::lock_guard<std::mutex> lock(inspection_mutex_);
+      const bool requested = inspection_requests_.erase(event.request_id) != 0;
+      inspection = requested && result_info.error_code == kOk &&
+          result_info.kind == CITIZENSDK_RESULT_WALLET_STATE;
+      if (inspection) wallet_inspections_.insert(event.result);
+    }
     const uint64_t token = is_prepared ? allocate_prepared_token() : 0;
     citizensdk_prepared_wallet_handle_t prepared_handle = 0;
     bool qr_review = false;
     WireWriter writer;
+    const bool requested_inspection = inspection;
     const bool encoded = encode_result(event.result, token, &writer,
-                                       &prepared_handle, &qr_review);
+                                       &prepared_handle, &qr_review, &inspection);
+    if (requested_inspection && !inspection) {
+      // 编码可能返回合法错误信封；其中没有资源号，不得保留无法交付的Core结果。
+      std::lock_guard<std::mutex> lock(inspection_mutex_);
+      wallet_inspections_.erase(event.result);
+    }
     // 审阅结果本身是 Core 一次性凭证；不能按普通 JSON 结果提前释放。
     if (qr_review && encoded) {
       std::lock_guard<std::mutex> lock(qr_mutex_);
       qr_reviews_.insert(event.result);
-    } else { citizensdk_result_release(event.result); }
+    } else if (!inspection) { citizensdk_result_release(event.result); }
     if (!encoded) {
+      if (inspection) (void)release_wallet_inspection(event.result);
       env->DeleteLocalRef(type);
       return;
     }
@@ -923,6 +1015,7 @@ void CitizenSdkHostBridge::dispatch_event(const citizensdk_event_t &event) {
                           static_cast<jlong>(event.request_id), bytes);
     }
     if (qr_review && (accepted != JNI_TRUE || env->ExceptionCheck())) release_qr_review(event.result);
+    if (inspection && (accepted != JNI_TRUE || env->ExceptionCheck())) (void)release_wallet_inspection(event.result);
     if (bytes != nullptr) env->DeleteLocalRef(bytes);
   } else if (event.event_type == CITIZENSDK_EVENT_WATCH_UPDATE) {
     WireWriter writer;

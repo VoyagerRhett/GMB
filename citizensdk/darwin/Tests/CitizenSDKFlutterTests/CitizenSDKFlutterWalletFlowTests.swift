@@ -2,50 +2,35 @@ import XCTest
 @testable import CitizenSDK
 @testable import CitizenSDKFlutter
 
-@MainActor
+/// 真实无UI请求的输入/资源边界；不打开SDK窗口或把合成数据当设备验收。
 final class CitizenSDKFlutterWalletFlowTests: XCTestCase {
-    func testFlutterRequestsMapOnlyToSdkOwnedWalletFlows() throws {
+    func testPrepareAndAppendCarryExplicitBoundedInputsOnly() throws {
         for count: UInt32 in [12, 18, 24] {
-            XCTAssertEqual(
-                try CitizenSdkFlutterWalletFlow.contract(for: .create(session: "s", sequence: 1, wordCount: count)),
-                .create(wordCount: count)
-            )
+            let request = try CitizenSdkFlutterCodec.decode(method: "prepareWalletCreation", arguments: [2, "s", 1, count, ""])
+            guard case let .walletInput(_, _, _, _, _, words, indices) = request else { return XCTFail("prepare request") }
+            XCTAssertEqual(words, count); XCTAssertTrue(indices.isEmpty)
         }
-        let text = ["账户角色", "授权说明", "完成说明", "备份说明", "冷账户说明"]
-        XCTAssertEqual(
-            try CitizenSdkFlutterWalletFlow.contract(
-                for: .initialize(session: "s", sequence: 2, wordCount: 18, text: text)
-            ),
-            .initialize(
-                wordCount: 18,
-                content: CitizenSDKWalletInitializationContent(
-                    walletAccountRoleText: text[0], walletAuthorizationText: text[1],
-                    walletCompletionText: text[2], walletBackupText: text[3],
-                    walletColdAccountText: text[4]
-                )
-            )
-        )
-        XCTAssertEqual(
-            try CitizenSdkFlutterWalletFlow.contract(
-                for: .importColdAccountWithUI(session: "s", sequence: 3, text: "只接受账户码")
-            ),
-            .importColdAccount(walletColdAccountText: "只接受账户码")
-        )
-        XCTAssertEqual(
-            try CitizenSdkFlutterWalletFlow.contract(for: .empty(method: "importWallet", session: "s", sequence: 4)),
-            .importWallet
-        )
-        XCTAssertEqual(
-            try CitizenSdkFlutterWalletFlow.contract(for: .addAccounts(session: "s", sequence: 5, indices: [1, 2])),
-            .addAccounts(indices: [1, 2])
-        )
+        let request = try CitizenSdkFlutterCodec.decode(method: "addWalletAccounts", arguments: [2, "s", 2, "synthetic", "", [2, 7]])
+        guard case let .walletInput(_, _, _, _, _, _, indices) = request else { return XCTFail("append request") }
+        XCTAssertEqual(indices, [2, 7])
+        XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "addNextWalletAccount", arguments: [2, "s", 3, "synthetic", "", 9]))
     }
 
-    func testNonWalletRequestCannotOpenSecretUi() {
-        XCTAssertThrowsError(try CitizenSdkFlutterWalletFlow.contract(
-            for: .empty(method: "start", session: "s", sequence: 1)
-        )) { error in
-            XCTAssertEqual((error as? CitizenSDKError)?.code, .invalidArgument)
+    func testRemovedWindowsAndInjectedPresentationAreRejected() {
+        for method in ["initializeWallet", "createWallet", "importColdAccountWithUi", "viewAccountPrivateKey", "qrScan"] {
+            XCTAssertFalse(CitizenSdkFlutterCodec.methods.contains(method))
+            XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: method, arguments: [2, "s", 1]))
+        }
+        XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: "prepareWalletCreation", arguments: [2, "s", 1, 18, "", "界面文案"]))
+    }
+
+    func testResourceReferencesAreOpaqueAndRejectBareHandlesOrWrongShapes() {
+        for method in ["releasePreparedWallet", "copyRecoveryPhrase", "releaseWalletInspection", "revealPrivateKey", "closePrivateKey", "releaseQrReview"] {
+            XCTAssertNoThrow(try CitizenSdkFlutterCodec.decode(method: method, arguments: [2, "s", 1, "owned-resource"]))
+            for wrong in ["", "a/b", String(repeating: "a", count: 129)] {
+                XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: method, arguments: [2, "s", 1, wrong]))
+            }
+            XCTAssertThrowsError(try CitizenSdkFlutterCodec.decode(method: method, arguments: [2, "s", 1, 9]))
         }
     }
 }

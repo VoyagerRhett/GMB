@@ -49,6 +49,7 @@ final _aliceWallet = _testAccount(
 );
 
 void main() {
+  TestCitizenSdkHarness();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   MyIdService buildService({

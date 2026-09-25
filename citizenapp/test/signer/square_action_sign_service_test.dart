@@ -1,14 +1,8 @@
 import '../support/fake_citizen_sdk.dart';
-import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:citizenapp/qr/bodies/sign_response_body.dart';
-import 'package:citizenapp/qr/bodies/sign_request_body.dart';
-import 'package:citizenapp/qr/envelope.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
-import 'package:citizenapp/signer/signing.dart';
 import 'package:citizenapp/signer/square_action_sign_service.dart';
 
 const _accountId =
@@ -21,28 +15,18 @@ final String _pubHex = _pubBytes
     .map((b) => b.toRadixString(16).padLeft(2, '0'))
     .join();
 
-Uint8List _payloadBytes() => Uint8List.fromList(<int>[
-  ...scaleString('cancel_membership'),
-  ...scaleString(_accountId),
-  ...scaleString('sqa_1'),
-  ...u64Le(1700000000000),
+Future<Uint8List> _payloadBytes() async => Uint8List.fromList(<int>[
+  ...(await CitizenSigning.encodePayload(CitizenSigningPayload.scaleString('cancel_membership'))),
+  ...(await CitizenSigning.encodePayload(CitizenSigningPayload.scaleString(_accountId))),
+  ...(await CitizenSigning.encodePayload(CitizenSigningPayload.scaleString('sqa_1'))),
+  ...(await CitizenSigning.encodePayload(CitizenSigningPayload.u64Le(BigInt.from(1700000000000)))),
 ]);
 
-String _hex(List<int> b) =>
-    b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
-
-String _signRequestRaw({int action = QrActions.squareAccountAction}) {
-  return QrEnvelope<SignRequestBody>(
-    kind: QrKind.signRequest,
-    id: 'square-request-000001',
-    issuedAt: 1800000000,
-    expiresAt: 1900000000,
-    body: SignRequestBody.fromHex(
-      signerPublicKeyHex: '0x$_pubHex',
-      payloadHex: '0x${_hex(_payloadBytes())}',
-      action: action,
-    ),
-  ).toRawJson();
+Future<String> _signRequestRaw(CitizenQr qr, {int action = CitizenQrActions.squareAccountAction}) async {
+  return (await qr.encodeDocument(CitizenQrContent.signRequest(
+    requestId: 'square-request-000001', expiresAt: BigInt.from(1900000000),
+    signerAccountId: '0x$_pubHex', reviewPayload: await _payloadBytes(), action: action,
+  ))).canonicalText;
 }
 
 CitizenWalletStateAccount _account({required String accountId, int index = 3}) {
@@ -96,13 +80,26 @@ class _FakeSigning implements CitizenSigning {
 }
 
 void main() {
-  final service = SquareActionSignService();
+  TestWidgetsFlutterBinding.ensureInitialized();
+  late TestCitizenSdkTransport encodingTransport;
+  late CitizenSdk encodingSdk;
+  setUp(() async {
+    encodingTransport = TestCitizenSdkTransport({}, useCore: true);
+    encodingSdk = await encodingTransport.open();
+  });
+  tearDown(() async {
+    await encodingSdk.close();
+    await encodingTransport.dispose();
+  });
+
+  late SquareActionSignService service;
+  setUp(() { service = SquareActionSignService(qr: encodingSdk.qr); });
 
   test(
     'prepare resolves accountId wallet by QR u signer public key + decodes action',
     () async {
       final wm = _FakeWallet([_account(accountId: '0x$_pubHex')]);
-      final prep = await service.prepare(_signRequestRaw(), wm);
+      final prep = await service.prepare(await _signRequestRaw(encodingSdk.qr), wm);
       expect(prep.account.accountIndex, 3);
       expect(prep.actionLabel, '广场账户动作签名');
       expect(prep.decoded.action, 'cancel_membership');
@@ -114,7 +111,7 @@ void main() {
   test('prepare rejects unknown non-App action before signing', () async {
     final wm = _FakeWallet([_account(accountId: '0x$_pubHex')]);
     await expectLater(
-      service.prepare(_signRequestRaw(action: 0x7fff), wm),
+      service.prepare(await _signRequestRaw(encodingSdk.qr, action: 0x7fff), wm),
       throwsA(
         isA<SquareActionSignException>()
             .having(
@@ -134,7 +131,7 @@ void main() {
   test('prepare rejects registered non-App action before signing', () async {
     final wm = _FakeWallet([_account(accountId: '0x$_pubHex')]);
     await expectLater(
-      service.prepare(_signRequestRaw(action: QrActions.login), wm),
+      service.prepare(await _signRequestRaw(encodingSdk.qr, action: CitizenQrActions.login), wm),
       throwsA(
         isA<SquareActionSignException>()
             .having(
@@ -154,7 +151,7 @@ void main() {
   test('prepare throws accountNotLocal when no wallet matches u', () async {
     final wm = _FakeWallet([_account(accountId: '0x${'aa' * 32}')]);
     await expectLater(
-      service.prepare(_signRequestRaw(), wm),
+      service.prepare(await _signRequestRaw(encodingSdk.qr), wm),
       throwsA(
         isA<SquareActionSignException>().having(
           (e) => e.error,
@@ -171,7 +168,7 @@ void main() {
       final wm = _FakeWallet([_account(accountId: '0x$_pubHex')]);
       await expectLater(
         service.prepare(
-          _signRequestRaw(),
+          await _signRequestRaw(encodingSdk.qr),
           wm,
           requiredAccount: _account(accountId: '0x${'aa' * 32}'),
         ),
@@ -190,31 +187,26 @@ void main() {
     'sign signs signing_message(0x1D) with accountId wallet and builds signResponse',
     () async {
       final wm = _FakeWallet([_account(accountId: '0x$_pubHex')]);
-      final prep = await service.prepare(_signRequestRaw(), wm);
+      final prep = await service.prepare(await _signRequestRaw(encodingSdk.qr), wm);
       final signing = _FakeSigning();
 
       final responseJson = await service.sign(prep, signing, null);
 
       // 用 QR 指定的 account_id 对 signing_message(0x1D, payload) 签名。
       expect(signing.signedAccountId, '0x$_pubHex');
-      final expected = signingMessage(
+      final expected = await CitizenSigning.encodePayload(CitizenSigningPayload.message(
         opTag: kOpSignSquareAction,
-        scalePayload: _payloadBytes(),
-      );
+        scalePayload: await _payloadBytes(),
+      ));
       expect(signing.signedPayload, expected);
 
-      // signResponse envelope 携带该 64B 签名。
-      final env = QrEnvelope.parse(responseJson);
-      expect(env.kind, QrKind.signResponse);
-      final body = env.body as SignResponseBody;
-      expect(body.signatureBytes.length, 64);
-      expect(body.signatureBytes, signing.signature);
-      // 请求-响应由 id 绑定。
-      expect(env.id, isNotNull);
-
-      // 冗余校验 JSON 结构。
-      final decoded = jsonDecode(responseJson) as Map<String, dynamic>;
-      expect(decoded['k'], 2);
+      // 响应由同一SDK解码；保留签名、请求标识及有效期绑定断言。
+      final response = await encodingSdk.qr.parse(responseJson);
+      expect(response.kind, CitizenQrKind.signResponse);
+      expect(response.signature, hasLength(64));
+      expect(response.signature, signing.signature);
+      expect(response.requestId, prep.request.requestId);
+      expect(response.expiresAt, prep.request.expiresAt);
     },
   );
 }

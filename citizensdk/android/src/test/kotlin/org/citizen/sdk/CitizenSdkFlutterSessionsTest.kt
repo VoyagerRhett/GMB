@@ -3,10 +3,12 @@ package org.citizen.sdk
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertThrows
 import org.junit.Test
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionException
 
 class CitizenSdkFlutterSessionsTest {
     @Test
@@ -26,8 +28,13 @@ class CitizenSdkFlutterSessionsTest {
 
     @Test
     fun `verification projection needs no context session activity or event subscription`() {
+        // 独立验签也使用唯一v2通道；旧版本必须拒绝，不能用旧夹具恢复兼容入口。
         val request = CitizenSdkFlutterCodec.decode("verifySignature",
-            listOf(1, "0x" + "11".repeat(32), ByteArray(64), byteArrayOf())) as CitizenSdkFlutterCodec.Request.VerifySignature
+            listOf(2, "0x" + "11".repeat(32), ByteArray(64), byteArrayOf())) as CitizenSdkFlutterCodec.Request.VerifySignature
+        assertThrows(CitizenSdkFlutterCodec.ContractFailure::class.java) {
+            CitizenSdkFlutterCodec.decode("verifySignature",
+                listOf(1, "0x" + "11".repeat(32), ByteArray(64), byteArrayOf()))
+        }
         var calls = 0
         // 只替换密码学叶节点；生产使用同一静态分派，测试无需构造任何 Android 宿主。
         repeat(2) {
@@ -38,7 +45,7 @@ class CitizenSdkFlutterSessionsTest {
                 assertTrue(payload.isEmpty())
                 false
             }
-            assertEquals(listOf(1, false), response)
+            assertEquals(listOf(2, false), response)
         }
         assertEquals(2, calls)
         assertThrows(CitizenSdkException::class.java) {
@@ -49,14 +56,49 @@ class CitizenSdkFlutterSessionsTest {
     }
 
     @Test
-    fun `request sequence is strictly contiguous and never advances on rejection`() {
-        val gate = CitizenSdkFlutterSequenceGate()
-        assertFalse(gate.accept(2))
-        assertTrue(gate.accept(1))
-        assertFalse(gate.accept(1))
-        assertFalse(gate.accept(3))
-        assertTrue(gate.accept(2))
-        assertTrue(gate.accept(3))
+    fun envelopeSurvivesInvalidParametersAndNeverInspectsSecrets() {
+        // 这里只验证平台外壳投影，序号重复/跳号/实例隔离由唯一Rust接纳测试验证。
+        val envelope = CitizenSdkFlutterCodec.envelope("getStorageKeysPaged", listOf(2, "synthetic", 1, Any()))
+        assertEquals("synthetic", envelope?.sessionId)
+        assertEquals(1L, envelope?.requestSequence)
+        assertThrows(CitizenSdkFlutterCodec.ContractFailure::class.java) {
+            CitizenSdkFlutterCodec.decode("getStorageKeysPaged", listOf(2, "synthetic", 1, Any()))
+        }
+        assertEquals(2L, CitizenSdkFlutterCodec.envelope("getSyncStatus", listOf(2, "synthetic", 2))?.requestSequence)
+        assertNull(CitizenSdkFlutterCodec.envelope("verifySignature", null))
+        for (bad in listOf(listOf(1, "synthetic", 1), listOf(2, "synthetic", 0), listOf(2))) {
+            assertThrows(CitizenSdkFlutterCodec.ContractFailure::class.java) {
+                CitizenSdkFlutterCodec.envelope("getSyncStatus", bad)
+            }
+        }
+    }
+
+    @Test
+    fun boundedDiagnosticsRejectUnlistedMethodsDeduplicateAndCapEachInstance() {
+        val lines = mutableListOf<String>()
+        val diagnostic = CitizenSdkFlutterDiagnostics(lines::add)
+        diagnostic.record("importWallet", CitizenSdkFlutterDiagnostics.Phase.BEGIN)
+        diagnostic.record("untrusted\nmethod", CitizenSdkFlutterDiagnostics.Phase.BEGIN)
+        assertTrue(lines.isEmpty())
+        repeat(100) {
+            diagnostic.record("getSyncStatus", CitizenSdkFlutterDiagnostics.Phase.COMPLETE,
+                elapsedNanos = Long.MAX_VALUE, sync = CitizenSdkFlutterDiagnostics.Sync.USABLE)
+        }
+        assertEquals(1, lines.size)
+        assertTrue(lines.single().endsWith("elapsed_ms=86400000"))
+        for (code in CitizenSdkErrorCode.entries) {
+            diagnostic.record("getSyncStatus", CitizenSdkFlutterDiagnostics.Phase.COMPLETE,
+                code, CitizenSdkFailureStage.fromErrorCode(code), elapsedNanos = -1)
+        }
+        assertEquals(8, lines.size)
+        assertTrue(lines.all { it.length < 256 && !it.contains('\n') })
+        diagnostic.record("start", CitizenSdkFlutterDiagnostics.Phase.BEGIN)
+        assertEquals(9, lines.size)
+        CitizenSdkFlutterDiagnostics(lines::add).record("getSyncStatus", CitizenSdkFlutterDiagnostics.Phase.BEGIN)
+        assertEquals(10, lines.size)
+        // 系统日志失败也不能让诊断反向改变原请求控制流。
+        CitizenSdkFlutterDiagnostics { throw IllegalStateException("synthetic sink failure") }
+            .record("open", CitizenSdkFlutterDiagnostics.Phase.BEGIN)
     }
 
     @Test
@@ -124,6 +166,52 @@ class CitizenSdkFlutterSessionsTest {
         )
         assertTrue(failed.isCompletedExceptionally)
         assertEquals(0, failedDisposeCount)
+    }
+
+    @Test
+    fun asynchronousStopRejectionPreservesTheNativeErrorWithoutRetryOrDispose() {
+        // 调用真实关闭组合器，只替换原生停止结果；BUSY与其他失败不得被吞掉或触发销毁。
+        for (code in listOf(CitizenSdkErrorCode.BUSY, CitizenSdkErrorCode.INVALID_STATE)) {
+            val stop = CompletableFuture<Void>()
+            val failure = CitizenSdkException(code, "synthetic stop rejection")
+            var stopCalls = 0
+            var disposeCalls = 0
+            var completions = 0
+            val close = citizenSdkFlutterCloseLifecycle(
+                CitizenSdkLifecycle.RUNNING,
+                { stopCalls++; stop },
+                { disposeCalls++ },
+            )
+            close.whenComplete { _, _ -> completions++ }
+            assertEquals(1, stopCalls)
+            assertFalse(close.isDone)
+            assertTrue(stop.completeExceptionally(failure))
+            // 迟到成功不得把原生拒绝改写成成功，也不能重复交付终态。
+            assertFalse(stop.complete(null))
+            val error = assertThrows(CompletionException::class.java) { close.join() }
+            assertSame(failure, error.cause)
+            assertEquals(1, stopCalls)
+            assertEquals(1, completions)
+            assertEquals(0, disposeCalls)
+        }
+    }
+
+    @Test
+    fun synchronousStopBusyIsReturnedWithoutRetryOrDispose() {
+        // 原生接纳前的同步拒绝同样保持原错误；不能靠关闭或重试掩盖并发冲突。
+        val failure = CitizenSdkException(CitizenSdkErrorCode.BUSY, "synthetic admission rejection")
+        var stopCalls = 0
+        var disposeCalls = 0
+        val actual = assertThrows(CitizenSdkException::class.java) {
+            citizenSdkFlutterCloseLifecycle(
+                CitizenSdkLifecycle.RUNNING,
+                { stopCalls++; throw failure },
+                { disposeCalls++ },
+            )
+        }
+        assertSame(failure, actual)
+        assertEquals(1, stopCalls)
+        assertEquals(0, disposeCalls)
     }
 
     @Test

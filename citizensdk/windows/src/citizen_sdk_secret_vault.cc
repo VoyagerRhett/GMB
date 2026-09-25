@@ -3,6 +3,8 @@
 #include <windows.h>
 #include <aclapi.h>
 #include <sddl.h>
+#include <ncrypt.h>
+#include <map>
 #include <algorithm>
 #include <utility>
 #include "citizen_sdk_directory.hpp"
@@ -10,6 +12,45 @@
 
 namespace citizen_sdk::windows {
 namespace {
+
+// 元数据枚举不触发认证窗口，不打开或导出私钥；只返回SDK自己的非秘密钥名称。
+std::vector<std::string> enumerate_wallet_keys() {
+  struct Provider {
+    NCRYPT_PROV_HANDLE value{};
+    ~Provider() { if (value) (void)::NCryptFreeObject(value); }
+  } provider;
+  const auto opened = ::NCryptOpenStorageProvider(&provider.value, MS_PLATFORM_CRYPTO_PROVIDER, 0);
+  require(opened == ERROR_SUCCESS, map_cng_error(static_cast<uint32_t>(opened), CITIZENSDK_ERROR_UNAVAILABLE).code,
+      "系统金库枚举不可用");
+  struct Enumeration {
+    void *value{};
+    ~Enumeration() { if (value) (void)::NCryptFreeBuffer(value); }
+  } enumeration;
+  std::vector<std::string> names;
+  std::size_t count = 0;
+  for (;;) {
+    struct Name {
+      NCryptKeyName *value{};
+      ~Name() { if (value) (void)::NCryptFreeBuffer(value); }
+    } name;
+    const auto code = ::NCryptEnumKeys(provider.value, nullptr, &name.value, &enumeration.value, NCRYPT_SILENT_FLAG);
+    if (code == NTE_NO_MORE_ITEMS) break;
+    require(code == ERROR_SUCCESS, map_cng_error(static_cast<uint32_t>(code), CITIZENSDK_ERROR_UNAVAILABLE).code,
+        "系统金库枚举失败");
+    require(++count <= 65536 && name.value && name.value->pszName,
+        CITIZENSDK_ERROR_INTEGRITY, "系统金库枚举边界无效");
+    const auto length = wcsnlen_s(name.value->pszName, 4097);
+    require(length <= 4096, CITIZENSDK_ERROR_INTEGRITY, "系统金库名称超过上限");
+    const std::wstring wide(name.value->pszName, length);
+    if (wide.rfind(L"citizensdk.", 0) != 0) continue;
+    require(std::all_of(wide.begin(), wide.end(), [](wchar_t value) { return static_cast<uint32_t>(value) <= 127U; }),
+        CITIZENSDK_ERROR_INTEGRITY, "SDK金库名称格式无效");
+    std::string name_ascii; name_ascii.reserve(wide.size());
+    for (const auto value : wide) name_ascii.push_back(static_cast<char>(value));
+    names.push_back(std::move(name_ascii));
+  }
+  return names;
+}
 
 void validate_identity(const WalletKey &key,
                         const std::array<uint8_t, 16> &operation_id) {
@@ -126,6 +167,7 @@ SecretVault::SecretVault(SecureStore &store, WindowRef &parent)
     return cng_.create_key(key, password);
   };
   services_.validate_key = [this](const VaultObject &object) { return cng_.validate_key(object); };
+  services_.enumerate_wallet_keys = [] { return enumerate_wallet_keys(); };
   services_.encrypt_dek = [this](const VaultObject &object, const uint8_t *input) {
     return cng_.encrypt_dek(object, input);
   };
@@ -140,7 +182,7 @@ SecretVault::SecretVault(SecureStore &store, WindowRef &parent)
 
 SecretVault::SecretVault(SecureStore &store, SecretVaultServices services)
     : secure_store_(store), services_(std::move(services)) {
-  require(services_.availability && services_.authentication_available &&
+  require(services_.availability && services_.enumerate_wallet_keys && services_.authentication_available &&
               services_.create_password && services_.unlock_password &&
               services_.create_key && services_.validate_key && services_.encrypt_dek &&
               services_.decrypt_dek && services_.delete_key,
@@ -216,6 +258,21 @@ void SecretVault::ensure_wallet_kek(
   require(secure_store_.generation_owned_by(key, operation_id) &&
               secure_store_.vault_object_is_active(key, object),
           CITIZENSDK_ERROR_KEY_INVALIDATED, "wallet TPM object was retired during provisioning");
+}
+
+bool SecretVault::has_any_wallet_key(uint32_t wallet_index) {
+  require_worker(parent_);
+  std::lock_guard<std::recursive_mutex> guard(generation_lock_);
+  std::map<std::string, uint32_t> known;
+  for (const auto &key : secure_store_.vault_generations()) known.emplace(cng_key_name(key), key.wallet_index);
+  const auto names = services_.enumerate_wallet_keys();
+  require(names.size() <= 65536, CITIZENSDK_ERROR_UNAVAILABLE, "物理钥数量超过上限");
+  for (const auto &name : names) {
+    const auto found = known.find(name);
+    require(found != known.end(), CITIZENSDK_ERROR_INTEGRITY, "存在无法归属的SDK物理钥");
+    if (found->second == wallet_index) return true;
+  }
+  return false;
 }
 
 bool SecretVault::has_wallet_kek(const WalletKey &key) {

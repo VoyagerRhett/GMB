@@ -19,7 +19,7 @@ use std::{
 
 use citizen_sdk_contracts::{
     AccountId32, FinalizedAccountBalance, Modules, SecretBuffer, SigningIntent, SigningTransform,
-    WalletAccount, WalletOrigin, WalletProfile, WalletSignMode,
+    WalletAccount, WalletOrigin, WalletProfile, WalletRecord, WalletSignMode,
 };
 #[cfg(feature = "chain")]
 use citizen_sdk_engine::BestFeeSnapshot;
@@ -185,7 +185,7 @@ impl CitizenSdkPrivateKeyReceiverV1 {
         let Some(authorizing) = self.authorizing else {
             return CitizenSdkErrorCode::Internal.as_i32();
         };
-        // SAFETY: open 完整验证此 SDK 私有表，阶段租约保证 context 直到 auth 排空都有效。
+        // SAFETY: open完整验证公开接收表，阶段租约保证context直到真实认证排空都有效。
         unsafe { authorizing(self.context, view_id, host_operation_id) }
     }
 }
@@ -438,7 +438,7 @@ fn enqueue_private_key_view(slot: &Arc<PrivateKeyViewSlot>) -> FfiResult<()> {
 }
 
 /// # Safety
-/// 接收表和输出必须有效，context必须存续到唯一最终request；不允许回调重入Core。
+/// 接收表和输出必须有效，context必须存续到唯一最终request；receive不得反调Core，settled可调用finish。
 #[no_mangle]
 pub unsafe extern "C" fn citizensdk_private_key_open(
     handle: CitizenSdkHandle,
@@ -456,14 +456,14 @@ pub unsafe extern "C" fn citizensdk_private_key_open(
         if account_id.is_null() {
             return Err(FfiError::invalid("account_id is null"));
         }
-        let callbacks = read_versioned(view, "internal private-key view")?;
+        let callbacks = read_versioned(view, "private-key receiver")?;
         if callbacks.context.is_null()
             || callbacks.receive.is_none()
             || callbacks.settled.is_none()
             || callbacks.authorizing.is_none()
         {
             return Err(FfiError::invalid(
-                "安全查看必须由 SDK 自有显示上下文和完整回调承载",
+                "私钥交付必须提供非空接收上下文和完整回调",
             ));
         }
         let runtime = handles::get(handle)?;
@@ -522,7 +522,7 @@ pub unsafe extern "C" fn citizensdk_private_key_open(
 }
 
 /// # Safety
-/// 只能由 SDK 自有确认操作调用；成功只代表登记，不表示授权或显示已完成。
+/// 宿主明确确认后调用；成功只代表登记，不表示设备授权或秘密交付已完成。
 #[no_mangle]
 pub unsafe extern "C" fn citizensdk_private_key_reveal(
     handle: CitizenSdkHandle,
@@ -564,7 +564,7 @@ pub unsafe extern "C" fn citizensdk_private_key_cancel(
 }
 
 /// # Safety
-/// SDK 原生界面关闭且可擦除显示 buffer 已清零后才能调用；必须等最终 request 再销毁 context。
+/// SDK接收副本已清零后调用；宿主负责清屏，context仍须保有至真实request终态。
 #[no_mangle]
 pub unsafe extern "C" fn citizensdk_private_key_finish(
     handle: CitizenSdkHandle,
@@ -1012,62 +1012,6 @@ pub unsafe extern "C" fn citizensdk_validate_wallet_input(
 }
 
 #[no_mangle]
-/// 同步复用派生密码校验，不返回规范化密码，不创建持久化状态。
-///
-/// # Safety
-/// `password` 在调用期间必须按声明长度可读。
-pub unsafe extern "C" fn citizensdk_validate_wallet_password(password: CitizenSdkBytesView) -> i32 {
-    #[cfg(not(feature = "wallet"))]
-    {
-        let _ = (password);
-        ffi_status(|| {
-            Err(FfiError::new(
-                CitizenSdkErrorCode::Unsupported,
-                "当前构建不包含所需模块",
-            ))
-        })
-    }
-    #[cfg(feature = "wallet")]
-    {
-        ffi_status(|| {
-            let password = secret_utf8(password, "wallet password", MAX_WALLET_SECRET_INPUT_BYTES)?;
-            citizen_sdk_engine::validate_wallet_password(&password)?;
-            Ok(())
-        })
-    }
-}
-
-#[no_mangle]
-/// 同步复用 English BIP-39 输入校验；错误不回显单词。
-///
-/// # Safety
-/// `mnemonic` 在调用期间必须按声明长度可读。
-pub unsafe extern "C" fn citizensdk_validate_wallet_mnemonic(
-    mnemonic: CitizenSdkBytesView,
-    word_count: u32,
-) -> i32 {
-    #[cfg(not(feature = "wallet"))]
-    {
-        let _ = (mnemonic, word_count);
-        ffi_status(|| {
-            Err(FfiError::new(
-                CitizenSdkErrorCode::Unsupported,
-                "当前构建不包含所需模块",
-            ))
-        })
-    }
-    #[cfg(feature = "wallet")]
-    {
-        ffi_status(|| {
-            let word_count = wallet_word_count(word_count)?;
-            let mnemonic = secret_utf8(mnemonic, "wallet mnemonic", MAX_WALLET_SECRET_INPUT_BYTES)?;
-            citizen_sdk_engine::validate_wallet_mnemonic(&mnemonic, word_count)?;
-            Ok(())
-        })
-    }
-}
-
-#[no_mangle]
 /// 同步查询本地官方词表，最多六词，以 LF 分隔且无尾随 LF/NUL。
 /// 容量不足时不部分写入；查询所需长度不要求提供输出缓冲区。
 ///
@@ -1270,6 +1214,132 @@ pub unsafe extern "C" fn citizensdk_reorder_wallet_accounts_without_default_chan
             })
         })
     }
+}
+
+#[no_mangle]
+/// 同修订切换付款钱包；不改默认账户、不签名、不重排。
+///
+/// # Safety
+/// out_request_id必须可写；返回接纳结果后由正常请求回调交付同次提交快照。
+pub unsafe extern "C" fn citizensdk_set_active_wallet(
+    handle: CitizenSdkHandle, expected_revision: u64, wallet_index: u32,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "wallet"))]
+    { let _ = (handle, expected_revision, wallet_index, out_request_id); ffi_status(|| Err(module_unsupported("wallet"))) }
+    #[cfg(feature = "wallet")]
+    { ffi_status(|| {
+        let runtime = handles::get(handle)?;
+        accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            runtime.refresh_provider_capabilities()?;
+            let state = runtime.drive(runtime.engine().set_active_wallet(expected_revision, wallet_index))??;
+            Ok(ResultPayload::WalletState(Box::new(state)))
+        })
+    }) }
+}
+
+/// 只接受同实例真实成功快照；原记录在接纳前复制，后续释放不悬垂。
+fn inspected_record(owner: CitizenSdkHandle, result: CitizenSdkResultHandle, wallet_index: u32)
+    -> FfiResult<(u64, WalletRecord)>
+{
+    let owned = ownership::get(result)?;
+    if owned.owner != owner || owned.code != CitizenSdkErrorCode::Ok {
+        return Err(FfiError::invalid("检查资源不属于当前实例的成功快照"));
+    }
+    let ResultPayload::WalletState(state) = owned.payload else { return Err(wrong_result("wallet state")); };
+    let record = state.diagnostic(wallet_index)
+        .ok_or_else(|| FfiError::new(CitizenSdkErrorCode::NotFound, "检查快照中没有该异常钱包"))?;
+    Ok((state.revision(), record.clone()))
+}
+
+#[no_mangle]
+/// 从真实快照核本机控制权；没有独立签名或清理实现。
+/// # Safety
+/// out_request_id必须可写，inspection须是仍未释放的同实例结果。
+pub unsafe extern "C" fn citizensdk_repair_hot_wallet(
+    handle: CitizenSdkHandle, inspection: CitizenSdkResultHandle, wallet_index: u32,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "wallet"))]
+    { let _ = (handle, inspection, wallet_index, out_request_id); ffi_status(|| Err(module_unsupported("wallet"))) }
+    #[cfg(feature = "wallet")]
+    { ffi_status(|| {
+        let runtime = handles::get(handle)?;
+        let (revision, record) = inspected_record(handle, inspection, wallet_index)?;
+        accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            runtime.refresh_provider_capabilities()?;
+            let state = runtime.drive(runtime.engine().repair_hot_wallet(revision, record))??;
+            Ok(ResultPayload::WalletState(Box::new(state)))
+        })
+    }) }
+}
+
+#[no_mangle]
+/// 异常改名仅委托既有Core同修订操作，不信任宿主回传记录字段。
+/// # Safety
+/// name同步可读，out_request_id可写；inspection须在接纳期间有效。
+pub unsafe extern "C" fn citizensdk_rename_diagnostic_wallet(
+    handle: CitizenSdkHandle, inspection: CitizenSdkResultHandle, wallet_index: u32,
+    name: CitizenSdkBytesView, out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "wallet"))]
+    { let _ = (handle, inspection, wallet_index, name, out_request_id); ffi_status(|| Err(module_unsupported("wallet"))) }
+    #[cfg(feature = "wallet")]
+    { ffi_status(|| {
+        let runtime = handles::get(handle)?;
+        let (revision, record) = inspected_record(handle, inspection, wallet_index)?;
+        let name = utf8(name, "wallet name", MAX_WALLET_NAME_BYTES)?;
+        accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            runtime.refresh_provider_capabilities()?;
+            let state = runtime.drive(runtime.engine().rename_diagnostic_wallet(revision, record, name))??;
+            Ok(ResultPayload::WalletState(Box::new(state)))
+        })
+    }) }
+}
+
+#[no_mangle]
+/// 异常删除沿原精确cleanup；接纳后独立拥有原记录，释放快照不取消请求。
+/// # Safety
+/// out_request_id可写，inspection在接纳期间有效。
+pub unsafe extern "C" fn citizensdk_delete_diagnostic_wallet(
+    handle: CitizenSdkHandle, inspection: CitizenSdkResultHandle, wallet_index: u32,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "wallet"))]
+    { let _ = (handle, inspection, wallet_index, out_request_id); ffi_status(|| Err(module_unsupported("wallet"))) }
+    #[cfg(feature = "wallet")]
+    { ffi_status(|| {
+        let runtime = handles::get(handle)?;
+        let (revision, record) = inspected_record(handle, inspection, wallet_index)?;
+        accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            runtime.refresh_provider_capabilities()?;
+            let state = runtime.drive(runtime.engine().delete_diagnostic_wallet(revision, record))??;
+            Ok(ResultPayload::WalletState(Box::new(state)))
+        })
+    }) }
+}
+
+#[no_mangle]
+/// 独立钱包级改名，名称借用仅限接纳期间；Core负责唯一校验及原子提交。
+///
+/// # Safety
+/// name指向可读UTF8字节，out_request_id必须可写。
+pub unsafe extern "C" fn citizensdk_rename_wallet(
+    handle: CitizenSdkHandle, expected_revision: u64, wallet_index: u32,
+    name: CitizenSdkBytesView, out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(feature = "wallet"))]
+    { let _ = (handle, expected_revision, wallet_index, name, out_request_id); ffi_status(|| Err(module_unsupported("wallet"))) }
+    #[cfg(feature = "wallet")]
+    { ffi_status(|| {
+        let runtime = handles::get(handle)?;
+        let name = utf8(name, "wallet name", MAX_WALLET_NAME_BYTES)?;
+        accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            runtime.refresh_provider_capabilities()?;
+            let state = runtime.drive(runtime.engine().rename_wallet(expected_revision, wallet_index, name))??;
+            Ok(ResultPayload::WalletState(Box::new(state)))
+        })
+    }) }
 }
 
 #[no_mangle]
@@ -2506,6 +2576,164 @@ pub unsafe extern "C" fn citizensdk_result_get_wallet_state(
 }
 
 #[no_mangle]
+/// 保留同实例成功钱包快照，仍沿原result_release及销毁计数归还。
+/// # Safety
+/// out_retained_result可写；错误不修改输出，输入结果在同步调用期间有效。
+pub unsafe extern "C" fn citizensdk_wallet_state_retain(
+    handle: CitizenSdkHandle, result: CitizenSdkResultHandle,
+    out_retained_result: *mut CitizenSdkResultHandle,
+) -> i32 {
+    ffi_status(|| {
+        require_output(out_retained_result, "retained wallet state")?;
+        let retained = handles::get(handle)?.retain_wallet_state(result)?;
+        ptr::write(out_retained_result, retained);
+        Ok(())
+    })
+}
+
+/// 投影只取成功WalletState，不用错误结果或另一类型伪造空目录。
+fn diagnostic_state(result: CitizenSdkResultHandle) -> FfiResult<Box<citizen_sdk_engine::WalletStateSnapshot>> {
+    let owned = ownership::get(result)?;
+    if owned.code != CitizenSdkErrorCode::Ok { return Err(wrong_result("successful wallet state")); }
+    match owned.payload {
+        ResultPayload::WalletState(state) => Ok(state),
+        _ => Err(wrong_result("wallet state")),
+    }
+}
+
+#[no_mangle]
+/// 读取同次诊断数量，不查询数据库或把诊断计为可签名账户。
+/// # Safety
+/// out_count可写，错误不修改输出。
+pub unsafe extern "C" fn citizensdk_wallet_state_get_diagnostic_count(
+    result: CitizenSdkResultHandle, out_count: *mut u32,
+) -> i32 {
+    ffi_status(|| {
+        require_output(out_count, "diagnostic count")?;
+        let state = diagnostic_state(result)?;
+        let count = checked_count(state.diagnostics().len(), "wallet diagnostic")?;
+        ptr::write(out_count, count);
+        Ok(())
+    })
+}
+
+#[no_mangle]
+/// 只提供原异常行需要的非秘密事实，缺地址与空地址分开表示。
+/// # Safety
+/// out_info须预置完整size/version并可写；错误不部分写入。
+pub unsafe extern "C" fn citizensdk_wallet_state_get_diagnostic_at(
+    result: CitizenSdkResultHandle, index: u32, out_info: *mut CitizenSdkWalletDiagnosticInfoV1,
+) -> i32 {
+    ffi_status(|| {
+        validate_output_versioned(out_info, "wallet diagnostic info")?;
+        let state = diagnostic_state(result)?;
+        let record = state.diagnostics().get(index as usize)
+            .ok_or_else(|| FfiError::invalid("异常记录索引越界"))?;
+        let reason = record.diagnostic_reason().ok_or_else(|| FfiError::internal("正常记录不能进入诊断"))?;
+        // 这里只容纳记录自身无法证明精确目标的情况；没有平台查询或被吞掉的宿主错误。
+        let cleanup = record.cleanup_targets().ok();
+        ptr::write(out_info, CitizenSdkWalletDiagnosticInfoV1 {
+            wallet_index: record.wallet_index(), diagnostic_reason: reason as u32,
+            has_ss58_address: u32::from(record.ss58_address().is_some()),
+            sign_mode: match record.known_sign_mode() {
+                Some(WalletSignMode::Hot) => 1, Some(WalletSignMode::Cold) => 2, None => 0,
+            },
+            account_id: account_id_to_abi(record.account_id()),
+            wallet_name_len: record.wallet_name().len() as u64,
+            ss58_address_len: record.ss58_address().map_or(0, str::len) as u64,
+            cleanup_account_count: cleanup.as_ref().map_or(0, |(ids, _)| ids.len() as u32),
+            delete_wallet_wide_key: cleanup.as_ref().map_or(0, |(_, wide)| u32::from(*wide)),
+            ..CitizenSdkWalletDiagnosticInfoV1::default()
+        });
+        Ok(())
+    })
+}
+
+#[no_mangle]
+/// 关联目标共用实际cleanup的精确引用校验，不把异常地址别名或猜测加入集合。
+/// # Safety
+/// out_account_id可写；没有可信目标、越界、错类型和已释放结果均不改输出。
+pub unsafe extern "C" fn citizensdk_wallet_state_get_diagnostic_cleanup_account(
+    result: CitizenSdkResultHandle, index: u32, account_index: u32, out_account_id: *mut CitizenSdkAccountId,
+) -> i32 {
+    ffi_status(|| {
+        require_output(out_account_id, "diagnostic cleanup account")?;
+        let state = diagnostic_state(result)?;
+        let record = state.diagnostics().get(index as usize)
+            .ok_or_else(|| FfiError::invalid("异常记录索引越界"))?;
+        let (ids, _) = record.cleanup_targets()?;
+        let id = ids.get(account_index as usize).ok_or_else(|| FfiError::invalid("清理账户索引越界"))?;
+        ptr::write(out_account_id, account_id_to_abi(*id));
+        Ok(())
+    })
+}
+
+#[no_mangle]
+/// 文本仅来自同一原记录；先校验所有输出，短缓冲不写长度或部分内容。
+/// # Safety
+/// buffer/capacity遵守长度查询合同，out_required必须可写。
+pub unsafe extern "C" fn citizensdk_wallet_state_copy_diagnostic_text(
+    result: CitizenSdkResultHandle, index: u32, field: u32,
+    buffer: *mut u8, capacity: u64, out_required: *mut u64,
+) -> i32 {
+    ffi_status(|| {
+        require_output(out_required, "diagnostic text required")?;
+        let state = diagnostic_state(result)?;
+        let record = state.diagnostics().get(index as usize)
+            .ok_or_else(|| FfiError::invalid("异常记录索引越界"))?;
+        let bytes = match field {
+            1 => record.wallet_name().as_bytes(),
+            2 => record.ss58_address().unwrap_or("").as_bytes(),
+            _ => return Err(FfiError::invalid("未知诊断文本字段")),
+        };
+        ensure_copy_destination(bytes, buffer, capacity, "diagnostic text")?;
+        copy_to_host(bytes, buffer, capacity, out_required)
+    })
+}
+
+#[no_mangle]
+/// 读取同一快照的付款选择；没有选择时输出present=0/index=0，不伪造账户标识。
+///
+/// # Safety
+/// 两个输出均可写，错误时不修改任何一个输出。
+pub unsafe extern "C" fn citizensdk_wallet_state_get_active_wallet(
+    result: CitizenSdkResultHandle, out_present: *mut u8, out_wallet_index: *mut u32,
+) -> i32 {
+    ffi_status(|| {
+        require_output(out_present, "active wallet present")?;
+        require_output(out_wallet_index, "active wallet index")?;
+        let owned = ownership::get(result)?;
+        let ResultPayload::WalletState(state) = &owned.payload else { return Err(wrong_result("wallet state")); };
+        let selection = state.active_wallet_index();
+        ptr::write(out_present, u8::from(selection.is_some()));
+        ptr::write(out_wallet_index, selection.unwrap_or_default());
+        Ok(())
+    })
+}
+
+#[no_mangle]
+/// 从profile/state结果读取独立热钱包名；无热profile返回零长，不改ABI固定结构。
+///
+/// # Safety
+/// buffer/capacity遵守长度查询合同，out_required可写；输出不足时不写任何输出。
+pub unsafe extern "C" fn citizensdk_wallet_profile_copy_name(
+    result: CitizenSdkResultHandle, buffer: *mut u8, capacity: u64, out_required: *mut u64,
+) -> i32 {
+    ffi_status(|| {
+        require_output(out_required, "wallet name required")?;
+        let owned = ownership::get(result)?;
+        let profile = match &owned.payload {
+            ResultPayload::WalletProfile(profile) => profile.as_ref(),
+            ResultPayload::WalletState(state) => state.profile(),
+            _ => return Err(wrong_result("wallet profile or wallet state")),
+        };
+        let bytes = profile.map_or(&[][..], |profile| profile.wallet_name().as_bytes());
+        ensure_copy_destination(bytes, buffer, capacity, "wallet name")?;
+        copy_to_host(bytes, buffer, capacity, out_required)
+    })
+}
+
+#[no_mangle]
 /// 从同一钱包快照取得初始化和清理事实，不另读数据库、不依赖热金库。
 ///
 /// # Safety
@@ -3084,8 +3312,7 @@ fn wallet_accounts(payload: &ResultPayload) -> FfiResult<(&[WalletAccount], Opti
             Ok((profile.accounts(), Some(profile.active_account_id())))
         }
         ResultPayload::WalletProfile(None) => Ok((&[], None)),
-        ResultPayload::WalletAccounts(accounts) => Ok((accounts, None)),
-        _ => Err(wrong_result("wallet profile or account list")),
+        _ => Err(wrong_result("wallet profile")),
     }
 }
 

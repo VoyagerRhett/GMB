@@ -6,7 +6,8 @@
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:citizenapp/security/device_subkey.dart';
-import 'package:citizenapp/signer/signing.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
+import '../support/fake_citizen_sdk.dart';
 
 const _accountId =
     '0x1111111111111111111111111111111111111111111111111111111111111111';
@@ -18,8 +19,19 @@ const _goldenHex =
     'a12230133532467b7757ae9597b36255ba0228aaa2fe595b8975283d5efe148e';
 
 void main() {
-  test('buildDeviceBindingSigningMessage matches Worker golden (0x1C)', () {
-    final message = buildDeviceBindingSigningMessage(
+  TestWidgetsFlutterBinding.ensureInitialized();
+  late TestCitizenSdkTransport encodingTransport;
+  late CitizenSdk encodingSdk;
+  setUp(() async {
+    encodingTransport = TestCitizenSdkTransport({}, useCore: true);
+    encodingSdk = await encodingTransport.open();
+  });
+  tearDown(() async {
+    await encodingSdk.close();
+    await encodingTransport.dispose();
+  });
+  test('buildDeviceBindingSigningMessage matches Worker golden (0x1C)', () async {
+    final message = await buildDeviceBindingSigningMessage(
       _cidNumber,
       _bindingRevision,
       _accountId,
@@ -30,18 +42,18 @@ void main() {
     expect(bytesToHex(message), _goldenHex);
   });
 
-  test('CitizenSDK Blake2Domain 输入与设备绑定逐字节共用 0x1C', () {
-    final payload = encodeDeviceBindingPayload(
+  test('CitizenSDK Blake2Domain 输入与设备绑定逐字节共用 0x1C', () async {
+    final payload = await encodeDeviceBindingPayload(
       cidNumber: _cidNumber,
       bindingRevision: _bindingRevision,
       accountId: _accountId,
       p256PublicKeyHex: _publicKey,
       issuedAtMillis: _issuedAt,
     );
-    final coldSigningMessage = signingMessage(
+    final coldSigningMessage = (await CitizenSigning.encodePayload(CitizenSigningPayload.message(
       opTag: kOpSignSquareDeviceBind,
       scalePayload: payload,
-    );
+    )));
     expect(bytesToHex(coldSigningMessage), _goldenHex);
   });
 }

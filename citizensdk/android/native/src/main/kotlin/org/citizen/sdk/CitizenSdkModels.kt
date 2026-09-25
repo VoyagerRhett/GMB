@@ -214,6 +214,8 @@ class CitizenWalletProfile(
     masterAccountId: ByteArray,
     activeAccountId: ByteArray,
     accounts: List<CitizenWalletAccount>,
+    /** 钱包级标签独立于账户0的name。 */
+    val walletName: String,
 ) {
     private val masterValue = masterAccountId.requireSize(32, "masterAccountId")
     private val activeValue = activeAccountId.requireSize(32, "activeAccountId")
@@ -236,13 +238,37 @@ class CitizenWalletStateAccount(
     fun accountId(): ByteArray = accountIdValue.clone()
 }
 
+/** Core精确校验的公开关联；不能作为绕过原删除校验的权限。 */
+class CitizenWalletCleanupTargets(accountIds: List<ByteArray>, val deleteWalletWideKey: Boolean) {
+    private val identities = accountIds.map { it.requireSize(32, "accountId") }
+    fun accountIds(): List<ByteArray> = identities.map { it.clone() }
+}
+
+/** 同次快照的异常事实，不参与普通签名；字节身份对外只返回副本。 */
+class CitizenWalletDiagnostic(
+    val walletIndex: Long,
+    val walletName: String,
+    accountId: ByteArray,
+    val ss58Address: String?,
+    val diagnosticReason: Int,
+    val signMode: CitizenWalletSignMode?,
+    val cleanupTargets: CitizenWalletCleanupTargets?,
+) {
+    private val identity = accountId.requireSize(32, "accountId")
+    fun accountId(): ByteArray = identity.clone()
+}
+
 class CitizenWalletState(
     val revision: String,
     val hotProfile: CitizenWalletProfile?,
     accounts: List<CitizenWalletStateAccount>,
     val initializationState: Int,
     val cleanupPending: Boolean,
+    /** 独立付款选择，不代表默认账户或热钱包activeAccountId。 */
+    val activeWalletIndex: Long?,
+    diagnostics: List<CitizenWalletDiagnostic> = emptyList(),
 ) {
+    val diagnostics: List<CitizenWalletDiagnostic> = diagnostics.toList()
     val accounts: List<CitizenWalletStateAccount> = accounts.toList()
     val defaultAccount: CitizenWalletStateAccount? get() = accounts.firstOrNull()
 }

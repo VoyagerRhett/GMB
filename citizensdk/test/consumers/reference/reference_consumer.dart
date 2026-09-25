@@ -2,8 +2,7 @@ import 'dart:typed_data';
 
 import 'package:citizen_sdk/citizen_sdk.dart';
 
-/// A product-neutral consumer proving that all six SDK capabilities compose
-/// without importing an SDK implementation library.
+/// SDK自身的合成消费者，验证六项公开能力组合，不导入实现库或外部产品源码。
 final class ReferenceConsumer {
   const ReferenceConsumer({
     required this.chain,
@@ -30,8 +29,7 @@ final class ReferenceConsumer {
   final CitizenTransactions transactions;
   final CitizenHistory history;
 
-  /// Exercises only public, product-independent facts. The caller remains the
-  /// owner of storage keys, payload bytes and RuntimeCall bytes.
+  /// 仅接入合成不透明字节检查公开端口；不定义生产App非UI职责归属。
   Future<ReferenceConsumerSnapshot> inspect({
     required String signerAccountId,
     required Uint8List sourceAccountId,
@@ -44,16 +42,16 @@ final class ReferenceConsumer {
       finalized,
       Uint8List.fromList(storageKey),
     );
-    final walletState = await wallet.getState();
+    final walletState = await wallet.getState().result;
     final signingOutcome = await signing.begin(
       CitizenSigningIntent(
         accountId: signerAccountId,
         payload: Uint8List.fromList(payload),
         transform: CitizenSigningTransform.raw(),
       ),
-    );
+    ).result;
     final qrRequest = await qr.createSignRequest(
-      action: 0,
+      action: 0x0400,
       signerAccountId: signerAccountId,
       reviewPayload: Uint8List.fromList(payload),
     );

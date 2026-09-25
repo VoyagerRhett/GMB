@@ -8,9 +8,57 @@ import org.junit.Test
 import java.nio.ByteBuffer
 import java.lang.reflect.Modifier
 import org.citizen.sdk.internal.CitizenSdkNative
-import org.citizen.sdk.ui.CitizenSdkPrivateKeyDisplayBuffer
 
 class CitizenSdkApiContractTest {
+
+    @Test
+    fun lifecycleEntriesKeepTheSameZeroArgumentVoidFutureContract() {
+        // 统一调用路径只删内部屏障，不改变Java/Kotlin公开签名或增加第二入口。
+        val type = Class.forName("org.citizen.sdk.CitizenSdk", false, javaClass.classLoader)
+        for (name in listOf("start", "stop")) {
+            val methods = type.methods.filter { it.name == name }
+            assertEquals(1, methods.size)
+            val method = methods.single()
+            assertEquals(0, method.parameterCount)
+            assertEquals(java.util.concurrent.CompletableFuture::class.java, method.returnType)
+            val result = method.genericReturnType as java.lang.reflect.ParameterizedType
+            assertEquals(listOf(Void::class.java), result.actualTypeArguments.toList())
+        }
+    }
+
+    @Test
+    fun walletCleanupFlagUsesStrictBooleanWireAndRetainsInitializationChecks() {
+        // 仅构造无账户、无秘密的JNI结果；实际调用生产解码器，不镜像钱包算法。
+        fun encoded(initialization: Int, cleanup: Int): ByteArray =
+            ByteBuffer.allocate(51).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                .putInt(1).putInt(0).putInt(0).putInt(21).putInt(0)
+                .putLong(0).putLong(1).put(0).putInt(0)
+                .putInt(initialization).put(cleanup.toByte()).put(0).putInt(0).array()
+        for ((initialization, cleanup) in listOf(0 to 0, 2 to 0, 2 to 1)) {
+            val decoded = org.citizen.sdk.internal.CitizenSdkNativeCodec.decode(encoded(initialization, cleanup))
+            assertEquals(null, decoded.error)
+            val state = (decoded.result as org.citizen.sdk.internal.CitizenSdkNativeResult.WalletState).value
+            assertEquals(initialization, state.initializationState)
+            assertEquals(cleanup == 1, state.cleanupPending)
+            assertTrue(state.accounts.isEmpty() && state.diagnostics.isEmpty())
+        }
+        // 无钱包不得带待清理事实；Ready不得缺账户/诊断，未知状态和布尔值仍拒绝。
+        for ((initialization, cleanup) in listOf(0 to 1, 1 to 0, 3 to 0, -1 to 0, 2 to 2, 2 to 255)) {
+            assertEquals(CitizenSdkErrorCode.INTEGRITY, assertThrows(CitizenSdkException::class.java) {
+                org.citizen.sdk.internal.CitizenSdkNativeCodec.decode(encoded(initialization, cleanup))
+            }.code)
+        }
+        val valid = encoded(2, 1)
+        for (size in listOf(45, 46, 50)) {
+            assertEquals(CitizenSdkErrorCode.INTEGRITY, assertThrows(CitizenSdkException::class.java) {
+                org.citizen.sdk.internal.CitizenSdkNativeCodec.decode(valid.copyOf(size))
+            }.code)
+        }
+        assertEquals(CitizenSdkErrorCode.INTEGRITY, assertThrows(CitizenSdkException::class.java) {
+            org.citizen.sdk.internal.CitizenSdkNativeCodec.decode(valid + byteArrayOf(0))
+        }.code)
+    }
+
     @Test
     fun `static JNI entries keep the exact single registration names`() {
         val type = CitizenSdkNative::class.java
@@ -33,21 +81,20 @@ class CitizenSdkApiContractTest {
     }
 
     @Test
-    fun `QR native UI has one scan and safe signing entry without clocks or raw signatures`() {
-        val activity = androidx.fragment.app.FragmentActivity::class.java
-        assertEquals(CitizenSdkOperation::class.java, CitizenSdk::class.java.getMethod("qrScan", activity).returnType)
-        assertEquals(CitizenSdkOperation::class.java, CitizenSdk::class.java.getMethod("signQrRequest", activity, String::class.java).returnType)
+    fun qrReviewAndCaptureExposeDataResourcesWithoutSdkWindows() {
+        assertEquals(CitizenSdkOperation::class.java, CitizenSigning::class.java.getMethod("reviewQrRequest", String::class.java).returnType)
+        assertEquals(CitizenSdkOperation::class.java, CitizenSigning::class.java.getMethod("signQrRequest", CitizenQrReview::class.java).returnType)
         assertEquals(CitizenQrDocument::class.java, CitizenSdk::class.java.getMethod("qrParse", String::class.java).returnType)
-        assertEquals(ByteArray::class.java, CitizenSdk::class.java.getMethod("qrConsumeSignResponse", String::class.java).returnType)
-        for (removed in listOf("qrSigningInput", "qrCreateSignResponse", "qrEncodeImage")) {
+        for (removed in listOf("qrScan", "viewAccountPrivateKey", "initializeWallet", "qrSigningInput", "qrCreateSignResponse", "qrEncodeImage")) {
             assertTrue(CitizenSdk::class.java.methods.none { it.name == removed })
         }
         assertNotNull(CitizenQrSigned::class.java.getMethod("getQrImage"))
+        assertEquals(CitizenSdkOperation::class.java, CitizenSdk::class.java.getMethod("inspectWallets").returnType)
     }
 
     @Test
     fun `private authorization binds exactly one actual host operation and rejects late notification`() {
-        val buffer = CitizenSdkPrivateKeyDisplayBuffer()
+        val buffer = CitizenSdkPrivateKeyReceiver()
         buffer.bind(7)
         val registered = mutableListOf<Long>()
         buffer.bindAuthenticationRegistry { registered.add(it); CitizenSdkErrorCode.OK.value }
@@ -63,49 +110,46 @@ class CitizenSdkApiContractTest {
     }
 
     @Test
-    fun `private key view public entry has only a foreground host account and no secret result`() {
-        val method = CitizenSdk::class.java.getMethod("viewAccountPrivateKey",
-            androidx.fragment.app.FragmentActivity::class.java, ByteArray::class.java)
-        assertEquals(CitizenSdkOperation::class.java, method.returnType)
-        assertEquals(2, method.parameterCount)
+    fun privateKeyResourcePublicEntryReturnsNoSecretUntilExplicitReveal() {
+        val method = CitizenSdk::class.java.getMethod("openPrivateKey", ByteArray::class.java)
+        assertEquals(java.util.concurrent.CompletableFuture::class.java, method.returnType)
+        assertEquals(1, method.parameterCount)
+        assertNotNull(CitizenSdkPrivateKey::class.java.getMethod("reveal"))
+        assertNotNull(CitizenSdkPrivateKey::class.java.getMethod("getClosed"))
     }
 
     @Test
-    fun `private display uses fixed mutable hex and rejects repeated malformed and cancelled delivery`() {
-        val buffer = CitizenSdkPrivateKeyDisplayBuffer()
+    fun receiverCopiesOnlyOnceWithoutMutatingBorrowedBufferAndClearsOwnedBytes() {
+        val buffer = CitizenSdkPrivateKeyReceiver()
         buffer.bind(7)
-        // 公开合成缓冲仅测试内存/显示合同，不创建钱包或读取设备秘密。
         val source = ByteBuffer.allocateDirect(32)
         repeat(32) { source.put(it, it.toByte()) }
-        assertEquals(CitizenSdkErrorCode.CANCELLED.value, buffer.display(8, source))
-        assertEquals(CitizenSdkErrorCode.INTEGRITY.value, buffer.display(7, ByteBuffer.allocate(32)))
-        assertEquals(CitizenSdkErrorCode.INTEGRITY.value, buffer.display(7, ByteBuffer.allocateDirect(31)))
-        assertEquals(CitizenSdkErrorCode.OK.value, buffer.display(7, source))
-        buffer.draw { characters ->
-            assertEquals(66, characters.size)
-            assertEquals('0', characters[0]); assertEquals('x', characters[1])
-            assertTrue(characters.drop(2).all { it in '0'..'9' || it in 'a'..'f' })
-        }
-        assertEquals(CitizenSdkErrorCode.CANCELLED.value, buffer.display(7, source))
+        assertEquals(CitizenSdkErrorCode.CANCELLED.value, buffer.receive(8, source))
+        assertEquals(CitizenSdkErrorCode.INTEGRITY.value, buffer.receive(7, ByteBuffer.allocate(32)))
+        assertEquals(CitizenSdkErrorCode.INTEGRITY.value, buffer.receive(7, ByteBuffer.allocateDirect(31)))
+        assertEquals(CitizenSdkErrorCode.OK.value, buffer.receive(7, source))
+        assertEquals(0, source.position())
+        val copied = buffer.copyBytes()
+        assertEquals((0..31).map(Int::toByte), copied.toList())
+        copied[0] = 99
+        assertEquals(0.toByte(), buffer.copyBytes()[0])
+        assertEquals(CitizenSdkErrorCode.CANCELLED.value, buffer.receive(7, source))
         buffer.clear()
-        assertTrue(buffer.isClearedForTest())
-        assertEquals(CitizenSdkErrorCode.CANCELLED.value, buffer.display(7, source))
-        var drawn = false
-        buffer.draw { drawn = true }
-        assertTrue(!drawn)
+        assertThrows(IllegalStateException::class.java) { buffer.copyBytes() }
+        assertEquals(CitizenSdkErrorCode.CANCELLED.value, buffer.receive(7, source))
         repeat(32) { source.put(it, 0) }
     }
 
     @Test
     fun `early private settlement retains a no secret notification until the view binds`() {
-        val buffer = CitizenSdkPrivateKeyDisplayBuffer()
+        val buffer = CitizenSdkPrivateKeyReceiver()
         buffer.settled(9, CitizenSdkErrorCode.NOT_FOUND.value)
         buffer.bind(9)
         var notifications = 0
         buffer.listen { assertEquals(CitizenSdkErrorCode.NOT_FOUND.value, it); notifications += 1 }
         assertEquals(1, notifications)
         buffer.clear()
-        assertTrue(buffer.isClearedForTest())
+        assertThrows(IllegalStateException::class.java) { buffer.copyBytes() }
     }
     @Test
     fun `chain facade exposes one genesis and batch balance entry with bounded input`() {
@@ -120,20 +164,12 @@ class CitizenSdkApiContractTest {
     }
 
     @Test
-    fun `wallet UI rejects unselected Core capability before starting Activity`() {
-        for ((supported, enabled) in listOf(true to false, false to true, false to false)) {
-            val status = CitizenCapabilityStatus(CitizenCapabilityName.WALLET_PROFILE,
-                CitizenCapabilityReason.HOST_DISABLED, supported, true, enabled, false)
-            assertEquals(CitizenSdkErrorCode.NOT_READY, assertThrows(CitizenSdkException::class.java) {
-                CitizenSdkWalletUiAdmission.check(CitizenSdkCapabilities("1", listOf(status)))
-            }.code)
+    fun inspectionResourcesHaveNoJavaSourceNativeHandleGetter() {
+        for (type in listOf(CitizenWalletInspection::class.java, CitizenSdkPrivateKey::class.java)) {
+            assertTrue(type.methods.filterNot { it.isSynthetic }.none { it.name.contains("handle", ignoreCase = true) })
         }
-        val enabled = CitizenCapabilityStatus(CitizenCapabilityName.WALLET_PROFILE,
-            CitizenCapabilityReason.NONE, true, true, true, true)
-        CitizenSdkWalletUiAdmission.check(CitizenSdkCapabilities("1", listOf(enabled)))
-        assertThrows(CitizenSdkException::class.java) {
-            CitizenSdkWalletUiAdmission.check(CitizenSdkCapabilities("1", emptyList()))
-        }
+        assertNotNull(CitizenWalletInspection::class.java.getMethod("getState"))
+        assertNotNull(CitizenWalletInspection::class.java.getMethod("release"))
     }
 
     @Test
@@ -141,7 +177,7 @@ class CitizenSdkApiContractTest {
         assertEquals(listOf(1, 2, 4, 8, 16), listOf(CitizenSdkModules.WALLET,
             CitizenSdkModules.SIGNING, CitizenSdkModules.CHAIN, CitizenSdkModules.TRANSACTIONS,
             CitizenSdkModules.HISTORY))
-        assertEquals(31, CitizenSdkModules.FULL)
+        assertEquals(63, CitizenSdkModules.FULL)
         assertEquals(0, CitizenSdkModules.WALLET and CitizenSdkModules.SIGNING)
         val names = CitizenSdk::class.java.methods.map { it.name }
         assertTrue("getSigning" in names)

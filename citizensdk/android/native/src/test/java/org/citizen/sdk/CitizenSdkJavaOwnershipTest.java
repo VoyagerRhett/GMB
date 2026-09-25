@@ -2,6 +2,7 @@ package org.citizen.sdk;
 
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertThrows;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
@@ -21,16 +22,10 @@ public final class CitizenSdkJavaOwnershipTest {
 
   @Test
   public void secretAndHandleEntrypointsAreNotJavaSourceApi() throws Exception {
-    assertTrue(
-        java.util.Arrays.stream(CitizenSdk.class.getDeclaredMethods())
-            .filter(
-                method ->
-                    Modifier.isPublic(method.getModifiers())
-                        && (method.getName().contains("prepareWalletCreation")
-                            || method.getName().contains("importWallet")
-                            || method.getName().contains("addWalletAccounts")
-                            || method.getName().contains("commitPreparedWallet")))
-            .allMatch(Method::isSynthetic));
+    // 显式创建/导入接收有界输入是公开合同，不再要求由SDK窗口收集。
+    assertNotNull(CitizenSdk.class.getMethod("importWallet", byte[].class, byte[].class));
+    assertNotNull(CitizenSdk.class.getMethod("prepareWalletCreation", int.class, byte[].class));
+    assertNotNull(CitizenWalletInspection.class.getMethod("release"));
 
     ClassLoader loader = CitizenSdkJavaOwnershipTest.class.getClassLoader();
     Class<?> nativeOwner =
@@ -48,16 +43,7 @@ public final class CitizenSdkJavaOwnershipTest {
                 constructor ->
                     Modifier.isPrivate(constructor.getModifiers()) || constructor.isSynthetic()));
 
-    Class<?> coordinator =
-        Class.forName("org.citizen.sdk.ui.CitizenSdkWalletFlowCoordinator", false, loader);
-    assertTrue(
-        java.util.Arrays.stream(coordinator.getDeclaredMethods())
-            .filter(
-                method ->
-                    Modifier.isPublic(method.getModifiers())
-                        && (method.getName().contains("acceptPreparation")
-                            || method.getName().contains("settlePrepared")
-                            || method.getName().contains("retryPreparedRelease")))
-            .allMatch(Method::isSynthetic));
+    assertThrows(ClassNotFoundException.class, () ->
+        Class.forName("org.citizen.sdk.ui.CitizenSdkWalletFlowCoordinator", false, loader));
   }
 }

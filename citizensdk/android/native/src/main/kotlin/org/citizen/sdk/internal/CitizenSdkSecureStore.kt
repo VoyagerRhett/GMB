@@ -1,5 +1,7 @@
 package org.citizen.sdk.internal
 
+import org.citizen.sdk.CitizenSdkErrorCode
+import org.citizen.sdk.CitizenSdkException
 import android.content.ContentValues
 import android.database.sqlite.SQLiteDatabase
 import java.io.File
@@ -74,6 +76,48 @@ internal class CitizenSdkSecureStore(private val directory: File) :
         }
         check(db.insertWithOnConflict("wallet_profile", null, values, SQLiteDatabase.CONFLICT_REPLACE) != -1L)
         CitizenSdkHostRecord.present(CitizenSdkHostDomain.WALLET_PROFILE, next, candidate)
+    }
+
+
+    /** 只读逐条扫描，Core是密文信封/修订/状态的唯一解码器；失败不能当成不存在。 */
+    fun hasAccountSecret(accountId: ByteArray): Boolean = lock.withLock {
+        require(accountId.size == 32)
+        database.rawQuery("SELECT revision, length(record), record FROM encrypted_secret LIMIT 65537", null).use { cursor ->
+            var count = 0
+            while (cursor.moveToNext()) {
+                count++
+                if (count > 65536 || cursor.getType(0) != android.database.Cursor.FIELD_TYPE_INTEGER ||
+                    cursor.getLong(0) <= 0 || cursor.getType(2) != android.database.Cursor.FIELD_TYPE_BLOB ||
+                    cursor.getLong(1) !in 1L..65536L) {
+                    throw CitizenSdkException(CitizenSdkErrorCode.INTEGRITY, "密文存在性查询边界无效")
+                }
+                if (CitizenSdkNative.encryptedSecretRecordHasSecret(accountId, cursor.getLong(0), cursor.getBlob(2))) return@withLock true
+            }
+            false
+        }
+    }
+
+    /** active和retired代际均参与物理钥核对，不以数据库标志代替系统枚举。 */
+    fun vaultGenerations(): List<Pair<Int, ByteArray>> = lock.withLock {
+        database.rawQuery("SELECT record_key, wallet_index, generation, state, length(generation), length(record_key) FROM vault_generation LIMIT 65537", null).use { cursor ->
+            val values = ArrayList<Pair<Int, ByteArray>>()
+            while (cursor.moveToNext()) {
+                val index = cursor.getLong(1)
+                if (values.size >= 65536 || cursor.getType(1) != android.database.Cursor.FIELD_TYPE_INTEGER ||
+                    index !in 0L..0xffffffffL || cursor.getType(2) != android.database.Cursor.FIELD_TYPE_BLOB ||
+                    cursor.getLong(4) != 16L || cursor.getType(3) != android.database.Cursor.FIELD_TYPE_INTEGER ||
+                    cursor.getLong(3) !in STATE_ACTIVE.toLong()..STATE_RETIRED.toLong() || cursor.getLong(5) > 64 ||
+                    cursor.getType(0) != android.database.Cursor.FIELD_TYPE_STRING) {
+                    throw CitizenSdkException(CitizenSdkErrorCode.INTEGRITY, "金库代际事实无效")
+                }
+                val generation = cursor.getBlob(2)
+                if (cursor.getString(0) != CitizenSdkRecordKey.walletGeneration(index.toInt(), generation)) {
+                    throw CitizenSdkException(CitizenSdkErrorCode.INTEGRITY, "金库代际主键不一致")
+                }
+                values.add(index.toInt() to generation)
+            }
+            values
+        }
     }
 
     fun encryptedSecretLoad(

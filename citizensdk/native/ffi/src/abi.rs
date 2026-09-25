@@ -12,6 +12,7 @@ pub use crate::host_providers::{
     CitizenSdkHostRuntimeCacheDeleteV1, CitizenSdkHostRuntimeCacheLoadV1,
     CitizenSdkHostRuntimeCacheStoreV1, CitizenSdkHostSecretKind, CitizenSdkHostSecretRefV1,
     CitizenSdkHostSecretVaultV1, CitizenSdkHostSecureStoreV1, CitizenSdkHostServicesV1,
+    CitizenSdkHostSecretPresenceV1, CitizenSdkHostHasAccountSecretV1, CitizenSdkHostHasAnyWalletKeyV1,
     CitizenSdkHostStatusCompletionV1, CitizenSdkHostStatusResultV1,
     CitizenSdkHostTransactionHistoryMutateV1, CitizenSdkHostTransactionHistoryQueryV1,
     CitizenSdkHostVaultAvailability, CitizenSdkHostVaultAvailabilityCompletionV1,
@@ -172,6 +173,7 @@ pub enum CitizenSdkResultKind {
     AccountNonce = 10,
     FeeSnapshot = 11,
     WalletProfile = 12,
+    /// 原ABI数值保持不变且不复用；现行Core不再产生此种结果。
     WalletAccounts = 13,
     Signature = 14,
     PreparedWallet = 15,
@@ -724,6 +726,41 @@ impl Default for CitizenSdkWalletStateInfo {
             account_count: 0,
             has_default_account: 0,
             default_account_id: CitizenSdkAccountId::default(),
+        }
+    }
+}
+
+/// 同次快照中的异常记录事实；不是可签名账户，不暴露秘密引用或代际。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CitizenSdkWalletDiagnosticInfoV1 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub wallet_index: u32,
+    pub diagnostic_reason: u32,
+    pub has_ss58_address: u32,
+    pub sign_mode: u32,
+    pub account_id: CitizenSdkAccountId,
+    pub wallet_name_len: u64,
+    pub ss58_address_len: u64,
+    pub cleanup_account_count: u32,
+    pub delete_wallet_wide_key: u32,
+}
+
+impl Default for CitizenSdkWalletDiagnosticInfoV1 {
+    fn default() -> Self {
+        Self {
+            struct_size: std::mem::size_of::<Self>() as u32,
+            abi_version: CITIZENSDK_ABI_VERSION,
+            wallet_index: 0,
+            diagnostic_reason: 0,
+            has_ss58_address: 0,
+            sign_mode: 0,
+            account_id: CitizenSdkAccountId::default(),
+            wallet_name_len: 0,
+            ss58_address_len: 0,
+            cleanup_account_count: 0,
+            delete_wallet_wide_key: 0,
         }
     }
 }

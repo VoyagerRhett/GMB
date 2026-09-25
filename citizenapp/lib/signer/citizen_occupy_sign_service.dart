@@ -125,6 +125,9 @@ class CitizenOccupySignService {
       opTag: prep.isOccupy ? kOpSignCidOccupy : kOpSignCidAdminRebind,
       scalePayload: prep.materializedPayload,
     ));
+    if (context != null && !context.mounted) {
+      throw const CitizenOccupySignException('当前签名页面已经关闭');
+    }
     final signature = await signCitizenPayload(
       signing: signing,
       context: context,
@@ -143,6 +146,9 @@ class CitizenOccupySignService {
         opTag: kOpSignCidRebind,
         scalePayload: prep.materializedPayload,
       ));
+      if (context != null && !context.mounted) {
+        throw const CitizenOccupySignException('当前签名页面已经关闭');
+      }
       currentAccountSignature = await signCitizenPayload(
         signing: signing,
         context: context,

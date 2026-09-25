@@ -26,26 +26,26 @@ static_assert(std::is_same_v<decltype(&citizensdk_result_get_account_balance_cou
 static_assert(std::is_same_v<decltype(&citizensdk_result_get_account_balance_at),
     citizensdk_error_code_t (*)(citizensdk_result_handle_t, uint32_t,
                                citizensdk_account_balance_info_t *)>);
-static_assert(std::is_same_v<decltype(&citizensdk_host_view_account_private_key),
-    citizensdk_error_code_t (*)(citizensdk_host_handle_t, const citizensdk_account_id_t *,
-        void *, citizensdk_wallet_flow_completion_v1_t,
-        citizensdk_wallet_flow_handle_t *)>);
-static_assert(std::is_same_v<decltype(&citizen_sdk::Host::view_account_private_key),
-    citizen_sdk::WalletFlow (citizen_sdk::Host::*)(const citizensdk_account_id_t &,
-                                                citizen_sdk::WalletFlowCompletion)>);
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::getState),
+    citizen_sdk::Operation<citizen_sdk::WalletState> (citizen_sdk::Host::*)()>);
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::inspect),
+    citizen_sdk::Operation<std::shared_ptr<citizen_sdk::WalletInspection>> (citizen_sdk::Host::*)()>);
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::openPrivateKey),
+    std::shared_future<std::shared_ptr<citizen_sdk::PrivateKey>> (citizen_sdk::Host::*)(citizen_sdk::AccountId)>);
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::openCapture),
+    std::shared_future<std::shared_ptr<citizen_sdk::QrCapture>> (citizen_sdk::Host::*)(uint32_t, citizen_sdk::QrCapture::Listener)>);
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::reviewQrRequest),
+    citizen_sdk::Operation<std::shared_ptr<citizen_sdk::QrReview>> (citizen_sdk::Host::*)(std::string)>);
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::signQrRequest),
+    citizen_sdk::Operation<citizen_sdk::QrSigned> (citizen_sdk::Host::*)(const std::shared_ptr<citizen_sdk::QrReview> &)>);
+// C++关键字映射及Core真实终态保持唯一接口，不增加兼容删除/消费别名。
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::erase),
+    citizen_sdk::Operation<void> (citizen_sdk::Host::*)()>);
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::reconcileCleanup),
+    citizen_sdk::Operation<void> (citizen_sdk::Host::*)()>);
+static_assert(std::is_same_v<decltype(&citizen_sdk::Host::consumeExternalSignature),
+    citizen_sdk::Operation<citizen_sdk::SigningOutcome> (citizen_sdk::Host::*)(std::string, std::string)>);
 static_assert(CITIZENSDK_RESULT_ACCOUNT_BALANCES == 18);
-
-
-static_assert(std::is_same_v<decltype(&citizensdk_host_scan_qr),
-    citizensdk_error_code_t (*)(citizensdk_host_handle_t, void *,
-        citizensdk_qr_completion_v1_t, citizensdk_wallet_flow_handle_t *)>);
-static_assert(std::is_same_v<decltype(&citizensdk_host_sign_qr_request),
-    citizensdk_error_code_t (*)(citizensdk_host_handle_t, citizensdk_bytes_view_t,
-        void *, citizensdk_qr_completion_v1_t, citizensdk_wallet_flow_handle_t *)>);
-static_assert(std::is_same_v<decltype(&citizen_sdk::Host::scan_qr),
-    citizen_sdk::WalletFlow (citizen_sdk::Host::*)(citizen_sdk::QrFlowCompletion)>);
-static_assert(std::is_same_v<decltype(&citizen_sdk::Host::sign_qr_request),
-    citizen_sdk::WalletFlow (citizen_sdk::Host::*)(const std::string &, citizen_sdk::QrFlowCompletion)>);
 static_assert(CITIZENSDK_RESULT_QR_REVIEW == 19 && CITIZENSDK_RESULT_QR_SIGNED == 20);
 
 #ifdef NDEBUG
@@ -96,7 +96,6 @@ struct Completion final {
   std::mutex lock;
   std::condition_variable changed;
   citizensdk_request_id_t request{};
-  citizensdk_result_handle_t result{};
   citizensdk_result_info_t info{};
   uint64_t last_sequence{};
   unsigned count{};
@@ -115,7 +114,6 @@ struct Completion final {
     info.abi_version = CITIZENSDK_ABI_VERSION;
     CHECK(citizensdk_result_get_info(event.result, &info) == CITIZENSDK_OK);
     request = event.request_id;
-    result = event.result;
     ++count;
     changed.notify_all();
     // 结果只在回调内借用；公开 Host trampoline 在返回后唯一释放。
@@ -125,33 +123,21 @@ struct Completion final {
   void prepare() {
     std::lock_guard<std::mutex> guard(lock);
     request = 0;
-    result = 0;
     info = {};
     count = 0;
   }
 
-  void await(citizensdk_request_id_t accepted,
+  void await(citizen_sdk::Host &host, citizensdk_request_id_t accepted,
              citizensdk_error_code_t expected = CITIZENSDK_OK) {
-    citizensdk_result_handle_t borrowed = 0;
     {
       std::unique_lock<std::mutex> guard(lock);
       CHECK(changed.wait_for(guard, std::chrono::seconds(60), [&] { return count == 1; }));
       CHECK(request == accepted && accepted != 0 && info.error_code == expected);
       if (expected == CITIZENSDK_OK) CHECK(info.kind == CITIZENSDK_RESULT_EMPTY);
-      borrowed = result;
     }
-    // notify 发生在回调返回前。必须等 trampoline 完成释放才启动下一次
-    // 独占生命周期请求，否则会把真实的在途结果竞态误判为 start/stop 失败。
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    for (;;) {
-      citizensdk_result_info_t probe{};
-      probe.struct_size = sizeof(probe);
-      probe.abi_version = CITIZENSDK_ABI_VERSION;
-      const auto code = citizensdk_result_get_info(borrowed, &probe);
-      if (code == CITIZENSDK_ERROR_INVALID_HANDLE) break;
-      CHECK(code == CITIZENSDK_OK && std::chrono::steady_clock::now() < deadline);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    // 清观察者是公开回调屏障；不把借用结果句柄带出回调后轮询。
+    host.set_event_observer({});
+    host.set_event_observer([this](const citizensdk_event_t &event) { receive(event); });
   }
 };
 
@@ -214,17 +200,33 @@ int main(int argc, char **argv) {
     CHECK(citizensdk_get_lifecycle(sdk, &lifecycle) == CITIZENSDK_OK);
     CHECK(lifecycle == CITIZENSDK_LIFECYCLE_CREATED);
     check_capabilities(host.capabilities());
+    // 当前实例未选择钱包/签名；实际Cpp请求必须给出Core拒绝且不留资源。
+    {
+      const auto operation = host.getState();
+      CHECK(operation.operationId() == "1");
+      CHECK(operation.result().wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+      bool rejected = false;
+      try { (void)operation.result().get(); } catch (const citizen_sdk::Error &error) { rejected = error.code() == CITIZENSDK_ERROR_UNSUPPORTED; }
+      CHECK(rejected && !operation.cancel());
+      const auto private_key = host.openPrivateKey(citizen_sdk::AccountId{});
+      CHECK(private_key.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+      rejected = false;
+      try { (void)private_key.get(); } catch (const citizen_sdk::Error &error) {
+        rejected = error.code() == CITIZENSDK_ERROR_UNSUPPORTED || error.code() == CITIZENSDK_ERROR_NOT_READY;
+      }
+      CHECK(rejected);
+    }
     host.set_event_observer([&](const citizensdk_event_t &event) { completion.receive(event); });
 
     completion.prepare();
     citizensdk_request_id_t request = 0;
     CHECK(citizensdk_get_finalized_head(sdk, &request) == CITIZENSDK_OK);
-    completion.await(request, CITIZENSDK_ERROR_NOT_READY);
+    completion.await(host, request, CITIZENSDK_ERROR_NOT_READY);
 
     // 只启动轻节点并验证 checkpoint，不发送 extrinsic、不建立钱包、不操作 TPM。
     completion.prepare();
     CHECK(citizensdk_start(sdk, &request) == CITIZENSDK_OK);
-    completion.await(request);
+    completion.await(host, request);
     CHECK(citizensdk_get_lifecycle(sdk, &lifecycle) == CITIZENSDK_OK);
     CHECK(lifecycle == CITIZENSDK_LIFECYCLE_RUNNING);
     check_capabilities(host.capabilities());
@@ -239,7 +241,7 @@ int main(int argc, char **argv) {
 
     completion.prepare();
     CHECK(citizensdk_stop(sdk, &request) == CITIZENSDK_OK);
-    completion.await(request);
+    completion.await(host, request);
     CHECK(citizensdk_get_lifecycle(sdk, &lifecycle) == CITIZENSDK_OK);
     CHECK(lifecycle == CITIZENSDK_LIFECYCLE_STOPPED);
     check_capabilities(host.capabilities());

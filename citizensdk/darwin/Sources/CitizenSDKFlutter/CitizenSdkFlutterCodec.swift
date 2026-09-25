@@ -19,11 +19,6 @@ internal enum CitizenSdkFlutterCodec {
     ]
     static let methods: Set<String> = [
         "open",
-        "encodeSigningPayload",
-        "qrEncodeDocument",
-        "qrPrepareAccountAuthorization",
-        "respondCredential",
-        "cancelCredential",
         "start",
         "stop",
         "close",
@@ -49,6 +44,11 @@ internal enum CitizenSdkFlutterCodec {
         "getAccountNonce",
         "getFeeSnapshot",
         "getWalletState",
+        "inspectWallets",
+        "releaseWalletInspection",
+        "repairHotWallet",
+        "renameDiagnosticWallet",
+        "deleteDiagnosticWallet",
         "validateWalletPassword",
         "validateWalletMnemonic",
         "walletWordSuggestions",
@@ -60,12 +60,16 @@ internal enum CitizenSdkFlutterCodec {
         "revealPrivateKey",
         "closePrivateKey",
         "cancelOperation",
+        "respondCredential",
+        "cancelCredential",
         "addNextWalletAccount",
         "signAndDeleteWallet",
         "importColdAccountCode",
         "importColdAccountId",
         "importColdAccountSs58",
         "reorderWalletAccountsWithoutDefaultChange",
+        "setActiveWallet",
+        "renameWallet",
         "renameAccount",
         "deleteAccount",
         "importWallet",
@@ -81,6 +85,9 @@ internal enum CitizenSdkFlutterCodec {
         "beginDefaultAccountChange",
         "consumeDefaultAccountChange",
         "verifySignature",
+        "encodeSigningPayload",
+        "qrEncodeDocument",
+        "qrPrepareAccountAuthorization",
         "prepareTransaction",
         "cancelPreparedTransaction",
         "executePreparedTransaction",
@@ -127,6 +134,8 @@ internal enum CitizenSdkFlutterCodec {
                          text: String, password: String, wordCount: UInt32, indices: [UInt32])
         case resource(method: String, session: String, sequence: Int64, id: String)
         case coldCode(session: String, sequence: Int64, code: String, name: String)
+        case walletInspection(method: String, session: String, sequence: Int64, id: String, walletIndex: UInt32, name: String?)
+        case walletMetadata(method: String, session: String, sequence: Int64, revision: UInt64, walletIndex: UInt32, name: String?)
         case rename(method: String, session: String, sequence: Int64, accountID: Data, name: String)
         case coldSS58(session: String, sequence: Int64, address: String, name: String)
         case reorder(session: String, sequence: Int64, expectedRevision: UInt64, accountIDs: [Data])
@@ -151,7 +160,7 @@ internal enum CitizenSdkFlutterCodec {
         var sessionID: String? {
             switch self {
             case .open, .verify, .encodePayload: return nil
-            case let .empty(_, value, _), let .account(_, value, _, _), let .walletInput(_, value, _, _, _, _, _),
+            case let .walletInspection(_, value, _, _, _, _), let .walletMetadata(_, value, _, _, _, _), let .empty(_, value, _), let .account(_, value, _, _), let .walletInput(_, value, _, _, _, _, _),
                  let .resource(_, value, _, _), let .coldCode(value, _, _, _), let .rename(_, value, _, _, _), let .coldSS58(value, _, _, _),
                  let .reorder(value, _, _, _), let .sign(value, _, _, _),
                  let .beginSigning(value, _, _), let .externalSignature(_, value, _, _, _),
@@ -172,7 +181,7 @@ internal enum CitizenSdkFlutterCodec {
         var sequence: Int64? {
             switch self {
             case .open, .verify, .encodePayload: return nil
-            case let .empty(_, _, value), let .account(_, _, value, _), let .walletInput(_, _, value, _, _, _, _),
+            case let .walletInspection(_, _, value, _, _, _), let .walletMetadata(_, _, value, _, _, _), let .empty(_, _, value), let .account(_, _, value, _), let .walletInput(_, _, value, _, _, _, _),
                  let .resource(_, _, value, _), let .coldCode(_, value, _, _), let .rename(_, _, value, _, _), let .coldSS58(_, value, _, _),
                  let .reorder(_, value, _, _), let .sign(_, value, _, _),
                  let .beginSigning(_, value, _), let .externalSignature(_, _, value, _, _),
@@ -208,7 +217,7 @@ internal enum CitizenSdkFlutterCodec {
             case .storageKeysPage: return "getStorageKeysPaged"
             case .runtimeAPI: return "callRuntimeApi"
             case .importState: return "importState"
-            case let .walletInput(method, _, _, _, _, _, _), let .resource(method, _, _, _): return method
+            case let .walletInspection(method, _, _, _, _, _), let .walletMetadata(method, _, _, _, _, _), let .walletInput(method, _, _, _, _, _, _), let .resource(method, _, _, _): return method
             case .coldCode: return "importColdAccountCode"
             case .coldSS58: return "importColdAccountSs58"
             case .reorder: return "reorderWalletAccountsWithoutDefaultChange"
@@ -240,9 +249,24 @@ internal enum CitizenSdkFlutterCodec {
         }
     }
 
+    /// 只读取外壳；无会话方法不接纳，必填字段仍严格校验，不解业务参数。
+    static func envelope(method: String, arguments: Any?) throws -> Request? {
+        if ["open", "verifySignature", "encodeSigningPayload"].contains(method) { return nil }
+        guard let tuple = arguments as? [Any?], tuple.count >= 3,
+              try integer(tuple[0], "protocolVersion") == version else {
+            throw failure(.invalidArgument, "Invalid request envelope")
+        }
+        let session = try string(tuple[1], "sessionId", 1...128)
+        let sequence = try integer(tuple[2], "requestSequence")
+        guard sequence > 0 else { throw failure(.invalidArgument, "requestSequence must be positive", session, sequence) }
+        return .empty(method: method, session: session, sequence: sequence)
+    }
+
     static func decode(method: String, arguments: Any?) throws -> Request {
         guard methods.contains(method) else { throw failure(.unsupported, "Unsupported method") }
-        guard let tuple = arguments as? [Any?] else { throw failure(.invalidArgument, "Arguments must be a tuple") }
+        guard let rawTuple = arguments as? [Any?] else { throw failure(.invalidArgument, "Arguments must be a tuple") }
+        // StandardMessageCodec以NSNull承载数组空值；统一投影为nil，必填字段随后仍拒绝。
+        let tuple: [Any?] = rawTuple.map { $0 is NSNull ? nil : $0 }
         guard !tuple.isEmpty, try integer(tuple[0], "protocolVersion") == version else {
             throw failure(.unsupported, "Unsupported protocol version")
         }
@@ -295,14 +319,14 @@ internal enum CitizenSdkFlutterCodec {
                 let id = try uint64Decimal(tuple[3], "hostOperationId")
                 guard id != 0 else { throw failure(.invalidArgument, "hostOperationId must be nonzero") }
                 // Apple继续使用真实OS认证，不创建SDK口令窗口或虚构口令挑战。
-                if method == "respondCredential", tuple[4] != nil, !(tuple[4] is NSNull) {
+                if method == "respondCredential", tuple[4] != nil {
                     var credential = try bytes(tuple[4], maximum: 1_024)
                     credential.resetBytes(in: 0..<credential.count)
                 }
                 return .resource(method: method, session: session, sequence: sequence, id: String(id))
             case "start", "stop", "close", "getCapabilities", "getFinalizedHead", "getSyncStatus",
                  "getBestHead", "exportState", "getGenesisHash", "getFeeSnapshot",
-                 "getWalletState", "deleteWallet", "signAndDeleteWallet", "reconcileWalletCleanup":
+                 "getWalletState", "inspectWallets", "deleteWallet", "signAndDeleteWallet", "reconcileWalletCleanup":
                 try length(3); return .empty(method: method, session: session, sequence: sequence)
             case "getFinalizedBlockAt":
                 try length(4)
@@ -414,13 +438,13 @@ internal enum CitizenSdkFlutterCodec {
                     guard values.allSatisfy({ (1...1989).contains($0) }), Set(values).count == values.count else {
                         throw failure(.invalidArgument, "indices must be unique within 1...1989")
                     }
-                    indices = values.map(UInt32.init)
+                    indices = values.map { UInt32($0) }
                 }
                 return .walletInput(method: method, session: session, sequence: sequence,
                     text: try utf8Text(tuple[3], "mnemonic", 0...1024), password: try utf8Text(tuple[4], "password", 0...1024),
                     wordCount: 0, indices: indices)
             case "copyRecoveryPhrase", "commitWalletCreation", "releasePreparedWallet", "revealPrivateKey",
-                 "closePrivateKey", "cancelOperation", "signQrRequest", "releaseQrReview",
+                 "closePrivateKey", "cancelOperation", "signQrRequest", "releaseQrReview", "releaseWalletInspection",
                  "closeQrCapture", "pauseQrCapture", "resumeQrCapture":
                 try length(4)
                 let id = try resourceID(tuple[3])
@@ -434,6 +458,22 @@ internal enum CitizenSdkFlutterCodec {
                 try length(5)
                 return .coldCode(session: session, sequence: sequence, code: try qrText(tuple[3], "account code"),
                     name: try accountName(tuple[4], allowEmpty: true))
+            case "repairHotWallet", "renameDiagnosticWallet", "deleteDiagnosticWallet":
+                try length(method == "renameDiagnosticWallet" ? 6 : 5)
+                let id = try resourceID(tuple[3])
+                let index = try integer(tuple[4], "walletIndex")
+                guard index >= 0, index <= Int64(UInt32.max) else { throw failure(.invalidArgument, "walletIndex must be uint32") }
+                let name = method == "renameDiagnosticWallet" ? try accountName(tuple[5], allowEmpty: false) : nil
+                return .walletInspection(method: method, session: session, sequence: sequence,
+                    id: id, walletIndex: UInt32(index), name: name)
+            case "setActiveWallet", "renameWallet":
+                try length(method == "renameWallet" ? 6 : 5)
+                let revision = try uint64Decimal(tuple[3], "expectedRevision")
+                let index = try integer(tuple[4], "walletIndex")
+                guard index >= 0, index <= Int64(UInt32.max) else { throw failure(.invalidArgument, "walletIndex must be uint32") }
+                let name = method == "renameWallet" ? try accountName(tuple[5], allowEmpty: false) : nil
+                return .walletMetadata(method: method, session: session, sequence: sequence,
+                    revision: revision, walletIndex: UInt32(index), name: name)
             case "renameAccount", "importColdAccountId":
                 try length(5)
                 return .rename(method: method, session: session, sequence: sequence, accountID: try hash32(tuple[3]),
@@ -753,11 +793,16 @@ internal enum CitizenSdkFlutterCodec {
         value.map { profile in
             [Int64(profile.walletIndex), profile.origin == .created ? "created" : "imported",
              String(profile.createdAtMillis), hex(profile.masterAccountID), hex(profile.activeAccountID),
-             profile.accounts.map(account)]
+             profile.accounts.map(account), profile.walletName]
         }
     }
     static func walletState(_ value: CitizenWalletState) -> [Any?] {
-        [String(value.revision), profile(value.hotProfile), value.accounts.map(stateAccount), value.initializationState, value.cleanupPending]
+        [String(value.revision), profile(value.hotProfile), value.accounts.map(stateAccount), value.initializationState,
+         value.cleanupPending, value.activeWalletIndex.map { Int64($0) }, value.diagnostics.map { item -> [Any?] in
+            [Int64(item.walletIndex), item.walletName, hex(item.accountID), item.ss58Address, item.diagnosticReason,
+             item.signMode.map { $0 == .hot ? "hot" : "cold" },
+             item.cleanupTargets.map { [$0.accountIDs.map(hex), $0.deleteWalletWideKey] as [Any?] }]
+         }]
     }
     static func signature(_ value: CitizenSignature) -> FlutterStandardTypedData { FlutterStandardTypedData(bytes: value.bytes) }
     static func signingOutcome(_ value: CitizenSigningOutcome) -> [Any?] {

@@ -10,7 +10,7 @@ import 'package:citizenapp/ui/app_layout.dart';
 
 /// 钱包详情页主视觉中的链上余额区。
 ///
-/// - RPC 查最新块,字段 = `free + reserved`,与 polkadot.js apps 的 total 口径一致。
+/// - SDK读取已验证finalized块，字段为totalFen（free + reserved），换算成元展示。
 /// - 不再展示卡内刷新按钮,刷新由外层 [WalletDetailPage] 的 RefreshIndicator
 ///   下拉触发,通过 [GlobalKey<WalletOnchainBalanceCardState>] 调 [refresh()]。
 /// - 与 [WalletIdentityCard] 共用外层纯色面板，单位只在金额行展示一次。
@@ -39,8 +39,8 @@ class WalletOnchainBalanceCardState extends State<WalletOnchainBalanceCard> {
   /// 查询结果(yuan),null 表示尚未查询或加载中。
   double? _balance;
 
-  /// 最近一次查询是否失败。失败后 `_balance` 可能保留上一次成功的值,但
-  /// UI 优先展示错误态并提供刷新入口。
+  /// 最近一次查询是否失败。没有成功值时显示原点击重试入口；已有成功值时
+  /// 保留原金额，仍由外层下拉刷新重试，不改变历史展示规则。
   bool _hasError = false;
 
   /// 是否正在刷新。用于防止重复触发刷新。
@@ -74,7 +74,7 @@ class WalletOnchainBalanceCardState extends State<WalletOnchainBalanceCard> {
       });
     } catch (e) {
       AppLog.d(
-        '[WalletOnchainBalanceCard] fetchFinalizedTotalBalance failed: $e',
+        '[WalletOnchainBalanceCard] getAccountBalance failed: $e',
       );
       if (!mounted) return;
       setState(() {

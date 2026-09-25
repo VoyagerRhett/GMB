@@ -84,6 +84,9 @@ class CitizenIdentitySignService {
     final bytes = await CitizenSigning.encodePayload(CitizenSigningPayload.message(
       opTag: kOpSignCitizenIdentity, scalePayload: prep.request.reviewPayload!,
     ));
+    if (context != null && !context.mounted) {
+      throw const CitizenIdentitySignException('当前签名页面已经关闭');
+    }
     final signature = await signCitizenPayload(
       signing: signing,
       context: context,

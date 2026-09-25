@@ -4,6 +4,52 @@ import XCTest
 @testable import CitizenSDK
 
 final class CitizenSDKSecureStoreTests: XCTestCase {
+    func testAccountSecretPresenceUsesCoreRecordsAcrossGenerations() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try CitizenSDKSecureStore(directory: directory)
+        defer { store.close() }
+        func bytes(_ hex: String) -> Data {
+            let chars = Array(hex)
+            return Data(stride(from: 0, to: chars.count, by: 2).map {
+                UInt8(String(chars[$0...($0 + 1)]), radix: 16)!
+            })
+        }
+        let sealed = bytes("43534852010038000500000000000000b8000000000000009481a10e6546da63b1c160907fb48acbfa35c6ffdee717bfd4a0094b3d9e57b901000700000008080808080808080808080808080808090909090909090909090909090909090a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a010100000000000000020b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b010000000c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c300000000d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d")
+        let tombstone = bytes("43534852010038000500000000000000600000000000000017b5fd919396d702e90558844acef60fb5a38a41f42bdfa34a449075559ce09101000700000008080808080808080808080808080808090909090909090909090909090909090a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a010200000000000000030e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e")
+        let second = bytes("43534852010038000500000000000000b800000000000000bbf644dec5dde868148f6f1ffe1151f121f1de7e78e2b7ecd7c9e35e0cdd48a501000700000058585858585858585858585858585858090909090909090909090909090909090a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a010100000000000000020b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b010000000c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c300000000d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d")
+        let account = Data(repeating: 10, count: 32), owner = Data(repeating: 9, count: 16)
+        let generation = Data(repeating: 8, count: 16)
+        XCTAssertFalse(try store.hasAccountSecret(accountID: account))
+        _ = try store.encryptedSecretCAS(walletIndex: 7, kind: 1, generation: generation, owner: owner,
+                                         accountID: account, expected: 0, candidate: sealed)
+        XCTAssertTrue(try store.hasAccountSecret(accountID: account))
+        XCTAssertFalse(try store.hasAccountSecret(accountID: Data(repeating: 11, count: 32)))
+        _ = try store.encryptedSecretCAS(walletIndex: 7, kind: 1, generation: generation, owner: owner,
+                                         accountID: account, expected: 1, candidate: tombstone)
+        XCTAssertFalse(try store.hasAccountSecret(accountID: account))
+        _ = try store.encryptedSecretCAS(walletIndex: 7, kind: 1, generation: Data(repeating: 88, count: 16), owner: owner,
+                                         accountID: account, expected: 0, candidate: second)
+        XCTAssertTrue(try store.hasAccountSecret(accountID: account))
+        XCTAssertThrowsError(try store.hasAccountSecret(accountID: Data(repeating: 1, count: 31)))
+        _ = try store.encryptedSecretCAS(walletIndex: 7, kind: 1, generation: generation, owner: owner,
+                                         accountID: account, expected: 2, candidate: Data([1]))
+        XCTAssertThrowsError(try store.hasAccountSecret(accountID: Data(repeating: 12, count: 32)))
+    }
+
+    func testGenerationQueryIncludesRetiredFactsAndChecksIdentity() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try CitizenSDKSecureStore(directory: directory)
+        defer { store.close() }
+        XCTAssertTrue(try store.vaultGenerations().isEmpty)
+        let generation = Data(repeating: 4, count: 16)
+        XCTAssertTrue(try store.ensureGeneration(walletIndex: 0, generation: generation, operationID: Data(repeating: 5, count: 16)))
+        try store.retireGeneration(walletIndex: 0, generation: generation, operationID: Data(repeating: 6, count: 16))
+        let values = try store.vaultGenerations()
+        XCTAssertEqual(values.count, 1); XCTAssertEqual(values[0].0, 0); XCTAssertEqual(values[0].1, generation)
+    }
+
     func testVaultMutationLockSerializesIndependentStores() throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

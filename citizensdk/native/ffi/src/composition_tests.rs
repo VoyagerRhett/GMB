@@ -71,6 +71,10 @@ struct FakeVault {
 }
 
 impl SecretVault for FakeVault {
+    fn has_any_wallet_key(&self, _wallet_index: u32) -> ContractFuture<'_, bool> {
+        Box::pin(async { Err(ContractError::new(ContractErrorCode::Unsupported, "该装配夹具不模拟物理钥枚举")) })
+    }
+
     fn availability(&self) -> ContractFuture<'_, VaultAvailability> {
         let availability = self.availability;
         Box::pin(async move { Ok(availability) })
@@ -183,27 +187,27 @@ impl WalletProfileStore for PrivateKeyViewProfileStore {
 
 #[cfg(feature = "wallet")]
 #[test]
-fn private_bridge_cancel_finish_and_reentrant_settled_drain_real_pending_prepare() {
+fn private_receiver_cancel_finish_and_reentrant_settled_drain_real_pending_prepare() {
     use crate::{abi::*, citizensdk_destroy, citizensdk_result_release, wallet_abi::*};
     use std::{ffi::c_void, mem::size_of, sync::mpsc, time::Duration};
     struct ViewContext {
         handle: CitizenSdkHandle,
         settled: mpsc::Sender<(u64, i32, i32)>,
         events: mpsc::Sender<CitizenSdkEvent>,
-        displayed: std::sync::atomic::AtomicBool,
+        received: std::sync::atomic::AtomicBool,
     }
-    unsafe extern "C" fn display(context: *mut c_void, _: u64, _: CitizenSdkBytesView) -> i32 {
+    unsafe extern "C" fn receive(context: *mut c_void, _: u64, _: CitizenSdkBytesView) -> i32 {
         let context = unsafe { &*context.cast::<ViewContext>() };
         context
-            .displayed
+            .received
             .store(true, std::sync::atomic::Ordering::SeqCst);
         CitizenSdkErrorCode::Internal as i32
     }
     unsafe extern "C" fn settled(context: *mut c_void, view_id: u64, code: i32) {
         let context = unsafe { &*context.cast::<ViewContext>() };
-        // 此测试没有显示 buffer；模拟原生 UI 清理后在 settled 内反调 finish。
+        // 本用例不交付秘密；在阶段通知内确认接收副本已归还，仍须等待真实准备排空。
         let finished =
-            unsafe { citizensdk_internal_private_key_view_finish(context.handle, view_id) };
+            unsafe { citizensdk_private_key_finish(context.handle, view_id) };
         let _ = context.settled.send((view_id, code, finished));
     }
     unsafe extern "C" fn event(context: *mut c_void, event: *const CitizenSdkEvent) {
@@ -254,17 +258,17 @@ fn private_bridge_cancel_finish_and_reentrant_settled_drain_real_pending_prepare
         handle,
         settled: settled_tx,
         events,
-        displayed: false.into(),
+        received: false.into(),
     });
     let context_pointer = (&mut *context as *mut ViewContext).cast();
     runtime
         .set_event_callback(Some(event), context_pointer)
         .unwrap();
-    let table = CitizenSdkInternalPrivateKeyViewV1 {
-        struct_size: size_of::<CitizenSdkInternalPrivateKeyViewV1>() as u32,
+    let table = CitizenSdkPrivateKeyReceiverV1 {
+        struct_size: size_of::<CitizenSdkPrivateKeyReceiverV1>() as u32,
         abi_version: 1,
         context: context_pointer,
-        display: Some(display),
+        receive: Some(receive),
         settled: Some(settled),
         authorizing: Some(authorizing),
     };
@@ -273,7 +277,7 @@ fn private_bridge_cancel_finish_and_reentrant_settled_drain_real_pending_prepare
     let account_id = CitizenSdkAccountId { bytes: [0; 32] };
     unsafe {
         assert_eq!(
-            citizensdk_internal_private_key_view_open(
+            citizensdk_private_key_open(
                 handle,
                 &account_id,
                 &table,
@@ -286,17 +290,17 @@ fn private_bridge_cancel_finish_and_reentrant_settled_drain_real_pending_prepare
     entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     unsafe {
         assert_eq!(
-            citizensdk_internal_private_key_view_reveal(handle, view_id),
+            citizensdk_private_key_reveal(handle, view_id),
             0,
             "确认可以在准备完成前登记"
         );
         assert_eq!(
-            citizensdk_internal_private_key_view_reveal(handle, view_id),
+            citizensdk_private_key_reveal(handle, view_id),
             CitizenSdkErrorCode::Conflict as i32
         );
         assert_eq!(citizensdk_destroy(handle), CitizenSdkErrorCode::Busy as i32);
         assert_eq!(
-            citizensdk_internal_private_key_view_cancel(handle, view_id),
+            citizensdk_private_key_cancel(handle, view_id),
             0
         );
     }
@@ -306,7 +310,7 @@ fn private_bridge_cancel_finish_and_reentrant_settled_drain_real_pending_prepare
     );
     assert!(
         events_rx.try_recv().is_err(),
-        "UI finish 不得提前结束仍借用宿主资源的准备阶段"
+        "receiver finish 不得提前结束仍借用宿主资源的准备阶段"
     );
     unsafe {
         assert_eq!(citizensdk_destroy(handle), CitizenSdkErrorCode::Busy as i32);
@@ -320,18 +324,18 @@ fn private_bridge_cancel_finish_and_reentrant_settled_drain_real_pending_prepare
         result.payload,
         crate::ownership::ResultPayload::Empty
     ));
-    assert!(!context.displayed.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!context.received.load(std::sync::atomic::Ordering::SeqCst));
     assert!(settled_rx.try_recv().is_err());
     unsafe {
         assert_eq!(
-            citizensdk_internal_private_key_view_finish(handle, view_id),
+            citizensdk_private_key_finish(handle, view_id),
             CitizenSdkErrorCode::NotFound as i32
         );
         assert_eq!(citizensdk_result_release(completion.result), 0);
         let previous_view_id = view_id;
         let previous_request_id = request_id;
         assert_eq!(
-            citizensdk_internal_private_key_view_open(
+            citizensdk_private_key_open(
                 handle,
                 &account_id,
                 &table,
@@ -359,6 +363,10 @@ fn private_bridge_cancel_finish_and_reentrant_settled_drain_real_pending_prepare
 }
 
 impl EncryptedSecretBlobStore for FakeEncryptedSecretStore {
+    fn has_account_secret(&self, _account_id: citizen_sdk_contracts::AccountId32) -> ContractFuture<'_, bool> {
+        Box::pin(async { Err(ContractError::new(ContractErrorCode::Unsupported, "该装配夹具不模拟完整密文仓储")) })
+    }
+
     fn load(&self, _secret_ref: SecretRef) -> ContractFuture<'_, EncryptedSecretBlobSnapshot> {
         Box::pin(async { Ok(EncryptedSecretBlobSnapshot::empty()) })
     }
@@ -580,7 +588,7 @@ fn complete_wallet_bundle_derives_ready_wallet_facts_without_host_signer_or_nonc
     feature = "history"
 ))]
 #[test]
-fn unavailable_vault_fails_signing_and_build_closed() {
+fn unavailable_vault_closes_local_signing_but_preserves_transaction_build() {
     let composition = ProductComposition::try_new(
         provider_config("CitizenSDK-unavailable-vault-test"),
         ProductHostProviders::new(
@@ -595,7 +603,6 @@ fn unavailable_vault_fails_signing_and_build_closed() {
         .unwrap_or_else(|error| panic!("capability resolution failed: {error}"));
 
     for name in [
-        CapabilityName::TransactionBuild,
         CapabilityName::LocalSigning,
         CapabilityName::HardwareVault,
         CapabilityName::UserAuthentication,
@@ -608,6 +615,8 @@ fn unavailable_vault_fails_signing_and_build_closed() {
             Some(CapabilityReason::DeviceUnavailable)
         );
     }
+    // 交易准备依赖真实链事实，不因本机热签金库或钱包存储不可用而关闭。
+    assert!(status(&snapshot, CapabilityName::TransactionBuild).is_ready());
 }
 
 #[cfg(all(
@@ -618,7 +627,7 @@ fn unavailable_vault_fails_signing_and_build_closed() {
     feature = "history"
 ))]
 #[test]
-fn wallet_storage_failure_fails_profile_signing_and_build_closed() {
+fn wallet_storage_failure_closes_profile_and_local_signing_not_transaction_build() {
     let composition = ProductComposition::try_new(
         provider_config("CitizenSDK-storage-failure-test"),
         ProductHostProviders::new(
@@ -633,7 +642,6 @@ fn wallet_storage_failure_fails_profile_signing_and_build_closed() {
         .unwrap_or_else(|error| panic!("capability resolution failed: {error}"));
 
     for name in [
-        CapabilityName::TransactionBuild,
         CapabilityName::WalletProfile,
         CapabilityName::LocalSigning,
     ] {
@@ -647,6 +655,8 @@ fn wallet_storage_failure_fails_profile_signing_and_build_closed() {
         );
     }
     assert!(status(&snapshot, CapabilityName::History).is_ready());
+    // 交易准备依赖真实链事实，不因本机热签金库或钱包存储不可用而关闭。
+    assert!(status(&snapshot, CapabilityName::TransactionBuild).is_ready());
 }
 
 #[cfg(all(

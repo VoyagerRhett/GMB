@@ -32,7 +32,7 @@ int main() {
     const std::string header((std::istreambuf_iterator<char>(stream)),
                              std::istreambuf_iterator<char>());
     for (const char *forbidden : {
-             "private_key", "mini_secret", "plaintext_dek", "unlock_password",
+             "plaintext_dek", "unlock_password",
              "mnemonic_utf8", "signed_extrinsic", "getAccountPrivateKey",
          }) {
       assert(header.find(forbidden) == std::string::npos);
@@ -47,7 +47,6 @@ int main() {
       "citizen_sdk_events.hpp",
       "citizen_sdk_models.hpp",
       "citizen_sdk_plugin.h",
-      "citizen_sdk_wallet_flow.hpp",
   };
   assert(headers == expected_headers);
 
@@ -70,17 +69,14 @@ int main() {
   }
   assert(oversized_rejected);
 
-  // 补全只读取自管 SensitiveInput 并调用 Rust 官方词表，不进入系统日志。
-  std::ifstream window_stream(
-      std::filesystem::path(CITIZENSDK_WINDOWS_TEST_SOURCE_DIR) / "src" /
-          "citizen_sdk_wallet_window.cc",
-      std::ios::binary);
-  assert(window_stream.good());
-  const std::string window_source(
-      (std::istreambuf_iterator<char>(window_stream)),
-      std::istreambuf_iterator<char>());
-  assert(window_source.find("citizensdk_wallet_word_suggestions") != std::string::npos);
-  for (const char *forbidden : {"printf(", "std::cout", "OutputDebugString"})
-    assert(window_source.find(forbidden) == std::string::npos);
+  // 补全/输入与显式秘密资源走无UI绑定，不能复活窗口Presenter或无租约导出。
+  std::ifstream source_stream(std::filesystem::path(CITIZENSDK_WINDOWS_TEST_SOURCE_DIR)
+      / "src" / "citizen_sdk_flutter_sessions.cc", std::ios::binary);
+  assert(source_stream.good());
+  const std::string source((std::istreambuf_iterator<char>(source_stream)), std::istreambuf_iterator<char>());
+  assert(source.find("citizensdk_validate_wallet_input") != std::string::npos);
+  assert(source.find("citizensdk_wallet_word_suggestions") != std::string::npos);
+  for (const char *forbidden : {"present_wallet_flow", "WalletWindow", "FlutterWalletFlows", "exportPrivateKey"})
+    assert(source.find(forbidden) == std::string::npos);
   return 0;
 }

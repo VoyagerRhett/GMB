@@ -1,3 +1,4 @@
+import '../support/fake_citizen_sdk.dart';
 import 'package:citizenapp/chat/tatachat_sdk_adapter.dart';
 
 import 'dart:convert';
@@ -59,6 +60,7 @@ class _UnusedCurrentUserContext implements CurrentUserContext {
 }
 
 void main() {
+  TestCitizenSdkHarness();
   useIsolatedIsar();
 
   group('ChatDevice', () {

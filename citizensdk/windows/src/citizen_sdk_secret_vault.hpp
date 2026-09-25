@@ -2,6 +2,7 @@
 #define CITIZENSDK_WINDOWS_SECRET_VAULT_HPP
 
 #include <array>
+#include <vector>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -30,6 +31,7 @@ class GenerationLock final {
 // 不导出，不接受自定义 signer；凭据仍经UserAuth交给真实CNG操作。
 struct SecretVaultServices final {
   std::function<CngAvailability()> availability;
+  std::function<std::vector<std::string>()> enumerate_wallet_keys;
   std::function<bool()> authentication_available;
   std::function<AuthenticationResult(uint64_t)> create_password;
   std::function<AuthenticationResult(uint64_t)> unlock_password;
@@ -47,6 +49,7 @@ class SecretVault final {
   citizensdk_host_vault_availability_t availability() const noexcept;
   void ensure_wallet_kek(uint64_t host_operation_id, const WalletKey &key,
                          const std::array<uint8_t, 16> &operation_id);
+  bool has_any_wallet_key(uint32_t wallet_index);
   bool has_wallet_kek(const WalletKey &key);
   Bytes wrap_dek(uint64_t host_operation_id, const WalletKey &key,
                  const std::array<uint8_t, 16> &operation_id,

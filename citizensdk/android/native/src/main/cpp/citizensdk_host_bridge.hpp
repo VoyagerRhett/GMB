@@ -46,6 +46,9 @@ class CitizenSdkHostBridge final {
 
   void dispatch_event(const citizensdk_event_t &event);
   bool has_qr_review(uint64_t result) const;
+  int32_t inspect_wallets(citizensdk_request_id_t *out);
+  bool has_wallet_inspection(uint64_t result) const;
+  int32_t release_wallet_inspection(uint64_t result);
   void release_qr_review(uint64_t result);
 
  private:
@@ -72,6 +75,9 @@ class CitizenSdkHostBridge final {
   std::unordered_map<uint64_t, PendingUnwrap> unwraps_;
   mutable std::mutex qr_mutex_;
   std::unordered_set<uint64_t> qr_reviews_;
+  mutable std::mutex inspection_mutex_;
+  std::unordered_set<uint64_t> inspection_requests_;
+  std::unordered_set<uint64_t> wallet_inspections_;
 };
 
 }  // namespace citizen::sdk::jni

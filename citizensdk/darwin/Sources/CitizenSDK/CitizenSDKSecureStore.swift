@@ -69,6 +69,55 @@ internal final class CitizenSDKSecureStore: CitizenSDKSQLite, @unchecked Sendabl
         }
     }
 
+
+    /// 有界只读遍历当前SDK密文仓储；解析与状态判断只调用同一Core，不在Swift复制信封规则。
+    func hasAccountSecret(accountID: Data) throws -> Bool {
+        try CitizenSDKChecks.require(accountID.count == 32, "accountId长度无效")
+        return try read { database in
+            let query = try Self.prepare(database, "SELECT revision, length(record), record FROM encrypted_secret LIMIT 65537")
+            defer { sqlite3_finalize(query) }
+            var count = 0
+            while try Self.stepRowOrDone(query) {
+                count += 1
+                guard count <= 65536, sqlite3_column_type(query, 2) == SQLITE_BLOB,
+                      (1...65536).contains(sqlite3_column_int64(query, 1)) else {
+                    throw CitizenSDKError(.integrity, "密文查询边界无效")
+                }
+                let revision = try Self.revision(query, 0)
+                if try CitizenSDKNative.encryptedSecretRecordHasSecret(accountID: accountID, revision: revision,
+                                                                        record: Self.data(query, 2)) { return true }
+            }
+            return false
+        }
+    }
+
+    /// 同一只读快照含active与retired全部代际；物理钥未删时不能因墓碑误判为不存在。
+    func vaultGenerations() throws -> [(UInt32, Data)] {
+        try read { database in
+            let query = try Self.prepare(database, "SELECT record_key, wallet_index, generation, state FROM vault_generation LIMIT 65537")
+            defer { sqlite3_finalize(query) }
+            var values: [(UInt32, Data)] = []
+            while try Self.stepRowOrDone(query) {
+                let index = sqlite3_column_int64(query, 1)
+                guard values.count < 65536, sqlite3_column_type(query, 1) == SQLITE_INTEGER,
+                      index >= 0, index <= Int64(UInt32.max), sqlite3_column_type(query, 2) == SQLITE_BLOB,
+                      sqlite3_column_bytes(query, 2) == 16, sqlite3_column_type(query, 3) == SQLITE_INTEGER,
+                      [Self.generationActive, Self.generationRetired].contains(sqlite3_column_int64(query, 3)),
+                      sqlite3_column_type(query, 0) == SQLITE_TEXT,
+                      let key = sqlite3_column_text(query, 0), sqlite3_column_bytes(query, 0) <= 64 else {
+                    throw CitizenSDKError(.integrity, "金库代际事实无效")
+                }
+                let generation = Self.data(query, 2)
+                guard Data(bytes: key, count: Int(sqlite3_column_bytes(query, 0))) ==
+                    Data((try CitizenSDKRecordKey.generation(walletIndex: UInt32(index), generation: generation)).utf8) else {
+                    throw CitizenSDKError(.integrity, "金库代际主键不一致")
+                }
+                values.append((UInt32(index), generation))
+            }
+            return values
+        }
+    }
+
     func encryptedSecretLoad(walletIndex: UInt32, kind: UInt32, generation: Data,
                              owner: Data, accountID: Data) throws -> CitizenSDKHostRecord {
         let key = try CitizenSDKRecordKey.secret(walletIndex: walletIndex, kind: kind,

@@ -118,7 +118,8 @@ final class CitizenSdkFlutterSession with WidgetsBindingObserver {
     if (!_closedResourceEvents.remove(id)) _closedResourceAcks.add(id);
   }
   static const _teardownMethods = <String>{
-    'releasePreparedWallet', 'closePrivateKey', 'releaseQrReview', 'closeQrCapture', 'cancelOperation',
+    'releasePreparedWallet', 'releaseWalletInspection', 'closePrivateKey',
+    'releaseQrReview', 'closeQrCapture', 'cancelOperation',
     'respondCredential', 'cancelCredential',
   };
 
@@ -492,8 +493,9 @@ final class CitizenSdkFlutterSession with WidgetsBindingObserver {
     }
     final pending = _CitizenSdkPendingCredential(event.hostOperationId);
     _credentials[event.hostOperationId] = pending;
-    // Future.sync使同步throw和异步throw走同一无秘密错误路径。
-    pending.finished = Future<void>.sync(() => _provideCredential(event, pending));
+    // 先退出当前事件派发再调用宿主/取消通道，避免同步平台回调重入同一广播流。
+    // 立即登记真实完成Future，关闭仍须等待提供者返回及秘密副本finally清零。
+    pending.finished = Future<void>.microtask(() => _provideCredential(event, pending));
     unawaited(pending.finished.catchError((Object _) {}));
   }
 

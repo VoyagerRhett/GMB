@@ -1,4 +1,5 @@
 #include "citizen_sdk_host_bridge.hpp"
+#include "citizen_sdk_qr_camera.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -9,7 +10,121 @@
 #include <utility>
 #include "citizen_sdk_input_limits.hpp"
 
+#if CITIZENSDK_ENABLE_QR_CAPTURE
+#include <gtk/gtk.h>
+#endif
+
 namespace citizen_sdk::linux {
+
+struct GtkParentRef::Impl final {
+  std::mutex lock;
+#if CITIZENSDK_ENABLE_QR_CAPTURE
+  GWeakRef weak{};
+  bool initialized{false};
+#endif
+};
+
+GtkParentLease::GtkParentLease(void *window,
+                               std::thread::id ui_thread) noexcept
+    : window_(window), ui_thread_(ui_thread) {}
+
+GtkParentLease::GtkParentLease(GtkParentLease &&other) noexcept
+    : window_(other.window_), ui_thread_(other.ui_thread_) {
+  other.window_ = nullptr;
+}
+
+GtkParentLease &GtkParentLease::operator=(GtkParentLease &&other) noexcept {
+  if (this != &other) {
+    clear();
+    window_ = other.window_;
+    ui_thread_ = other.ui_thread_;
+    other.window_ = nullptr;
+  }
+  return *this;
+}
+
+GtkParentLease::~GtkParentLease() { clear(); }
+
+void GtkParentLease::clear() noexcept {
+#if CITIZENSDK_ENABLE_QR_CAPTURE
+  if (window_ != nullptr) {
+    if (std::this_thread::get_id() != ui_thread_) std::terminate();
+    g_object_unref(window_);
+    window_ = nullptr;
+  }
+#else
+  window_ = nullptr;
+#endif
+}
+
+GtkParentRef::GtkParentRef(void *window, std::thread::id ui_thread)
+    : impl_(std::make_unique<Impl>()), ui_thread_(ui_thread) {
+#if CITIZENSDK_ENABLE_QR_CAPTURE
+  g_weak_ref_init(&impl_->weak, nullptr);
+  impl_->initialized = true;
+#endif
+  const citizensdk_error_code_t code = set(window);
+  if (code != CITIZENSDK_OK) {
+    throw HostError(code, "CitizenSDK GTK parent window is invalid");
+  }
+}
+
+GtkParentRef::~GtkParentRef() {
+#if CITIZENSDK_ENABLE_QR_CAPTURE
+  if (impl_ && impl_->initialized) {
+    std::lock_guard<std::mutex> guard(impl_->lock);
+    g_weak_ref_clear(&impl_->weak);
+    impl_->initialized = false;
+  }
+#endif
+}
+
+citizensdk_error_code_t GtkParentRef::set(void *window) noexcept {
+  if (!on_ui_thread()) return CITIZENSDK_ERROR_BUSY;
+#if !CITIZENSDK_ENABLE_QR_CAPTURE
+  return window == nullptr ? CITIZENSDK_OK : CITIZENSDK_ERROR_UNSUPPORTED;
+#else
+  if (window != nullptr &&
+      (!GTK_IS_WINDOW(window) ||
+       gtk_widget_in_destruction(GTK_WIDGET(window)))) {
+    return CITIZENSDK_ERROR_INVALID_ARGUMENT;
+  }
+  try {
+    std::lock_guard<std::mutex> guard(impl_->lock);
+    g_weak_ref_set(&impl_->weak,
+                   window == nullptr ? nullptr : G_OBJECT(window));
+    return CITIZENSDK_OK;
+  } catch (...) {
+    return CITIZENSDK_ERROR_INTERNAL;
+  }
+#endif
+}
+
+GtkParentLease GtkParentRef::acquire() const noexcept {
+  if (!on_ui_thread()) return {};
+#if !CITIZENSDK_ENABLE_QR_CAPTURE
+  return {};
+#else
+  try {
+    std::lock_guard<std::mutex> guard(impl_->lock);
+    GObject *object = static_cast<GObject *>(g_weak_ref_get(&impl_->weak));
+    if (object == nullptr) return {};
+    if (!GTK_IS_WINDOW(object) ||
+        gtk_widget_in_destruction(GTK_WIDGET(object))) {
+      g_object_unref(object);
+      return {};
+    }
+    return GtkParentLease(object, ui_thread_);
+  } catch (...) {
+    return {};
+  }
+#endif
+}
+
+bool GtkParentRef::on_ui_thread() const noexcept {
+  return std::this_thread::get_id() == ui_thread_;
+}
+
 namespace {
 
 std::array<uint8_t, 16> id16(citizensdk_host_id128_t value) {
@@ -223,6 +338,30 @@ citizensdk_error_code_t vault_has(void *context, uint64_t operation_id,
   } catch (...) { return map_exception(); }
 }
 
+
+citizensdk_error_code_t account_secret_presence(void *context, uint64_t operation_id,
+    citizensdk_account_id_t account_id, void *sdk_context, citizensdk_host_bool_completion_v1_t completion) {
+  if (!completion) return CITIZENSDK_ERROR_INVALID_ARGUMENT;
+  try {
+    std::array<uint8_t, 32> account{};
+    std::copy(account_id.bytes, account_id.bytes + 32, account.begin());
+    citizensdk_host_bool_result_v1_t result{};
+    result.struct_size = sizeof(result); result.abi_version = 1; result.host_operation_id = operation_id;
+    result.error_code = CITIZENSDK_OK; result.value = host(context).has_account_secret(account) ? 1 : 0;
+    completion(sdk_context, &result); return CITIZENSDK_OK;
+  } catch (...) { return map_exception(); }
+}
+citizensdk_error_code_t wallet_key_presence(void *context, uint64_t operation_id,
+    uint32_t wallet_index, void *sdk_context, citizensdk_host_bool_completion_v1_t completion) {
+  if (!completion) return CITIZENSDK_ERROR_INVALID_ARGUMENT;
+  try {
+    citizensdk_host_bool_result_v1_t result{};
+    result.struct_size = sizeof(result); result.abi_version = 1; result.host_operation_id = operation_id;
+    result.error_code = CITIZENSDK_OK; result.value = host(context).has_any_wallet_key(wallet_index) ? 1 : 0;
+    completion(sdk_context, &result); return CITIZENSDK_OK;
+  } catch (...) { return map_exception(); }
+}
+
 citizensdk_error_code_t vault_wrap(void *context, uint64_t operation_id,
     citizensdk_host_wallet_key_ref_v1_t key,
     citizensdk_host_id128_t provisioning_id, citizensdk_bytes_view_t plaintext,
@@ -290,6 +429,79 @@ HostBridge::HostBridge(std::filesystem::path storage_root,
 }
 
 HostBridge::~HostBridge() = default;
+
+// 采集与图像解码沿用同一服务租约；租约拥有Host，排空前Core/存储不能被释放。
+struct HostBridge::CaptureOwner final {
+  std::shared_ptr<HostBridge> host;
+  ServiceLease service;
+  explicit CaptureOwner(std::shared_ptr<HostBridge> value) : host(std::move(value)), service(*host) {}
+};
+
+citizensdk_error_code_t HostBridge::open_qr_capture(uint32_t purpose,
+    const citizensdk_qr_capture_callbacks_v1_t &callbacks, uint64_t *out_resource) {
+  require(out_resource != nullptr, CITIZENSDK_ERROR_INVALID_ARGUMENT, "采集输出不能为空");
+  std::shared_ptr<QrCapture> capture;
+  uint64_t id = 0;
+  {
+    std::lock_guard<std::recursive_mutex> guard(call_lock_);
+    require(!teardown_started_ && !close_in_progress_ && !create_in_progress_ && !services_retired_ && sdk_ != 0,
+        CITIZENSDK_ERROR_INVALID_STATE, "Host尚未就绪或正在关闭");
+    require((modules_ & CITIZENSDK_MODULE_QR) != 0, CITIZENSDK_ERROR_UNSUPPORTED, "未启用二维码模块");
+    require(captures_.size() < 4, CITIZENSDK_ERROR_QUEUE_FULL, "采集资源已达上限");
+    require(!capture_ids_exhausted_, CITIZENSDK_ERROR_UNAVAILABLE, "采集资源编号已耗尽");
+    auto owner = std::make_shared<CaptureOwner>(shared_from_this());
+    id = next_capture_;
+    if (next_capture_ == UINT64_MAX) capture_ids_exhausted_ = true; else ++next_capture_;
+    std::weak_ptr<HostBridge> weak = shared_from_this();
+    capture = std::make_shared<QrCapture>(sdk_, id, purpose, callbacks, owner, [weak](uint64_t resource) {
+      const auto host = weak.lock();
+      if (!host) std::terminate(); // CaptureOwner在terminal返回前必须仍拥有Host。
+      std::lock_guard<std::recursive_mutex> guard(host->call_lock_);
+      host->captures_.erase(resource);
+    });
+    captures_.emplace(id, capture);
+  }
+  try { capture->start(); }
+  catch (...) {
+    std::lock_guard<std::recursive_mutex> guard(call_lock_); captures_.erase(id); throw;
+  }
+  *out_resource = id;
+  return CITIZENSDK_OK;
+}
+citizensdk_error_code_t HostBridge::control_qr_capture(uint64_t resource, uint64_t operation,
+                                                      uint32_t action, uint8_t enabled) {
+  std::shared_ptr<QrCapture> capture;
+  {
+    std::lock_guard<std::recursive_mutex> guard(call_lock_);
+    const auto found = captures_.find(resource);
+    if (found == captures_.end()) return CITIZENSDK_ERROR_NOT_FOUND;
+    capture = found->second;
+  }
+  // 不持Host锁进入资源门，避免回调重入控制时形成反向锁序。
+  return capture->control(operation, action, enabled);
+}
+void HostBridge::close_qr_captures() {
+  std::vector<std::shared_ptr<QrCapture>> captures;
+  {
+    std::lock_guard<std::recursive_mutex> guard(call_lock_);
+    for (const auto &entry : captures_) captures.push_back(entry.second);
+  }
+  for (const auto &capture : captures) capture->request_close();
+}
+Bytes HostBridge::decode_qr_image(citizensdk_bytes_view_t encoded, uint32_t purpose) {
+  citizensdk_handle_t sdk = 0;
+  std::shared_ptr<CaptureOwner> owner;
+  {
+    std::lock_guard<std::recursive_mutex> guard(call_lock_);
+    require(!teardown_started_ && !close_in_progress_ && !services_retired_ && sdk_ != 0,
+        CITIZENSDK_ERROR_INVALID_STATE, "Host尚未就绪或正在关闭");
+    require((modules_ & CITIZENSDK_MODULE_QR) != 0, CITIZENSDK_ERROR_UNSUPPORTED, "未启用二维码模块");
+    owner = std::make_shared<CaptureOwner>(shared_from_this()); sdk = sdk_;
+  }
+  return decode_qr_image_documents(sdk, encoded, purpose);
+}
+
+
 
 void HostBridge::configure_vtables() noexcept {
   public_vtable_ = {sizeof(public_vtable_), 1, this, ::citizen_sdk::linux::chain_load,
@@ -374,7 +586,13 @@ citizensdk_error_code_t HostBridge::create_sdk(citizensdk_handle_t *out_sdk) {
       std::lock_guard<std::recursive_mutex> guard(call_lock_);
       sdk_ = created;
     }
-    code = citizensdk_set_event_callback(created, receive_core_event, this);
+    if (secure_store_) {
+      const citizensdk_host_secret_presence_v1_t presence{
+          sizeof(citizensdk_host_secret_presence_v1_t), CITIZENSDK_ABI_VERSION, this,
+          account_secret_presence, wallet_key_presence};
+      code = citizensdk_set_secret_presence_provider(created, &presence);
+    }
+    if (code == CITIZENSDK_OK) code = citizensdk_set_event_callback(created, receive_core_event, this);
     if (code == CITIZENSDK_OK) {
       std::lock_guard<std::recursive_mutex> guard(call_lock_);
       callback_installed_ = true;
@@ -591,6 +809,7 @@ citizensdk_error_code_t HostBridge::close() {
   };
   try {
     // 无UI资源自行结束Core租约；仅发取消请求，不清空真实终态路由。
+    close_qr_captures();
     private_requests_.cancel_all();
     // 回调不持有Host锁；租约防止其他关闭线程在取消期间释放金库。
     // 已进入单向拆卸的重试不重新接纳服务，也不妨碍原关闭状态机继续收敛。
@@ -797,6 +1016,18 @@ HostRecord HostBridge::profile_cas(uint64_t expected, const Bytes &candidate) {
     require(secure_store_ != nullptr, CITIZENSDK_ERROR_UNSUPPORTED,
             "wallet host is disabled");
     return secure_store_->wallet_profile_compare_and_swap(expected, candidate);
+  });
+}
+bool HostBridge::has_account_secret(const std::array<uint8_t, 32> &account_id) {
+  return service_call([&] {
+    require(secure_store_ != nullptr, CITIZENSDK_ERROR_UNSUPPORTED, "未启用安全仓储");
+    return secure_store_->has_account_secret(account_id);
+  });
+}
+bool HostBridge::has_any_wallet_key(uint32_t wallet_index) {
+  return service_call([&] {
+    require(vault_ != nullptr, CITIZENSDK_ERROR_UNSUPPORTED, "未启用金库");
+    return vault_->has_any_wallet_key(wallet_index);
   });
 }
 HostRecord HostBridge::secret_load(const SecretIdentity &identity) {

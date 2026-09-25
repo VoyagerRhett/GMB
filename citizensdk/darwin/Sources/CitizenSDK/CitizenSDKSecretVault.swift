@@ -141,6 +141,50 @@ internal final class CitizenSDKSecretVault: @unchecked Sendable {
         try createPrivateKey(walletIndex: walletIndex, generation: generation)
     }
 
+
+    /// 只枚举属性，不读取钥或触发授权；未知SDK别名/系统错误不能被解释为没有钥。
+    func hasAnyWalletKey(walletIndex: UInt32) throws -> Bool {
+        try secureStore.withVaultLock {
+            var known: [Data: UInt32] = [:]
+            for (index, generation) in try secureStore.vaultGenerations() {
+                let tag = try CitizenSDKRecordKey.keychainTag(applicationID: applicationID, walletIndex: index, generation: generation)
+                guard known.updateValue(index, forKey: tag) == nil else {
+                    throw CitizenSDKError(.integrity, "金库别名重复")
+                }
+            }
+            let context = LAContext()
+            context.interactionNotAllowed = true
+            let query: [CFString: Any] = [
+                kSecClass: kSecClassKey,
+                kSecAttrKeyClass: kSecAttrKeyClassPrivate,
+                kSecAttrSynchronizable: kSecAttrSynchronizableAny,
+                kSecReturnAttributes: true,
+                kSecMatchLimit: NSNumber(value: 65537),
+                kSecUseAuthenticationContext: context,
+            ]
+            var result: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &result)
+            if status == errSecItemNotFound { return false }
+            guard status == errSecSuccess else { throw mapStatus(status, fallback: "金库存在性枚举失败") }
+            guard let values = result as? [[String: Any]], values.count <= 65536 else {
+                throw CitizenSDKError(.integrity, "金库枚举结果边界无效")
+            }
+            let tags = values.compactMap { $0[kSecAttrApplicationTag as String] as? Data }
+            return try Self.walletKeyPresent(walletIndex: walletIndex, known: known, tags: tags)
+        }
+    }
+
+    /// 与生产枚举共用归属判断，有限测试只替换系统返回的非秘密属性。
+    static func walletKeyPresent(walletIndex: UInt32, known: [Data: UInt32], tags: [Data]) throws -> Bool {
+        guard tags.count <= 65536 else { throw CitizenSDKError(.integrity, "金库枚举结果超限") }
+        let prefix = Data("citizensdk_wallet_".utf8)
+        for tag in tags where tag.starts(with: prefix) {
+            guard let index = known[tag] else { throw CitizenSDKError(.integrity, "存在无法归属的SDK物理钥") }
+            if index == walletIndex { return true }
+        }
+        return false
+    }
+
     func hasWalletKEK(walletIndex: UInt32, generation: Data) throws -> Bool {
         try secureStore.withVaultLock {
             guard try secureStore.isGenerationActive(walletIndex: walletIndex, generation: generation) else { return false }

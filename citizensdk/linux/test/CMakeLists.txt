@@ -24,8 +24,8 @@ if(CITIZENSDK_TEST_WORK_DIR STREQUAL "" OR
     "CITIZENSDK_TEST_WORK_DIR must be an existing task-exclusive absolute directory")
 endif()
 
-# Flutter 路径重用适配层，钱包回归额外编译真实纯参数校验器；运行态
-# 仍链接同版已安装 Host/Core，不重建 Host/Core 或下载测试框架。
+# Flutter路径复用同一无UI适配层；钱包输入回归直接调用唯一Core。
+# 运行态只链接同版Host/Core，不编译退役窗口校验器或下载测试框架。
 if(TARGET citizen_sdk_plugin)
   set(CITIZENSDK_LINUX_FLUTTER_CONTRACT_TESTS
     citizen_sdk_flutter_codec_test
@@ -49,12 +49,6 @@ if(TARGET citizen_sdk_plugin)
     $<$<BOOL:${CITIZENSDK_WARNINGS_AS_ERRORS}>:-Werror>)
   foreach(test_name IN LISTS CITIZENSDK_LINUX_FLUTTER_CONTRACT_TESTS)
     add_executable(${test_name} "${test_name}.cc")
-    if(test_name STREQUAL "citizen_sdk_flutter_wallet_flow_test")
-      target_sources(${test_name} PRIVATE
-        ../src/citizen_sdk_wallet_validation.cc
-        ../src/citizen_sdk_input_limits.cc
-        ../src/citizen_sdk_host_record.cc)
-    endif()
     target_link_libraries(${test_name} PRIVATE citizensdk_linux_flutter_test_support)
     target_compile_definitions(${test_name} PRIVATE
       CITIZENSDK_LINUX_TEST_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}/..")
@@ -74,7 +68,6 @@ set(CITIZENSDK_LINUX_HOST_TEST_SOURCES
   ../src/citizen_sdk_host_api.cc
   ../src/citizen_sdk_host_bridge.cc
   ../src/citizen_sdk_host_record.cc
-  ../src/citizen_sdk_gtk_parent.cc
   ../src/citizen_sdk_input_limits.cc
   ../src/citizen_sdk_lifecycle.cc
   ../src/citizen_sdk_operation.cc
@@ -87,10 +80,6 @@ set(CITIZENSDK_LINUX_HOST_TEST_SOURCES
   ../src/citizen_sdk_tpm2.cc
   ../src/citizen_sdk_user_auth.cc
   ../src/citizen_sdk_qr_camera.cc
-  ../src/citizen_sdk_qr_flow.cc
-  ../src/citizen_sdk_wallet_flow.cc
-  ../src/citizen_sdk_wallet_validation.cc
-  ../src/citizen_sdk_wallet_window.cc
 )
 
 add_library(citizensdk_linux_test_support STATIC
@@ -100,7 +89,7 @@ target_compile_features(citizensdk_linux_test_support PUBLIC cxx_std_17)
 target_compile_definitions(citizensdk_linux_test_support PRIVATE
   _GNU_SOURCE=1
   CITIZENSDK_HOST_BUILDING=1
-  CITIZENSDK_ENABLE_WALLET_UI=$<BOOL:${CITIZENSDK_ENABLE_WALLET_UI}>
+  CITIZENSDK_ENABLE_QR_CAPTURE=$<BOOL:${CITIZENSDK_ENABLE_QR_CAPTURE}>
   CITIZENSDK_HOST_VERSION="${PROJECT_VERSION}"
 )
 target_include_directories(citizensdk_linux_test_support
@@ -122,7 +111,7 @@ target_link_libraries(citizensdk_linux_test_support PUBLIC
   Threads::Threads
   ${CMAKE_DL_LIBS}
 )
-if(CITIZENSDK_ENABLE_WALLET_UI)
+if(CITIZENSDK_ENABLE_QR_CAPTURE)
   target_link_libraries(citizensdk_linux_test_support PUBLIC PkgConfig::GTK3 PkgConfig::GSTREAMER)
 endif()
 target_compile_options(citizensdk_linux_test_support PRIVATE
@@ -158,6 +147,7 @@ foreach(test_name IN LISTS CITIZENSDK_LINUX_CONTRACT_TESTS)
   )
   target_compile_definitions(${test_name} PRIVATE
     CITIZENSDK_LINUX_TEST_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}/.."
+    CITIZENSDK_ENABLE_QR_CAPTURE=$<BOOL:${CITIZENSDK_ENABLE_QR_CAPTURE}>
   )
   target_compile_options(${test_name} PRIVATE
     # 主流程以 Release 构建 Host；合同测试必须显式撤销 CMake Release 的

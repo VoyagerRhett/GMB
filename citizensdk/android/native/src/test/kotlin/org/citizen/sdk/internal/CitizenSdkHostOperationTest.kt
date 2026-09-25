@@ -2,13 +2,13 @@ package org.citizen.sdk.internal
 
 import org.citizen.sdk.CitizenSdkErrorCode
 import org.citizen.sdk.CitizenSdkException
+import org.citizen.sdk.CitizenSdkFailureStage
 import org.citizen.sdk.CitizenSdkClosePolicy
 import org.citizen.sdk.CitizenSdkLifecycle
 import org.citizen.sdk.CitizenAccountBalance
 import org.citizen.sdk.CitizenBlockRef
 import org.citizen.sdk.CitizenFinality
 import org.citizen.sdk.CitizenU128
-import org.citizen.sdk.ui.CitizenSdkWalletFlowAttachmentPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -22,19 +22,79 @@ import kotlin.concurrent.thread
 
 class CitizenSdkHostOperationTest {
     @Test
-    fun `QR close waits only for owned surfaces and frames while a shared camera may remain open`() {
-        val gate = org.citizen.sdk.ui.CitizenSdkQrOwnedDrain()
-        gate.surfaceBorrowed(); gate.surfaceBorrowed()
-        gate.revoke(); gate.framesReturned()
-        assertFalse(gate.isReady())
-        gate.surfaceReturned(); assertFalse(gate.isReady())
-        gate.surfaceReturned(); assertTrue(gate.isReady())
-        // 不输入共享 CameraState.CLOSED；另一用例继续 OPEN 不阻碍本次真实归还。
-        assertThrows(IllegalStateException::class.java) { gate.surfaceBorrowed() }
-        assertThrows(IllegalStateException::class.java) { gate.surfaceReturned() }
-        val noDevice = org.citizen.sdk.ui.CitizenSdkQrOwnedDrain()
-        noDevice.revoke(); assertFalse(noDevice.isReady())
-        noDevice.framesReturned(); assertTrue(noDevice.isReady())
+    fun cancelledConsumerDoesNotConstructOrDoubleReleaseOwnedResources() {
+        var rawReleased = 0; var resourceClosed = 0; var decoded = 0
+        val router = CitizenSdkRequestRouter({ true }) { rawReleased++ }
+        val early = router.submitOperation({ 81 }, { decoded++; AutoCloseable { resourceClosed++ } })
+        early.future.cancel(false)
+        router.onCompletion(81, CitizenSdkNativeCodec.Decoded(CitizenSdkNativeResult.QrReview(1, "{}"), null))
+        assertEquals(0, decoded); assertEquals(1, rawReleased)
+        lateinit var race: org.citizen.sdk.CitizenSdkOperation<AutoCloseable>
+        race = router.submitOperation({ 82 }, {
+            race.future.cancel(false)
+            AutoCloseable { resourceClosed++ }
+        })
+        router.onCompletion(82, CitizenSdkNativeCodec.Decoded(CitizenSdkNativeResult.QrReview(2, "{}"), null))
+        assertEquals(1, resourceClosed); assertEquals(1, rawReleased)
+        router.requireIdle(); router.close()
+    }
+
+    @Test
+    fun failedProjectionStillCompletesWhenResourceCleanupThrows() {
+        var releases = 0
+        val router = CitizenSdkRequestRouter({ false }) { releases++; error("synthetic cleanup") }
+        val operation = router.submitOperation<Int>({ 83 }, { error("synthetic projection") })
+        router.onCompletion(83, CitizenSdkNativeCodec.Decoded(CitizenSdkNativeResult.QrReview(3, "{}"), null))
+        assertTrue(operation.future.isCompletedExceptionally); assertEquals(1, releases)
+        router.requireIdle(); router.close()
+    }
+
+    @Test
+    fun cameraLuminanceUsesActualStridePositionAndRejectsOverflowBeforeAllocation() {
+        val source = ByteBuffer.wrap(byteArrayOf(99, 1, 8, 2, 8, 3, 8, 4))
+        source.position(1)
+        val pixels = org.citizen.sdk.CitizenSdkQrLuminance.copy(source, 2, 2, 4, 2)
+        assertEquals(listOf<Byte>(1, 2, 3, 4), pixels.toList())
+        assertEquals(1, source.position())
+        pixels[0] = 7
+        assertEquals(1.toByte(), source.get(1))
+        for (fields in listOf(intArrayOf(0, 2, 4, 2), intArrayOf(4097, 1, Int.MAX_VALUE, 1),
+            intArrayOf(2, 2, -1, 2), intArrayOf(2, 2, 4, 0), intArrayOf(4096, 4096, -1, Int.MAX_VALUE),
+            intArrayOf(2, 2, Int.MAX_VALUE, Int.MAX_VALUE), intArrayOf(2, 3, 4, 2))) {
+            assertThrows(CitizenSdkException::class.java) {
+                org.citizen.sdk.CitizenSdkQrLuminance.copy(source, fields[0], fields[1], fields[2], fields[3])
+            }
+        }
+    }
+
+    @Test
+    fun walletInspectionWireKeepsSameSnapshotAndRejectsTruncatedOrInvalidTargets() {
+        fun wire(mode: Int = 1, targetCount: Int = 2, duplicate: Boolean = false): ByteArray {
+            val out = ByteBuffer.allocate(1024).order(ByteOrder.LITTLE_ENDIAN)
+            fun text(value: String) { val bytes = value.toByteArray(Charsets.UTF_8); out.putInt(bytes.size).put(bytes) }
+            out.putInt(1).putInt(0).putInt(0).putInt(21).putInt(0) // 唯一JNI信封。
+            out.putLong(7).putLong(3).put(0).putInt(0) // 检查引用、revision、无profile/正常账户。
+            out.putInt(1).put(0).put(1).putInt(0) // ready、无cleanup、选择异常0槽。
+            out.putInt(1).putInt(0); text("异常")
+            out.put(ByteArray(32) { 1 }).put(0).putInt(3).putInt(mode)
+            out.putInt(targetCount).put((if (targetCount == 0) 0 else 1).toByte())
+            if (targetCount in 1..2) repeat(targetCount) { at -> out.put(ByteArray(32) { if (duplicate || at == 0) 1 else 2 }) }
+            return out.array().copyOf(out.position())
+        }
+        val valid = wire()
+        val result = CitizenSdkNativeCodec.decode(valid).result as CitizenSdkNativeResult.WalletState
+        assertEquals(7L, result.inspectionToken)
+        assertEquals("3", result.value.revision)
+        assertTrue(result.value.accounts.isEmpty())
+        assertEquals(2, result.value.diagnostics.single().cleanupTargets!!.accountIds().size)
+        for (size in 0 until valid.size) assertThrows(CitizenSdkException::class.java) {
+            CitizenSdkNativeCodec.decode(valid.copyOf(size))
+        }
+        for (bad in listOf(wire(mode = 3), wire(targetCount = 1991), wire(duplicate = true))) {
+            assertThrows(CitizenSdkException::class.java) { CitizenSdkNativeCodec.decode(bad) }
+        }
+        val absent = (CitizenSdkNativeCodec.decode(wire(mode = 0, targetCount = 0)).result as CitizenSdkNativeResult.WalletState).value.diagnostics.single()
+        assertEquals(null, absent.signMode); assertEquals(null, absent.cleanupTargets)
     }
 
     @Test
@@ -229,30 +289,18 @@ class CitizenSdkHostOperationTest {
     }
 
     @Test
-    fun `claimed wallet Activity cannot cross a concurrent terminal boundary`() {
-        assertTrue(
-            CitizenSdkWalletFlowAttachmentPolicy.canClaim(
-                completionStarted = false,
-                finished = false,
-                terminalKnown = false,
-                claimPending = false,
-            ),
-        )
-        assertFalse(
-            CitizenSdkWalletFlowAttachmentPolicy.canClaim(
-                completionStarted = false,
-                finished = false,
-                terminalKnown = false,
-                claimPending = true,
-            ),
-        )
-        assertTrue(
-            CitizenSdkWalletFlowAttachmentPolicy.finishWithoutContent(
-                completionStarted = true,
-                finished = false,
-                terminalKnown = false,
-            ),
-        )
+    fun earlyPrivateSettlementCannotBeClaimedByAnotherIdentityOrAfterClose() {
+        val receiver = org.citizen.sdk.CitizenSdkPrivateKeyReceiver()
+        receiver.settled(9, CitizenSdkErrorCode.NOT_FOUND.value)
+        assertThrows(IllegalStateException::class.java) { receiver.bind(10) }
+        receiver.bind(9)
+        var calls = 0
+        receiver.listen { calls++ }
+        assertEquals(1, calls)
+        receiver.clear()
+        receiver.settled(9, CitizenSdkErrorCode.OK.value)
+        assertEquals(1, calls)
+        assertThrows(IllegalStateException::class.java) { receiver.bind(9) }
     }
 
     @Test
@@ -333,16 +381,30 @@ class CitizenSdkHostOperationTest {
     }
 
     @Test
-    fun `watch codec preserves full unsigned u32 peer count`() {
-        val wire = ByteBuffer.allocate(4 + 4 + 4 + 1 + 1)
-            .order(ByteOrder.LITTLE_ENDIAN)
-            .putInt(1)
-            .putInt(1)
-            .putInt(-1)
-            .put(0.toByte())
-            .put(0.toByte())
-            .array()
-        assertEquals(4_294_967_295L, CitizenSdkNativeCodec.decodeWatch(wire).peerCount)
+    fun `sync status codec preserves unsigned peer count boundaries`() {
+        // peerCount由现行getSyncStatus结果投影；保留原u32最大值，再覆盖完整u64。
+        // 旧decodeWatch已无Kotlin消费入口，不能为旧夹具恢复另一套解码接口。
+        for ((bits, expected) in listOf(0L to "0", 4_294_967_295L to "4294967295",
+                                        -1L to "18446744073709551615")) {
+            val wire = ByteBuffer.allocate(20 + 8 + 2 + 2 * 44)
+                .order(ByteOrder.LITTLE_ENDIAN)
+                .putInt(1).putInt(0).putInt(0).putInt(24).putInt(0)
+                .putLong(bits).put(0.toByte()).put(1.toByte())
+                .put(ByteArray(32) { 1 }).putLong(2).putInt(1)
+                .put(ByteArray(32) { 2 }).putLong(1).putInt(2)
+                .array()
+            val decoded = CitizenSdkNativeCodec.decode(wire)
+            assertEquals(null, decoded.error)
+            val value = (decoded.result as CitizenSdkNativeResult.SyncStatus).value
+            assertEquals(expected, value.peerCount)
+            assertFalse(value.isSyncing)
+            assertTrue(value.isUsable)
+            assertEquals(CitizenFinality.BEST, value.best.finality)
+            assertEquals(CitizenFinality.FINALIZED, value.finalized.finality)
+            assertEquals(CitizenSdkErrorCode.INTEGRITY, assertThrows(CitizenSdkException::class.java) {
+                CitizenSdkNativeCodec.decode(wire.copyOf(wire.size - 1))
+            }.code)
+        }
     }
 
     @Test

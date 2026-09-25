@@ -67,6 +67,40 @@ Future<void> _pumpUntilFound(WidgetTester tester, Finder finder) async {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  testWidgets('隐藏底层错误行但保留未就绪禁用与同步恢复', (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.lightTheme,
+      home: OnchainPaymentPanel(
+        title: '交易',
+        currentWalletLoader: () async => _wallet(
+          index: 0, name: '测试钱包', address: 'wallet_a', accountId: _walletAAccountId),
+        balanceLoader: (_) async => 100,
+        localRecordsLoader: (_, {limit = 100}) async => const [],
+      ),
+    ));
+    await _pumpUntilFound(tester, find.textContaining('钱包可用余额：100'));
+    FilledButton submit() => tester.widget<FilledButton>(
+      find.widgetWithText(FilledButton, '签名交易'));
+    final banner = tester.widget<ChainProgressBanner>(find.byType(ChainProgressBanner));
+    banner.onErrorChanged?.call('capability unavailable: engine_not_running');
+    await tester.pump();
+    expect(find.textContaining('capability unavailable'), findsNothing);
+    expect(submit().onPressed, isNull);
+    final block = CitizenBlockRef(hash: _walletAAccountId, number: BigInt.one,
+      finality: CitizenBlockFinality.finalized);
+    banner.onProgressChanged?.call(CitizenChainSyncStatus(
+      peerCount: BigInt.one, isSyncing: false, isUsable: true, best: block, finalized: block));
+    banner.onErrorChanged?.call(null);
+    await tester.pump();
+    expect(submit().onPressed, isNotNull);
+    banner.onProgressChanged?.call(null);
+    banner.onErrorChanged?.call('capability unavailable: engine_not_running');
+    await tester.pump();
+    expect(submit().onPressed, isNull);
+    expect(find.textContaining('capability unavailable'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('交易页顶栏显示链状态，入口只剩多签账户卡片，扫码收进收款地址框', (tester) async {
     ContactPickMode? openedContactMode;
     await tester.pumpWidget(

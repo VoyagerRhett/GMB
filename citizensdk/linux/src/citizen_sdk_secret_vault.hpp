@@ -17,6 +17,7 @@ class SecretVault final {
   citizensdk_host_vault_availability_t availability() const noexcept;
   void ensure_wallet_kek(uint64_t host_operation_id, const WalletKey &key,
                          const std::array<uint8_t, 16> &operation_id);
+  bool has_any_wallet_key(uint32_t wallet_index);
   bool has_wallet_kek(const WalletKey &key);
   Bytes wrap_dek(uint64_t host_operation_id, const WalletKey &key,
                  const std::array<uint8_t, 16> &operation_id,

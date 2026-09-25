@@ -9,8 +9,6 @@ import 'dart:typed_data';
 import 'package:citizen_sdk/citizen_sdk.dart';
 import '../../support/fake_citizen_sdk.dart';
 import 'package:citizenapp/my/myid/citizen_identity_transaction.dart';
-import 'package:citizenapp/signer/signing.dart'
-    show kOpSignCidRebind, signingMessage;
 import 'package:flutter_test/flutter_test.dart';
 
 CitizenIdentityTransaction _transaction(CitizenChain chain) =>
@@ -26,6 +24,18 @@ CitizenBlockRef _finalized(String hash, [int number = 88]) => CitizenBlockRef(
     );
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  late TestCitizenSdkTransport encodingTransport;
+  late CitizenSdk encodingSdk;
+  setUp(() async {
+    encodingTransport = TestCitizenSdkTransport({}, useCore: true);
+    encodingSdk = await encodingTransport.open();
+  });
+  tearDown(() async {
+    await encodingSdk.close();
+    await encodingTransport.dispose();
+  });
+
   // 采用链端 CTZN 金标号做样本(26 字节 ASCII)。
   const cid = 'CN951-CTZN1-539598435-2026';
   final cidBytes = Uint8List.fromList(cid.codeUnits);
@@ -33,7 +43,7 @@ void main() {
   const compactCid = 26 << 2; // 0x68
 
   group('self_occupy_cid call data', () {
-    test('布局 [10,5, compact(len), ...cid.utf8]', () {
+    test('布局 [10,5, compact(len), ...cid.utf8]', () async {
       final call = CitizenIdentityTransaction.buildSelfOccupyCidCall(cid);
       expect(call[0], 10);
       expect(call[1], 5);
@@ -42,7 +52,7 @@ void main() {
       expect(call.length, 3 + 26);
     });
 
-    test('空 / 超 32 字节 cid 被拒', () {
+    test('空 / 超 32 字节 cid 被拒', () async {
       expect(() => CitizenIdentityTransaction.buildSelfOccupyCidCall(''),
           throwsArgumentError);
       expect(
@@ -57,7 +67,7 @@ void main() {
     final revision = BigInt.from(0x01020304);
     final expiresAt = BigInt.from(0x11121314);
 
-    test('布局 [10,9,cid,revision:u64LE,expires:u64LE,sig]', () {
+    test('布局 [10,9,cid,revision:u64LE,expires:u64LE,sig]', () async {
       final call = CitizenIdentityTransaction.buildSelfRebindCidAccountCall(
         cidNumber: cid,
         expectedBindingRevision: revision,
@@ -84,7 +94,7 @@ void main() {
       expect(call.length, sigStart + 2 + 64); // 111
     });
 
-    test('非 64 字节签名或越界 u64 被拒', () {
+    test('非 64 字节签名或越界 u64 被拒', () async {
       expect(
         () => CitizenIdentityTransaction.buildSelfRebindCidAccountCall(
           cidNumber: cid,
@@ -119,8 +129,8 @@ void main() {
     final revision = BigInt.from(0x01020304);
     final expiresAt = BigInt.from(0x11121314);
 
-    test('op=0x11 且字段逐字节对齐 CidRebindAuthorization SCALE', () {
-      final digest = CitizenIdentityTransaction.buildRebindSigningDigest(
+    test('op=0x11 且字段逐字节对齐 CidRebindAuthorization SCALE', () async {
+      final digest = await CitizenIdentityTransaction.buildRebindSigningDigest(
         genesisHash: genesisHash,
         cidNumber: cid,
         currentAccountId: currentAccount,
@@ -155,7 +165,7 @@ void main() {
         0,
       ];
       final expected =
-          signingMessage(opTag: kOpSignCidRebind, scalePayload: payload);
+          (await CitizenSigning.encodePayload(CitizenSigningPayload.message(opTag: kOpSignCidRebind, scalePayload: Uint8List.fromList(payload))));
       expect(digest, expected);
       expect(
         digest.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join(),
@@ -163,8 +173,8 @@ void main() {
       );
     });
 
-    test('创世/当前账户/revision/expiry 任一变化都不能重放此前摘要', () {
-      Uint8List digest({
+    test('创世/当前账户/revision/expiry 任一变化都不能重放此前摘要', () async {
+      Future<Uint8List> digest({
         Uint8List? genesis,
         String? old,
         BigInt? revisionValue,
@@ -179,14 +189,15 @@ void main() {
             expiresAt: expiresValue ?? expiresAt,
           );
 
-      final baseline = digest();
-      expect(digest(genesis: Uint8List(32)..[0] = 1), isNot(baseline));
-      expect(digest(old: '0x${'44' * 32}'), isNot(baseline));
-      expect(digest(revisionValue: revision + BigInt.one), isNot(baseline));
-      expect(digest(expiresValue: expiresAt + BigInt.one), isNot(baseline));
+      final baseline = await digest();
+      expect(await digest(genesis: Uint8List(32)..[0] = 1), isNot(baseline));
+      expect(await digest(old: '0x${'44' * 32}'), isNot(baseline));
+      expect(await digest(revisionValue: revision + BigInt.one), isNot(baseline));
+      expect(await digest(expiresValue: expiresAt + BigInt.one), isNot(baseline));
     });
 
     test('非法 newAccountId 文本被拒', () {
+      // 账户边界在返回编码Future前同步拒绝；闭包捕获该原始异常，不改变生产时序。
       expect(
         () => CitizenIdentityTransaction.buildRebindSigningDigest(
           genesisHash: genesisHash,

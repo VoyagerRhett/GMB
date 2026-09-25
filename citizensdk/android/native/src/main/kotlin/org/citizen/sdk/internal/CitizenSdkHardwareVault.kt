@@ -128,6 +128,37 @@ internal class CitizenSdkHardwareVault(
         requireHardwareKey(alias)
     }
 
+
+    /** 只枚举系统别名，不解锁、不触发弹窗；未知SDK别名和读取错误一律失败。 */
+    @Synchronized
+    fun hasAnyWalletKey(walletIndex: Int): Boolean = secureStore.withVaultLock {
+        val known = HashMap<String, Int>()
+        for ((index, generation) in secureStore.vaultGenerations()) {
+            val alias = CitizenSdkRecordKey.hardwareAlias(index, generation)
+            if (known.put(alias, index) != null) throw VaultFailure(CitizenSdkErrorCode.INTEGRITY, "金库别名重复")
+        }
+        val aliases = keyStore().aliases()
+        val names = ArrayList<String>()
+        var count = 0
+        while (aliases.hasMoreElements()) {
+            if (++count > 65536) throw VaultFailure(CitizenSdkErrorCode.INTEGRITY, "金库别名枚举超限")
+            val alias = aliases.nextElement()
+            if (alias.startsWith("citizensdk_wallet_")) names.add(alias)
+        }
+        walletKeyPresent(walletIndex, known, names)
+    }
+
+    /** 生产归属判断的有限输入接缝，不把存在或错误转换成热/冷签名结论。 */
+    internal fun walletKeyPresent(walletIndex: Int, known: Map<String, Int>, names: List<String>): Boolean {
+        if (names.size > 65536) throw VaultFailure(CitizenSdkErrorCode.INTEGRITY, "金库别名枚举超限")
+        for (alias in names) {
+            if (!alias.startsWith("citizensdk_wallet_")) continue
+            val index = known[alias] ?: throw VaultFailure(CitizenSdkErrorCode.INTEGRITY, "存在无法归属的SDK物理钥")
+            if (index == walletIndex) return true
+        }
+        return false
+    }
+
     @Synchronized
     fun hasWalletKek(walletIndex: Int, generation: ByteArray): Boolean {
         return secureStore.withVaultLock {

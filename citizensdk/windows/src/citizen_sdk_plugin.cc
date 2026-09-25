@@ -3,6 +3,7 @@
 #include <flutter/binary_messenger.h>
 #include <flutter/plugin_registrar_windows.h>
 #include <flutter/standard_method_codec.h>
+#include <flutter/texture_registrar.h>
 
 #include <algorithm>
 #include <atomic>
@@ -178,6 +179,131 @@ std::unique_ptr<Bytes> encoded_error(citizensdk_error_code_t code, const char *m
 
 // BinaryReply 是 Flutter 官方自持 messenger 的回应能力，不借用插件或 registrar。
 // 引擎已消失时官方实现安全拒发；活引擎替换 channel 时仍须实际回应一次。
+
+struct PreviewPixels final : std::enable_shared_from_this<PreviewPixels> {
+  struct FrameLease {
+    FlutterDesktopPixelBuffer buffer{};
+    std::shared_ptr<const std::vector<uint8_t>> pixels;
+    std::shared_ptr<PreviewPixels> owner;
+  };
+  std::mutex mutex;
+  uint32_t width{}, height{};
+  std::shared_ptr<const std::vector<uint8_t>> latest;
+  std::size_t leases{};
+  bool unregistered{}, finalized{};
+  std::vector<std::function<void()>> drained;
+
+  void finish() {
+    std::vector<std::function<void()>> callbacks;
+    {
+      std::lock_guard<std::mutex> guard(mutex);
+      if (finalized || !unregistered || leases != 0) return;
+      finalized = true; latest.reset(); callbacks.swap(drained);
+    }
+    for (auto &callback : callbacks) if (callback) callback();
+  }
+  const FlutterDesktopPixelBuffer *copy() noexcept {
+    try {
+      std::lock_guard<std::mutex> guard(mutex);
+      // 固定最多三个借用，不让慢渲染器无限保留旧相机帧。
+      if (unregistered || !latest || leases >= 3) return nullptr;
+      auto lease = std::make_unique<FrameLease>();
+      lease->pixels = latest; lease->owner = shared_from_this();
+      lease->buffer.buffer = lease->pixels->data(); lease->buffer.width = width; lease->buffer.height = height;
+      lease->buffer.release_context = lease.get();
+      lease->buffer.release_callback = [](void *raw) {
+        std::unique_ptr<FrameLease> released(static_cast<FrameLease *>(raw));
+        const auto state = released->owner;
+        { std::lock_guard<std::mutex> guard(state->mutex); --state->leases; }
+        released.reset(); // 像素借用已归还，再允许资源收到排空通知。
+        state->finish();
+      };
+      ++leases;
+      return &lease.release()->buffer;
+    } catch (...) { return nullptr; } // 分配失败不返回无效像素指针。
+  }
+};
+
+class WindowsCaptureTexture final : public CaptureTexture, public std::enable_shared_from_this<WindowsCaptureTexture> {
+ public:
+  WindowsCaptureTexture(::flutter::TextureRegistrar *registrar, uint32_t width, uint32_t height)
+      : registrar_(registrar), pixels_(std::make_shared<PreviewPixels>()) {
+    if (!registrar || width == 0 || width > 4096 || height == 0 || height > 4096)
+      throw ContractFailure(CITIZENSDK_ERROR_INVALID_ARGUMENT, "纹理尺寸或注册器无效");
+    pixels_->width = width; pixels_->height = height;
+  }
+  void register_texture() {
+    const auto state = pixels_;
+    texture_ = std::make_unique<::flutter::TextureVariant>(
+        ::flutter::PixelBufferTexture([state](std::size_t, std::size_t) { return state->copy(); }));
+    identity_ = registrar_->RegisterTexture(texture_.get());
+    if (identity_ < 0) {
+      texture_.reset();
+      throw ContractFailure(CITIZENSDK_ERROR_UNAVAILABLE, "Flutter纹理注册失败");
+    }
+  }
+  int64_t id() const noexcept override { return identity_; }
+  void update(std::shared_ptr<const std::vector<uint8_t>> rgba) override {
+    if (closing_ || !registrar_) return;
+    if (!rgba || rgba->size() != static_cast<std::size_t>(pixels_->width) * pixels_->height * 4)
+      throw ContractFailure(CITIZENSDK_ERROR_INTEGRITY, "纹理像素尺寸不符");
+    { std::lock_guard<std::mutex> guard(pixels_->mutex); pixels_->latest = std::move(rgba); }
+    if (!registrar_->MarkTextureFrameAvailable(identity_))
+      throw ContractFailure(CITIZENSDK_ERROR_UNAVAILABLE, "Flutter拒绝纹理帧");
+  }
+  void close(std::function<void()> drained) override {
+    bool complete = false;
+    {
+      std::lock_guard<std::mutex> guard(pixels_->mutex);
+      complete = pixels_->finalized;
+      if (!complete && drained) pixels_->drained.push_back(std::move(drained));
+    }
+    if (complete) { if (drained) drained(); return; }
+    if (closing_) return;
+    if (!registrar_) throw ContractFailure(CITIZENSDK_ERROR_UNAVAILABLE, "Flutter纹理注册器已撤销");
+    closing_ = true;
+    const auto self = shared_from_this();
+    try {
+      registrar_->UnregisterTexture(identity_, [self] {
+        { std::lock_guard<std::mutex> guard(self->pixels_->mutex); self->pixels_->unregistered = true; }
+        // 官方异步注销已完成；即使仍有PixelBuffer借用，也由各自lease保有像素。
+        self->texture_.reset();
+        self->pixels_->finish();
+      });
+    } catch (...) { closing_ = false; throw; }
+  }
+  void detach_registrar() noexcept { registrar_ = nullptr; }
+ private:
+  ::flutter::TextureRegistrar *registrar_{};
+  std::shared_ptr<PreviewPixels> pixels_;
+  std::unique_ptr<::flutter::TextureVariant> texture_;
+  int64_t identity_{-1};
+  bool closing_{};
+};
+
+class WindowsTextures final {
+ public:
+  explicit WindowsTextures(::flutter::TextureRegistrar *value) : registrar_(value) {}
+  std::shared_ptr<CaptureTexture> create(uint32_t width, uint32_t height) {
+    if (!registrar_) throw ContractFailure(CITIZENSDK_ERROR_UNAVAILABLE, "Flutter纹理注册器已撤销");
+    values_.erase(std::remove_if(values_.begin(), values_.end(), [](const auto &value) { return value.expired(); }), values_.end());
+    auto texture = std::make_shared<WindowsCaptureTexture>(registrar_, width, height);
+    values_.push_back(texture);
+    texture->register_texture();
+    return texture;
+  }
+  void detach() noexcept {
+    for (const auto &weak : values_) if (const auto texture = weak.lock()) {
+      try { texture->close({}); } catch (...) { /* 未排空不能通知资源关闭。 */ }
+      texture->detach_registrar(); // registrar销毁后任何迟到任务均不得再解引用。
+    }
+    registrar_ = nullptr;
+  }
+ private:
+  ::flutter::TextureRegistrar *registrar_{};
+  std::vector<std::weak_ptr<WindowsCaptureTexture>> values_;
+};
+
 struct PendingReply final {
   explicit PendingReply(::flutter::BinaryReply value) : reply(std::move(value)) {}
   ::flutter::BinaryReply reply;
@@ -228,6 +354,7 @@ struct PluginState final : std::enable_shared_from_this<PluginState> {
   std::shared_ptr<UiQueue> queue = std::make_shared<UiQueue>();
   std::shared_ptr<FlutterEnvironment> environment;
   std::shared_ptr<Sessions> sessions;
+  TextureRegistration textures;
   ::flutter::BinaryMessenger *messenger{};
   std::shared_ptr<Registration> method_registration = std::make_shared<Registration>();
   std::shared_ptr<Registration> event_registration = std::make_shared<Registration>();
@@ -244,6 +371,7 @@ struct PluginState final : std::enable_shared_from_this<PluginState> {
     if (detached) return;
     detached = true;
     listening = false;
+    if (textures.detach) textures.detach();
     if (environment) environment->detach();
     const auto current = sessions;
     if (current) current->detach();
@@ -294,6 +422,13 @@ struct PluginState final : std::enable_shared_from_this<PluginState> {
                                                       "CitizenSDK Flutter plugin is detached");
       const auto call = decode_method_call(message, size);
       if (!call) throw ContractFailure(CITIZENSDK_ERROR_INVALID_ARGUMENT, "CitizenSDK method message is invalid");
+      const auto envelope = decode_request_envelope(call->method_name(), call->arguments());
+      response->method = call->method_name();
+      if (envelope) {
+        response->session = envelope->session;
+        response->sequence = envelope->sequence;
+        sessions->accept_request_sequence(*envelope);
+      }
       const auto request = decode_request(call->method_name(), call->arguments());
       response->method = method_name(request.method);
       if (!request.session.empty()) response->session = request.session;
@@ -374,10 +509,17 @@ class CitizenSdkPlugin final : public ::flutter::Plugin {
 
 }  // namespace
 
+TextureRegistration create_texture_registration(::flutter::TextureRegistrar *registrar) {
+  const auto owner = std::make_shared<WindowsTextures>(registrar);
+  return {[owner](uint32_t width, uint32_t height) { return owner->create(width, height); },
+          [owner] { owner->detach(); }};
+}
+
 // 私有依赖注入仅替换原生环境/有限 transport；生产与测试走同一注册和消息实现。
 // 不声明在安装头、不导出 C++ 符号，不构成宿主可获取秘密或原生 handle 的 API。
 std::unique_ptr<::flutter::Plugin> register_plugin(::flutter::BinaryMessenger *messenger,
-    HWND view, EnvironmentFactory environment_factory, TransportFactory transport_factory) {
+    HWND view, EnvironmentFactory environment_factory, TransportFactory transport_factory,
+    ::flutter::TextureRegistrar *registrar = nullptr) {
   if (messenger == nullptr) throw ContractFailure(CITIZENSDK_ERROR_INVALID_ARGUMENT,
                                                  "CitizenSDK Flutter messenger is unavailable");
   const auto state = std::make_shared<PluginState>();
@@ -387,8 +529,9 @@ std::unique_ptr<::flutter::Plugin> register_plugin(::flutter::BinaryMessenger *m
   const auto environment = state->environment;
   if (!environment_factory) environment_factory = [environment](uint32_t modules) { return environment->open(modules); };
   const auto queue = state->queue;
+  state->textures = create_texture_registration(registrar);
   state->sessions = Sessions::create(std::move(environment_factory),
-      [queue](std::function<void()> action) { queue->post(std::move(action)); }, std::move(transport_factory));
+      [queue](std::function<void()> action) { queue->post(std::move(action)); }, std::move(transport_factory), state->textures.open);
   const auto method = std::make_shared<HandlerToken>();
   method->state = state;
   method->registration = state->method_registration;
@@ -426,7 +569,7 @@ void CitizenSdkPluginRegisterWithRegistrar(FlutterDesktopPluginRegistrarRef regi
         ->GetRegistrar<::flutter::PluginRegistrarWindows>(registrar);
     auto *view = owner->GetView();
     owner->AddPlugin(citizen_sdk::flutter::register_plugin(owner->messenger(),
-        view == nullptr ? nullptr : view->GetNativeWindow(), {}, {}));
+        view == nullptr ? nullptr : view->GetNativeWindow(), {}, {}, owner->texture_registrar()));
   } catch (...) {
     // C 注册入口绝不抛异常、记录环境/消息内容或构造半可用的降级插件。
   }

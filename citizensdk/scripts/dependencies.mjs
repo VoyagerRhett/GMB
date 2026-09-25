@@ -12,6 +12,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -134,7 +135,27 @@ function verifyExtractedTree(root, source) {
     for (const name of readdirSync(directory)) {
       const path = join(directory, name);
       const info = lstatSync(path);
-      if (info.isSymbolicLink() || (!info.isDirectory() && !info.isFile())) fail(`${source.archive_root}包含非普通条目`);
+      if (info.isSymbolicLink()) {
+        // 官方ZXing的语言包装只链接同包core；准确路径/原始目标/真实目标三者同时校验。
+        // 不遍历链接以免重复或循环，不扩大为任意“包内链接”许可。
+        const allowed = {
+          'wrappers/python/core': '../../core',
+          'wrappers/rust/core': '../../core/',
+        };
+        const key = relative(root, path).split(sep).join('/');
+        if (source !== lock.environment['zxing-cpp'] || !Object.hasOwn(allowed, key)
+            || readlinkSync(path) !== allowed[key]) {
+          fail(`${source.archive_root}包含未许可链接`);
+        }
+        const core = join(root, 'core');
+        if (!existsSync(core) || !lstatSync(core).isDirectory()
+            || lstatSync(core).isSymbolicLink()
+            || realpathSync(path) !== join(realpathSync(root), 'core')) {
+          fail('ZXing链接目标必须是同包普通core目录');
+        }
+        continue;
+      }
+      if (!info.isDirectory() && !info.isFile()) fail(`${source.archive_root}包含非普通条目`);
       if (info.isDirectory()) visit(path);
     }
   };

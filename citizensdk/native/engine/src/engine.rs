@@ -19,7 +19,7 @@ use citizen_sdk_contracts::{
     SignedExtrinsic, SigningCompletion, SigningIntent, Sr25519PublicKey, Sr25519Signature,
     StateImportReceipt, SubmittedExtrinsic, TransactionExecutionCompleted, TransactionExecutionId,
     TransactionPreparationId, UnverifiedReason, VerifiedBlockBody, VerifiedBlockHeader,
-    VerifiedBlockRef, VerifiedChainClient, WalletProfile, WalletSignMode, WalletState,
+    VerifiedBlockRef, VerifiedChainClient, WalletProfile, WalletSignMode, WalletState, WalletRecord,
 };
 use zeroize::Zeroizing;
 
@@ -295,7 +295,10 @@ struct EngineState {
     private_key_views: u64,
     /// QR 审阅/认证期间保持原 Engine 代际，停止必须等待真实 await 排空。
     qr_operations: u64,
+    /// 历史读取准入；停止节点后也保持暂停，不能兼作本地钱包操作互斥。
     history_paused: bool,
+    /// 仅标记正在排空/执行的钱包变更；与链是否运行无关。
+    wallet_mutation_in_progress: bool,
     history_cancel: Arc<crate::chain_monitor::MonitorCancellation>,
     history_drain_waiters: Vec<std::task::Waker>,
 }
@@ -312,6 +315,7 @@ impl Default for EngineState {
             private_key_views: 0,
             qr_operations: 0,
             history_paused: false,
+            wallet_mutation_in_progress: false,
             history_cancel: Arc::new(crate::chain_monitor::MonitorCancellation::default()),
             history_drain_waiters: Vec::new(),
         }
@@ -491,11 +495,11 @@ impl CitizenEngine {
         })
     }
 
-    /// Return one coherent typed snapshot from the running light client. Applications consume
-    /// `is_usable` directly; they must not invent a second readiness algorithm from heights.
+    /// 运行中的轻节点即使尚未同步，也必须能报告真实状态；不能用数据就绪门禁
+    /// 阻止读取is_usable本身。模块/宿主准入保留，余额与交易仍走原完整就绪检查。
     pub fn chain_sync_status(&self) -> EngineFuture<'_, ChainSyncStatus> {
         Box::pin(async move {
-            self.require_capabilities(&[CapabilityName::ChainRead])?;
+            self.require_running_capability_admission(&[CapabilityName::ChainRead])?;
             self.components
                 .chain_client()?
                 .get_sync_status()
@@ -1079,6 +1083,52 @@ impl CitizenEngine {
     pub fn wallet_state(&self) -> EngineFuture<'_, WalletStateSnapshot> {
         let service = self.local_wallet_service(&[CapabilityName::WalletProfile]);
         Box::pin(async move { service?.state().await })
+    }
+
+    /// 公开付款选择不需要签名/金库就绪；修订检查和写入由唯一钱包服务负责。
+    /// 诊断快照引用由绑定层验证实例归属；Engine再比对当前修订和完整原记录。
+    pub fn repair_hot_wallet(&self, expected_revision: u64, record: WalletRecord) -> EngineFuture<'_, WalletStateSnapshot> {
+        let service = self.local_wallet_service(&[
+            CapabilityName::WalletProfile, CapabilityName::LocalSigning, CapabilityName::HardwareVault, CapabilityName::UserAuthentication,
+        ]);
+        Box::pin(async move {
+            let state = self.with_wallet_monitor_paused(service?.repair_hot_wallet(expected_revision, &record)).await?;
+            WalletStateSnapshot::from_state(&state)
+        })
+    }
+    pub fn rename_diagnostic_wallet(&self, expected_revision: u64, record: WalletRecord, name: String) -> EngineFuture<'_, WalletStateSnapshot> {
+        let service = self.local_wallet_service(&[CapabilityName::WalletProfile]);
+        Box::pin(async move {
+            let state = service?.rename_diagnostic_wallet(expected_revision, &record, &name).await?;
+            WalletStateSnapshot::from_state(&state)
+        })
+    }
+    pub fn delete_diagnostic_wallet(&self, expected_revision: u64, record: WalletRecord) -> EngineFuture<'_, WalletStateSnapshot> {
+        let required: &[CapabilityName] = if matches!(record, WalletRecord::Profile { .. }) {
+            &[CapabilityName::WalletProfile, CapabilityName::HardwareVault]
+        } else { &[CapabilityName::WalletProfile] };
+        let service = self.local_wallet_service(required);
+        Box::pin(async move {
+            let state = self.with_wallet_monitor_paused(service?.delete_diagnostic_wallet(expected_revision, &record)).await?;
+            WalletStateSnapshot::from_state(&state)
+        })
+    }
+
+    pub fn set_active_wallet(&self, expected_revision: u64, wallet_index: u32) -> EngineFuture<'_, WalletStateSnapshot> {
+        let service = self.local_wallet_service(&[CapabilityName::WalletProfile]);
+        Box::pin(async move {
+            let state = service?.set_active_wallet(expected_revision, wallet_index).await?;
+            WalletStateSnapshot::from_state(&state)
+        })
+    }
+
+    /// 钱包级改名不借用账户改名，不触碰账户身份、默认顺序或密钥。
+    pub fn rename_wallet(&self, expected_revision: u64, wallet_index: u32, name: String) -> EngineFuture<'_, WalletStateSnapshot> {
+        let service = self.local_wallet_service(&[CapabilityName::WalletProfile]);
+        Box::pin(async move {
+            let state = service?.rename_wallet(expected_revision, wallet_index, &name).await?;
+            WalletStateSnapshot::from_state(&state)
+        })
     }
 
     pub fn import_cold_wallet_account(
@@ -2463,6 +2513,33 @@ impl CitizenEngine {
         ))
     }
 
+    /// 只用于同步状态和后台监控接纳，不授予读取链业务数据或发交易的权限。
+    /// 未同步属于正常运行阶段；未启用、缺组件或宿主不可用仍然失败关闭。
+    fn require_running_capability_admission(
+        &self,
+        required: &[CapabilityName],
+    ) -> Result<(), EngineError> {
+        let state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
+        if state.lifecycle != EngineLifecycle::Running {
+            return Err(EngineError::CapabilityUnavailable("engine_not_running".to_owned()));
+        }
+        let capabilities = self.capabilities.lock().map_err(|_| EngineError::StatePoisoned)?;
+        let probes = capabilities.base_probes.as_ref().ok_or_else(|| {
+            EngineError::CapabilityUnavailable("capability state has not been established".to_owned())
+        })?;
+        for name in required {
+            // 原始事实已经过唯一组件/模块过滤；只豁免正常同步等待，缺组件、存储或授权
+            // 未就绪不能借此放行。依赖链未就绪也不能反过来禁止启动观察它的监控。
+            if !probes.iter().find(|probe| probe.name == *name).is_some_and(|probe| {
+                probe.supported && probe.available && probe.enabled
+                    && (probe.runtime_ready || probe.not_ready_reason == Some(CapabilityReason::ChainUnsynced))
+            }) {
+                return Err(EngineError::CapabilityUnavailable(format!("{} is unavailable", name.as_str())));
+            }
+        }
+        Ok(())
+    }
+
     fn require_capabilities(&self, required: &[CapabilityName]) -> Result<(), EngineError> {
         self.require_capability_snapshot(required, true)
     }
@@ -2816,10 +2893,11 @@ fn private_key_view_cancelled() -> EngineError {
 }
 
 impl CitizenEngine {
-    /// 启动 SDK 自有钱包监控；没有钱包 profile 是合法的初始状态。
+    /// 启动SDK自有钱包监控；没有钱包或尚未同步都是合法初始状态。
+    /// 后台具体读取仍复核完整就绪条件，不能因监控启动过早而停掉正在同步的节点。
     pub fn start_chain_monitor(&self) -> EngineFuture<'_, ()> {
         Box::pin(async move {
-            self.require_capabilities(&[CapabilityName::ChainRead, CapabilityName::History])?;
+            self.require_running_capability_admission(&[CapabilityName::ChainRead, CapabilityName::History])?;
             let state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
             if state.lifecycle != EngineLifecycle::Running || state.history_paused {
                 return Err(lifecycle_error(
@@ -2890,21 +2968,39 @@ impl CitizenEngine {
         {
             return mutation.await;
         }
-        let (generation, cancellation) = {
+        self.with_wallet_history_paused(mutation).await
+    }
+
+    /// 单一历史协调入口：模块筛选与状态所有权分开，停止不再冒充钱包变更占用。
+    async fn with_wallet_history_paused<T>(
+        &self,
+        mutation: impl Future<Output = Result<T, EngineError>>,
+    ) -> Result<T, EngineError> {
+        let (generation, cancellation, was_paused) = {
             let mut state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
-            if state.history_paused {
-                return Err(lifecycle_error("wallet history is already paused"));
+            if state.lifecycle == EngineLifecycle::Disposed {
+                return Err(lifecycle_error("wallet mutation requires a live Engine"));
             }
+            if state.wallet_mutation_in_progress {
+                return Err(lifecycle_error("wallet mutation is already in progress"));
+            }
+            let was_paused = state.history_paused;
+            state.wallet_mutation_in_progress = true;
             state.history_paused = true;
             state.history_cancel.cancel();
-            (state.generation, Arc::clone(&state.history_cancel))
+            (state.generation, Arc::clone(&state.history_cancel), was_paused)
         };
-        self.drain_chain_monitor().await?;
-        // 此 future 不可用 select 丢弃：store/CAS 已进入后必须等真实返回。
-        let result = mutation.await;
+        // 停止/启动失败只关闭链历史准入，不关闭本地钱包。两种状态都先排空旧读取；
+        // 已接纳的store/CAS仍等真实返回，不能用丢弃future或清暂停标志伪造取消。
+        let result = match self.drain_chain_monitor().await {
+            Ok(()) => mutation.await,
+            Err(error) => Err(error),
+        };
         {
             let mut state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
-            if state.generation == generation
+            state.wallet_mutation_in_progress = false;
+            // 只归还自己取得的临时暂停；停止、失败或并发stop换过的取消代次不复活。
+            if !was_paused && state.generation == generation
                 && Arc::ptr_eq(&state.history_cancel, &cancellation)
                 && !matches!(
                     state.lifecycle,
@@ -3395,6 +3491,140 @@ mod chain_query_tests {
             matches!(engine.genesis_hash(), Err(EngineError::Contract(error))
             if error.code() == ContractErrorCode::Unsupported)
         );
+    }
+
+    // 用原状态协调入口验证所有权，不触碰实际钱包、存储或硬件认证。
+    fn local_engine(lifecycle: EngineLifecycle) -> CitizenEngine {
+        let engine = CitizenEngine::new(EngineComponents::new(
+            None, None, None, None, None, None, None, None,
+        ));
+        engine.state.lock().unwrap_or_else(|e| panic!("{e}")).lifecycle = lifecycle;
+        engine
+    }
+
+    #[test]
+    fn stopped_or_failed_history_does_not_block_local_wallet_mutations() {
+        for lifecycle in [EngineLifecycle::Created, EngineLifecycle::Stopped, EngineLifecycle::StartFailed] {
+            let engine = local_engine(lifecycle);
+            engine.stop_chain_monitor().unwrap_or_else(|e| panic!("{e}"));
+            for _ in 0..2 {
+                assert_eq!(futures::executor::block_on(
+                    engine.with_wallet_history_paused(async { Ok(7) })
+                ).unwrap_or_else(|e| panic!("{e}")), 7);
+                let state = engine.state.lock().unwrap_or_else(|e| panic!("{e}"));
+                assert!(state.history_paused, "本地操作不能复活已停止的历史读取");
+                assert!(!state.wallet_mutation_in_progress);
+            }
+        }
+    }
+
+    #[test]
+    fn wallet_mutation_failure_restores_only_its_own_temporary_pause() {
+        let engine = local_engine(EngineLifecycle::Running);
+        let result: Result<(), EngineError> = futures::executor::block_on(
+            engine.with_wallet_history_paused(async { Err(lifecycle_error("synthetic failure")) })
+        );
+        assert!(result.is_err());
+        let state = engine.state.lock().unwrap_or_else(|e| panic!("{e}"));
+        assert!(!state.history_paused);
+        assert!(!state.wallet_mutation_in_progress);
+        drop(state);
+        assert!(futures::executor::block_on(
+            engine.with_wallet_history_paused(async { Ok(()) })
+        ).is_ok());
+    }
+
+    #[test]
+    fn wallet_mutation_drains_history_rejects_overlap_and_does_not_undo_stop() {
+        use std::{sync::atomic::{AtomicBool, Ordering}, task::Context};
+        let engine = local_engine(EngineLifecycle::Running);
+        let cancellation = {
+            let mut state = engine.state.lock().unwrap_or_else(|e| panic!("{e}"));
+            state.inflight_history_operations = 1;
+            Arc::clone(&state.history_cancel)
+        };
+        let lease = EngineHistoryOperationLease {
+            state: Arc::clone(&engine.state), generation: 0, cancellation,
+        };
+        let began = AtomicBool::new(false);
+        let (send, receive) = futures::channel::oneshot::channel::<()>();
+        let mut operation = Box::pin(engine.with_wallet_history_paused(async {
+            began.store(true, Ordering::SeqCst);
+            receive.await.map_err(|_| lifecycle_error("synthetic channel closed"))?;
+            Ok(())
+        }));
+        let waker = futures::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(operation.as_mut().poll(&mut context).is_pending());
+        assert!(!began.load(Ordering::SeqCst), "旧历史读未排空不能进入钱包写入");
+        assert!(futures::executor::block_on(
+            engine.with_wallet_history_paused(async { Ok(()) })
+        ).is_err());
+        drop(lease);
+        assert!(operation.as_mut().poll(&mut context).is_pending());
+        assert!(began.load(Ordering::SeqCst));
+        engine.stop_chain_monitor().unwrap_or_else(|e| panic!("{e}"));
+        send.send(()).unwrap_or_else(|_| panic!("receiver missing"));
+        assert!(futures::executor::block_on(operation).is_ok());
+        let state = engine.state.lock().unwrap_or_else(|e| panic!("{e}"));
+        assert!(state.history_paused);
+        assert!(!state.wallet_mutation_in_progress);
+    }
+
+    #[test]
+    fn disposed_engine_does_not_enter_local_wallet_mutation() {
+        let engine = local_engine(EngineLifecycle::Disposed);
+        let entered = std::sync::atomic::AtomicBool::new(false);
+        let result = futures::executor::block_on(engine.with_wallet_history_paused(async {
+            entered.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }));
+        assert!(result.is_err());
+        assert!(!entered.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn monitor_can_start_while_syncing_but_not_when_stopped_or_disabled() {
+        let engine = local_engine(EngineLifecycle::Running);
+        // 此用例只隔离监控状态机；公开组件/模块过滤由chain_access回归验证。
+        let mut probes = CapabilityName::ALL.into_iter().map(CapabilityProbe::ready).collect::<Vec<_>>();
+        for probe in &mut probes {
+            if matches!(probe.name, CapabilityName::ChainRead | CapabilityName::History) {
+                probe.runtime_ready = false;
+                probe.not_ready_reason = Some(CapabilityReason::ChainUnsynced);
+            }
+        }
+        {
+            let mut capabilities = engine.capabilities.lock().unwrap_or_else(|e| panic!("{e}"));
+            capabilities.base_probes = Some(probes.clone());
+            capabilities.tracker.update(probes.clone()).unwrap_or_else(|e| panic!("{e}"));
+        }
+        assert!(futures::executor::block_on(engine.start_chain_monitor()).is_ok());
+        assert!(engine.chain_monitor.lock().unwrap_or_else(|e| panic!("{e}")).running);
+        assert!(engine.require_capabilities(&[CapabilityName::ChainRead]).is_err(),
+            "监控可启动不代表业务读取已就绪");
+        engine.stop_chain_monitor().unwrap_or_else(|e| panic!("{e}"));
+        assert!(futures::executor::block_on(engine.start_chain_monitor()).is_err());
+        for lifecycle in [EngineLifecycle::Created, EngineLifecycle::Stopped, EngineLifecycle::StartFailed, EngineLifecycle::Disposed] {
+            engine.state.lock().unwrap_or_else(|e| panic!("{e}")).lifecycle = lifecycle;
+            assert!(futures::executor::block_on(engine.start_chain_monitor()).is_err());
+        }
+        {
+            let mut state = engine.state.lock().unwrap_or_else(|e| panic!("{e}"));
+            state.lifecycle = EngineLifecycle::Running;
+            state.history_paused = false;
+        }
+        for name in [CapabilityName::ChainRead, CapabilityName::History] {
+            let mut disabled = probes.clone();
+            disabled.iter_mut().find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("probe missing")).enabled = false;
+            {
+                let mut capabilities = engine.capabilities.lock().unwrap_or_else(|e| panic!("{e}"));
+                capabilities.base_probes = Some(disabled.clone());
+                capabilities.tracker.update(disabled).unwrap_or_else(|e| panic!("{e}"));
+            }
+            assert!(futures::executor::block_on(engine.start_chain_monitor()).is_err());
+        }
     }
 
     #[test]

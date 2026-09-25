@@ -1,3 +1,4 @@
+import '../support/fake_citizen_sdk.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -22,6 +23,7 @@ SquareSession _session() => SquareSession(
     );
 
 void main() {
+  TestCitizenSdkHarness();
   test('SquareApiClient 解析 Worker feed 内容和媒体元数据', () async {
     final client = SquareApiClient(
       baseUrl: 'https://square.test',

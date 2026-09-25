@@ -302,16 +302,16 @@ verify_symbol_contract() {
 }
 
 product_header_symbols() {
-  perl -0777 -ne 'while (/\b(citizensdk_[a-z0-9_]+)\s*\(/g) { print "$1\n" }' \
+  perl -0777 -ne 'while (/\b(citizensdk_[a-z0-9_]+)\s*\((?!\s*\*)/g) { print "$1\n" }' \
     "$product_header" | sort -u
 }
 
-# 公开121符号与内部4符号各自精确封闭；私有头只在本轮工作目录生成。
+# 公开146符号精确封闭，旧窗口私有符号已清零；内部模块只复用公开声明。
 product_internal_symbols() {
   node --input-type=module - "$script_dir/release.mjs" <<'NODE'
 import {pathToFileURL} from 'node:url';
 const {CITIZENSDK_INTERNAL_SYMBOLS} = await import(pathToFileURL(process.argv[2]));
-process.stdout.write(CITIZENSDK_INTERNAL_SYMBOLS.join('\n') + '\n');
+if (CITIZENSDK_INTERNAL_SYMBOLS.length) process.stdout.write(CITIZENSDK_INTERNAL_SYMBOLS.join('\n') + '\n');
 NODE
 }
 
@@ -376,7 +376,7 @@ verify_product_abi_symbols() {
     local missing extra
     missing="$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))"
     extra="$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))"
-    fail "$label 与121公开+4内部符号闭集不一致；缺失=${missing:-无}；额外=${extra:-无}"
+    fail "$label 与产品头及既定内部符号闭集不一致；缺失=${missing:-无}；额外=${extra:-无}"
   }
 }
 
@@ -476,7 +476,6 @@ linux_install_files() {
     include/citizen_sdk/citizen_sdk_error.hpp \
     include/citizen_sdk/citizen_sdk_events.hpp \
     include/citizen_sdk/citizen_sdk_models.hpp \
-    include/citizen_sdk/citizen_sdk_wallet_flow.hpp \
     include/citizen_sdk/citizensdk_host.h \
     "lib/$platform/libcitizensdk.so" "lib/$platform/libcitizensdk_host.so" \
     "lib/$platform/cmake/CitizenSDK/CitizenSDKConfig.cmake" \
@@ -499,8 +498,8 @@ verify_linux_install() {
   [[ -z "$(find "$prefix" -mindepth 1 ! -type f ! -type d -print -quit)" ]] \
     || fail "$platform 安装投影禁止符号链接和特殊节点"
   expected="$(linux_install_files "$platform")"
-  [[ "$(printf '%s\n' "$expected" | wc -l | tr -d ' ')" == 20 ]] \
-    || fail "$platform 安装文件合同必须精确为 20 项"
+  [[ "$(printf '%s\n' "$expected" | wc -l | tr -d ' ')" == 19 ]] \
+    || fail "$platform 安装文件合同必须精确为 19 项"
   actual="$(cd "$prefix" && find . -type f -print | sed 's|^./||' | LC_ALL=C sort)"
   [[ "$actual" == "$expected" ]] || fail "$platform 安装文件闭集不一致"
   while IFS= read -r path; do
@@ -521,7 +520,7 @@ verify_linux_install() {
   cmp -s "$qr_image_header" "$prefix/include/citizensdk_qr_image.h" \
     || fail "$platform 安装统一 QR 图像头字节漂移"
   for path in citizen_sdk.hpp citizen_sdk_config.hpp citizen_sdk_error.hpp \
-      citizen_sdk_events.hpp citizen_sdk_models.hpp citizen_sdk_wallet_flow.hpp citizensdk_host.h; do
+      citizen_sdk_events.hpp citizen_sdk_models.hpp citizensdk_host.h; do
     cmp -s "$linux_source_root/include/citizen_sdk/$path" "$prefix/include/citizen_sdk/$path" \
       || fail "$platform 安装 Host 头字节漂移：$path"
   done
@@ -546,9 +545,9 @@ verify_linux_install() {
   fi
   core_symbols="$(product_header_symbols)"
   host_symbols="$(linux_host_header_symbols)"
-  [[ "$(printf '%s\n' "$core_symbols" | wc -l | tr -d ' ')" == 121 \
-    && "$(printf '%s\n' "$host_symbols" | wc -l | tr -d ' ')" == 17 ]] \
-    || fail "$platform 公开 ABI 必须精确为 121 Core / 17 Host"
+  [[ "$(printf '%s\n' "$core_symbols" | wc -l | tr -d ' ')" == 146 \
+    && "$(printf '%s\n' "$host_symbols" | wc -l | tr -d ' ')" == 19 ]] \
+    || fail "$platform 公开 ABI 必须精确为 146 Core / 19 Host"
   verify_linux_elf_identity "$platform" "$prefix/lib/$platform/libcitizensdk.so" \
     "$prefix/lib/$platform/libcitizensdk_host.so" "$readelf_bin" "$nm_bin"
 }
@@ -562,7 +561,7 @@ copy_linux_install() {
   paths="$(linux_install_files "$platform")"
   assert_descendant_path "$destination_root" "$destination_prefix" "$platform 安装投影目标"
   assert_safe_directory_path "$destination_prefix" "$platform 安装投影目标"
-  # 唯一 20 项名单同时用于外部 native 输入和 Flutter 包内投影。源码已有的
+  # 唯一19项名单同时用于外部native输入和Flutter包内投影。源码已有的
   # 七个 Host 公开头只做字节比较，绝不覆盖不同版本或复制整个未受控目录。
   # 全量预检完成后才写入，缺项或重叠漂移不会留下半份安装投影。
   while IFS= read -r path; do
@@ -947,8 +946,8 @@ verify_apple_product_abi_symbols() {
   actual="$(printf '%s\n' "$all_symbols" | grep '^citizensdk_' || true)"
   expected="$(apple_public_symbols)"
   expected_count="$(printf '%s\n' "$expected" | grep -c '^citizensdk_' || true)"
-  [[ "$expected_count" == 124 ]] \
-    || fail "Apple 产品头必须精确声明 121 个 Core 与 3 个图像函数"
+  [[ "$expected_count" == 150 ]] \
+    || fail "Apple 产品头必须精确声明 146 个 Core 与 4 个图像函数"
   forbidden="$(printf '%s\n' "$all_symbols" \
     | grep -E '^(smoldot_|citizen_sr25519_|account_crypto_)' || true)"
   [[ -z "$forbidden" ]] \
@@ -957,11 +956,11 @@ verify_apple_product_abi_symbols() {
     local missing extra
     missing="$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))"
     extra="$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))"
-    fail "$label 的 citizensdk_* 与 121 Core + 3 图像函数产品头不一致；缺失=${missing:-无}；额外=${extra:-无}"
+    fail "$label 的 citizensdk_* 与 146 Core + 4 图像函数产品头不一致；缺失=${missing:-无}；额外=${extra:-无}"
   }
   # 动态 framework 同时提供 Swift API 和 C ABI。Swift public/ABI-support 符号
   # 只能属于本模块 mangling；除这组 Swift 符号外，全部外部已定义符号必须正好
-  # 是产品头中的 121 个 Core + 3 个图像 C ABI，Rust staticlib 及其依赖不得穿透边界。
+  # 是产品头中的 146 个 Core + 4 个图像 C ABI，Rust staticlib 及其依赖不得穿透边界。
   swift_symbols="$(printf '%s\n' "$all_symbols" | grep '^\$s10CitizenSDK' || true)"
   [[ -n "$swift_symbols" ]] || fail "$label 未导出 CitizenSDK Swift 模块符号"
   foreign="$(printf '%s\n' "$all_symbols" \
@@ -978,7 +977,7 @@ write_apple_exported_symbols() {
   actual="$(printf '%s\n' "$all_symbols" | grep '^citizensdk_' || true)"
   expected="$(apple_linked_symbols)"
   [[ "$actual" == "$expected" ]] \
-    || fail "$label 未过滤链接不等于121公开+4内部+3图像符号闭集（共128项）"
+    || fail "$label 未过滤链接不等于产品头与既定内部符号闭集"
   swift_symbols="$(printf '%s\n' "$all_symbols" | grep '^\$s10CitizenSDK' || true)"
   [[ -n "$swift_symbols" ]] || fail "$label 未过滤链接没有 CitizenSDK Swift 导出"
   prepare_safe_output_file "$work_dir" "$destination" "$label 导出允许集"
@@ -986,8 +985,8 @@ write_apple_exported_symbols() {
     apple_public_symbols
     printf '%s\n' "$swift_symbols"
   } | sed 's/^/_/' | LC_ALL=C sort -u >"$destination"
-  [[ "$(grep -c '^_citizensdk_' "$destination" || true)" == 124 ]] \
-    || fail "$label 导出允许集没有精确 121 个 Core + 3 个图像 C ABI"
+  [[ "$(grep -c '^_citizensdk_' "$destination" || true)" == 150 ]] \
+    || fail "$label 导出允许集没有精确 146 个 Core + 4 个图像 C ABI"
 }
 
 write_framework_plist() {
@@ -1486,7 +1485,7 @@ compile_apple_flutter_adapter() {
 
 write_apple_test_package() {
   local harness="$1" static_library="$2" flutter_module="$3"
-  local qr_library="$4" zxing_library="$5"
+  local qr_library="$4" zxing_library="$5" product_swift_target="$6"
   local source destination
   for directory in \
     "$harness/Sources/CitizenSDK" \
@@ -1536,12 +1535,15 @@ let strict: [SwiftSetting] = [
 // default. The harness needs internal access for the canonical @testable XCTest
 // suites, so only its two generated implementation targets receive this flag.
 let testable: [SwiftSetting] = strict + [
-    .unsafeFlags(["-enable-testing"]),
+    // SDK源码继续按正式最低版本编译；只有XCTest目标使用较高运行库版本。
+    // SwiftPM/Xcode会重建driver目标，必须把生产目标直接传给编译前端。
+    .unsafeFlags(["-enable-testing", "-Xfrontend", "-target", "-Xfrontend", "$product_swift_target"]),
 ]
 
 let package = Package(
     name: "CitizenSDKAppleTests",
-    platforms: [.iOS(.v16), .macOS(.v13)],
+    // 仅测试包对齐XCTest运行库最低版本；交付框架仍支持iOS16/macOS13。
+    platforms: [.iOS(.v17), .macOS(.v14)],
     targets: [
         .binaryTarget(name: "$flutter_module", path: "Artifacts/$flutter_module.xcframework"),
         .target(
@@ -1593,8 +1595,15 @@ run_apple_test_harness() {
   local flutter_module="$5" flutter_xcframework="$6" mode="$7"
   local static_library qr_library zxing_library harness scratch artifact sdk_path runtime_framework_root=''
   local flutter_test_bundle framework_destination test_product_root test_bundle_names
-  local test_bundle_name resource_destination asset_name
+  local test_bundle_name resource_destination asset_name product_swift_target
   local -a swiftpm_paths swiftpm_target
+  # 生产源码的可用性诊断必须与交付目标一致，不能被XCTest运行库的最低版本抬高。
+  case "$apple_sdk" in
+    iphoneos) product_swift_target="arm64-apple-ios$ios_deployment_target" ;;
+    iphonesimulator) product_swift_target="arm64-apple-ios$ios_deployment_target-simulator" ;;
+    macosx) product_swift_target="arm64-apple-macosx$macos_deployment_target" ;;
+    *) fail "Apple XCTest SDK未登记：$apple_sdk" ;;
+  esac
   static_library="$CARGO_TARGET_DIR/$rust_target/release/libcitizensdk.a"
   [[ -f "$static_library" && ! -L "$static_library" ]] \
     || fail "$slice_name XCTest 缺少已构建 native/ffi 静态 Core"
@@ -1612,7 +1621,7 @@ run_apple_test_harness() {
   prepare_safe_directory "$work_dir" "$harness" "$slice_name XCTest harness"
   prepare_safe_directory "$work_dir" "$scratch" "$slice_name XCTest scratch"
   write_apple_test_package \
-    "$harness" "$static_library" "$flutter_module" "$qr_library" "$zxing_library"
+    "$harness" "$static_library" "$flutter_module" "$qr_library" "$zxing_library" "$product_swift_target"
   prepare_safe_directory "$work_dir" "$harness/Artifacts" "$slice_name XCTest artifacts"
   artifact="$harness/Artifacts/$flutter_module.xcframework"
   [[ ! -e "$artifact" && ! -L "$artifact" ]] \
@@ -1888,12 +1897,13 @@ build_apple_tests() {
   prepare_safe_output_file "$work_dir" "$test_header_root/citizensdk_qr_image.h" \
     "Apple XCTest 共享 QR 图像头文件"
   cp "$qr_image_header" "$test_header_root/citizensdk_qr_image.h"
-  run_apple_test_harness aarch64-apple-ios iphoneos arm64-apple-ios16.0 \
+  # XCTest运行库要求iOS17/macOS14；这里只调整测试目标，正式slice及消费者目标不变。
+  run_apple_test_harness aarch64-apple-ios iphoneos arm64-apple-ios17.0 \
     aarch64-apple-ios Flutter "$flutter_ios_xcframework" compile
   run_apple_test_harness aarch64-apple-ios-sim iphonesimulator \
-    arm64-apple-ios16.0-simulator aarch64-apple-ios-sim Flutter \
+    arm64-apple-ios17.0-simulator aarch64-apple-ios-sim Flutter \
     "$flutter_ios_xcframework" compile
-  run_apple_test_harness aarch64-apple-darwin macosx arm64-apple-macosx13.0 \
+  run_apple_test_harness aarch64-apple-darwin macosx arm64-apple-macosx14.0 \
     aarch64-apple-darwin FlutterMacOS "$flutter_macos_xcframework" run
   run_final_apple_consumer_smoke
 }
@@ -1925,15 +1935,18 @@ build_apple_framework_slice() {
   done < <(find "$darwin_source_root" -maxdepth 1 -type f -name '*.swift' -print | LC_ALL=C sort)
   [[ "${#swift_sources[@]}" -gt 0 ]] || fail "CitizenSDK Swift 产品源码为空"
 
+  # Rust中的C依赖必须与后续Swift/CMake共用本slice的SDK，不能继承外层平台值。
+  sdk_path="$(xcrun --sdk "$apple_sdk" --show-sdk-path)"
+  [[ -d "$sdk_path" ]] || fail "$slice_name 缺少受控 Apple SDK"
   case "$rust_target" in
     aarch64-apple-ios|aarch64-apple-ios-sim)
-      IPHONEOS_DEPLOYMENT_TARGET="$ios_deployment_target" \
+      SDKROOT="$sdk_path" IPHONEOS_DEPLOYMENT_TARGET="$ios_deployment_target" \
         CARGO_PROFILE_RELEASE_STRIP=false \
         cargo build --manifest-path "$product_ffi_manifest" --release --locked \
           --target "$rust_target"
       ;;
     aarch64-apple-darwin)
-      MACOSX_DEPLOYMENT_TARGET="$macos_deployment_target" \
+      SDKROOT="$sdk_path" MACOSX_DEPLOYMENT_TARGET="$macos_deployment_target" \
         CARGO_PROFILE_RELEASE_STRIP=false \
         cargo build --manifest-path "$product_ffi_manifest" --release --locked \
           --target "$rust_target"
@@ -2006,7 +2019,6 @@ build_apple_framework_slice() {
     done
   fi
 
-  sdk_path="$(xcrun --sdk "$apple_sdk" --show-sdk-path)"
   swiftc="$(xcrun --sdk "$apple_sdk" --find swiftc)"
   nm_bin="$(xcrun --find nm)"
   [[ -d "$sdk_path" && -x "$swiftc" && -x "$nm_bin" ]] \
@@ -3024,7 +3036,7 @@ build_linux() (
     -DCITIZENSDK_ZXING_SOURCE_DIR="$CITIZENSDK_ZXING_SOURCE_DIR" \
     -DCITIZENSDK_TEST_WORK_DIR="$linux_test_work" \
     -DCITIZENSDK_BUILD_TESTS=ON \
-    -DCITIZENSDK_ENABLE_WALLET_UI=ON \
+    -DCITIZENSDK_ENABLE_QR_CAPTURE=ON \
     -DCITIZENSDK_WARNINGS_AS_ERRORS=ON
   "$cmake_bin" --build "$cmake_build" --config Release --parallel
   verify_linux_ctest_inventory "$ctest_bin" "$cmake_build" LinuxHost 12
@@ -3097,7 +3109,6 @@ windows_install_files() {
     include/citizen_sdk/citizen_sdk_error.hpp \
     include/citizen_sdk/citizen_sdk_events.hpp \
     include/citizen_sdk/citizen_sdk_models.hpp \
-    include/citizen_sdk/citizen_sdk_wallet_flow.hpp \
     include/citizen_sdk/citizensdk_host.h \
     bin/Windows/citizensdk.dll bin/Windows/citizensdk_host.dll \
     lib/Windows/citizensdk.dll.lib lib/Windows/citizensdk_host.lib \
@@ -3122,7 +3133,7 @@ verify_windows_install() {
     const fs=require("fs"), p=require("path");
     const [prefix,version,core,build,sdk,windows,assets,listing]=process.argv.slice(1);
     const expected=listing.split("\n");
-    if(expected.length!==22 || new Set(expected).size!==22) throw Error("Windows install set must contain 22 files");
+    if(expected.length!==21 || new Set(expected).size!==21) throw Error("Windows install set must contain 21 files");
     const identity=x=>process.platform==="win32"?p.resolve(x).toLowerCase():p.resolve(x);
     function ordinary(path,directory) {
       const root=p.parse(path).root;
@@ -3170,7 +3181,7 @@ verify_windows_install() {
     }
     for(const name of ["citizensdk.h","citizensdk_types.h"]) same(p.join(sdk,"include",name),"include/"+name);
     same(p.join(sdk,"native","qr-image","citizensdk_qr_image.h"),"include/citizensdk_qr_image.h");
-    for(const name of ["citizen_sdk.hpp","citizen_sdk_config.hpp","citizen_sdk_error.hpp","citizen_sdk_events.hpp","citizen_sdk_models.hpp","citizen_sdk_wallet_flow.hpp","citizensdk_host.h"])
+    for(const name of ["citizen_sdk.hpp","citizen_sdk_config.hpp","citizen_sdk_error.hpp","citizen_sdk_events.hpp","citizen_sdk_models.hpp","citizensdk_host.h"])
       same(p.join(windows,"include","citizen_sdk",name),"include/citizen_sdk/"+name);
     for(const name of ["manifest.json","chainspec.json","light_sync_state.json"])
       same(p.join(assets,name),"share/citizensdk/citizenchain/"+name);
@@ -3821,7 +3832,7 @@ build_windows() {
 
 verify_windows_exports() {
   local library="$1" header="$2" label="$3" exports internal_symbols=""
-  # 只有 Core 采用 121 公开 + 4 内部闭集；Host 另导出自己的 17 项和 3 项统一图像接口。
+  # Core为147项公开闭集，无窗口私有符号；Host另导出自己的19项和4项统一图像接口。
   if [[ "$header" == "$product_header" ]]; then
     internal_symbols="$(product_internal_symbols)"
   else
@@ -3839,7 +3850,7 @@ verify_windows_exports() {
       const actual=[...process.env.CITIZENSDK_PE_EXPORTS.matchAll(/^\s*\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)(.*)$/gm)];
       if(actual.some(x=>x[2].includes("="))) throw Error("forwarded export");
       const names=actual.map(x=>x[1]).sort();
-      const expected=[...new Set([...fs.readFileSync(process.env.CITIZENSDK_PE_HEADER,"utf8").matchAll(/\b(citizensdk_[a-z0-9_]+)\s*\(/g)].map(x=>x[1]).concat(process.env.CITIZENSDK_PE_INTERNAL.split("\n").filter(Boolean)))].sort();
+      const expected=[...new Set([...fs.readFileSync(process.env.CITIZENSDK_PE_HEADER,"utf8").matchAll(/\b(citizensdk_[a-z0-9_]+)\s*\((?!\s*\*)/g)].map(x=>x[1]).concat(process.env.CITIZENSDK_PE_INTERNAL.split("\n").filter(Boolean)))].sort();
       if(JSON.stringify(names)!==JSON.stringify(expected)) throw Error("Windows full export set drift");
     ' || fail "Windows $label PE/COFF 或完整导出合同失败"
 }

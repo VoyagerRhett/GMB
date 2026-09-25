@@ -1,3 +1,5 @@
+import '../../support/fake_citizen_sdk.dart';
+import 'package:provider/provider.dart';
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizenapp/qr/pages/qr_scan_page.dart';
 import 'package:citizenapp/transaction/personal-manage/personal_account_create_page.dart';
@@ -7,12 +9,21 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../../support/isar_test_env.dart';
 
+late TestCitizenSdkHarness _sdkHarness;
+
 void main() {
+  _sdkHarness = TestCitizenSdkHarness(handlers: {
+    // 只验证原扫码入口和导航；摄像设备明确用合成资源，不访问真机。
+    'openQrCapture': (_) => ['capture-1', 42, 640, 480, 90],
+    'pauseQrCapture': (_) => [],
+    'resumeQrCapture': (_) => [],
+    'closeQrCapture': (_) => [],
+  });
   useIsolatedIsar();
 
   Future<void> pumpPage(WidgetTester tester) async {
     await tester.pumpWidget(
-      MaterialApp(
+      Provider<CitizenSdk>.value(value: _sdkHarness.sdk, child: MaterialApp(
         home: PersonalAccountCreatePage(
           walletStateLoader: () async => CitizenWalletState(
             initializationState: CitizenWalletInitializationState.empty,
@@ -22,7 +33,7 @@ void main() {
             accounts: const [],
           ),
         ),
-      ),
+      )),
     );
     await tester.pumpAndSettle();
   }

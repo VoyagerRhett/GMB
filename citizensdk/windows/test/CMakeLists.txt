@@ -32,12 +32,6 @@ if(TARGET citizen_sdk_plugin)
   target_link_libraries(citizensdk_windows_flutter_test_support PUBLIC advapi32)
   foreach(test_name IN LISTS CITIZENSDK_WINDOWS_FLUTTER_CONTRACT_TESTS)
     add_executable(${test_name} "${test_name}.cc")
-    if(test_name STREQUAL "citizen_sdk_flutter_wallet_flow_test")
-      target_sources(${test_name} PRIVATE
-        ../src/citizen_sdk_wallet_validation.cc
-        ../src/citizen_sdk_input_limits.cc
-        ../src/citizen_sdk_host_record.cc)
-    endif()
     citizensdk_configure_flutter_target(${test_name})
     target_link_libraries(${test_name} PRIVATE citizensdk_windows_flutter_test_support)
     target_compile_definitions(${test_name} PRIVATE
@@ -78,7 +72,7 @@ target_include_directories(citizensdk_windows_test_support PUBLIC
 target_compile_options(citizensdk_windows_test_support PRIVATE /W4 /permissive- /utf-8 /EHsc
   $<$<BOOL:${CITIZENSDK_WARNINGS_AS_ERRORS}>:/WX>)
 target_link_libraries(citizensdk_windows_test_support PUBLIC CitizenSDK::Core CitizenSDK::QrImage
-  "${CITIZENSDK_SQLITE_ARCHIVE}" ncrypt bcrypt tbs advapi32 user32 gdi32 comctl32 ntdll wtsapi32 mfplat mfreadwrite mfuuid ole32)
+  "${CITIZENSDK_SQLITE_ARCHIVE}" ncrypt bcrypt tbs advapi32 user32 gdi32 comctl32 ntdll wtsapi32 mfplat mfreadwrite mfuuid ole32 windowscodecs)
 
 set(CITIZENSDK_WINDOWS_CONTRACT_TESTS
   citizen_sdk_api_contract_test

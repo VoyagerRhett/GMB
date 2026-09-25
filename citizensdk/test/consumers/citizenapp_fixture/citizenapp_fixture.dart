@@ -3,7 +3,7 @@ import 'dart:typed_data';
 
 import 'package:citizen_sdk/citizen_sdk.dart';
 
-/// CitizenApp-owned transfer draft. This type must never move into SDK code.
+/// SDK测试所有者的合成转账夹具，不代表生产App保留编解码或业务规则。
 final class CitizenAppTransferDraft {
   CitizenAppTransferDraft({
     required Uint8List destination,
@@ -39,7 +39,7 @@ final class CitizenAppTransferDraft {
   final String remark;
 }
 
-/// CitizenApp-owned event projection used only after the App decodes chain bytes.
+/// 仅验证合成字段往返，不是生产链事件模型或App解码实现。
 final class CitizenAppTransferEvent {
   CitizenAppTransferEvent({
     required Uint8List destination,
@@ -52,7 +52,7 @@ final class CitizenAppTransferEvent {
   final String remark;
 }
 
-/// App-side adapter: business encoding stays here and SDK sees only opaque bytes.
+/// SDK测试夹具通过公开端口传入不同的不透明字节，不连接真实产品。
 final class CitizenAppFixture {
   const CitizenAppFixture({
     required this.chain,
@@ -80,8 +80,7 @@ final class CitizenAppFixture {
   Future<CitizenTransactionHistoryPage> readSdkExecutionFacts() =>
       history.getTransactionHistory();
 
-  /// App-owned RuntimeCall encoding: pallet/call and all business fields remain
-  /// outside CitizenSDK.
+  /// 测试专用合成RuntimeCall，不承诺真实链pallet/call布局或生产职责。
   static Uint8List encodeTransferRuntimeCall(CitizenAppTransferDraft draft) {
     final remark = utf8.encode(draft.remark);
     return Uint8List.fromList(<int>[
@@ -94,7 +93,7 @@ final class CitizenAppFixture {
     ]);
   }
 
-  /// App-owned storage key; SDK only verifies the supplied bytes against a block.
+  /// 合成storage键仅验证公开读取参数和块锚点接线。
   static Uint8List transferStorageKey(Uint8List accountId) {
     if (accountId.length != 32) {
       throw ArgumentError.value(
@@ -109,8 +108,7 @@ final class CitizenAppFixture {
     ]);
   }
 
-  /// Minimal App-side event decoder used to prove that SDK history remains a
-  /// product-independent execution log.
+  /// 合成事件解码只验证测试字段往返，不作为生产App保留解码逻辑的依据。
   static CitizenAppTransferEvent decodeTransferEvent(Uint8List bytes) {
     const fixedLength = 32 + 16 + 1;
     if (bytes.length < fixedLength) {

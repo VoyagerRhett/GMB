@@ -1,38 +1,36 @@
-// 全仓签名消息金标向量测试(ADR-026 Tier 2)。
-//
-// 金标 fixture 由 Rust 切片导出(canonical 真源
-// citizenchain/runtime/primitives/tests/fixtures/signing_domain_vectors.json
-// 的副本),逐条断言 Dart 镜像 signingMessage(op_tag, scale_payload) == message_hex,
-// 防止 Dart 与链端 primitives::sign 漂移。
-//
-// 治理 5 个 op_tag(0x10-0x14)message_hex 任何时候不得变化;业务哈希域
-// (0x15-0x17/0x1A)已冻结；0x1A 是不可复用的历史保留值，当前 Chat 不调用。
-//
-// fixture 缺席时(Rust 切片尚未落地)skip,不阻塞纯 Dart 测试。
-
+// 原签名域金标逐字节比较SDK Core真实结果；不保留App哈希镜像或预填答案。
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:citizenapp/signer/signing.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
+import '../support/fake_citizen_sdk.dart';
 
 const _fixturePath = 'test/signer/fixtures/signing_domain_vectors.json';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  late TestCitizenSdkTransport encodingTransport;
+  late CitizenSdk encodingSdk;
+  setUp(() async {
+    encodingTransport = TestCitizenSdkTransport({}, useCore: true);
+    encodingSdk = await encodingTransport.open();
+  });
+  tearDown(() async {
+    await encodingSdk.close();
+    await encodingTransport.dispose();
+  });
   final file = File(_fixturePath);
   if (!file.existsSync()) {
-    test('签名金标 fixture 尚未生成(Rust 切片落地后启用)', () {
-      markTestSkipped('缺少 $_fixturePath —— 由 Rust signing golden 切片导出');
-    }, skip: '缺少 $_fixturePath');
-    return;
+    throw StateError('缺少原金标$_fixturePath');
   }
 
   final root = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
   final vectors = (root['vectors'] as List).cast<Map<String, dynamic>>();
 
   group('签名消息金标向量(链端 primitives::sign ↔ Dart 逐字节对齐)', () {
-    test('fixture 域常量为 GMB,与 Dart kGmbSignDomain 一致', () {
+    test('fixture 域常量为 GMB,与 Dart kGmbSignDomain 一致', () async {
       expect(root['domain'], 'GMB');
       expect(kGmbSignDomain, equals(const [0x47, 0x4D, 0x42]));
     });
@@ -43,8 +41,8 @@ void main() {
       final scalePayload = _hexToBytes(v['scale_payload_hex'] as String);
       final expectedHex = (v['message_hex'] as String).toLowerCase();
 
-      test('$name (op_tag=0x${opTag.toRadixString(16)}) → $expectedHex', () {
-        final actual = signingMessage(opTag: opTag, scalePayload: scalePayload);
+      test('$name (op_tag=0x${opTag.toRadixString(16)}) → $expectedHex', () async {
+        final actual = (await CitizenSigning.encodePayload(CitizenSigningPayload.message(opTag: opTag, scalePayload: scalePayload)));
         expect(_hexLower(actual), expectedHex);
       });
     }

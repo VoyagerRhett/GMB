@@ -83,7 +83,7 @@ pub use transaction_prepare::{
 pub use wallet::{
     citizen_ss58_address, parse_citizen_ss58_address, ColdWalletAccount, WalletAccount,
     WalletCleanupPlan, WalletOrigin, WalletProfile, WalletProvisioningPlan, WalletSignMode,
-    WalletState, CITIZEN_SS58_PREFIX, CITIZEN_WALLET_INDEX, FIRST_COLD_WALLET_INDEX,
+    WalletState, WalletRecord, WalletRecordAccount, WalletDiagnosticReason, CITIZEN_SS58_PREFIX, CITIZEN_WALLET_INDEX, FIRST_COLD_WALLET_INDEX,
     MAX_COLD_WALLET_ACCOUNTS, MAX_WALLET_ACCOUNT_INDEX, MAX_WALLET_ACCOUNT_NAME_SCALARS,
 };
 

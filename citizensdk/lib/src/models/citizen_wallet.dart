@@ -10,6 +10,39 @@ enum CitizenWalletSignMode { hot, cold }
 /// 真实目录的初始化事实；读取失败用异常表达，不能冒充empty。
 enum CitizenWalletInitializationState { empty, ready, recovering }
 
+/// 异常原因是只读诊断，不构成第三种签名模式。
+enum CitizenWalletDiagnosticReason { invalidSignMode, invalidIdentity, invalidStructure }
+
+/// 来自Core同一精确目标校验的公开关联，不是执行权限，不含秘密引用。
+final class CitizenWalletCleanupTargets {
+  CitizenWalletCleanupTargets({required List<String> accountIds, required this.deleteWalletWideKey})
+      : accountIds = List<String>.unmodifiable(accountIds);
+  final List<String> accountIds;
+  final bool deleteWalletWideKey;
+}
+
+final class CitizenWalletDiagnostic {
+  const CitizenWalletDiagnostic({required this.walletIndex, required this.walletName,
+    required this.accountId, required this.ss58Address, required this.diagnosticReason,
+    required this.signMode, required this.cleanupTargets});
+  final int walletIndex;
+  final String walletName;
+  final String accountId;
+  final String? ss58Address;
+  final CitizenWalletDiagnosticReason diagnosticReason;
+  final CitizenWalletSignMode? signMode;
+  final CitizenWalletCleanupTargets? cleanupTargets;
+}
+
+/// 同实例真实快照资源；动作由Core复核原记录，不使用宿主回传字段作为修复依据。
+abstract interface class CitizenWalletInspection {
+  CitizenWalletState get state;
+  CitizenSdkOperation<CitizenWalletState> repairHot(int walletIndex);
+  CitizenSdkOperation<CitizenWalletState> rename({required int walletIndex, required String name});
+  CitizenSdkOperation<CitizenWalletState> delete(int walletIndex);
+  Future<void> release();
+}
+
 /// Core唯一输入校验结果；枚举值与公开C合同一致，不包含界面文案。
 enum CitizenWalletInputReason {
   valid, inputTooLong, wordCount, unknownWord, checksum, passwordFormat, mnemonicFormat,
@@ -90,7 +123,7 @@ final class CitizenCredentialChallenge {
   final Future<void> cancelled;
 }
 
-/// SDK 安全界面可选的 BIP39 词数；数值直接作为原生合同，不使用枚举序号。
+/// SDK派生能力支持的BIP39词数；数值直接作为原生合同，不包含界面定义。
 enum CitizenWalletWordCount {
   words12(12),
   words18(18),
@@ -101,47 +134,11 @@ enum CitizenWalletWordCount {
   final int value;
 }
 
-/// 宿主传给 SDK 唯一钱包初始化界面的非秘密展示内容。
-///
-/// SDK 只按固定位置显示这些文字，不解释宿主业务、不接收路由或行为回调。所有字段
-/// 必须是单行、已修剪的 1..256 个 Unicode scalar；助记词、密码、公钥和私钥绝对
-/// 不得进入本对象。
-final class CitizenWalletInitializationContent {
-  CitizenWalletInitializationContent({
-    required this.walletAccountRoleText,
-    required this.walletAuthorizationText,
-    required this.walletCompletionText,
-    required this.walletBackupText,
-    required this.walletColdAccountText,
-  }) {
-    for (final entry in <String, String>{
-      'walletAccountRoleText': walletAccountRoleText,
-      'walletAuthorizationText': walletAuthorizationText,
-      'walletCompletionText': walletCompletionText,
-      'walletBackupText': walletBackupText,
-      'walletColdAccountText': walletColdAccountText,
-    }.entries) {
-      final value = entry.value;
-      if (value.trim() != value ||
-          value.runes.isEmpty ||
-          value.runes.length > 256 ||
-          value.runes.any((scalar) => scalar <= 0x1f || scalar == 0x7f)) {
-        throw ArgumentError.value(value, entry.key, '必须是已修剪的单行 1..256 字符文本');
-      }
-    }
-  }
-
-  final String walletAccountRoleText;
-  final String walletAuthorizationText;
-  final String walletCompletionText;
-  final String walletBackupText;
-  final String walletColdAccountText;
-}
-
 /// 一只无根热钱包的公开资料；不包含 generation、secret owner 或任何秘密。
 final class CitizenWalletProfile {
   CitizenWalletProfile({
     required this.walletIndex,
+    required this.walletName,
     required this.masterAccountId,
     required this.origin,
     required this.createdAtMillis,
@@ -150,6 +147,8 @@ final class CitizenWalletProfile {
   }) : accounts = List<CitizenAccount>.unmodifiable(accounts);
 
   final int walletIndex;
+  /// 钱包级本机标签；与账户0的name独立。
+  final String walletName;
   final String masterAccountId;
   final CitizenWalletOrigin origin;
   final BigInt createdAtMillis;
@@ -198,17 +197,36 @@ final class CitizenWalletStateAccount {
 final class CitizenWalletState {
   CitizenWalletState({
     required this.revision,
+    this.activeWalletIndex,
     required this.hotProfile,
     required List<CitizenWalletStateAccount> accounts,
     required this.initializationState,
     required this.cleanupPending,
-  }) : accounts = List<CitizenWalletStateAccount>.unmodifiable(accounts);
+    List<CitizenWalletDiagnostic> diagnostics = const [],
+  }) : accounts = List<CitizenWalletStateAccount>.unmodifiable(accounts),
+       diagnostics = List<CitizenWalletDiagnostic>.unmodifiable(diagnostics);
 
   final BigInt revision;
+  /// 当前付款钱包，不代表全局默认账户或热钱包内部activeAccountId。
+  final int? activeWalletIndex;
   final CitizenWalletProfile? hotProfile;
   final List<CitizenWalletStateAccount> accounts;
   final CitizenWalletInitializationState initializationState;
   final bool cleanupPending;
+  final List<CitizenWalletDiagnostic> diagnostics;
+
+  /// 只连接同一快照内的付款钱包与其账户；热钱包使用钱包锚点而非热当前账户。
+  CitizenWalletStateAccount? get activeWalletAccount {
+    final index = activeWalletIndex;
+    if (index == null) return null;
+    for (final account in accounts) {
+      if (account.walletIndex == index &&
+          (account.signMode == CitizenWalletSignMode.cold || account.accountId == hotProfile?.masterAccountId)) {
+        return account;
+      }
+    }
+    return null;
+  }
 
   /// 默认账户只能从全局顺序第一项读取；第 1.2 步不提供无授权写入口。
   CitizenWalletStateAccount? get defaultAccount =>

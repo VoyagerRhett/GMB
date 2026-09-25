@@ -31,30 +31,100 @@ internal object CitizenSdkFlutterCodec {
     const val MAXIMUM_TRANSACTION_CALL_DATA_BYTES = 1024 * 1024
 
     val methods: Set<String> = linkedSetOf(
-        "open", "start", "stop", "close", "respondCredential", "cancelCredential", "getCapabilities", "getFinalizedHead",
-        "encodeSigningPayload", "qrEncodeDocument", "qrPrepareAccountAuthorization",
-        "getSyncStatus", "getBestHead", "getFinalizedBlockAt", "resolveFinalizedBlock",
-        "getBlockHeader", "getBlockBody", "getRuntimeContext", "getStorage", "getStorageBatch",
-        "getStorageKeysPaged", "callRuntimeApi",
-        "getSystemEvents", "exportState", "importState",
-        "getGenesisHash", "getAccountBalance", "getAccountBalances", "getAccountNonce", "getFeeSnapshot", "openPrivateKey",
-        "getWalletState", "validateWalletPassword", "validateWalletMnemonic", "walletWordSuggestions",
-        "prepareWalletCreation", "copyRecoveryPhrase", "commitWalletCreation", "releasePreparedWallet",
-        "revealPrivateKey", "closePrivateKey", "cancelOperation", "addNextWalletAccount",
-        "signAndDeleteWallet", "importColdAccountCode", "importColdAccountId", "importColdAccountSs58",
-        "reorderWalletAccountsWithoutDefaultChange", "renameAccount", "deleteAccount",
-        "importWallet", "addWalletAccounts", "setActiveWalletAccount",
+        "open",
+        "start",
+        "stop",
+        "close",
+        "getCapabilities",
+        "getFinalizedHead",
+        "getSyncStatus",
+        "getBestHead",
+        "getFinalizedBlockAt",
+        "resolveFinalizedBlock",
+        "getBlockHeader",
+        "getBlockBody",
+        "getRuntimeContext",
+        "getStorage",
+        "getStorageBatch",
+        "getStorageKeysPaged",
+        "callRuntimeApi",
+        "getSystemEvents",
+        "exportState",
+        "importState",
+        "getGenesisHash",
+        "getAccountBalance",
+        "getAccountBalances",
+        "getAccountNonce",
+        "getFeeSnapshot",
+        "getWalletState",
+        "inspectWallets",
+        "releaseWalletInspection",
+        "repairHotWallet",
+        "renameDiagnosticWallet",
+        "deleteDiagnosticWallet",
+        "validateWalletPassword",
+        "validateWalletMnemonic",
+        "walletWordSuggestions",
+        "prepareWalletCreation",
+        "copyRecoveryPhrase",
+        "commitWalletCreation",
+        "releasePreparedWallet",
+        "openPrivateKey",
+        "revealPrivateKey",
+        "closePrivateKey",
+        "cancelOperation",
+        "respondCredential",
+        "cancelCredential",
+        "addNextWalletAccount",
+        "signAndDeleteWallet",
+        "importColdAccountCode",
+        "importColdAccountId",
+        "importColdAccountSs58",
+        "reorderWalletAccountsWithoutDefaultChange",
+        "setActiveWallet",
+        "renameWallet",
+        "renameAccount",
+        "deleteAccount",
+        "importWallet",
+        "addWalletAccounts",
+        "setActiveWalletAccount",
         "deleteWallet",
-        "reconcileWalletCleanup", "signWalletPayload", "deriveApplicationKey",
-        "beginSigning", "consumeExternalSignature", "cancelSigning",
-        "beginDefaultAccountChange", "consumeDefaultAccountChange",
-        "verifySignature", "prepareTransaction", "cancelPreparedTransaction",
-        "executePreparedTransaction", "consumePreparedTransactionQrResponse",
-        "cancelPreparedTransactionExecution", "getTransactionHistory",
+        "reconcileWalletCleanup",
+        "signWalletPayload",
+        "deriveApplicationKey",
+        "beginSigning",
+        "consumeExternalSignature",
+        "cancelSigning",
+        "beginDefaultAccountChange",
+        "consumeDefaultAccountChange",
+        "verifySignature",
+        "encodeSigningPayload",
+        "qrEncodeDocument",
+        "qrPrepareAccountAuthorization",
+        "prepareTransaction",
+        "cancelPreparedTransaction",
+        "executePreparedTransaction",
+        "consumePreparedTransactionQrResponse",
+        "cancelPreparedTransactionExecution",
+        "getTransactionHistory",
         "syncTransactionHistory",
-        "qrParse", "qrCreateSignRequest", "qrValidateSignResponse", "qrConsumeSignResponse", "qrCancelSignRequest", "qrEncodeAccountId",
-        "qrDecodeLuminance", "qrEncode", "reviewQrRequest", "releaseQrReview", "signQrRequest",
-        "openQrCapture", "closeQrCapture", "pauseQrCapture", "resumeQrCapture", "setQrCaptureTorch", "qrDecodeImage",
+        "qrParse",
+        "qrCreateSignRequest",
+        "qrValidateSignResponse",
+        "qrConsumeSignResponse",
+        "qrCancelSignRequest",
+        "qrEncodeAccountId",
+        "qrDecodeLuminance",
+        "qrEncode",
+        "reviewQrRequest",
+        "releaseQrReview",
+        "openQrCapture",
+        "closeQrCapture",
+        "pauseQrCapture",
+        "resumeQrCapture",
+        "setQrCaptureTorch",
+        "qrDecodeImage",
+        "signQrRequest",
     )
 
     sealed interface Request {
@@ -155,6 +225,22 @@ internal object CitizenSdkFlutterCodec {
             override val requestSequence: Long,
             val code: String,
             val name: String,
+        ) : SessionRequest
+        data class WalletInspection(
+            val method: String,
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val resourceId: String,
+            val walletIndex: Long,
+            val name: String?,
+        ) : SessionRequest
+        data class WalletMetadata(
+            val method: String,
+            override val sessionId: String,
+            override val requestSequence: Long,
+            val expectedRevision: String,
+            val walletIndex: Long,
+            val name: String?,
         ) : SessionRequest
         data class RenameWalletAccount(
             val method: String,
@@ -282,6 +368,8 @@ internal object CitizenSdkFlutterCodec {
         is Request.WalletInput -> request.method
         is Request.Resource -> request.method
         is Request.ColdCode -> "importColdAccountCode"
+        is Request.WalletMetadata -> request.method
+        is Request.WalletInspection -> request.method
         is Request.RenameWalletAccount -> request.method
         is Request.ColdSs58 -> "importColdAccountSs58"
         is Request.ReorderWalletAccounts -> "reorderWalletAccountsWithoutDefaultChange"
@@ -299,6 +387,20 @@ internal object CitizenSdkFlutterCodec {
     }
 
     /** open 与公开验签无会话；其他请求保留版本、会话、序号和固定字段位置。 */
+    fun envelope(method: String, rawArguments: Any?): Request.Empty? {
+        if (method in setOf("open", "verifySignature", "encodeSigningPayload")) return null
+        val tuple = rawArguments as? List<*>
+            ?: throw failure(CitizenSdkErrorCode.INVALID_ARGUMENT, "Arguments must be a tuple")
+        if (tuple.size < 3 || exactLong(tuple[0], "protocolVersion") != PROTOCOL_VERSION.toLong()) {
+            throw failure(CitizenSdkErrorCode.INVALID_ARGUMENT, "Invalid request envelope")
+        }
+        val session = string(tuple[1], "sessionId", 1, 128)
+        val sequence = exactLong(tuple[2], "requestSequence")
+        if (sequence <= 0) badRequest("requestSequence must be positive", session, sequence)
+        return Request.Empty(method, session, sequence)
+    }
+
+    /** 参数解码不修改序号；插件必须先以有效外壳调用唯一Core接纳入口。 */
     fun decode(method: String, rawArguments: Any?): Request {
         if (method !in methods) throw failure(CitizenSdkErrorCode.UNSUPPORTED, "Unsupported method")
         val tuple = rawArguments as? List<*>
@@ -346,7 +448,7 @@ internal object CitizenSdkFlutterCodec {
                 }
                 "start", "stop", "close", "getCapabilities", "getFinalizedHead", "getSyncStatus",
                 "getBestHead", "exportState", "getGenesisHash",
-                "getFeeSnapshot", "getWalletState", "deleteWallet", "signAndDeleteWallet",
+                "getFeeSnapshot", "getWalletState", "inspectWallets", "deleteWallet", "signAndDeleteWallet",
                 "reconcileWalletCleanup" -> {
                     length(3)
                     Request.Empty(method, sessionId, sequence)
@@ -485,7 +587,7 @@ internal object CitizenSdkFlutterCodec {
                         password = utf8Text(tuple[4], "password", 0, 1024), indices = indices)
                 }
                 "copyRecoveryPhrase", "commitWalletCreation", "releasePreparedWallet",
-                "revealPrivateKey", "closePrivateKey", "cancelOperation", "signQrRequest", "releaseQrReview",
+                "revealPrivateKey", "closePrivateKey", "cancelOperation", "signQrRequest", "releaseQrReview", "releaseWalletInspection",
                 "closeQrCapture", "pauseQrCapture", "resumeQrCapture" -> {
                     length(4)
                     val id = string(tuple[3], "resourceId", 1, 128)
@@ -500,6 +602,23 @@ internal object CitizenSdkFlutterCodec {
                     val rawName = string(tuple[4], "name", 0, 128)
                     val name = if (rawName.isEmpty()) "" else checkedAccountName(rawName, sessionId, sequence)
                     Request.ColdCode(sessionId, sequence, qrText(tuple[3], "account code"), name)
+                }
+                "repairHotWallet", "renameDiagnosticWallet", "deleteDiagnosticWallet" -> {
+                    length(if (method == "renameDiagnosticWallet") 6 else 5)
+                    val id = string(tuple[3], "resourceId", 1, 128)
+                    if (!Regex("^[A-Za-z0-9_-]+$").matches(id)) badRequest("resourceId is invalid", sessionId, sequence)
+                    val index = exactLong(tuple[4], "walletIndex")
+                    if (index !in 0..0xffffffffL) badRequest("walletIndex must be uint32", sessionId, sequence)
+                    val name = if (method == "renameDiagnosticWallet") checkedAccountName(string(tuple[5], "name", 1, 128), sessionId, sequence) else null
+                    Request.WalletInspection(method, sessionId, sequence, id, index, name)
+                }
+                "setActiveWallet", "renameWallet" -> {
+                    length(if (method == "renameWallet") 6 else 5)
+                    val revision = unsigned64Decimal(tuple[3], "expectedRevision")
+                    val index = exactLong(tuple[4], "walletIndex")
+                    if (index !in 0..0xffffffffL) badRequest("walletIndex must be uint32", sessionId, sequence)
+                    val name = if (method == "renameWallet") checkedAccountName(string(tuple[5], "name", 1, 128), sessionId, sequence) else null
+                    Request.WalletMetadata(method, sessionId, sequence, revision, index, name)
                 }
                 "renameAccount", "importColdAccountId" -> {
                     length(5)
@@ -884,6 +1003,7 @@ internal object CitizenSdkFlutterCodec {
             encodeHash32(profile.masterAccountId()),
             encodeHash32(profile.activeAccountId()),
             profile.accounts.map(::walletAccount),
+            profile.walletName,
         )
     }
 
@@ -904,6 +1024,10 @@ internal object CitizenSdkFlutterCodec {
         },
         value.initializationState,
         value.cleanupPending,
+        value.activeWalletIndex,
+        value.diagnostics.map { item -> listOf(item.walletIndex, item.walletName, encodeHash32(item.accountId()), item.ss58Address,
+            item.diagnosticReason, item.signMode?.let { if (it == CitizenWalletSignMode.HOT) "hot" else "cold" },
+            item.cleanupTargets?.let { listOf(it.accountIds().map(::encodeHash32), it.deleteWalletWideKey) }) },
     )
 
     fun signature(value: CitizenSignature): ByteArray = value.bytes().also { check(it.size == 64) }

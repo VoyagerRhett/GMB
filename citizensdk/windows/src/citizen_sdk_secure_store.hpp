@@ -2,6 +2,7 @@
 #define CITIZENSDK_WINDOWS_SECURE_STORE_HPP
 
 #include <array>
+#include <vector>
 #include <filesystem>
 #include <optional>
 #include "citizen_sdk_sqlite.hpp"
@@ -38,6 +39,9 @@ class SecureStore final : public SQLiteStore {
   HostRecord wallet_profile_load();
   HostRecord wallet_profile_compare_and_swap(uint64_t expected,
                                              const Bytes &candidate);
+  // 跨代际只读存在性；错误不能当false，不返回密文或钥。
+  bool has_account_secret(const std::array<uint8_t, 32> &account_id);
+  std::vector<WalletKey> vault_generations();
   HostRecord encrypted_secret_load(const SecretIdentity &identity);
   HostRecord encrypted_secret_compare_and_swap(const SecretIdentity &identity,
                                                uint64_t expected,

@@ -1,3 +1,4 @@
+import '../support/fake_citizen_sdk.dart';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -123,6 +124,7 @@ class _SessionIdentityCache implements CurrentUserContext {
 }
 
 void main() {
+  TestCitizenSdkHarness();
   test('注册 wire 的 p256_public_key 带 0x 前缀（ADR-041），公钥本身裸', () async {
     // 65 字节未压缩点裸 hex（04 || 128 hex）。
     final barePub = '04${'a' * 128}';

@@ -1,4 +1,4 @@
-// 验证钱包流程与关闭 admission 使用同一个单调状态机。
+// 验证实际服务租约与关闭接纳使用同一个单调状态机；旧SDK窗口token已删除。
 #include <cassert>
 #include <condition_variable>
 #include <fstream>
@@ -8,7 +8,6 @@
 #include <thread>
 
 #include "citizen_sdk_lifecycle.hpp"
-#include "citizen_sdk_qr_flow.hpp"
 #include "citizen_sdk/citizen_sdk.hpp"
 
 #ifndef CITIZENSDK_WINDOWS_TEST_SOURCE_DIR
@@ -19,20 +18,6 @@
 #endif
 
 int main() {
-  // 正式原生 flow 使用的取消门；不模拟 GTK/Win32，也不把它冒充设备验收。
-  {
-    citizen_sdk::windows::QrFlowCancellation gate;
-    assert(gate.accepts() && !gate.cancelled() && !gate.closing());
-    gate.cancel();
-    assert(!gate.accepts() && gate.cancelled());
-    assert(!gate.begin_cleanup());
-    assert(gate.begin_cleanup());
-    gate.cancel();
-    assert(!gate.accepts() && gate.cancelled() && gate.closing());
-    citizen_sdk::windows::QrFlowCancellation completed;
-    assert(!completed.begin_cleanup());
-    assert(!completed.accepts() && !completed.cancelled());
-  }
   // 只测试 Core 公共 JSON 的结构投影，业务校验与真实签名仍只由 Rust 测试覆盖。
   assert(citizen_sdk::detail::qr_public_field(
       R"({"kind":5,"canonical_text":"QR_\u00561"})", "canonical_text", 2331) == "QR_V1");
@@ -47,55 +32,21 @@ int main() {
   using citizen_sdk::windows::Lifecycle;
 
   Lifecycle lifecycle;
-  const uint64_t wallet = lifecycle.reserve_wallet_flow();
-  assert(wallet != 0);
-  assert(lifecycle.wallet_active());
-
-  bool second_wallet_busy = false;
-  try {
-    (void)lifecycle.reserve_wallet_flow();
-  } catch (const HostError &error) {
-    second_wallet_busy = error.code() == CITIZENSDK_ERROR_BUSY;
-  }
-  assert(second_wallet_busy);
-
-  lifecycle.finish_wallet_flow(wallet + 1);
-  assert(lifecycle.wallet_active());
-  bool close_busy = false;
-  try {
-    (void)lifecycle.begin_close();
-  } catch (const HostError &error) {
-    close_busy = error.code() == CITIZENSDK_ERROR_BUSY;
-  }
-  assert(close_busy);
-
-  lifecycle.finish_wallet_flow(wallet);
-  assert(!lifecycle.wallet_active());
   assert(lifecycle.begin_close());
+  bool concurrent_close_busy = false;
+  try { (void)lifecycle.begin_close(); }
+  catch (const HostError &error) { concurrent_close_busy = error.code() == CITIZENSDK_ERROR_BUSY; }
+  assert(concurrent_close_busy);
   lifecycle.cancel_close(false);
-  const uint64_t retry_wallet = lifecycle.reserve_wallet_flow();
-  lifecycle.finish_wallet_flow(retry_wallet);
-
+  lifecycle.begin_service(); lifecycle.finish_service();
   assert(lifecycle.begin_close());
   lifecycle.cancel_close(true);
-  bool teardown_rejected_wallet = false;
-  try {
-    (void)lifecycle.reserve_wallet_flow();
-  } catch (const HostError &error) {
-    teardown_rejected_wallet =
-        error.code() == CITIZENSDK_ERROR_INVALID_STATE;
-  }
-  assert(teardown_rejected_wallet);
-  assert(lifecycle.begin_close());
-  lifecycle.commit_closed();
+  bool teardown_rejected_service = false;
+  try { lifecycle.begin_service(); }
+  catch (const HostError &error) { teardown_rejected_service = error.code() == CITIZENSDK_ERROR_INVALID_STATE; }
+  assert(teardown_rejected_service);
+  assert(lifecycle.begin_close()); lifecycle.commit_closed();
   assert(!lifecycle.begin_close());
-  bool closed_rejected = false;
-  try {
-    (void)lifecycle.reserve_wallet_flow();
-  } catch (const HostError &error) {
-    closed_rejected = error.code() == CITIZENSDK_ERROR_INVALID_STATE;
-  }
-  assert(closed_rejected);
 
   // 模拟 worker 正在等 Win32 认证：service 只持租约、不持状态机锁。
   // UI 仍可查询状态并立即取得 BUSY；worker 返回后正常关闭且关闭期间
@@ -119,7 +70,6 @@ int main() {
     std::unique_lock<std::mutex> guard(service_lock);
     service_ready.wait(guard, [&] { return entered; });
   }
-  assert(!services.wallet_active());
   bool active_service_busy = false;
   try {
     (void)services.begin_close();
@@ -154,26 +104,17 @@ int main() {
   }
   assert(closed_rejected_service);
 
-  // 安全查看取消/清屏不等于请求终态。运行正式 Lifecycle 验证：认证租约
-  // 排空后，查看仍须保留钱包租约，只有真实终态才释放；这不模拟原生 UI。
-  Lifecycle private_view;
-  const uint64_t private_view_token = private_view.reserve_wallet_flow();
-  private_view.begin_service();
-  for (const bool authentication_drained : {false, true}) {
-    if (authentication_drained) private_view.finish_service();
-    assert(private_view.wallet_active());
-    bool private_view_busy = false;
-    try { (void)private_view.begin_close(); }
-    catch (const HostError &error) { private_view_busy = error.code() == CITIZENSDK_ERROR_BUSY; }
-    assert(private_view_busy);
-  }
-  private_view.finish_wallet_flow(private_view_token + 1);
-  assert(private_view.wallet_active());
-  private_view.finish_wallet_flow(private_view_token);
-  assert(private_view.begin_close());
-  private_view.commit_closed();
-  private_view.finish_wallet_flow(private_view_token); // 重复晚终态不能复活状态。
-  assert(!private_view.begin_close() && !private_view.wallet_active());
+  // 多个实际服务必须分别排空，归还其中一个不能提前释放Host。
+  Lifecycle multiple;
+  multiple.begin_service(); multiple.begin_service();
+  multiple.finish_service();
+  bool remaining_busy = false;
+  try { (void)multiple.begin_close(); }
+  catch (const HostError &error) { remaining_busy = error.code() == CITIZENSDK_ERROR_BUSY; }
+  assert(remaining_busy);
+  multiple.finish_service();
+  assert(multiple.begin_close()); multiple.commit_closed();
+  assert(!multiple.begin_close());
 
   const auto read = [](const char *relative) {
     const std::string path = std::string(CITIZENSDK_WINDOWS_TEST_SOURCE_DIR) +
@@ -231,14 +172,13 @@ int main() {
     ++leased_entry_points;
     ++lease_cursor;
   }
-  // 安全查看也使用唯一 Host lease；模块构造不新增另一套资源生命周期。
-  assert(leased_entry_points == 12);
-  const auto private_view_entry = host_api.find("citizensdk_host_view_account_private_key(");
-  const auto private_view_lease = host_api.find("auto host = acquire_host(", private_view_entry);
-  const auto private_view_call = host_api.find("view_account_private_key(host.entry()->host", private_view_lease);
-  assert(private_view_entry != std::string::npos && private_view_lease != std::string::npos &&
-         private_view_call != std::string::npos && private_view_entry < private_view_lease &&
-         private_view_lease < private_view_call);
+  // 采集和普通请求都沿同一Host服务租约，不再有SDK窗口入口。
+  assert(leased_entry_points == 14);
+  const auto capture_entry = host_api.find("citizensdk_host_open_qr_capture(");
+  const auto capture_lease = host_api.find("auto host = acquire_host(", capture_entry);
+  const auto capture_call = host_api.find("open_qr_capture(", capture_lease);
+  assert(capture_entry != std::string::npos && capture_lease != std::string::npos &&
+         capture_call != std::string::npos && capture_entry < capture_lease && capture_lease < capture_call);
   const auto retirement = host_api.find("begin_retirement(host_handle, host, false)");
   const auto host_close = host_api.find("code = host->close()", retirement);
   const auto registry_erase = host_api.find("registry().erase(found)", host_close);

@@ -1,3 +1,4 @@
+import '../../support/fake_citizen_sdk.dart';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -22,6 +23,7 @@ SquareSession _session() => SquareSession(
     );
 
 void main() {
+  TestCitizenSdkHarness();
   test('uploads bytes and returns the object key and hash', () async {
     final bytes = Uint8List.fromList([1, 2, 3, 4, 5]);
     final sha = sha256.convert(bytes).toString();

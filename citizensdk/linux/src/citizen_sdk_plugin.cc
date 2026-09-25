@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <functional>
+#include <exception>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -46,6 +48,142 @@ void post(GMainContext *context, std::function<void()> work) {
                           "CitizenSDK Flutter UI context rejected a task");
   }
 }
+
+
+// PixelBuffer返回的指针在注销前必须稳定；仅渲染回调改写这块固定大小的RGBA缓冲。
+struct PreviewPixels final {
+  std::mutex mutex;
+  uint32_t width{}, height{};
+  std::shared_ptr<const std::vector<uint8_t>> latest;
+  std::vector<uint8_t> stable;
+  bool finalized{};
+  std::vector<std::function<void()>> drained;
+};
+typedef struct _CitizenSdkPreviewTexture {
+  FlPixelBufferTexture parent_instance;
+  std::shared_ptr<PreviewPixels> *pixels;
+} CitizenSdkPreviewTexture;
+typedef struct _CitizenSdkPreviewTextureClass {
+  FlPixelBufferTextureClass parent_class;
+} CitizenSdkPreviewTextureClass;
+G_DEFINE_TYPE(CitizenSdkPreviewTexture, citizen_sdk_preview_texture, fl_pixel_buffer_texture_get_type())
+
+gboolean preview_copy(FlPixelBufferTexture *texture, const uint8_t **buffer,
+                      uint32_t *width, uint32_t *height, GError **) noexcept {
+  auto *self = reinterpret_cast<CitizenSdkPreviewTexture *>(texture);
+  if (!self->pixels || !buffer || !width || !height) return FALSE;
+  const auto state = *self->pixels;
+  {
+    std::lock_guard<std::mutex> guard(state->mutex);
+    if (state->finalized) return FALSE;
+    if (state->latest) std::copy(state->latest->begin(), state->latest->end(), state->stable.begin());
+  }
+  *buffer = state->stable.data(); *width = state->width; *height = state->height;
+  return TRUE;
+}
+void preview_finalize(GObject *object) {
+  auto *self = reinterpret_cast<CitizenSdkPreviewTexture *>(object);
+  const auto state = self->pixels ? *self->pixels : std::shared_ptr<PreviewPixels>{};
+  delete self->pixels; self->pixels = nullptr;
+  G_OBJECT_CLASS(citizen_sdk_preview_texture_parent_class)->finalize(object);
+  if (!state) return;
+  std::vector<std::function<void()>> callbacks;
+  {
+    std::lock_guard<std::mutex> guard(state->mutex);
+    state->finalized = true; state->latest.reset(); state->stable.clear();
+    callbacks.swap(state->drained);
+  }
+  // GObject实际终结之后才通知资源层；注销接纳本身不能冒充最后渲染引用已归还。
+  for (auto &callback : callbacks) if (callback) callback();
+}
+void citizen_sdk_preview_texture_class_init(CitizenSdkPreviewTextureClass *type) {
+  G_OBJECT_CLASS(type)->finalize = preview_finalize;
+  FL_PIXEL_BUFFER_TEXTURE_CLASS(type)->copy_pixels = preview_copy;
+}
+void citizen_sdk_preview_texture_init(CitizenSdkPreviewTexture *self) { self->pixels = nullptr; }
+
+class LinuxCaptureTexture final : public CaptureTexture {
+ public:
+  LinuxCaptureTexture(FlTextureRegistrar *registrar, uint32_t width, uint32_t height)
+      : registrar_(FL_TEXTURE_REGISTRAR(g_object_ref(registrar)), [](FlTextureRegistrar *value) { g_object_unref(value); }), pixels_(std::make_shared<PreviewPixels>()) {
+    if (width == 0 || width > 4096 || height == 0 || height > 4096)
+      throw ContractFailure(CITIZENSDK_ERROR_INVALID_ARGUMENT, "纹理尺寸无效");
+    pixels_->width = width; pixels_->height = height;
+    pixels_->stable.resize(static_cast<std::size_t>(width) * height * 4);
+  }
+  ~LinuxCaptureTexture() override {
+    // 成功注册的纹理必须由close注销；失败不能靠析构伪造渲染排空。
+    if (texture_) std::terminate();
+  }
+  void register_texture() {
+    auto *created = reinterpret_cast<CitizenSdkPreviewTexture *>(g_object_new(citizen_sdk_preview_texture_get_type(), nullptr));
+    try { created->pixels = new std::shared_ptr<PreviewPixels>(pixels_); }
+    catch (...) { g_object_unref(created); throw; }
+    if (!fl_texture_registrar_register_texture(registrar_.get(), FL_TEXTURE(created))) {
+      g_object_unref(created);
+      throw ContractFailure(CITIZENSDK_ERROR_UNAVAILABLE, "Flutter纹理注册失败");
+    }
+    texture_ = created;
+    identity_ = fl_texture_get_id(FL_TEXTURE(created));
+    if (identity_ < 0) {
+      close({});
+      throw ContractFailure(CITIZENSDK_ERROR_INTEGRITY, "Flutter纹理编号无效");
+    }
+  }
+  int64_t id() const noexcept override { return identity_; }
+  void update(std::shared_ptr<const std::vector<uint8_t>> rgba) override {
+    if (!texture_) return;
+    if (!rgba || rgba->size() != pixels_->stable.size())
+      throw ContractFailure(CITIZENSDK_ERROR_INTEGRITY, "纹理像素尺寸不符");
+    { std::lock_guard<std::mutex> guard(pixels_->mutex); pixels_->latest = std::move(rgba); }
+    if (!fl_texture_registrar_mark_texture_frame_available(registrar_.get(), FL_TEXTURE(texture_)))
+      throw ContractFailure(CITIZENSDK_ERROR_UNAVAILABLE, "Flutter拒绝纹理帧");
+  }
+  void close(std::function<void()> drained) override {
+    bool complete = false;
+    {
+      std::lock_guard<std::mutex> guard(pixels_->mutex);
+      complete = pixels_->finalized;
+      if (!complete && drained) pixels_->drained.push_back(std::move(drained));
+    }
+    if (complete) { if (drained) drained(); return; }
+    if (!texture_) return; // 注销后GObject可能仍被真实渲染调用保有。
+    if (!fl_texture_registrar_unregister_texture(registrar_.get(), FL_TEXTURE(texture_)))
+      throw ContractFailure(CITIZENSDK_ERROR_UNAVAILABLE, "Flutter纹理注销失败");
+    auto *owned = texture_; texture_ = nullptr;
+    g_object_unref(owned);
+  }
+ private:
+  std::shared_ptr<FlTextureRegistrar> registrar_;
+  CitizenSdkPreviewTexture *texture_{};
+  std::shared_ptr<PreviewPixels> pixels_;
+  int64_t identity_{-1};
+};
+
+class LinuxTextures final {
+ public:
+  explicit LinuxTextures(FlTextureRegistrar *value)
+      : registrar_(value ? FL_TEXTURE_REGISTRAR(g_object_ref(value)) : nullptr) {}
+  ~LinuxTextures() { g_clear_object(&registrar_); }
+  std::shared_ptr<CaptureTexture> create(uint32_t width, uint32_t height) {
+    if (detached_ || !registrar_) throw ContractFailure(CITIZENSDK_ERROR_UNAVAILABLE, "Flutter纹理注册器已撤销");
+    values_.erase(std::remove_if(values_.begin(), values_.end(), [](const auto &value) { return value.expired(); }), values_.end());
+    auto texture = std::make_shared<LinuxCaptureTexture>(registrar_, width, height);
+    values_.push_back(texture); // 注册前完成容器分配，避免已注册对象在异常路径被直接析构。
+    texture->register_texture();
+    return texture;
+  }
+  void detach() noexcept {
+    detached_ = true;
+    for (const auto &weak : values_) if (const auto texture = weak.lock()) {
+      try { texture->close({}); } catch (...) { /* 资源仍拥有纹理；不提前确认释放。 */ }
+    }
+  }
+ private:
+  FlTextureRegistrar *registrar_{};
+  bool detached_{};
+  std::vector<std::weak_ptr<LinuxCaptureTexture>> values_;
+};
 
 struct PendingReply final {
   PendingReply(FlMethodCall *value, const DecodedRequest &request)
@@ -120,6 +258,7 @@ struct PluginState final {
   std::thread::id ui_thread = std::this_thread::get_id();
   std::shared_ptr<FlutterEnvironment> environment;
   std::shared_ptr<Sessions> sessions;
+  TextureRegistration textures;
   FlBinaryMessenger *messenger = nullptr;
   FlMethodChannel *method_channel = nullptr;
   FlEventChannel *event_channel = nullptr;
@@ -144,6 +283,7 @@ struct PluginState final {
     // 直接丢句柄会违反 Flutter 回应契约，并使活引擎内的 Dart Future 悬空。
     // This does not claim accepted native operations have finished/cancelled;
     // Sessions still owns their checkpointed shutdown and native resources.
+    if (textures.detach) textures.detach();
     if (environment) environment->detach();
     if (sessions) sessions->detach();
   }
@@ -284,11 +424,14 @@ void method_call(FlMethodChannel *, FlMethodCall *call, gpointer user_data) noex
   auto *plugin = static_cast<HandlerToken *>(user_data)->plugin;
   PluginState *state = plugin->state;
   std::shared_ptr<PendingReply> pending;
+  std::optional<RequestEnvelope> envelope;
   try {
     if (state->detached || state->sessions == nullptr) {
       throw ContractFailure(CITIZENSDK_ERROR_INVALID_STATE,
                             "CitizenSDK Flutter plugin is detached");
     }
+    envelope = decode_request_envelope(fl_method_call_get_name(call), fl_method_call_get_args(call));
+    if (envelope) state->sessions->accept_request_sequence(*envelope);
     const DecodedRequest request = decode_request(
         fl_method_call_get_name(call), fl_method_call_get_args(call));
     pending = std::make_shared<PendingReply>(call, request);
@@ -314,7 +457,9 @@ void method_call(FlMethodChannel *, FlMethodCall *call, gpointer user_data) noex
       }
     } else {
       const std::string method = fl_method_call_get_name(call);
-      respond_failure(call, error.code, error.what(), error.session, error.sequence,
+      respond_failure(call, error.code, error.what(),
+                      error.session ? error.session : (envelope ? std::optional<std::string>(envelope->session) : std::nullopt),
+                      error.sequence ? error.sequence : (envelope ? std::optional<int64_t>(envelope->sequence) : std::nullopt),
                       method, error.stage);
     }
   } catch (...) {
@@ -407,6 +552,12 @@ static void citizen_sdk_plugin_init(CitizenSdkPlugin *plugin) { plugin->state = 
 
 namespace citizen_sdk::flutter {
 
+TextureRegistration create_texture_registration(FlTextureRegistrar *registrar) {
+  const auto owner = std::make_shared<LinuxTextures>(registrar);
+  return {[owner](uint32_t width, uint32_t height) { return owner->create(width, height); },
+          [owner] { owner->detach(); }};
+}
+
 // Internal dependency seam for deterministic native transport fixtures. This
 // symbol is hidden by the plugin's visibility policy and is not declared in
 // installed/public headers. Production and tests use this same registration,
@@ -438,10 +589,11 @@ void register_plugin(FlPluginRegistrar *registrar,
     if (!environment_factory) {
       environment_factory = [environment](uint32_t modules) { return environment->open(modules); };
     }
+    state->textures = create_texture_registration(fl_plugin_registrar_get_texture_registrar(registrar));
     state->sessions = Sessions::create(
         std::move(environment_factory),
         [context](std::function<void()> work) { post(context.get(), std::move(work)); },
-        std::move(transport_factory));
+        std::move(transport_factory), state->textures.open);
     g_autoptr(FlStandardMethodCodec) codec = new_method_codec();
     auto method_token = std::make_unique<HandlerToken>(
         plugin, &state->method_registration);

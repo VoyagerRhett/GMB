@@ -38,6 +38,7 @@ void main() {
       home: Scaffold(
         body: WalletListTile(
           wallet: wallet,
+          walletName: wallet.name,
           balance: 1234567.89,
           showActions: showActions,
           isDefault: wallet.isDefault,
@@ -73,25 +74,28 @@ void main() {
     expect(find.text('钱包详情'), findsNothing);
   });
 
-  test('SDK 公开账户事实决定异常行', () {
-    expect(isBrokenCitizenWalletStateAccount(account()), isFalse);
-    final valid = account();
-    final broken = CitizenWalletStateAccount(
-      signMode: valid.signMode,
-      walletIndex: valid.walletIndex,
-      accountIndex: valid.accountIndex,
-      accountId: valid.accountId,
-      ss58Address: 'wrong',
-      name: valid.name,
-      createdAtMillis: valid.createdAtMillis,
-      isDefault: valid.isDefault,
-    );
-    expect(isBrokenCitizenWalletStateAccount(broken), isTrue);
+  testWidgets('异常事实仍复用原卡片，按SDK原模式保留配色而不构造正常账户', (tester) async {
+    for (final mode in <CitizenWalletSignMode?>[CitizenWalletSignMode.hot, CitizenWalletSignMode.cold, null]) {
+      final diagnostic = CitizenWalletDiagnostic(walletIndex: 0, walletName: '原异常钱包',
+        accountId: account().accountId, ss58Address: null,
+        diagnosticReason: CitizenWalletDiagnosticReason.invalidStructure, signMode: mode, cleanupTargets: null);
+      await tester.pumpWidget(MaterialApp(home: Scaffold(body: WalletListTile(
+        wallet: null, diagnostic: diagnostic, walletName: diagnostic.walletName, balance: 0,
+        showActions: true, isBroken: true, onTap: () {}, onRename: () {}, onDelete: () {},
+      ))));
+      expect(find.text('钱包数据异常，请验证热钱包或重新导入冷钱包'), findsOneWidget);
+      expect(find.text('0'), findsNothing);
+      expect(tester.widget<Icon>(find.byIcon(Icons.account_balance_wallet_rounded)).color,
+        mode == CitizenWalletSignMode.hot ? AppTheme.primaryDark : AppTheme.info);
+    }
   });
 
-  test('冷钱包导入只启动SDK账户码界面且不复用App业务二维码', () {
+  test('冷钱包导入保留App原界面，只接SDK账户码解析与导入', () {
     final source = File('lib/wallet/pages/wallet_page.dart').readAsStringSync();
-    expect(source, contains('importColdAccountWithUi'));
+    expect(source, contains('mode: QrScanMode.coldAccountImport'));
+    expect(source, contains('CitizenQrScanPurpose.coldAccountImport'));
+    expect(source, contains('.wallet.importColdAccount('));
+    expect(source, isNot(contains('importColdAccountWithUi')));
     expect(source, isNot(contains('extractColdWalletImportAddress')));
     expect(source, isNot(contains('QrRouter().route')));
     expect(source, isNot(contains('QrRouteType.userContact')));

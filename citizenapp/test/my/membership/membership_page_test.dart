@@ -337,6 +337,7 @@ SubscriptionService _subscriptionService({SquareApiClient? api}) =>
     );
 
 void main() {
+  TestCitizenSdkHarness();
   useIsolatedIsar();
 
   test('平台 finalized 镜像回执不再产生设备签名', () async {

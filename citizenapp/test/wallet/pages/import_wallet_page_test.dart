@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/wallet/pages/import_wallet_page.dart';
@@ -11,6 +13,44 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(() => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
     const MethodChannel('citizenapp/security'), (_) async => null));
+
+
+  for (final leave in [false, true]) {
+    testWidgets('导入${leave ? '退出后迟到结果不导航' : '成功清输入并返回true'}', (tester) async {
+      final pending = Completer<List<Object?>>();
+      final transport = TestCitizenSdkTransport({
+        'walletWordSuggestions': (_) => [<String>[]],
+        'validateWalletPassword': (_) => [0, null],
+        'importWallet': (_) => pending.future,
+        'cancelOperation': (_) => [true],
+      });
+      final sdk = await transport.open();
+      bool? result;
+      await tester.pumpWidget(Provider<CitizenSdk>.value(value: sdk,
+        child: MaterialApp(home: Builder(builder: (context) => Scaffold(
+          body: TextButton(onPressed: () async {
+            result = await Navigator.of(context).push<bool>(
+              MaterialPageRoute(builder: (_) => const ImportWalletPage()));
+          }, child: const Text('打开导入')),
+        )))));
+      await tester.tap(find.text('打开导入')); await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).first, 'synthetic mnemonic input');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('确认导入')); await tester.pump();
+      expect(transport.calls, contains('importWallet'));
+      if (leave) {
+        Navigator.of(tester.element(find.byType(ImportWalletPage))).pop();
+        await tester.pumpAndSettle();
+        expect(transport.calls, contains('cancelOperation'));
+      }
+      pending.complete([testCitizenWalletProfile()]);
+      await tester.pumpAndSettle();
+      expect(result, leave ? isNull : isTrue);
+      expect(find.text('打开导入'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink()); await sdk.close(); await transport.dispose();
+    });
+  }
 
   testWidgets('导入失败使用原弹窗，重试后仍留页并保留输入', (tester) async {
     final transport = TestCitizenSdkTransport({

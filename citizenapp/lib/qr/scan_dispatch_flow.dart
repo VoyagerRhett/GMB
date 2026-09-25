@@ -90,6 +90,7 @@ Future<void> _dispatchSignRequest(
     if (context.mounted) _snack(context, '请扫描公民 App 业务签名请求：${error.message}');
     return;
   }
+  if (!context.mounted) return;
   if (action == CitizenQrActions.citizenIdentity) {
     await _handleCitizenIdentitySignRequest(context, raw, requiredAccount);
   } else if (CitizenQrActions.isSelfAccountDomainAction(action)) {

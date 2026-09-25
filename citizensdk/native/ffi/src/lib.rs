@@ -50,6 +50,7 @@ mod wallet_abi;
 pub use abi::*;
 #[doc(hidden)]
 pub use host_providers::{
+    citizensdk_set_secret_presence_provider, citizensdk_encrypted_secret_record_has_secret,
     decode_host_error_code, empty_bytes_view, settle_host_dispatch, validate_bool_result_v1,
     validate_bytes_result_v1, validate_host_bytes_result, validate_host_record_result,
     validate_host_services_presence, validate_host_status_result, validate_mutable_dek_view,
@@ -65,6 +66,12 @@ use ownership::ResultPayload;
 use runtime::NativeRuntime;
 
 const MAX_ABI_INPUT_BYTES: usize = 16 * 1024 * 1024;
+
+/// 平台通道在方法参数解码前接纳准确序号；无业务、设备或网络副作用。
+#[no_mangle]
+pub extern "C" fn citizensdk_accept_request_sequence(handle: CitizenSdkHandle, request_sequence: u64) -> i32 {
+    ffi_status(|| handles::get(handle)?.accept_request_sequence(request_sequence))
+}
 
 /// Execute the startup prefix with one frozen host/legacy ordering policy.
 /// Host restore failure is terminal for this request and is published by the

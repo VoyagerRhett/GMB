@@ -43,7 +43,7 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use citizen_sdk_contracts::{
-    ChainDatabaseSnapshot, ChainDatabaseStore, ContractError, ContractErrorCode, ContractFuture,
+    AccountId32, ChainDatabaseSnapshot, ChainDatabaseStore, ContractError, ContractErrorCode, ContractFuture,
     EncryptedSecretBlobSnapshot, EncryptedSecretBlobState, EncryptedSecretBlobStore,
     EncryptedSecretEnvelope, Hash32, Hash32Bytes, RuntimeCacheStore, RuntimeContext, SecretBuffer,
     SecretKind, SecretRef, SecretVault, TransactionExecutionId, TransactionHistoryCursor,
@@ -55,7 +55,7 @@ use futures_channel::oneshot;
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::abi::{CitizenSdkBytesView, CitizenSdkErrorCode, CITIZENSDK_ABI_VERSION};
+use crate::abi::{CitizenSdkAccountId, CitizenSdkBytesView, CitizenSdkErrorCode, CITIZENSDK_ABI_VERSION};
 use crate::host_codec::{
     decode_chain_database_snapshot, decode_encrypted_secret_blob_snapshot, decode_runtime_context,
     decode_transaction_history_host_batch, decode_wallet_state, encode_chain_database_snapshot,
@@ -629,6 +629,29 @@ impl Default for CitizenSdkHostServicesV1 {
         }
     }
 }
+
+
+/// 独立的只读跨代际存在性投影，不扩长既有Host v1布局，不接收秘密明文。
+pub type CitizenSdkHostHasAccountSecretV1 = Option<unsafe extern "C" fn(
+    *mut c_void, u64, CitizenSdkAccountId, *mut c_void, CitizenSdkHostBoolCompletionV1,
+) -> i32>;
+pub type CitizenSdkHostHasAnyWalletKeyV1 = Option<unsafe extern "C" fn(
+    *mut c_void, u64, u32, *mut c_void, CitizenSdkHostBoolCompletionV1,
+) -> i32>;
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CitizenSdkHostSecretPresenceV1 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub context: *mut c_void,
+    pub has_account_secret: CitizenSdkHostHasAccountSecretV1,
+    pub has_any_wallet_key: CitizenSdkHostHasAnyWalletKeyV1,
+}
+#[derive(Clone, Copy)]
+struct SendSecretPresence(CitizenSdkHostSecretPresenceV1);
+// SAFETY: 与原Host vtable相同，注册者保证回调/context线程安全并保有至真实SDK销毁。
+unsafe impl Send for SendSecretPresence {}
+unsafe impl Sync for SendSecretPresence {}
 
 /// The expected result shape for one accepted host operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1811,9 +1834,21 @@ struct HostBridge {
 
 struct HostOperationGate {
     accepting: bool,
+    started: bool,
+    presence: Option<SendSecretPresence>,
 }
 
 impl HostBridge {
+    fn secret_presence(&self) -> Result<SendSecretPresence, ContractError> {
+        let gate = self.operation_gate.lock().map_err(|_| ContractError::new(
+            ContractErrorCode::Internal, "存在性查询门已损坏"))?;
+        if !gate.accepting {
+            return Err(ContractError::new(ContractErrorCode::InvalidState, "Host正在关闭"));
+        }
+        gate.presence.ok_or_else(|| ContractError::new(
+            ContractErrorCode::Unsupported, "未登记完整秘密存在性查询"))
+    }
+
     fn public(&self) -> Result<SendPublicStore, ContractError> {
         self.public.ok_or_else(|| {
             ContractError::new(
@@ -1837,7 +1872,7 @@ impl HostBridge {
         ),
         ContractError,
     > {
-        let gate = self.operation_gate.lock().map_err(|_| {
+        let mut gate = self.operation_gate.lock().map_err(|_| {
             ContractError::new(
                 ContractErrorCode::Internal,
                 "host operation gate is poisoned",
@@ -1851,6 +1886,7 @@ impl HostBridge {
         }
         // Keep the gate locked until the pending entry is visible. A concurrent
         // close therefore happens entirely before this reservation or after it.
+        gate.started = true;
         reserve_host_operation(self.owner_id, kind, secret_buffer)
     }
 
@@ -2085,6 +2121,27 @@ pub struct HostServicesAdapter {
 }
 
 impl HostServicesAdapter {
+    /// 只能在首次Host操作之前登记一次；不允许在正在使用的context下原地换提供者。
+    /// # Safety
+    /// 回调代码与context必须线程安全，并保有至SDK成功销毁。
+    pub unsafe fn set_secret_presence_provider(&self, provider: CitizenSdkHostSecretPresenceV1) -> Result<(), ContractError> {
+        if provider.struct_size as usize != std::mem::size_of::<CitizenSdkHostSecretPresenceV1>() ||
+            provider.abi_version != CITIZENSDK_ABI_VERSION || provider.has_account_secret.is_none() ||
+            provider.has_any_wallet_key.is_none() {
+            return Err(ContractError::new(ContractErrorCode::InvalidArgument, "秘密存在性回调不完整"));
+        }
+        if self.bridge.secure.is_none() || self.bridge.vault.is_none() {
+            return Err(ContractError::new(ContractErrorCode::Unsupported, "实例没有安全仓储及金库"));
+        }
+        let mut gate = self.bridge.operation_gate.lock().map_err(|_| ContractError::new(
+            ContractErrorCode::Internal, "存在性查询门已损坏"))?;
+        if !gate.accepting || gate.started || gate.presence.is_some() {
+            return Err(ContractError::new(ContractErrorCode::InvalidState, "存在性提供者已冻结"));
+        }
+        gate.presence = Some(SendSecretPresence(provider));
+        Ok(())
+    }
+
     /// Copies validated host vtables. Callback contexts remain host-owned.
     ///
     /// # Safety
@@ -2119,7 +2176,7 @@ impl HostServicesAdapter {
                     &NEXT_HOST_OWNER_ID,
                     "host provider owner id space is exhausted",
                 )?,
-                operation_gate: Mutex::new(HostOperationGate { accepting: true }),
+                operation_gate: Mutex::new(HostOperationGate { accepting: true, started: false, presence: None }),
                 public,
                 secure,
                 vault,
@@ -2941,6 +2998,23 @@ async fn load_encrypted_blob(
 }
 
 impl EncryptedSecretBlobStore for HostEncryptedSecretBlobStore {
+    fn has_account_secret(&self, account_id: AccountId32) -> ContractFuture<'_, bool> {
+        let bridge = Arc::clone(&self.bridge);
+        Box::pin(async move {
+            let provider = bridge.secret_presence()?;
+            let callback = provider.0.has_account_secret.ok_or_else(|| ContractError::new(
+                ContractErrorCode::Internal, "账户秘密存在性回调缺失"))?;
+            let context = provider.0.context as usize;
+            let (code, value) = bridge.call_bool(|operation, token, complete| {
+                // SAFETY: 提供者在登记时承诺生命周期；公开账户按值传递，不能遗留借用指针。
+                unsafe { callback(context as *mut c_void, operation,
+                    CitizenSdkAccountId { bytes: *account_id.as_bytes() }, token, complete) }
+            }).await?;
+            require_host_ok(code, "账户秘密存在性查询失败")?;
+            Ok(value)
+        })
+    }
+
     fn load(&self, secret_ref: SecretRef) -> ContractFuture<'_, EncryptedSecretBlobSnapshot> {
         let bridge = Arc::clone(&self.bridge);
         Box::pin(async move { load_encrypted_blob(&bridge, secret_ref).await })
@@ -3044,6 +3118,22 @@ const MAX_VAULT_CIPHERTEXT_BYTES: usize = 64 * 1024;
 const SECRET_AAD_PREFIX: &[u8] = b"citizensdk\0account-secret\0v1\0";
 
 impl SecretVault for HostSecretVault {
+    fn has_any_wallet_key(&self, wallet_index: u32) -> ContractFuture<'_, bool> {
+        let bridge = Arc::clone(&self.bridge);
+        Box::pin(async move {
+            let provider = bridge.secret_presence()?;
+            let callback = provider.0.has_any_wallet_key.ok_or_else(|| ContractError::new(
+                ContractErrorCode::Internal, "钱包密钥存在性回调缺失"))?;
+            let context = provider.0.context as usize;
+            let (code, value) = bridge.call_bool(|operation, token, complete| {
+                // SAFETY: 同一Host操作跟踪器验证真实操作ID及完整BoolResult，不重造完成路由。
+                unsafe { callback(context as *mut c_void, operation, wallet_index, token, complete) }
+            }).await?;
+            require_host_ok(code, "钱包密钥存在性查询失败")?;
+            Ok(value)
+        })
+    }
+
     fn availability(&self) -> ContractFuture<'_, VaultAvailability> {
         let bridge = Arc::clone(&self.bridge);
         Box::pin(async move {
@@ -3482,6 +3572,41 @@ fn decode_vault_inner(encoded: &[u8]) -> Result<DecodedVaultInner, ContractError
     })
 }
 
+
+/// 登记只读存在性回调，不新增窗口、Keychain项目或存储副本。
+/// # Safety
+/// provider可读，回调/context在SDK成功销毁前始终有效；只允许首次Host操作前调用一次。
+#[no_mangle]
+pub unsafe extern "C" fn citizensdk_set_secret_presence_provider(
+    handle: crate::abi::CitizenSdkHandle, provider: *const CitizenSdkHostSecretPresenceV1,
+) -> i32 {
+    crate::ffi_status(|| {
+        // SAFETY: 上述C调用合同，read_versioned先检查前缀再复制完整结构。
+        let provider = unsafe { crate::read_versioned(provider, "secret presence provider")? };
+        unsafe { crate::handles::get(handle)?.set_secret_presence_provider(provider) }
+    })
+}
+
+/// 单条已加密记录的存在性投影，使用唯一Core信封/身份/状态解码。
+/// # Safety
+/// 输入视图可读，out_present可写；失败保持输出原值，不返回任何记录或秘密字节。
+#[no_mangle]
+pub unsafe extern "C" fn citizensdk_encrypted_secret_record_has_secret(
+    account_id: *const CitizenSdkAccountId, expected_revision: u64,
+    record: CitizenSdkBytesView, out_present: *mut u8,
+) -> i32 {
+    crate::ffi_status(|| {
+        unsafe { crate::require_output(out_present, "out_present")?; }
+        if account_id.is_null() { return Err(crate::error::FfiError::invalid("account_id is null")); }
+        let account = AccountId32::from_bytes(unsafe { (*account_id).bytes });
+        let bytes = unsafe { crate::copy_view(record, "encrypted record", 65536)? };
+        let present = crate::host_codec::encrypted_secret_record_has_secret(account, expected_revision, &bytes)
+            .map_err(codec_contract_error).map_err(crate::error::FfiError::from)?;
+        unsafe { *out_present = u8::from(present); }
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 mod production_tests {
     use std::{
@@ -3513,7 +3638,7 @@ mod production_tests {
         Arc::new(HostBridge {
             owner_id: next_global_id(&NEXT_HOST_OWNER_ID, "test host owner id space is exhausted")
                 .unwrap_or_else(|error| panic!("test owner allocation failed: {error}")),
-            operation_gate: Mutex::new(HostOperationGate { accepting: true }),
+            operation_gate: Mutex::new(HostOperationGate { accepting: true, started: false, presence: None }),
             public: Some(SendPublicStore(public)),
             secure: secure.map(SendSecureStore),
             vault: vault.map(SendSecretVault),
@@ -4867,4 +4992,82 @@ mod production_tests {
             ChainDatabaseSnapshot::new(0, None)
         );
     }
+    unsafe extern "C" fn presence_account(
+        context: *mut c_void, operation: u64, account: CitizenSdkAccountId,
+        token: *mut c_void, completion: CitizenSdkHostBoolCompletionV1,
+    ) -> i32 {
+        let mode = unsafe { &*(context.cast::<AtomicU8>()) }.load(Ordering::SeqCst);
+        if mode == 3 { return CitizenSdkErrorCode::PermissionDenied.as_i32(); }
+        let result = CitizenSdkHostBoolResultV1 {
+            host_operation_id: operation,
+            error_code: if mode == 1 { CitizenSdkErrorCode::Storage.as_i32() } else { 0 },
+            value: if mode == 2 { 2 } else if mode == 1 { 0 } else { u8::from(account.bytes == [7; 32]) },
+            ..CitizenSdkHostBoolResultV1::default()
+        };
+        unsafe { completion.unwrap_or_else(|| panic!("缺少布尔完成"))(token, &result); }
+        0
+    }
+    unsafe extern "C" fn presence_wallet(
+        context: *mut c_void, operation: u64, index: u32, token: *mut c_void,
+        completion: CitizenSdkHostBoolCompletionV1,
+    ) -> i32 {
+        unsafe { presence_account(context, operation,
+            CitizenSdkAccountId { bytes: [if index == u32::MAX { 7 } else { 0 }; 32] }, token, completion) }
+    }
+
+    #[test]
+    fn secret_presence_registration_is_exact_once_and_queries_use_existing_completion_validation() {
+        assert_eq!(std::mem::size_of::<CitizenSdkHostSecretPresenceV1>(), 32);
+        assert_eq!(std::mem::offset_of!(CitizenSdkHostSecretPresenceV1, context), 8);
+        assert_eq!(std::mem::offset_of!(CitizenSdkHostSecretPresenceV1, has_account_secret), 16);
+        assert_eq!(std::mem::offset_of!(CitizenSdkHostSecretPresenceV1, has_any_wallet_key), 24);
+        let bridge = test_bridge(CitizenSdkHostPublicStoreV1::default(),
+            Some(CitizenSdkHostSecureStoreV1::default()), Some(CitizenSdkHostSecretVaultV1::default()));
+        let adapter = HostServicesAdapter { bridge: Arc::clone(&bridge) };
+        let blobs = HostEncryptedSecretBlobStore { bridge: Arc::clone(&bridge) };
+        let vault = HostSecretVault { bridge: Arc::clone(&bridge), authorizing: None };
+        let mode = AtomicU8::new(0);
+        let provider = CitizenSdkHostSecretPresenceV1 {
+            struct_size: 32, abi_version: 1, context: (&mode as *const AtomicU8).cast_mut().cast(),
+            has_account_secret: Some(presence_account), has_any_wallet_key: Some(presence_wallet),
+        };
+        assert_eq!(block_on(blobs.has_account_secret(AccountId32::from_bytes([7; 32])))
+            .err().unwrap_or_else(|| panic!("应拒绝未登记查询")).code(), ContractErrorCode::Unsupported);
+        for malformed in [
+            CitizenSdkHostSecretPresenceV1 { struct_size: 31, ..provider },
+            CitizenSdkHostSecretPresenceV1 { struct_size: 33, ..provider },
+            CitizenSdkHostSecretPresenceV1 { abi_version: 2, ..provider },
+            CitizenSdkHostSecretPresenceV1 { has_account_secret: None, ..provider },
+            CitizenSdkHostSecretPresenceV1 { has_any_wallet_key: None, ..provider },
+        ] {
+            assert!(unsafe { adapter.set_secret_presence_provider(malformed) }.is_err());
+        }
+        unsafe { adapter.set_secret_presence_provider(provider) }.unwrap_or_else(|_| panic!("提供者登记失败"));
+        assert!(unsafe { adapter.set_secret_presence_provider(provider) }.is_err());
+        assert!(block_on(blobs.has_account_secret(AccountId32::from_bytes([7; 32]))).unwrap_or_else(|_| panic!("存在查询失败")));
+        assert!(!block_on(blobs.has_account_secret(AccountId32::from_bytes([8; 32]))).unwrap_or_else(|_| panic!("不存在查询失败")));
+        assert!(block_on(vault.has_any_wallet_key(u32::MAX)).unwrap_or_else(|_| panic!("钱包查询失败")));
+        assert!(!block_on(vault.has_any_wallet_key(0)).unwrap_or_else(|_| panic!("钱包查询失败")));
+        for value in [1, 2, 3] {
+            mode.store(value, Ordering::SeqCst);
+            assert!(block_on(blobs.has_account_secret(AccountId32::from_bytes([8; 32]))).is_err());
+            assert!(block_on(vault.has_any_wallet_key(0)).is_err()); // 错误不能变成不存在。
+        }
+        bridge.close_operation_gate().unwrap_or_else(|_| panic!("关门失败"));
+        assert!(block_on(blobs.has_account_secret(AccountId32::from_bytes([7; 32]))).is_err());
+
+        let late_bridge = test_bridge(CitizenSdkHostPublicStoreV1::default(),
+            Some(CitizenSdkHostSecureStoreV1::default()), Some(CitizenSdkHostSecretVaultV1::default()));
+        let (operation, pending) = late_bridge.reserve_operation(PendingKind::Bool, None)
+            .unwrap_or_else(|_| panic!("Host操作接纳失败"));
+        let result = CitizenSdkHostBoolResultV1 { host_operation_id: operation, ..CitizenSdkHostBoolResultV1::default() };
+        unsafe { production_bool_completion(operation_token(operation), &result); }
+        assert!(block_on(pending).unwrap_or_else(|_| panic!("Host完成丢失")).is_ok());
+        assert!(unsafe { HostServicesAdapter { bridge: late_bridge }.set_secret_presence_provider(provider) }.is_err());
+        let public_only = test_bridge(CitizenSdkHostPublicStoreV1::default(), None, None);
+        assert!(unsafe { HostServicesAdapter { bridge: public_only }.set_secret_presence_provider(provider) }.is_err());
+        assert_ne!(unsafe { citizensdk_set_secret_presence_provider(0, &provider) }, 0);
+        assert_ne!(unsafe { citizensdk_set_secret_presence_provider(0, std::ptr::null()) }, 0);
+    }
+
 }

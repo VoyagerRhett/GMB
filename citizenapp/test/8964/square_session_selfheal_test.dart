@@ -1,3 +1,4 @@
+import '../support/fake_citizen_sdk.dart';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -68,6 +69,7 @@ Future<String> _sign(
     '0x${'11' * 64}';
 
 void main() {
+  TestCitizenSdkHarness();
   test('invalid_signature(本机钥不在库中) → 登记一次本机子钥并重试成功', () async {
     final requestLog = <String>[];
     final client = SquareApiClient(

@@ -18,11 +18,104 @@ namespace citizen_sdk::flutter {
 // The exported registrar entry invokes exactly this implementation with the
 // real OS environment and Host; only finite transport dependencies differ.
 void register_plugin(FlPluginRegistrar *, EnvironmentFactory, TransportFactory);
+TextureRegistration create_texture_registration(FlTextureRegistrar *);
 }  // namespace citizen_sdk::flutter
 
 namespace csf = citizen_sdk::flutter;
 
 namespace {
+
+
+typedef struct _FixtureTextures {
+  GObject parent_instance;
+  FlTexture *texture;
+  gboolean reject_register, reject_unregister, reject_frame;
+  guint registrations, frames, unregistrations;
+} FixtureTextures;
+typedef struct _FixtureTexturesClass { GObjectClass parent_class; } FixtureTexturesClass;
+void fixture_textures_interface_init(FlTextureRegistrarInterface *);
+void fixture_textures_class_init(FixtureTexturesClass *);
+void fixture_textures_init(FixtureTextures *) {}
+G_DEFINE_TYPE_WITH_CODE(FixtureTextures, fixture_textures, G_TYPE_OBJECT,
+    G_IMPLEMENT_INTERFACE(fl_texture_registrar_get_type(), fixture_textures_interface_init))
+void fixture_textures_class_init(FixtureTexturesClass *klass) {
+  G_OBJECT_CLASS(klass)->dispose = [](GObject *object) {
+    auto *self = reinterpret_cast<FixtureTextures *>(object);
+    g_clear_object(&self->texture);
+    G_OBJECT_CLASS(fixture_textures_parent_class)->dispose(object);
+  };
+}
+void fixture_textures_interface_init(FlTextureRegistrarInterface *api) {
+  api->register_texture = [](FlTextureRegistrar *registrar, FlTexture *texture) -> gboolean {
+    auto *self = reinterpret_cast<FixtureTextures *>(registrar);
+    if (self->reject_register) return FALSE;
+    assert(self->texture == nullptr); ++self->registrations;
+    self->texture = FL_TEXTURE(g_object_ref(texture)); return TRUE;
+  };
+  api->lookup_texture = [](FlTextureRegistrar *registrar, int64_t) -> FlTexture * {
+    return reinterpret_cast<FixtureTextures *>(registrar)->texture;
+  };
+  api->mark_texture_frame_available = [](FlTextureRegistrar *registrar, FlTexture *texture) -> gboolean {
+    auto *self = reinterpret_cast<FixtureTextures *>(registrar);
+    assert(self->texture == texture); ++self->frames; return !self->reject_frame;
+  };
+  api->unregister_texture = [](FlTextureRegistrar *registrar, FlTexture *texture) -> gboolean {
+    auto *self = reinterpret_cast<FixtureTextures *>(registrar);
+    assert(self->texture == texture);
+    if (self->reject_unregister) return FALSE;
+    ++self->unregistrations; g_clear_object(&self->texture); return TRUE;
+  };
+}
+void texture_contract() {
+  // 有限registrar只替换Flutter借用，不伪称真实GPU验收；像素回调/注销所有权均为生产实现。
+  auto *registrar = reinterpret_cast<FixtureTextures *>(g_object_new(fixture_textures_get_type(), nullptr));
+  auto registration = csf::create_texture_registration(FL_TEXTURE_REGISTRAR(registrar));
+  for (const uint32_t width : {0U, 4097U}) {
+    bool invalid = false;
+    try { (void)registration.open(width, 2); } catch (const csf::ContractFailure &) { invalid = true; }
+    assert(invalid);
+  }
+  registrar->reject_register = TRUE;
+  bool refused = false;
+  try { (void)registration.open(2, 2); } catch (const csf::ContractFailure &) { refused = true; }
+  assert(refused && registrar->texture == nullptr);
+  registrar->reject_register = FALSE;
+  auto texture = registration.open(2, 2);
+  auto *render = FL_PIXEL_BUFFER_TEXTURE(g_object_ref(registrar->texture));
+  const auto copy = FL_PIXEL_BUFFER_TEXTURE_GET_CLASS(render)->copy_pixels;
+  texture->update(std::make_shared<const std::vector<uint8_t>>(16, 3));
+  const uint8_t *first = nullptr; uint32_t width = 0, height = 0;
+  assert(copy(render, &first, &width, &height, nullptr) && width == 2 && height == 2 && first[0] == 3);
+  texture->update(std::make_shared<const std::vector<uint8_t>>(16, 9));
+  assert(first[0] == 3); // 平台线程只换latest，不能改写渲染器还在借用的stable指针。
+  const uint8_t *second = nullptr;
+  assert(copy(render, &second, &width, &height, nullptr) && second == first && first[0] == 9);
+  bool wrong_size = false;
+  try { texture->update(std::make_shared<const std::vector<uint8_t>>(15)); }
+  catch (const csf::ContractFailure &) { wrong_size = true; }
+  assert(wrong_size);
+  registrar->reject_frame = TRUE;
+  bool frame_failed = false;
+  try { texture->update(std::make_shared<const std::vector<uint8_t>>(16)); }
+  catch (const csf::ContractFailure &) { frame_failed = true; }
+  assert(frame_failed);
+  registrar->reject_unregister = TRUE;
+  bool close_failed = false;
+  try { texture->close({}); } catch (const csf::ContractFailure &) { close_failed = true; }
+  assert(close_failed && registrar->unregistrations == 0);
+  registrar->reject_unregister = FALSE;
+  int drained = 0;
+  texture->close([&] { ++drained; });
+  assert(drained == 0 && registrar->unregistrations == 1 && first[0] == 9);
+  g_object_unref(render); // 最后一个真实GObject借用归还后才能回drained。
+  assert(drained == 1);
+  registration.detach();
+  bool late = false;
+  try { (void)registration.open(2, 2); } catch (const csf::ContractFailure &) { late = true; }
+  assert(late && registrar->registrations == 1);
+  texture.reset();
+  g_object_unref(registrar);
+}
 
 typedef struct _FixtureResponseHandle {
   FlBinaryMessengerResponseHandle parent_instance;
@@ -201,11 +294,25 @@ void fixture_registrar_interface_init(FlPluginRegistrarInterface *interface) {
 
 class PendingTransport final : public csf::NativeTransport {
  public:
+  // 使用同一真实Core序号入口，不在平台夹具复制接纳算法；QR实例无设备/链副作用。
+  PendingTransport() {
+    citizensdk_create_options_t options{};
+    options.struct_size = static_cast<uint32_t>(sizeof(options));
+    options.abi_version = CITIZENSDK_ABI_VERSION;
+    assert(citizensdk_create_with_modules(&options, nullptr, CITIZENSDK_MODULE_QR, &sequence_core) == CITIZENSDK_OK);
+  }
+  ~PendingTransport() override { assert(citizensdk_destroy(sequence_core) == CITIZENSDK_OK); }
+  citizensdk_error_code_t accept_request_sequence(uint64_t sequence) override {
+    return citizensdk_accept_request_sequence(sequence_core, sequence);
+  }
+  citizensdk_handle_t sequence_core{};
+
   void observe(Observer callback) override { observer = std::move(callback); }
   citizensdk_error_code_t accept(csf::Method method, const csf::DecodedRequest &,
-                                 citizensdk_request_id_t *out) override {
+                                 citizensdk_request_id_t *out, Completion done) override {
     assert(method == csf::Method::get_finalized_head && !accepted);
     accepted = true;
+    completion = std::move(done);
     *out = 41;
     return CITIZENSDK_OK;  // finite accepted request; no actual chain is started
   }
@@ -223,30 +330,48 @@ class PendingTransport final : public csf::NativeTransport {
     throw csf::ContractFailure(CITIZENSDK_ERROR_UNAVAILABLE,
                                "Fixture has no chain capabilities");
   }
-  void cancel(citizensdk_request_id_t) override { assert(false); }
-  csf::WalletCancellation present(
-      const csf::DecodedRequest &,
-      citizen_sdk::WalletFlowCompletion) override {
-    assert(false);
-    return {};
+  ResourceObserver resource_observer;
+  std::function<void(const csf::DecodedRequest &, csf::PrivateKeyResource::Completion)> private_handler;
+  bool private_closed{true};
+  void observe_resources(ResourceObserver observer) override { resource_observer = std::move(observer); }
+  void private_key(const csf::DecodedRequest &request, csf::PrivateKeyResource::Completion completion) override {
+    if (!private_handler) throw csf::ContractFailure(CITIZENSDK_ERROR_INVALID_STATE, "Private resource fixture is not configured");
+    private_handler(request, std::move(completion));
   }
+  std::function<void()> close_private_handler;
+  void close_private_keys() override {
+    if (close_private_handler) close_private_handler(); else assert(private_closed);
+  }
+  bool private_keys_closed() override { return private_closed; }
+  std::function<void(const csf::DecodedRequest &, csf::PrivateKeyResource::Completion)> capture_handler;
+  std::function<void()> close_capture_handler;
+  bool capture_closed{true};
+  void capture(const csf::DecodedRequest &request, csf::PrivateKeyResource::Completion completion) override {
+    if (!capture_handler) throw csf::ContractFailure(CITIZENSDK_ERROR_INVALID_STATE, "Capture fixture is not configured");
+    capture_handler(request, std::move(completion));
+  }
+  void close_captures() override { if (close_capture_handler) close_capture_handler(); else assert(capture_closed); }
+  bool captures_closed() override { return capture_closed; }
+
+  std::function<csf::Value(const csf::DecodedRequest &)> control_handler;
+  csf::Value control(const csf::DecodedRequest &request) override {
+    if (!control_handler)
+      throw csf::ContractFailure(CITIZENSDK_ERROR_INVALID_STATE, "Wallet input fixture is not configured");
+    return control_handler(request);
+  }
+  bool cancel(citizensdk_request_id_t id) override { assert(id == 41); ++cancelled; return true; }
   void close() override { assert(false); }
   void retire() noexcept override { ++retired; }
   void complete_after_detach() {
     assert(accepted && !completed);
     completed = true;
-    citizensdk_event_t event{};
-    event.struct_size = sizeof(event);
-    event.abi_version = CITIZENSDK_ABI_VERSION;
-    event.event_type = CITIZENSDK_EVENT_REQUEST_COMPLETED;
-    event.request_id = 41;
-    // This fixture token is never dereferenced or passed to Core. The injected
-    // copy_result raises a terminal error; no fabricated successful result.
-    event.result = 42;
-    observer(event);
+    completion(41, [this] { return copy_result(csf::Method::get_finalized_head, 0); });
+    completion = {};
   }
 
   Observer observer;
+  Completion completion;
+  guint cancelled{};
   bool accepted{};
   bool completed{};
   guint retired{};
@@ -417,6 +542,7 @@ void test_stateless_verification(GMainContext *context) {
 }  // namespace
 
 int main() {
+  texture_contract();
   GMainContext *context = g_main_context_default();
   assert(g_main_context_acquire(context));
   test_stateless_verification(context);
@@ -433,8 +559,9 @@ int main() {
   // still settle exactly one reply and remove that completed pending call.
   auto method = citizen_sdk::flutter::new_method_codec();
   g_autoptr(FlValue) open_args = fl_value_new_list();
-  fl_value_append_take(open_args, fl_value_new_int(1));
+  fl_value_append_take(open_args, fl_value_new_int(2));
   fl_value_append_take(open_args, fl_value_new_int(31));
+  fl_value_append_take(open_args, fl_value_new_bool(FALSE));
   g_autoptr(GError) encode_error = nullptr;
   g_autoptr(GBytes) message = fl_method_codec_encode_method_call(
       FL_METHOD_CODEC(method), "open", open_args, &encode_error);

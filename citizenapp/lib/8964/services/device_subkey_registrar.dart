@@ -1,4 +1,3 @@
-import 'package:citizen_sdk/citizen_sdk.dart';
 import 'dart:typed_data';
 
 import 'package:citizenapp/8964/services/square_api_client.dart';

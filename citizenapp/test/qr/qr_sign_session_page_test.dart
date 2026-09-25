@@ -113,7 +113,7 @@ void main() {
   testWidgets('扫码路由取消后留在原请求页', (tester) async {
     final qr = _Qr();
     var completed = false;
-    await open(tester, qr, completed: (_) => completed = true, scan: (_, __) async => null);
+    await open(tester, qr, completed: (_) => completed = true, scan: (_, _) async => null);
     await tester.tap(find.text('扫描响应'));
     await tester.pumpAndSettle();
     expect(completed, isFalse);

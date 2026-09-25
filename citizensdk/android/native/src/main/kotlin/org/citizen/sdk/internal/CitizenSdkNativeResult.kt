@@ -37,7 +37,7 @@ internal sealed class CitizenSdkNativeResult {
     class TransactionHistoryPage(val value: CitizenTransactionHistoryPage) : CitizenSdkNativeResult()
     class QrReview(val token: Long, val json: String) : CitizenSdkNativeResult()
     class QrSigned(val value: org.citizen.sdk.CitizenQrDocument) : CitizenSdkNativeResult()
-    class WalletState(val value: CitizenWalletState) : CitizenSdkNativeResult()
+    class WalletState(val value: CitizenWalletState, val inspectionToken: Long = 0) : CitizenSdkNativeResult()
     class SigningOutcome(val value: CitizenSigningOutcome) : CitizenSdkNativeResult()
     class DefaultAccountChange(val value: CitizenDefaultAccountChangeOutcome) : CitizenSdkNativeResult()
     class SyncStatus(val value: CitizenChainSyncStatus) : CitizenSdkNativeResult()

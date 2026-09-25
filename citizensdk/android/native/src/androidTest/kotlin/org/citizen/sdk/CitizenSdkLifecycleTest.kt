@@ -1,21 +1,22 @@
 package org.citizen.sdk
 
-import android.content.ComponentName
 import android.content.pm.PackageManager
 import androidx.test.core.app.ApplicationProvider
-import org.citizen.sdk.ui.CitizenSdkWalletFlowActivity
-import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class CitizenSdkLifecycleTest {
     @Test
     @Suppress("DEPRECATION")
-    fun `wallet activity is not exported`() {
+    fun sdkOwnsNoWalletOrQrActivity() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
-        val info = context.packageManager.getActivityInfo(
-            ComponentName(context, CitizenSdkWalletFlowActivity::class.java),
-            0,
-        )
-        assertFalse(info.exported)
+        val activities = context.packageManager.getPackageInfo(context.packageName, PackageManager.GET_ACTIVITIES).activities.orEmpty()
+        assertTrue(activities.none { it.name.startsWith("org.citizen.sdk.ui.") })
+        for (name in listOf("CitizenSdkWalletFlowActivity", "CitizenSdkQrFlowActivity")) {
+            assertThrows(ClassNotFoundException::class.java) {
+                Class.forName("org.citizen.sdk.ui.$name", false, javaClass.classLoader)
+            }
+        }
     }
 }

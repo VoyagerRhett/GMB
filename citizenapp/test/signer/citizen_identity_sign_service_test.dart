@@ -2,9 +2,6 @@ import '../support/fake_citizen_sdk.dart';
 import 'dart:typed_data';
 
 import 'package:citizen_sdk/citizen_sdk.dart';
-import 'package:citizenapp/qr/bodies/sign_request_body.dart';
-import 'package:citizenapp/qr/envelope.dart';
-import 'package:citizenapp/qr/qr_protocols.dart';
 import 'package:citizenapp/signer/citizen_identity_sign_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -43,19 +40,12 @@ class _FakeSigning implements CitizenSigning {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-String _request({required int action, required List<int> payload}) {
-  return QrEnvelope<SignRequestBody>(
-    kind: QrKind.signRequest,
-    id: 'citizen-request-000001',
-    issuedAt: 1800000000,
-    expiresAt: 1900000000,
-    body: SignRequestBody.fromHex(
-      action: action,
-      signerPublicKeyHex: '0x${'11' * 32}',
-      payloadHex:
-          '0x${payload.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join()}',
-    ),
-  ).toRawJson();
+Future<String> _request(CitizenQr qr, {required int action, required List<int> payload}) async {
+  return (await qr.encodeDocument(CitizenQrContent.signRequest(
+    requestId: 'citizen-request-000001', expiresAt: BigInt.from(1900000000),
+    signerAccountId: '0x${'11' * 32}', action: action,
+    reviewPayload: Uint8List.fromList(payload),
+  ))).canonicalText;
 }
 
 List<int> _u32Le(int value) => [
@@ -104,19 +94,37 @@ Uint8List _validAuthorizationBytes() => Uint8List.fromList([
     ]);
 
 void main() {
-  final service = CitizenIdentitySignService();
+  TestWidgetsFlutterBinding.ensureInitialized();
+  late TestCitizenSdkTransport encodingTransport;
+  late CitizenSdk encodingSdk;
+  setUp(() async {
+    encodingTransport = TestCitizenSdkTransport({}, useCore: true);
+    encodingSdk = await encodingTransport.open();
+  });
+  tearDown(() async {
+    await encodingSdk.close();
+    await encodingTransport.dispose();
+  });
 
-  test('协议登记的公民动作统一展示公民签名确认', () {
-    expect(
-      QrActions.actionLabelForCode(QrActions.citizenIdentity),
-      '公民签名确认',
+  late CitizenIdentitySignService service;
+  setUp(() { service = CitizenIdentitySignService(qr: encodingSdk.qr); });
+
+  test('公民身份确认文案由App保留，不由通用SDK提供', () async {
+    final account = CitizenWalletStateAccount(
+      signMode: CitizenWalletSignMode.hot, walletIndex: 0, accountIndex: 0,
+      accountId: '0x${'11' * 32}', ss58Address: 'w5CitizenAccount',
+      name: '账户0', createdAtMillis: BigInt.zero, isDefault: true,
     );
+    final prep = await service.prepare(await _request(encodingSdk.qr,
+      action: CitizenQrActions.citizenIdentity, payload: _validAuthorizationBytes()),
+      _FakeWallet(account: account));
+    expect(prep.actionLabel, '公民签名确认');
   });
 
   test('非公民签名动作在读取钱包前即拒绝', () async {
     await expectLater(
       service.prepare(
-        _request(action: QrActions.login, payload: Uint8List(1)),
+        await _request(encodingSdk.qr, action: CitizenQrActions.login, payload: Uint8List(1)),
         _FakeWallet(),
       ),
       throwsA(isA<CitizenIdentitySignException>()),
@@ -126,7 +134,7 @@ void main() {
   test('无法完整解码的公民身份载荷禁止签名', () async {
     await expectLater(
       service.prepare(
-        _request(action: QrActions.citizenIdentity, payload: Uint8List(1)),
+        await _request(encodingSdk.qr, action: CitizenQrActions.citizenIdentity, payload: Uint8List(1)),
         _FakeWallet(),
       ),
       throwsA(
@@ -142,8 +150,8 @@ void main() {
   test('缺少防重放三件套的裸载荷禁止签名', () async {
     await expectLater(
       service.prepare(
-        _request(
-          action: QrActions.citizenIdentity,
+        await _request(encodingSdk.qr,
+          action: CitizenQrActions.citizenIdentity,
           payload: _votingIdentityPayload(),
         ),
         _FakeWallet(),
@@ -171,8 +179,8 @@ void main() {
     );
     final wallet = _FakeWallet(account: account);
     final signing = _FakeSigning();
-    final raw = _request(
-      action: QrActions.citizenIdentity,
+    final raw = await _request(encodingSdk.qr,
+      action: CitizenQrActions.citizenIdentity,
       payload: _validAuthorizationBytes(),
     );
     final prep = await service.prepare(

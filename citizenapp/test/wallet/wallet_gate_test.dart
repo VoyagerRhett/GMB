@@ -1,180 +1,117 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:citizen_sdk/citizen_sdk.dart';
+import 'package:citizen_sdk/src/platform/citizen_sdk_flutter_codec.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
-
-import 'package:citizenapp/security/account_data_key_provision.dart';
-import 'package:citizenapp/security/account_security_service.dart';
-import 'package:citizenapp/security/local_data_key.dart';
 import 'package:citizenapp/wallet/wallet_gate.dart';
+import 'package:citizenapp/wallet/pages/create_wallet_onboarding_page.dart';
+import '../support/fake_citizen_sdk.dart';
 
 void main() {
-  late AccountSecurityService security;
-
-  setUp(() {
-    security = AccountSecurityService(
-      wallet: _UnusedWallet(),
-      signing: _UnusedSigning(),
-      subkeyRegistrar: _registerNothing,
-      coldDeviceBindingSigner: _rejectColdBinding,
-      coldAccountDataKeyProvider: _rejectColdKeys,
-    );
+  late CitizenSdk sdk;
+  late TestCitizenSdkTransport transport;
+  setUp(() async {
+    transport = TestCitizenSdkTransport({
+      'getCapabilities': (_) => throw const CitizenSdkException(code: CitizenSdkErrorCode.unavailable, message: '合成能力不可用'),
+    });
+    sdk = await transport.open();
   });
+  tearDown(() async { await sdk.close(); await transport.dispose(); });
 
-  tearDown(() => security.dispose());
+  Widget gate(Future<CitizenWalletState> Function() loader, {Duration timeout = const Duration(seconds: 5), VoidCallback? introduced}) =>
+      Provider<CitizenSdk>.value(value: sdk, child: MaterialApp(home: WalletGate(
+        walletStateLoader: loader, loadTimeout: timeout,
+        onInitialized: (_) => introduced?.call(), child: const Scaffold(body: Text('main-shell')),
+      )));
 
-  Widget gate(
-    Future<CitizenWalletState> Function() loader, {
-    Future<CitizenWalletState> Function()? initializer,
-  }) =>
-      Provider<AccountSecurityService>.value(
-        value: security,
-        child: MaterialApp(
-          home: WalletGate(
-            walletStateLoader: loader,
-            walletInitializer: initializer,
-            onInitialized: (_) {},
-            child: const Scaffold(body: Text('main-shell')),
-          ),
-        ),
-      );
-
-  testWidgets('空目录直接启动SDK唯一初始化且不保留App简化入口', (tester) async {
-    var initializationCalls = 0;
-    await tester.pumpWidget(gate(
-      () async => _state(const []),
-      initializer: () async {
-        initializationCalls += 1;
-        return _state([_account(CitizenWalletSignMode.cold)]);
-      },
-    ));
+  testWidgets('无钱包保留原App入口，SDK就绪事件不越过原备份结束回调', (tester) async {
+    var ready = false, introduced = 0;
+    await tester.pumpWidget(gate(() async => ready ? _state([_account(CitizenWalletSignMode.cold)]) : _state([]),
+      introduced: () => introduced++));
     await tester.pumpAndSettle();
-    expect(initializationCalls, 1);
-    expect(find.text('main-shell'), findsOneWidget);
-    expect(find.widgetWithText(FilledButton, '创建钱包'), findsNothing);
-    expect(find.text('已有钱包？导入助记词'), findsNothing);
+    // 原页面使用惰性ListView，先按真实滚动行为使底部按钮进入构建范围。
+    await tester.scrollUntilVisible(find.widgetWithText(FilledButton, '创建钱包'), 250,
+      scrollable: find.descendant(of: find.byType(ListView), matching: find.byType(Scrollable)).first);
+    expect(find.widgetWithText(FilledButton, '创建钱包'), findsOneWidget);
+    await tester.scrollUntilVisible(find.text('已有钱包？导入助记词'), 150,
+      scrollable: find.descendant(of: find.byType(ListView), matching: find.byType(Scrollable)).first);
+    expect(find.text('已有钱包？导入助记词'), findsOneWidget);
+    expect(find.byType(CreateWalletOnboardingPage), findsOneWidget);
+    ready = true; transport.walletChanged();
+    await tester.pumpAndSettle();
+    expect(find.text('main-shell'), findsNothing);
+    tester.widget<CreateWalletOnboardingPage>(find.byType(CreateWalletOnboardingPage)).onCreated();
+    await tester.pumpAndSettle();
+    expect(find.text('main-shell'), findsOneWidget); expect(introduced, 1);
+    expect(transport.calls, isNot(contains('initializeWallet')));
   });
 
-  testWidgets('热账户或冷账户任一存在都放行', (tester) async {
+  testWidgets('热账户或冷账户任一存在都放行，不触发初始化', (tester) async {
     for (final mode in CitizenWalletSignMode.values) {
+      await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpWidget(gate(() async => _state([_account(mode)])));
       await tester.pumpAndSettle();
       expect(find.text('main-shell'), findsOneWidget);
+      expect(find.byType(CreateWalletOnboardingPage), findsNothing);
     }
   });
 
-  testWidgets('SDK 目录读取失败不误判为空，重试后放行', (tester) async {
+  testWidgets('异常钱包也不是空目录，门禁放行由SDK事实决定', (tester) async {
+    await tester.pumpWidget(gate(() async => CitizenWalletState(revision: BigInt.one, hotProfile: null,
+      accounts: const [], initializationState: CitizenWalletInitializationState.ready, cleanupPending: false,
+      diagnostics: [CitizenWalletDiagnostic(walletIndex: 0, walletName: '异常', accountId: testCitizenAccountId,
+        ss58Address: null, diagnosticReason: CitizenWalletDiagnosticReason.invalidStructure, signMode: null, cleanupTargets: null)])));
+    await tester.pumpAndSettle();
+    expect(find.text('main-shell'), findsOneWidget);
+  });
+
+  testWidgets('SDK读取失败不当空，原重试成功后放行', (tester) async {
     var calls = 0;
     await tester.pumpWidget(gate(() async {
-      calls += 1;
-      if (calls == 1) throw Exception('sdk unavailable');
+      if (++calls == 1) throw Exception('合成读取失败');
       return _state([_account(CitizenWalletSignMode.hot)]);
     }));
     await tester.pumpAndSettle();
     expect(find.textContaining('本地钱包读取失败'), findsOneWidget);
-    await tester.tap(find.text('重试'));
-    await tester.pumpAndSettle();
+    expect(find.byType(CreateWalletOnboardingPage), findsNothing);
+    await tester.tap(find.text('重试')); await tester.pumpAndSettle();
     expect(find.text('main-shell'), findsOneWidget);
   });
 
-  testWidgets('运行期 SDK 账户删空后回到门禁', (tester) async {
-    var initializationCalls = 0;
-    var accounts = <CitizenWalletStateAccount>[
-      _account(CitizenWalletSignMode.hot),
-    ];
-    await tester.pumpWidget(gate(
-      () async => _state(accounts),
-      initializer: () async {
-        initializationCalls += 1;
-        return _state([_account(CitizenWalletSignMode.cold)]);
-      },
-    ));
-    await tester.pumpAndSettle();
-    expect(find.text('main-shell'), findsOneWidget);
-    accounts = const [];
-    security.notifyDefaultAccountChanged();
-    await tester.pumpAndSettle();
-    expect(initializationCalls, 1);
-    expect(find.text('main-shell'), findsOneWidget);
+  testWidgets('运行期SDK删除至空回原门禁，不自动调用SDK窗口', (tester) async {
+    var state = _state([_account(CitizenWalletSignMode.hot)]);
+    await tester.pumpWidget(gate(() async => state)); await tester.pumpAndSettle();
+    state = _state([]); transport.walletChanged(); await tester.pumpAndSettle();
+    expect(find.text('main-shell'), findsNothing);
+    expect(find.byType(CreateWalletOnboardingPage), findsOneWidget);
+    expect(transport.calls, isNot(contains('initializeWallet')));
   });
 
-  testWidgets('永久 pending 会按门禁超时显示错误', (tester) async {
+  testWidgets('未收敛状态和超时保留原错误与重试，不启动初始化', (tester) async {
+    await tester.pumpWidget(gate(() async => CitizenWalletState(revision: BigInt.one, hotProfile: null,
+      accounts: const [], initializationState: CitizenWalletInitializationState.recovering, cleanupPending: true)));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('本地钱包读取失败'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
     final pending = Completer<CitizenWalletState>();
-    await tester.pumpWidget(
-      Provider<AccountSecurityService>.value(
-        value: security,
-        child: MaterialApp(
-          home: WalletGate(
-            walletStateLoader: () => pending.future,
-            loadTimeout: const Duration(milliseconds: 20),
-            child: const Scaffold(body: Text('main-shell')),
-          ),
-        ),
-      ),
-    );
+    await tester.pumpWidget(gate(() => pending.future, timeout: const Duration(milliseconds: 20)));
     await tester.pump(const Duration(milliseconds: 25));
     expect(find.textContaining('本地钱包读取失败'), findsOneWidget);
+    expect(find.byType(CreateWalletOnboardingPage), findsNothing);
   });
 }
 
-CitizenWalletState _state(List<CitizenWalletStateAccount> accounts) =>
-    CitizenWalletState(
-      initializationState: accounts.isEmpty ? CitizenWalletInitializationState.empty : CitizenWalletInitializationState.ready,
-      cleanupPending: false,
-      revision: BigInt.one,
-      hotProfile: null,
-      accounts: accounts,
-    );
+CitizenWalletState _state(List<CitizenWalletStateAccount> accounts) => CitizenWalletState(
+  revision: BigInt.one, hotProfile: accounts.any((value) => value.signMode == CitizenWalletSignMode.hot)
+    ? const CitizenSdkFlutterCodec().decodeWalletProfile(testCitizenWalletProfile()) : null,
+  accounts: accounts, initializationState: accounts.isEmpty ? CitizenWalletInitializationState.empty : CitizenWalletInitializationState.ready,
+  cleanupPending: false);
 
-CitizenWalletStateAccount _account(CitizenWalletSignMode mode) =>
-    CitizenWalletStateAccount(
-      signMode: mode,
-      walletIndex: 0,
-      accountIndex: mode == CitizenWalletSignMode.hot ? 0 : null,
-      accountId:
-          '0x1111111111111111111111111111111111111111111111111111111111111111',
-      ss58Address: 'test-address',
-      name: mode.name,
-      createdAtMillis: BigInt.zero,
-      isDefault: true,
-    );
-
-Future<void> _registerNothing({
-  required String cidNumber,
-  required int bindingRevision,
-  required String accountId,
-  required Future<String> Function({
-    required Uint8List payload,
-    required Uint8List signingMessage,
-    required String devicePublicKey,
-    required int issuedAtMillis,
-  }) signBinding,
-}) async {}
-
-Future<String> _rejectColdBinding({
-  required AccountDataBinding binding,
-  required Uint8List payload,
-  required Uint8List signingMessage,
-  required String devicePublicKey,
-  required int issuedAtMillis,
-}) =>
-    throw UnimplementedError();
-
-Future<List<Uint8List>> _rejectColdKeys({
-  required AccountDataBinding binding,
-  required List<DataKeyRequest> requests,
-}) =>
-    throw UnimplementedError();
-
-final class _UnusedWallet implements CitizenSdkWallet {
-  @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
-}
-
-final class _UnusedSigning implements CitizenSigning {
-  @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+CitizenWalletStateAccount _account(CitizenWalletSignMode mode) {
+  final hot = const CitizenSdkFlutterCodec().decodeWalletState(testCitizenWalletState()).accounts.single;
+  return mode == CitizenWalletSignMode.hot ? hot : CitizenWalletStateAccount(
+    signMode: mode, walletIndex: 1, accountIndex: null, accountId: hot.accountId, ss58Address: hot.ss58Address,
+    name: 'cold', createdAtMillis: BigInt.one, isDefault: true);
 }
