@@ -255,6 +255,231 @@ final class RunnerUITests: XCTestCase {
     attachScreenshot(app, name: "CitizenApp-交易Tab公民链状态")
   }
 
+  /// 只用于用户当场确认的一次真机交易诊断；测试绝不点击最终“确认”。
+  /// 由 App 自身校验已填表单；不读取输入值、不截图、不记录交易标识。
+  func testUserConfirmedTransferDiagnostic() throws {
+    guard ProcessInfo.processInfo.environment["CITIZENAPP_TRANSFER_DIAGNOSTIC"] == "1" else {
+      throw XCTSkip("真实交易诊断只允许在用户当场确认的定向测试中启用")
+    }
+    let app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
+    app.activate()
+    guard app.wait(for: .runningForeground, timeout: 20) else {
+      NSLog("TRANSFER_DIAG stage=app_unavailable")
+      return
+    }
+    let keyboardDone = app.keyboards.buttons["完成"].firstMatch
+    if keyboardDone.exists { keyboardDone.tap() }
+    let sign = app.buttons["签名交易"]
+    let knownLabels = ["确认交易", "确认", "取消", "稍后再说", "创建钱包", "交易", "签名交易", "我的", "聊天", "扫码失败"]
+    for label in knownLabels {
+      let count = app.descendants(matching: .any).matching(
+        NSPredicate(format: "label CONTAINS %@", label)
+      ).count
+      if count > 0 { NSLog("TRANSFER_DIAG stage=known_label kind=%@ count=%d", label, count) }
+    }
+    NSLog("TRANSFER_DIAG stage=element_count all=%d buttons=%d static=%d other=%d alerts=%d",
+          app.descendants(matching: .any).count, app.buttons.count, app.staticTexts.count,
+          app.otherElements.count, app.alerts.count)
+    let transactionTab = app.buttons.matching(
+      NSPredicate(format: "label CONTAINS %@", "交易")
+    ).firstMatch
+    // 钱包选择页是 Flutter 路由，返回按钮不属于 UIKit navigationBars。
+    // 只在标题准确且页面仅有一个按钮时点击，避免误触钱包或交易确认。
+    let walletPickerTitle = app.descendants(matching: .any).matching(
+      NSPredicate(format: "label == %@", "选择交易钱包")
+    ).firstMatch
+    if walletPickerTitle.exists && app.buttons.count == 1 {
+      NSLog("TRANSFER_DIAG stage=return_from_wallet_picker")
+      app.buttons.firstMatch.tap()
+    } else if !sign.exists && !transactionTab.exists {
+      NSLog("TRANSFER_DIAG stage=unknown_nested_page")
+      return
+    }
+    NSLog("TRANSFER_DIAG stage=surface sign=%d tab=%d keyboard=%d",
+          sign.exists ? 1 : 0, transactionTab.exists ? 1 : 0, app.keyboards.count > 0 ? 1 : 0)
+    if !sign.exists {
+      if transactionTab.exists {
+        // Flutter 重建语义树时，按钮惰性查询在 tap 阶段可能失效；使用同次命中的
+        // 可见按钮矩形生成 XCTest 坐标，禁止猜坐标或回退点击其他控件。
+        let frame = transactionTab.frame
+        guard !frame.isEmpty, app.frame.contains(frame) else {
+          NSLog("TRANSFER_DIAG stage=transaction_tab_frame_unavailable")
+          return
+        }
+        app.coordinate(withNormalizedOffset: .zero)
+          .withOffset(CGVector(dx: frame.midX, dy: frame.midY)).tap()
+      }
+    }
+
+    // 指标位于表单下方；基线必须全部读到，否则不能把旧交易误认成本次结果。
+    app.swipeUp()
+    guard let initialPending = transactionCount("待确认", in: app),
+          let initialConfirmed = transactionCount("已确认", in: app),
+          let initialFailed = transactionCount("失败", in: app) else {
+      NSLog("TRANSFER_DIAG stage=baseline_missing")
+      return
+    }
+    app.swipeDown()
+    guard sign.waitForExistence(timeout: 20) else {
+      NSLog("TRANSFER_DIAG stage=sign_button_missing tab=%d keyboard=%d",
+            transactionTab.exists ? 1 : 0, app.keyboards.count > 0 ? 1 : 0)
+      return
+    }
+    let enabled = expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: sign)
+    guard XCTWaiter.wait(for: [enabled], timeout: 120) == .completed else {
+      NSLog("TRANSFER_DIAG stage=sign_button_disabled")
+      return
+    }
+    let startedAt = Date()
+    NSLog("TRANSFER_DIAG stage=form_ready t=0 pending=%d confirmed=%d failed=%d",
+          initialPending, initialConfirmed, initialFailed)
+    sign.tap()
+
+    let dialog = app.staticTexts["确认交易"]
+    guard dialog.waitForExistence(timeout: 15) else {
+      NSLog("TRANSFER_DIAG stage=confirmation_not_shown t=%.1f", Date().timeIntervalSince(startedAt))
+      return
+    }
+    let confirm = app.buttons["确认"].firstMatch
+    guard confirm.exists else {
+      NSLog("TRANSFER_DIAG stage=confirm_button_missing t=%.1f", Date().timeIntervalSince(startedAt))
+      return
+    }
+    NSLog("TRANSFER_DIAG stage=awaiting_owner t=%.1f", Date().timeIntervalSince(startedAt))
+    let closed = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: dialog)
+    guard XCTWaiter.wait(for: [closed], timeout: 300) == .completed else {
+      NSLog("TRANSFER_DIAG stage=owner_did_not_confirm")
+      return
+    }
+    NSLog("TRANSFER_DIAG stage=dialog_closed t=%.1f", Date().timeIntervalSince(startedAt))
+
+    var lastState = "initial"
+    var sawConfirmed = false
+    var firstConfirmedAt: Date?
+    var scrolledToHistory = false
+    let deadline = Date().addingTimeInterval(120)
+    while Date() < deadline {
+      // 先读提示再滚动，避免滑动操作耗时掩盖短暂拒绝提示；原始语义仅在内存存在。
+      let phrases = ["待确认", "已确认", "失败", "签名中", "交易池已拒绝", "交易已完成", "交易已最终失败", "交易发送失败", "交易准备失败", "交易执行失败", "交易异常"]
+      let predicate = NSCompoundPredicate(orPredicateWithSubpredicates:
+        phrases.map { NSPredicate(format: "label CONTAINS %@", $0) })
+      let labels = app.descendants(matching: .any).matching(predicate)
+        .allElementsBoundByIndex.map { $0.label }
+      let pending = transactionCount("待确认", labels: labels)
+      let confirmed = transactionCount("已确认", labels: labels)
+      let failed = transactionCount("失败", labels: labels)
+      let busy = labels.contains { $0.contains("签名中") }
+      let notices = [
+        ("pool_rejected", "交易池已拒绝"), ("finalized_success", "交易已完成"),
+        ("finalized_failure", "交易已最终失败"), ("send_failure", "交易发送失败"),
+        ("prepare_failure", "交易准备失败"), ("execute_failure", "交易执行失败"),
+        ("unexpected_failure", "交易异常"),
+      ].filter { item in labels.contains { $0.contains(item.1) } }.map { $0.0 }
+      // 指标不可见必须明确记为不可读，禁止用基线伪造当前数量。
+      let state = "pending=\(pending.map { String($0 - initialPending) } ?? "unreadable"),confirmed=\(confirmed.map { String($0 - initialConfirmed) } ?? "unreadable"),failed=\(failed.map { String($0 - initialFailed) } ?? "unreadable"),busy=\(busy ? 1 : 0),notice=\(notices.isEmpty ? "none" : notices.joined(separator: "+"))"
+      if state != lastState {
+        NSLog("TRANSFER_DIAG stage=history t=%.1f %@", Date().timeIntervalSince(startedAt), state)
+        lastState = state
+      }
+      if let confirmed, confirmed > initialConfirmed, !sawConfirmed {
+        sawConfirmed = true
+        firstConfirmedAt = Date()
+        NSLog("TRANSFER_DIAG stage=finalized t=%.1f", Date().timeIntervalSince(startedAt))
+      }
+      // 确认后继续观察十秒，保留终态是否反复变化的证据。
+      if let firstConfirmedAt, Date().timeIntervalSince(firstConfirmedAt) >= 10 {
+        NSLog("TRANSFER_DIAG stage=observation_complete t=%.1f", Date().timeIntervalSince(startedAt))
+        return
+      }
+      if !scrolledToHistory {
+        app.swipeUp()
+        scrolledToHistory = true
+      }
+      Thread.sleep(forTimeInterval: 0.25)
+    }
+    NSLog("TRANSFER_DIAG stage=not_finalized_within_120s")
+  }
+
+  /// 只读取固定状态名后面的整数；不得枚举或输出交易记录的其他语义值。
+  private func transactionCount(_ status: String, in app: XCUIApplication) -> Int? {
+    let candidates = app.descendants(matching: .any).matching(
+      NSPredicate(format: "label CONTAINS %@", status)
+    )
+    return transactionCount(status, labels: (0..<min(candidates.count, 12)).map {
+      candidates.element(boundBy: $0).label
+    })
+  }
+
+  /// 同一次采样复用内存语义，避免分别查询三态造成额外采样间隔。
+  private func transactionCount(_ status: String, labels: [String]) -> Int? {
+    let pattern = NSRegularExpression.escapedPattern(for: status) + #"\s+([0-9]+)"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+    for label in labels {
+      let fullRange = NSRange(label.startIndex..<label.endIndex, in: label)
+      guard let match = regex.firstMatch(in: label, range: fullRange),
+            let range = Range(match.range(at: 1), in: label),
+            let count = Int(label[range]) else { continue }
+      return count
+    }
+    return nil
+  }
+
+  /// 已结束交易的只读回读：仅输出三类状态数量和固定提示是否存在，不再触发签名或广播。
+  func testTransferStatusReadOnlyDiagnostic() throws {
+    guard ProcessInfo.processInfo.environment["CITIZENAPP_TRANSFER_DIAGNOSTIC"] == "1" else {
+      throw XCTSkip("真实交易诊断只允许在用户当场确认的定向测试中启用")
+    }
+    let app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
+    app.activate()
+    guard app.wait(for: .runningForeground, timeout: 20) else {
+      NSLog("TRANSFER_READBACK stage=app_unavailable")
+      return
+    }
+    let walletPickerTitle = app.descendants(matching: .any).matching(
+      NSPredicate(format: "label == %@", "选择交易钱包")
+    ).firstMatch
+    if walletPickerTitle.exists && app.buttons.count == 1 {
+      app.buttons.firstMatch.tap()
+      NSLog("TRANSFER_READBACK stage=return_from_wallet_picker")
+    }
+    let transactionTab = app.buttons.matching(
+      NSPredicate(format: "label CONTAINS %@", "交易")
+    ).firstMatch
+    if !app.buttons["签名交易"].exists && transactionTab.exists {
+      transactionTab.tap()
+      NSLog("TRANSFER_READBACK stage=open_transaction_tab")
+    }
+    // 三态指标在签名按钮下方；XCTest 只枚举可见无障碍元素，先滚到卡片底部。
+    app.swipeUp()
+    NSLog("TRANSFER_READBACK stage=surface all=%d buttons=%d static=%d",
+          app.descendants(matching: .any).count, app.buttons.count, app.staticTexts.count)
+    NSLog("TRANSFER_READBACK stage=controls sign=%d tab=%d picker=%d",
+          app.buttons["签名交易"].exists ? 1 : 0, transactionTab.exists ? 1 : 0,
+          walletPickerTitle.exists ? 1 : 0)
+    for status in ["待确认", "已确认", "失败"] {
+      let candidates = app.descendants(matching: .any).matching(
+        NSPredicate(format: "label CONTAINS %@", status)
+      ).count
+      NSLog("TRANSFER_READBACK metric_candidates=%@ count=%d", status, candidates)
+      if let count = transactionCount(status, in: app) {
+        NSLog("TRANSFER_READBACK metric=%@ count=%d", status, count)
+      } else {
+        NSLog("TRANSFER_READBACK metric=%@ absent=1", status)
+      }
+    }
+    for (kind, phrase) in [
+      ("pool_rejected", "交易池已拒绝"),
+      ("finalized_success", "交易已完成"),
+      ("finalized_failure", "交易已最终失败"),
+      ("send_failure", "交易发送失败"),
+    ] {
+      let visible = app.descendants(matching: .any).matching(
+        NSPredicate(format: "label BEGINSWITH %@", phrase)
+      ).firstMatch.exists
+      NSLog("TRANSFER_READBACK notice=%@ visible=%d", kind, visible ? 1 : 0)
+    }
+  }
+
   /// 真机首进扫码页必须持续收到摄像预览；仅在内存比较扫码框中心像素，绝不保存画面。
   /// 临时提示可能在 XCTest 的 tap 返回前消失，因此以白屏和连续帧作为验收依据。
   func testTransactionScannerFirstEntryKeepsLivePreview() throws {

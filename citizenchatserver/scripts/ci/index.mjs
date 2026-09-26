@@ -241,7 +241,9 @@ function action(values) {
     mkdirSync(download, { mode: 0o700 });
     const archive = join(download, upstreamAsset);
     downloadAsset(assets.get(upstreamAsset), archive);
-    run('gh', ['attestation', 'verify', archive, '--repo', upstreamRepository]);
+    // 中文注释：上游不可变 Release 的签名证明绑定标签、提交和此包摘要，先验真再解包。
+    run('gh', ['release', 'verify', release.tag_name, '--repo', upstreamRepository]);
+    run('gh', ['release', 'verify-asset', release.tag_name, archive, '--repo', upstreamRepository]);
     const extracted = join(temporary, 'extracted');
     safeExtract(archive, extracted);
     const upstreamSourceSHA = verifyUpstream(extracted, release);

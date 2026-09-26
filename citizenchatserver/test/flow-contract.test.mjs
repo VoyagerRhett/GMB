@@ -122,6 +122,9 @@ test('CI 与 Release 独立且只消费正式上游成品', () => {
   assert.match(ci, /VoyagerRhett\/TATA/);
   assert.match(ci, /tatachatserver-cloudflare-v/);
   assert.doesNotMatch(ci, /git clone|wrangler deploy/);
+  assert.match(ci, /'release', 'verify', release[.]tag_name/u);
+  assert.match(ci, /'release', 'verify-asset', release[.]tag_name, archive/u);
+  assert.doesNotMatch(ci, /'attestation', 'verify'/u);
   assert.match(release, /CitizenChatServer-Cloudflare-CI/);
   assert.match(release, /version-tag/);
   assert.match(release, /next-semantic-release/);
