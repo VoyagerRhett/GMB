@@ -30,7 +30,8 @@ hex = "0.4"
 citizen-signer = { path = "../../signer" }
 
 [target.'cfg(target_os = "android")'.dependencies]
-jni = "0.21"
+# 归档模块仍统一使用 SDK 已锁定的 JNI 版本，避免同名直接依赖分叉。
+jni = "=0.22.4"
 android_logger = "0.14"
 
 [profile.release]

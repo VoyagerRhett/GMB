@@ -7,6 +7,7 @@ import UIKit
 final class RunnerUITestHostAppDelegate: UIResponder, UIApplicationDelegate {}
 #else
 import XCTest
+import UIKit
 
 /// 对设备中已经安装的 Release CitizenApp 做黑盒验收。
 ///
@@ -252,6 +253,161 @@ final class RunnerUITests: XCTestCase {
     }
     XCTAssertTrue(app.buttons["选择交易钱包"].exists, "交易Tab缺少原有钱包选择入口")
     attachScreenshot(app, name: "CitizenApp-交易Tab公民链状态")
+  }
+
+  /// 真机首进扫码页必须持续收到摄像预览；仅在内存比较扫码框中心像素，绝不保存画面。
+  /// 临时提示可能在 XCTest 的 tap 返回前消失，因此以白屏和连续帧作为验收依据。
+  func testTransactionScannerFirstEntryKeepsLivePreview() throws {
+    let app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
+    app.launch()
+    XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20))
+    dismissPermissionGuideIfNeeded(in: app)
+    try requireMainNavigation(in: app)
+
+    let transactionTab = app.buttons.matching(
+      NSPredicate(format: "label CONTAINS %@", "交易")
+    ).firstMatch
+    XCTAssertTrue(transactionTab.waitForExistence(timeout: 20))
+    transactionTab.tap()
+
+    let scanButton = app.buttons["扫码填入收款地址"]
+    XCTAssertTrue(scanButton.waitForExistence(timeout: 10))
+    scanButton.tap()
+    try assertLiveScannerPreview(in: app, title: "扫码填入收款地址")
+
+    // 同一引擎第二次进入仍须可用，防止首个纹理释放遗漏。
+    let backButton = app.navigationBars["扫码填入收款地址"].buttons.firstMatch
+    XCTAssertTrue(backButton.waitForExistence(timeout: 10))
+    backButton.tap()
+    XCTAssertTrue(scanButton.waitForExistence(timeout: 10))
+    scanButton.tap()
+    try assertLiveScannerPreview(in: app, title: "扫码填入收款地址")
+  }
+
+  /// 冷钱包只进入扫码页读取相机预览，不读取或导入任何账户码。
+  func testColdWalletImportScannerFirstEntryKeepsLivePreview() throws {
+    let app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
+    app.launch()
+    XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20))
+    dismissPermissionGuideIfNeeded(in: app)
+    try requireMainNavigation(in: app)
+
+    let myTab = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "我的")).firstMatch
+    XCTAssertTrue(myTab.waitForExistence(timeout: 20))
+    myTab.tap()
+    let walletEntry = app.descendants(matching: .any).matching(
+      NSPredicate(format: "label == %@", "钱包")
+    ).firstMatch
+    XCTAssertTrue(walletEntry.waitForExistence(timeout: 10))
+    walletEntry.tap()
+    XCTAssertTrue(app.staticTexts["我的钱包"].waitForExistence(timeout: 15))
+
+    let addEntry = app.buttons["添加账户 / 导入冷钱包"]
+    if addEntry.waitForExistence(timeout: 5) && addEntry.isEnabled {
+      addEntry.tap()
+    }
+    let coldImport = app.staticTexts["导入冷钱包"].firstMatch
+    XCTAssertTrue(coldImport.waitForExistence(timeout: 10))
+    coldImport.tap()
+    XCTAssertTrue(app.navigationBars["导入冷钱包"].waitForExistence(timeout: 10))
+    let scanButton = app.buttons["扫码填入地址"]
+    XCTAssertTrue(scanButton.waitForExistence(timeout: 10))
+    scanButton.tap()
+    try assertLiveScannerPreview(in: app, title: "扫描钱包二维码")
+  }
+
+  /// 通讯录只验证扫码页摄像预览，不识别二维码或写联系人关系。
+  func testContactScannerFirstEntryKeepsLivePreview() throws {
+    let app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
+    app.launch()
+    XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20))
+    dismissPermissionGuideIfNeeded(in: app)
+    try requireMainNavigation(in: app)
+
+    let myTab = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "我的")).firstMatch
+    XCTAssertTrue(myTab.waitForExistence(timeout: 20))
+    myTab.tap()
+    let contactsEntry = app.descendants(matching: .any).matching(
+      NSPredicate(format: "label == %@", "通讯录")
+    ).firstMatch
+    XCTAssertTrue(contactsEntry.waitForExistence(timeout: 10))
+    contactsEntry.tap()
+    XCTAssertTrue(app.staticTexts["我的通讯录"].waitForExistence(timeout: 15))
+    let scanButton = app.buttons["扫码添加联系人"]
+    XCTAssertTrue(scanButton.waitForExistence(timeout: 10))
+    scanButton.tap()
+    try assertLiveScannerPreview(in: app, title: "扫码添加好友")
+  }
+
+  /// 三个入口共用同一真机像素门禁；临时提示可能早于 XCTest 的点击回执消失。
+  private func assertLiveScannerPreview(in app: XCUIApplication, title: String) throws {
+    XCTAssertTrue(app.staticTexts[title].firstMatch.waitForExistence(timeout: 10))
+
+    var previous: [UInt8]?
+    var liveFrames = false
+    var sawFailure = false
+    let deadline = Date().addingTimeInterval(12)
+    while Date() < deadline {
+      sawFailure = sawFailure || app.staticTexts["扫码失败"].exists
+      let current = try scanCenterPixels(in: app)
+      if let previous, !scanCenterIsWhite(current), scanCenterChanged(previous, current) {
+        liveFrames = true
+        break
+      }
+      previous = current
+      Thread.sleep(forTimeInterval: 0.35)
+    }
+    XCTAssertFalse(sawFailure, "\(title)首次打开显示了设备失败提示")
+    XCTAssertTrue(liveFrames, "\(title)首次打开未持续输出摄像头画面")
+  }
+
+  /// 只下采样无文字的扫码框中央区域并返回瞬时RGB值；原始画面不进入附件、日志或磁盘。
+  private func scanCenterPixels(in app: XCUIApplication) throws -> [UInt8] {
+    let image = try XCTUnwrap(app.screenshot().image.cgImage)
+    let crop = CGRect(
+      x: CGFloat(image.width) * 0.38,
+      y: CGFloat(image.height) * 0.41,
+      width: CGFloat(image.width) * 0.24,
+      height: CGFloat(image.height) * 0.12
+    ).integral
+    let center = try XCTUnwrap(image.cropping(to: crop))
+    let side = 24
+    var pixels = [UInt8](repeating: 0, count: side * side * 4)
+    let drawn = pixels.withUnsafeMutableBytes { bytes -> Bool in
+      guard let context = CGContext(
+        data: bytes.baseAddress,
+        width: side,
+        height: side,
+        bitsPerComponent: 8,
+        bytesPerRow: side * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+      ) else { return false }
+      context.interpolationQuality = .low
+      context.draw(center, in: CGRect(x: 0, y: 0, width: side, height: side))
+      return true
+    }
+    XCTAssertTrue(drawn, "无法在内存中读取扫码框中心像素")
+    return pixels
+  }
+
+  private func scanCenterIsWhite(_ pixels: [UInt8]) -> Bool {
+    let count = pixels.count / 4
+    let white = stride(from: 0, to: pixels.count, by: 4).filter {
+      pixels[$0] > 245 && pixels[$0 + 1] > 245 && pixels[$0 + 2] > 245
+    }.count
+    return white * 10 >= count * 9
+  }
+
+  private func scanCenterChanged(_ previous: [UInt8], _ current: [UInt8]) -> Bool {
+    guard previous.count == current.count else { return false }
+    var difference = 0
+    for index in stride(from: 0, to: current.count, by: 4) {
+      for channel in 0..<3 {
+        difference += abs(Int(current[index + channel]) - Int(previous[index + channel]))
+      }
+    }
+    return difference > (current.count / 4) * 2
   }
 
   /// 正式App钱包页只验收公开结构和CitizenSDK追加账户窗口的初始遮挡态。

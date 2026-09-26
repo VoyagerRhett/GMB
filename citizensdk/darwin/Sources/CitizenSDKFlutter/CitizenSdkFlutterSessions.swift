@@ -41,6 +41,15 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
     private var textures: FlutterTextureRegistry?
     func setTextureRegistry(_ textures: FlutterTextureRegistry) { self.textures = textures }
 
+    // iOS 引擎从 0 分配纹理编号；macOS 注册器则以 0 表示失败。
+    static func isCaptureTextureIDValid(_ id: Int64) -> Bool {
+        #if os(iOS)
+        return id >= 0
+        #else
+        return id != 0
+        #endif
+    }
+
     /// 纹理只借SDK持有的CF帧，不创建UIView/NSView或相机预览窗口。
     private final class CaptureTexture: NSObject, FlutterTexture, @unchecked Sendable {
         private let gate = NSLock()
@@ -478,7 +487,9 @@ internal final class CitizenSdkFlutterSessions: NSObject, @preconcurrency Flutte
             // run已通过接纳检查后才注册；尚未开始便取消的请求不遗留空纹理。
             let texture = CaptureTexture()
             let textureID = textures.register(texture)
-            guard textureID != 0 else { throw CitizenSDKError(.unavailable, "texture registration failed") }
+            guard Self.isCaptureTextureIDValid(textureID) else {
+                throw CitizenSDKError(.unavailable, "texture registration failed")
+            }
             let listener = CitizenSDKQrCapture.Listener(
                 result: { [weak self, weak session] value in
                     Task { @MainActor in

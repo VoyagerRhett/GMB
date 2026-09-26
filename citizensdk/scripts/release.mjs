@@ -405,17 +405,17 @@ const PUBLIC_ABI_FILES = Object.freeze({
 // XCFramework 分别由测试、文档与候选投影合同固定，不能在本表建立第二条来源。
 const MOBILE_BINDING_SOURCE_FILE_COUNT = 85;
 const MOBILE_BINDING_SOURCE_FILES = Object.freeze({
-  'android/build.gradle': '26401bbfe2e1f6e044dce4b3055a57a19fb22b6b3422a24ba28fa9f1a278ce52',
+  'android/build.gradle': '5d29d7669275ad00011694974e2be6e850e70926de851966f874a2cedfc3c948',
   'android/gradle.properties': '5318804f9c8a0d30039e9449e074d4ce23c97ce76ce4fc58349f671cc43deecf',
-  'android/native/build.gradle': '734abdd3b2c52dc57ce84fa3fa9d5fd201cf6dceadcd28fe5b50ca8b36ea1b49',
-  'android/native/consumer-rules.pro': '81c0d229a083f6b87647b45708e1b19ad116a65c5eed33bf5152ac35def7f2c0',
+  'android/native/build.gradle': '10f4b4ed2bc4b1078a38e30724fe8ee56100a58cd0e5fdb8ad325dc2af31b239',
+  'android/native/consumer-rules.pro': '7a2e6f17f3b414dd62fb760cfbcdefcfc3ec7847d183a89d9782fc479f89d3e6',
   'android/native/src/main/AndroidManifest.xml': '709ef7018c08e6f14d3d02fec899180b6758177b4f1defbae51d815782aa9a8a',
   'android/native/src/main/cpp/CMakeLists.txt': '51b1cf4641cfc3c66d8c0cf4bdfe9821dab8115491efb5ed6ec4e29518624d57',
   'android/native/src/main/cpp/citizensdk_host_bridge.cpp': 'c572aabcaf39a2a2077fb15cb9f9b872912b4d54c6d9edc254db56d142ff50c0',
   'android/native/src/main/cpp/citizensdk_host_bridge.hpp': 'e87140fce8cdae22e52dde261c9a89eec886088ca0d165ab4fd9efb2c6a0dcf2',
-  'android/native/src/main/cpp/citizensdk_jni.cpp': 'f86c8ddb79a576391cb4be85f7089677e8211d06d4101f10bfdd1be65a14a93a',
+  'android/native/src/main/cpp/citizensdk_jni.cpp': '51e3de9044e745a001e1b531e83685625c56508da497da36305c51d6a8130549',
   'android/native/src/main/cpp/citizensdk_jni_support.hpp': 'b0b4fcef64701248f0c34e4d1ffb76fa19cc07bdb96e2b0ff48d7b14926561fa',
-  'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdk.kt': '1a9a7ac21371d7a052954845a79c8744d9807e4cc661020543131d22ab9b5fa3',
+  'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdk.kt': '056bcc7842190a24726ce839c1adf99b767a6908e2d5d26755dfb3ac690e5abb',
   'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdkError.kt': '317ae6a6eeeb3283c2f9035a5c0a63579688eb48fa10fc9424f9eda15f6cdaba',
   'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdkEvents.kt': '43107b2606d06928508b634a0ad5a673bfefa607528786b91bab658efb7fa034',
   'android/native/src/main/kotlin/org/citizen/sdk/CitizenSdkModels.kt': 'af239629e3fa34b27a384111eb86f6b4ce863aa05b20c40ff282f17e93e25fea',
@@ -428,7 +428,7 @@ const MOBILE_BINDING_SOURCE_FILES = Object.freeze({
   'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkHardwareVault.kt': '4994dfb5ff5eb236d256fe98075b0b2bc34cc640e8664c6788ff11a08daef3c6',
   'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkHostRecord.kt': '6cdb3638939976db4c1b179a5871d8de111dd4bf2a3c94eab378e281cbcc9b49',
   'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkHostServices.kt': '12947fde352a8723bef9529dd4e41c375cf1bb456c78a7b7f97475bff2bb2399',
-  'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkNative.kt': 'a1732741f7cd181e701715215ac73925a9dbefc8cb214b2dabb60e6139c08616',
+  'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkNative.kt': '1af314844cfe9af9cc4a057eac8b189d3174b9893d33261b6967d190ae521b3c',
   'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkNativeCodec.kt': '434f49cd3f493bea135209263ceaf2644b6d1fcb9a7a7b8d143d7fc2da4c35a6',
   'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkNativeResult.kt': 'd45832c31e03d83c384659ac0d9d2a919a680c427c8a4bb29b04161d47f3ff8f',
   'android/native/src/main/kotlin/org/citizen/sdk/internal/CitizenSdkPublicStore.kt': '2bf4f6a208b51ce4a89b278a060ffc051a4b985260780125bc76ad1f633ee1d5',
@@ -440,7 +440,7 @@ const MOBILE_BINDING_SOURCE_FILES = Object.freeze({
   'android/settings.gradle': '8c640faa6535ad6f80efd22154ccc50332ae9c77e2b8a0a69419afbfcffe9a8b',
   'android/src/main/AndroidManifest.xml': '5f63723834c354984501a277bf3752b0cd4dc85350bf2e09558538364fcb28ec',
   'android/src/main/kotlin/org/citizen/sdk/CitizenSdkFlutterCodec.kt': 'ad895ed0c5af0c029b11668b2de5a1fce4071e8491e4f05259b31285f60c577b',
-  'android/src/main/kotlin/org/citizen/sdk/CitizenSdkFlutterSessions.kt': '2c62b17a97f84c951d7ad166b1e2882678f8fdeaa5a401892e85709e7e8eaa55',
+  'android/src/main/kotlin/org/citizen/sdk/CitizenSdkFlutterSessions.kt': '770a9807ab911f4bf5a0ff49c9ee57c96264f48ffd5a7aeeffbb28f79483f4be',
   'android/src/main/kotlin/org/citizen/sdk/CitizenSdkPlugin.kt': '5054cf69ad1216f58ca65d32e01d4ff8faa5fc3eadc9ec828e80d0f0dff321d7',
   'darwin/Package.swift': '159c504cab86afb641fbef2b1fd35c59c20bbbe81d003cd7cdeec914a3ee91fc',
   'darwin/Sources/CitizenSDK/CitizenSDK-Bridging-Header.h': '977e6c4e7ede7d12d193032be74810c49412492321ea719937873482956f25a8',
@@ -658,7 +658,7 @@ const SDK_SCRIPT_ENTRIES = Object.freeze({
 });
 const SDK_PINNED_SCRIPT_FILES = Object.freeze({
   'scripts/analysis_options.yaml': '67a8f842d8b2c0eee53ab22db23c98e4deb3f8d3992a20d1a977870dc2e8218a',
-  'scripts/build-native.sh': '919288272aa20e757e347aaa074b767389ab35a6f494a6ff5a9aebe3ecd435bd',
+  'scripts/build-native.sh': '92e4d164c792e0225c2ec446e18d16f7ccf1d4ec48481f5e1c029d26351448d6',
   'scripts/dependencies.lock.json': '0a8512053a401ac12604098de0c19e810b529424eea3e81f952a5eea14e9d5da',
   'scripts/dependencies.mjs': 'd3411d94527d99a93857eb8b9302027e42af6484ddb4fb95c71fdf9c2f13739b',
   'scripts/test.sh': 'ce50ec9439388273a2ee071bc96609eff8decb8743beeee9f22b7cd9190cff7b',
@@ -708,13 +708,13 @@ const SDK_TEST_CONTRACT_FILES = Object.freeze({
   'android/native/src/androidTest/kotlin/org/citizen/sdk/ui/CitizenSdkWalletFlowSecretBoundaryTest.kt': '9ed5779c514f268d804b0660d7e498b3e6921851923427c68bc2d9d16118acf1',
   'android/native/src/test/java/org/citizen/sdk/CitizenSdkJavaApiTest.java': '14831f3885786a8c04bb8425b257f2baa7bf4205f42e579236ca3fa63c75506f',
   'android/native/src/test/java/org/citizen/sdk/CitizenSdkJavaOwnershipTest.java': '81d06cf7ace9cc41b2045f757588a9859ec7f02cc24c4b11fab95d7ad5dc74a4',
-  'android/native/src/test/kotlin/org/citizen/sdk/CitizenSdkApiContractTest.kt': '77d39a306283bf75a41bbda67c9e0ca6df8b56b2f23db2151cbaa6019a5d36af',
+  'android/native/src/test/kotlin/org/citizen/sdk/CitizenSdkApiContractTest.kt': '0ffc68189f7e2712d19af4a5fd7bf651a11b1cfc58a27f72aa4c01026120669e',
   'android/native/src/test/kotlin/org/citizen/sdk/CitizenSdkPreparedWalletTest.kt': '326742ec538a0a0b73188ac24d06f3e6042776a8e0b545c50f6defcbf04cc632',
   'android/native/src/test/kotlin/org/citizen/sdk/internal/CitizenSdkHostOperationTest.kt': 'f1f9bde38554168e856a966d7c79803d2fc02ecae1ca7dc7996a685fc5c01602',
   'android/native/src/test/kotlin/org/citizen/sdk/internal/CitizenSdkRecordKeyTest.kt': 'b83832d2431e40caaea3b9356390c3ea7c03624c93733fc821d3a6f832aed634',
   'android/native/src/test/kotlin/org/citizen/sdk/internal/CitizenSdkVaultIdentityTest.kt': '995a25c4742c3098e96f869379ea4f7e77289e2230cd4c211462712ec4ba1acb',
   'android/src/test/kotlin/org/citizen/sdk/CitizenSdkFlutterCodecTest.kt': '5ca0b611e72043965b49e26ae4b9802e4164801be1e2b11cba2655b030c883e3',
-  'android/src/test/kotlin/org/citizen/sdk/CitizenSdkFlutterSessionsTest.kt': 'd0ec0045359a6888668a8a8e7d9004ba66c8fc7696dab7fd4e66a4c5c54d64e9',
+  'android/src/test/kotlin/org/citizen/sdk/CitizenSdkFlutterSessionsTest.kt': 'a37a33a871f18b72c282862bb6f68b8483cd584b1a52a5d37fe28829391c5e46',
   'android/src/test/kotlin/org/citizen/sdk/CitizenSdkFlutterWalletFlowTest.kt': '5af91c52409e5cfe41c827e0e762aa2148e491ca645e22019c63c0a2e5d61a0a',
   'darwin/Tests/CitizenSDKFlutterTests/CitizenSDKFlutterCodecTests.swift': '535593bec7e4c99b8d3932e79039320cf94be2294443076c924a08829ca615cb',
   'darwin/Tests/CitizenSDKFlutterTests/CitizenSDKFlutterPluginTests.swift': 'd905fda42ad2303ec3fdf7e7b1e6993694747be02b2fb949de1089164aa71923',
@@ -789,8 +789,8 @@ const SDK_TEST_CONTRACT_FILES = Object.freeze({
   'native/ffi/tests/ownership_contract.rs': '1046ef5656bf151bb2fbb8a8172602fbf3fc8846582f5d4346534a65cbe80321',
   'native/ffi/tests/qr_abi_contract.rs': '760aac708a04c952eaf2563d7c96b3ddede85a095ae2268bb89cba625be5725a',
   'native/ffi/tests/request_contract.rs': '587c5cbab565a5b6c574a5fadeb29577f6b647563c3203a21b3d11b85eb74534',
-  'native/ffi/tests/symbol_contract.rs': '12ecb544c92bead55c7b27921d76822f6fa80051f33be5d9536d1a44ba1f1f6b',
-  'native/ffi/tests/wallet_abi_contract.rs': '5bee7ff12a74a75e362b98a154f386ab8e6c98ec75b5fd7de475c3bb329c808f',
+  'native/ffi/tests/symbol_contract.rs': 'c36d2fbaa22fbee98aff4dfaf544bab60bc24059ba50e24bbbab9812fb6de15f',
+  'native/ffi/tests/wallet_abi_contract.rs': '4965bc7127616221b4be6e6f0130d585501d9492a3428bb4ad0b64adcf09631e',
   'native/signer/tests/chain_signer_contract.rs': 'd4e53512dffab3f75ee213a08b71909dbc6c667b4b287df39cd9ac3e62824b31',
   'native/signer/tests/ffi_contract.rs': 'bf38f650394011e7f68219ee8ba435453f616281f91649634c536b8620407038',
   'native/signer/tests/legacy_parity.rs': '984a1521042d8a5b2285a43459383ef3972058db20e8f05154c1f75a2a11d70f',
@@ -798,7 +798,7 @@ const SDK_TEST_CONTRACT_FILES = Object.freeze({
   'native/smoldot/provider/tests/account_nonce_contract.rs': '13f2d194df11c94527fd5b513228cc1ec917f3735b12f3326c239b600821b754',
   'native/smoldot/provider/tests/legacy_parity.rs': '7db2b3ef4959a7bd1c83b22597666b0448f48b3079b82821f624efd2ccb7d9dc',
   'native/smoldot/provider/tests/verified_chain_client_contract.rs': '2239b6e9a0a3375bfa45d9a7fdf2157eee6696ff75c1e5154aba373f8ef17de8',
-  'scripts/release.test.mjs': 'ad6964143b1b659a3c91dff2f78115f808a1efd893377da2b76d1ea47f69d3c9',
+  'scripts/release.test.mjs': 'b15025bda4940155619d0c22b97ce9aa841016ba7162dd27b3b99d31c85e16c7',
   'test/api/citizen_sdk_test.dart': '682d5b30eed22732404d83f00da062578e4676fe64ff7e4be33cae2e7c8e9548',
   'test/api/citizen_transaction_test.dart': '323b2315d2b6a6343c682f1626b10938c141348994b566b4ba0e75d2b656a4a8',
   'test/api/citizen_wallet_flow_test.dart': 'd69cdc13378c8b9af9ff9bc302540af0c28fa726673beb4183cf57091de46c0d',
@@ -867,7 +867,7 @@ const SMOLDOT_UPSTREAM_LOCK_FILES = Object.freeze([
 // 只能保证使用当前锁，必须再固定锁文件自身，才能阻止依赖身份随提交静默漂移。
 // Dart 锁按获批中央 Flutter 测试最小闭包解析并验真；不修改 SDK 运行依赖声明或上游实现。
 const SDK_ROOT_LOCK_FILES = Object.freeze({
-  'Cargo.lock': 'b7f2188071c527748241af33082f5278f14c9717aab47a54ddd5008174158d78',
+  'Cargo.lock': '07e34bab68cc18eaeeb82b8e624b429226426f3eef9355d39ee650b4f31d6d0b',
   'pubspec.lock': '735c65795780cf2eaced6ac373c0f02e7b14953af44c1d1113480eb3d40d90a4',
 });
 // Cargo.lock 会按 registry package 合并整个根 workspace 的 feature。Engine 为钱包
@@ -1001,7 +1001,7 @@ const CORE_RUST_FILES = Object.freeze({
   'native/engine/tests/runtime_context.rs': 'e5eb9f999668b6664d29ba61a0c8b2fd8b2e9fe37f7830bb4f4b7732b9c4fe43',
   'native/engine/tests/state_import.rs': '6937752568de3531a32b8ad35b1fd7270abad120c4b5aac423ae7df970d3f917',
   'native/engine/tests/transaction_outcome.rs': '68a05dfbdeedccaf70c22f83f88ad05131e8f65f9c2f355f12ce93d90e7d0645',
-  'native/ffi/Cargo.toml': 'c82cc038401911e135b9e43dccdf5bb774a0292830bedc4eced66605f4403d66',
+  'native/ffi/Cargo.toml': 'ca8ba157dcc0caf082952c22473f106e0ba2b49f5d10a4d6bfeb32bcc69025ff',
   'native/ffi/src/abi.rs': 'de2d7c034441064ea7408ba92d81ecfe0fd16e2f35cc552d44c86ef9f80b7347',
   'native/ffi/src/assets.rs': '38ec1fc759746e68967ced815b7fcd4d1312be8ccc8da80cc4f8c60b4278ac67',
   'native/ffi/src/capabilities.rs': '107ae5a5fe465b6ed20af8e9117c892424b33a9f6fe572b8f73ef2b9200775fa',
@@ -1013,7 +1013,7 @@ const CORE_RUST_FILES = Object.freeze({
   'native/ffi/src/host_codec.rs': '9a2624f73e1978ec16bb35311269eb8ed1b908626339dfabcf8c90ec8b062c8c',
   'native/ffi/src/host_codec_tests.rs': '2c4530aa91512284dd273663c31e80c3a47734be82a04fe8a5245d0beb80574a',
   'native/ffi/src/host_providers.rs': '5bc57c2f3db9447f626892c8aecdbb5ab5acb4dc1f8246db0c8ae792561013e2',
-  'native/ffi/src/lib.rs': '67016de235e2bb995d5b06e487a2a5a404846523664ef18920366d237184a81f',
+  'native/ffi/src/lib.rs': '877431bb2a0578c34ebf4ed7c2d909c2d31c9048952826feaeb60648e905326d',
   'native/ffi/src/ownership.rs': '7739286ddba8f043fff0c50020438b5a87148512eeb49b194f80faec31db6168',
   'native/ffi/src/qr_abi.rs': 'eb858f929ebc7b0dd1a31b8f384b60ae27e776b077a8b24d55aaf7218fc5ac40',
   'native/ffi/src/requests.rs': 'e880ae4f9e8f20d02e2d291035ca4f6283843dcdb8af5ed935c9c40a342bc11f',
@@ -1033,8 +1033,8 @@ const CORE_RUST_FILES = Object.freeze({
   'native/ffi/tests/ownership_contract.rs': '1046ef5656bf151bb2fbb8a8172602fbf3fc8846582f5d4346534a65cbe80321',
   'native/ffi/tests/qr_abi_contract.rs': '760aac708a04c952eaf2563d7c96b3ddede85a095ae2268bb89cba625be5725a',
   'native/ffi/tests/request_contract.rs': '587c5cbab565a5b6c574a5fadeb29577f6b647563c3203a21b3d11b85eb74534',
-  'native/ffi/tests/symbol_contract.rs': '12ecb544c92bead55c7b27921d76822f6fa80051f33be5d9536d1a44ba1f1f6b',
-  'native/ffi/tests/wallet_abi_contract.rs': '5bee7ff12a74a75e362b98a154f386ab8e6c98ec75b5fd7de475c3bb329c808f',
+  'native/ffi/tests/symbol_contract.rs': 'c36d2fbaa22fbee98aff4dfaf544bab60bc24059ba50e24bbbab9812fb6de15f',
+  'native/ffi/tests/wallet_abi_contract.rs': '4965bc7127616221b4be6e6f0130d585501d9492a3428bb4ad0b64adcf09631e',
   'native/qr/Cargo.toml': '5bee37654c4e2198ae00b65578cf6c005df3b8000434dfa9a9948bc5853505b4',
   'native/contracts/src/signing.rs': 'a55cabb69e572c70e3b25d316a3cf69d86930299ad51f90fe2a54341ba154907',
   'native/qr/src/codec.rs': 'ca467f6c9f51c5847f7558b93a046c55900d115b46ed6ee70d60792ee5bf3c18',
@@ -1059,14 +1059,14 @@ const NATIVE_ROOT_ENTRIES = Object.freeze({
 // 同步审核；每个边界文件都固定最终审核字节，任何后续漂移均失败关闭。
 const CORE_RUST_BOUNDARY_FILES = Object.freeze({
   'Cargo.toml': '3bb213b37d2e0dedb467d1f170af33e0b9d3ee0c949d45345801abfe3907c8e7',
-  'Cargo.lock': 'b7f2188071c527748241af33082f5278f14c9717aab47a54ddd5008174158d78',
+  'Cargo.lock': '07e34bab68cc18eaeeb82b8e624b429226426f3eef9355d39ee650b4f31d6d0b',
 });
 // 该清单离线固定 FFI、PoW workspace、light-base 与 lib 的完整文件闭集；
 // byte_identical 项来自 CitizenApp 初始稳定基线，adapted/sdk_only 是已审查的
 // SDK 边界。清单自身再由此哈希固定，CI/Release 不回指 CitizenApp。
 const SMOLDOT_RUST_SOURCE_MANIFEST = Object.freeze({
   path: 'native/smoldot/SOURCE_SHA256.json',
-  sha256: 'c4d9035c10aa5b36e68af96366c04a135c103d32a1e4e5eb80ffe9189a03afda',
+  sha256: 'a3c754fe25204f1ca0ad216c04e925d63c192a40e4aa8ff72cd4d6a6b3ab10a7',
 });
 // 这些文件位于各来源单元之外，但仍属于 Release 的正式输入：许可证、来源记录、
 // smoldot 原始 ABI 头文件以及由 light-base 示例通过 include_str! 编译引用的链规范。

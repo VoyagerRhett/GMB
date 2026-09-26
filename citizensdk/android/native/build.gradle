@@ -158,6 +158,8 @@ tasks.configureEach { task ->
 
 dependencies {
     implementation 'androidx.biometric:biometric:1.1.0'
+    // 独立 AAR 消费时同样保留官方验证器传递依赖合同。
+    implementation 'rustls:rustls-platform-verifier:0.1.1'
     implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'androidx.fragment:fragment-ktx:1.8.9'
     implementation 'androidx.camera:camera-core:1.5.3'

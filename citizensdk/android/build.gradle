@@ -50,8 +50,14 @@ if (androidBuildValue != null && !androidBuildValue.trim().isEmpty()) {
     buildDir = new File(androidBuildRoot, 'flutter')
 }
 
-allprojects {
+// Flutter 宿主会在 :app 解析本插件的传递依赖；仓库必须登记到消费方所在的根工程。
+rootProject.allprojects {
     repositories {
+        // 同一任务的 Cargo 锁定包提供官方 Android 证书组件；脚本先建立只读 Maven 视图。
+        maven {
+            url = new File(gradle.gradleUserHomeDir, 'citizensdk-verifier-maven').toURI()
+            content { includeGroup 'rustls' }
+        }
         google()
         mavenCentral()
     }
@@ -191,6 +197,8 @@ dependencies {
         testImplementation files(flutterTestJar)
     }
     implementation 'androidx.biometric:biometric:1.1.0'
+    // 与 Cargo.lock 中 rustls-platform-verifier-android 精确同版，随宿主 APK 合入 JVM 类。
+    implementation 'rustls:rustls-platform-verifier:0.1.1'
     implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'androidx.fragment:fragment-ktx:1.8.9'
     implementation 'androidx.camera:camera-core:1.5.3'

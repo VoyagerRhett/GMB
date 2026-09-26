@@ -24,6 +24,7 @@ import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/widgets/shimmer_loading.dart';
 import 'package:citizenapp/wallet/pages/wallet_page.dart';
 import 'package:citizenapp/transaction/onchain-transaction/onchain_payment_service.dart';
+import 'package:citizenapp/transaction/onchain-transaction/onchain_payment_models.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
@@ -899,6 +900,65 @@ void main() {
     expect(_transport.calls, isNot(contains('reorderWalletAccountsWithoutDefaultChange')));
     final payments = OnchainPaymentService(wallet: _sdk.wallet, transactions: TestCitizenTransactions());
     expect((await payments.getCurrentWallet())!.accountId, cold.accountId);
+  });
+
+  test('交易准备失败保留SDK原始分类与阶段，不冒充广播失败', () async {
+    final original = const CitizenSdkException(
+      code: CitizenSdkErrorCode.decode,
+      stage: CitizenSdkFailureStage.provider,
+      method: 'prepareTransaction',
+      message: '合成链数据解析失败',
+    );
+    _transport.handlers['prepareTransaction'] = (_) => throw original;
+    final payments = OnchainPaymentService(
+      wallet: _sdk.wallet, transactions: _sdk.transactions,
+    );
+    await expectLater(
+      payments.prepareTransfer(OnchainPaymentDraft(
+        toSs58Address: _makeColdWallet(walletIndex: 3).ss58Address,
+        amount: 1,
+        symbol: 'GMB',
+        remark: '',
+      )),
+      // SDK 传输层重建异常实例；只要求 App 不改写错误分类、阶段和方法。
+      throwsA(isA<CitizenSdkException>()
+          .having((error) => error.code, 'code', original.code)
+          .having((error) => error.stage, 'stage', original.stage)
+          .having((error) => error.method, 'method', original.method)),
+    );
+  });
+
+  test('非有限金额在调用SDK前作为草稿错误拒绝', () async {
+    var invoked = false;
+    _transport.handlers['prepareTransaction'] = (_) {
+      invoked = true;
+      return const <Object?>[];
+    };
+    final payments = OnchainPaymentService(
+      wallet: _sdk.wallet, transactions: _sdk.transactions,
+    );
+    await expectLater(
+      payments.prepareTransfer(OnchainPaymentDraft(
+        toSs58Address: _makeColdWallet(walletIndex: 3).ss58Address,
+        amount: double.infinity,
+        symbol: 'GMB',
+        remark: '',
+      )),
+      throwsA(isA<OnchainPaymentException>().having(
+        (error) => error.code, 'code', OnchainPaymentErrorCode.invalidDraft,
+      )),
+    );
+    expect(invoked, isFalse);
+    await expectLater(
+      payments.prepareTransfer(OnchainPaymentDraft(
+        toSs58Address: _makeColdWallet(walletIndex: 3).ss58Address,
+        amount: double.maxFinite,
+        symbol: 'GMB',
+        remark: '',
+      )),
+      throwsA(isA<OnchainPaymentException>()),
+    );
+    expect(invoked, isFalse);
   });
 
 

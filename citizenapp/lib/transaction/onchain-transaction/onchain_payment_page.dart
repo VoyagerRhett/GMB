@@ -446,7 +446,8 @@ class _OnchainPaymentPanelState extends State<OnchainPaymentPanel>
     }
 
     final amount = double.tryParse(amountText);
-    if (amount == null || amount <= 0) {
+    if (amount == null || !amount.isFinite || !(amount * 100).isFinite ||
+        amount <= 0) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('金额格式不正确')));
@@ -529,6 +530,7 @@ class _OnchainPaymentPanelState extends State<OnchainPaymentPanel>
     setState(() {
       _submitting = true;
     });
+    var paymentStep = OnchainPaymentStep.preparation;
     try {
       final wallet = _currentWallet!;
       final sdk = context.read<CitizenSdk>();
@@ -540,11 +542,13 @@ class _OnchainPaymentPanelState extends State<OnchainPaymentPanel>
           remark: remark,
         ),
       );
+      paymentStep = OnchainPaymentStep.execution;
       final started = await sdk.transactions.executePreparedTransaction(
         prepared.preparationId,
       );
       CitizenTransactionExecutionCompleted completed;
       if (started is CitizenTransactionExternalSigningPending) {
+        paymentStep = OnchainPaymentStep.externalSignature;
         if (!mounted) return;
         final response = await showCitizenSdkQrResponse(
           context,
@@ -618,20 +622,33 @@ class _OnchainPaymentPanelState extends State<OnchainPaymentPanel>
       if (!mounted) {
         return;
       }
-      final message = e.code == OnchainPaymentErrorCode.broadcastFailed
-          ? '交易发送失败：${e.message}'
-          : '签名失败：${e.message}';
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text(message)));
+      ).showSnackBar(SnackBar(content: Text(e.message)));
+    } on CitizenSdkException catch (e) {
+      // 诊断仅含固定步骤和SDK枚举；不得记录错误描述、账户或交易载荷。
+      final method = switch (e.method) {
+        'prepareTransaction' => 'prepareTransaction',
+        'executePreparedTransaction' => 'executePreparedTransaction',
+        'consumePreparedTransactionQrResponse' =>
+          'consumePreparedTransactionQrResponse',
+        _ => 'unknown',
+      };
+      AppLog.d('[链上交易] step=${paymentStep.name} code=${e.code.name} '
+          'stage=${e.stage.name} method=$method');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(onchainPaymentFailureText(paymentStep, e.code)),
+      ));
     } catch (e) {
       if (!mounted) {
         return;
       }
-      AppLog.d('[链上交易] 未知异常: $e');
+      // 未分类异常不得把可能携带交易内容的原始描述写入日志或弹窗。
+      AppLog.d('[链上交易] 未分类异常类型: ${e.runtimeType}');
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('交易异常：$e')));
+      ).showSnackBar(const SnackBar(content: Text('交易异常，请稍后重试')));
     } finally {
       if (mounted) {
         setState(() {

@@ -255,7 +255,11 @@ fn rust_and_c_publish_exactly_the_reviewed_product_symbols() {
         .iter()
         .map(|name| (*name).to_owned())
         .collect();
-    let mut rust = rust_exports(include_str!("../src/lib.rs"));
+    let source = include_str!("../src/lib.rs");
+    let mut rust = rust_exports(source);
+    // Android 专用系统证书初始化只供 JNI 内部调用，不扩大跨平台公开 C ABI。
+    assert!(source.contains("#[cfg(target_os = \"android\")]\n#[no_mangle]\npub unsafe extern \"C\" fn citizensdk_android_init_tls"));
+    assert!(rust.remove("citizensdk_android_init_tls"));
     let wallet = rust_exports(include_str!("../src/wallet_abi.rs"));
     let qr = rust_exports(include_str!("../src/qr_abi.rs"));
     let transaction = rust_exports(include_str!("../src/transaction_abi.rs"));

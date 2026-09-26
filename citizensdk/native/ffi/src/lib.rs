@@ -10,6 +10,8 @@
 // contracts, Engine and providers continue to forbid unsafe code.
 #![allow(unsafe_code)]
 
+#[cfg(feature = "chain")]
+use std::cell::Cell;
 use std::{
     panic::{catch_unwind, AssertUnwindSafe},
     ptr,
@@ -66,6 +68,83 @@ use ownership::ResultPayload;
 use runtime::NativeRuntime;
 
 const MAX_ABI_INPUT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Android JNI 创建链实例前初始化系统证书验证器；失败封闭，不允许退回弱化验证。
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub unsafe extern "C" fn citizensdk_android_init_tls(
+    raw_env: *mut std::ffi::c_void,
+    raw_context: *mut std::ffi::c_void,
+) -> i32 {
+    ffi_status(|| {
+        if raw_env.is_null() || raw_context.is_null() {
+            return Err(FfiError::new(
+                CitizenSdkErrorCode::InvalidArgument,
+                "Android TLS verifier requires JNI environment and Context",
+            ));
+        }
+        // JNI 栈帧与 Context 局部引用只借用于此调用；库内部保存自己的全局引用。
+        let mut env = unsafe { jni::EnvUnowned::from_raw(raw_env.cast()) };
+        let outcome = env.with_env(|env| {
+            let context = unsafe { jni::objects::JObject::from_raw(env, raw_context.cast()) };
+            rustls_platform_verifier::android::init_with_env(env, context)
+        });
+        match outcome.into_outcome() {
+            jni::Outcome::Ok(()) => Ok(()),
+            jni::Outcome::Err(_) | jni::Outcome::Panic(_) => Err(FfiError::new(
+                CitizenSdkErrorCode::Unavailable,
+                "Android TLS verifier initialization failed",
+            )),
+        }
+    })
+}
+
+/// 启动诊断只保留固定步骤，不读取 panic 内容、宿主数据或链状态。
+#[cfg(feature = "chain")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartStep {
+    Restore,
+    Begin,
+    PublishBegin,
+    ProviderStart,
+    Refresh,
+    Complete,
+    Services,
+    PublishComplete,
+}
+
+#[cfg(feature = "chain")]
+impl StartStep {
+    const fn token(self) -> &'static str {
+        match self {
+            Self::Restore => "RESTORE",
+            Self::Begin => "BEGIN",
+            Self::PublishBegin => "PUBLISH_BEGIN",
+            Self::ProviderStart => "PROVIDER_START",
+            Self::Refresh => "REFRESH",
+            Self::Complete => "COMPLETE",
+            Self::Services => "SERVICES",
+            Self::PublishComplete => "PUBLISH_COMPLETE",
+        }
+    }
+}
+
+/// 在原有异步请求 worker 的隔离之内记录最近一步；普通错误原样返回。
+#[cfg(feature = "chain")]
+fn diagnose_start<T>(
+    step: &Cell<StartStep>,
+    converge_panic: impl FnOnce(),
+    operation: impl FnOnce() -> FfiResult<T>,
+) -> FfiResult<T> {
+    catch_unwind(AssertUnwindSafe(operation)).unwrap_or_else(|_| {
+        // provider 已可能产生副作用；先单向收敛，再把固定阶段送出 JNI。
+        let _ = catch_unwind(AssertUnwindSafe(converge_panic));
+        Err(FfiError::new(
+            CitizenSdkErrorCode::Panic,
+            format!("CitizenSDK start panicked at {}", step.get().token()),
+        ))
+    })
+}
 
 /// 平台通道在方法参数解码前接纳准确序号；无业务、设备或网络副作用。
 #[no_mangle]
@@ -423,79 +502,94 @@ pub unsafe extern "C" fn citizensdk_start(
             let runtime = handles::get(handle)?;
             runtime.provider()?;
             accept_and_write_lifecycle(runtime, out_request_id, |runtime, _, _| {
-                // Host-composed instances own a typed public chain-database store.
-                // Restore it before `begin_provider_start` and, critically, before
-                // the provider's start operation can have any side effect. Legacy
-                // `citizensdk_create` instances retain their original startup path.
-                run_start_lifecycle_policy(
-                    runtime.uses_host_services(),
-                    || -> FfiResult<()> {
-                        match runtime.drive(runtime.engine().restore_state_from_store()) {
-                            Ok(Ok(_)) => Ok(()),
-                            Ok(Err(error)) => Err(error.into()),
-                            Err(error) => Err(error),
-                        }
-                    },
-                    // A provider import followed by failed CAS is already one-way
-                    // StartFailed; a pre-provider validation error remains Created.
-                    // Publish either exact lifecycle without replacing its cause.
-                    || runtime.converge_failed_start(),
-                    || {
-                        runtime
-                            .engine()
-                            .begin_provider_start()
-                            .map_err(FfiError::from)
-                    },
-                    || {
-                        runtime.publish_capabilities()?;
-                        runtime.publish_lifecycle()
-                    },
-                    || -> FfiResult<()> {
-                        match runtime.provider()?.drive(runtime.provider()?.start()) {
-                            Ok(Ok(())) => Ok(()),
-                            Ok(Err(error)) | Err(error) => {
-                                runtime.converge_failed_start();
-                                Err(error.into())
+                let step = Cell::new(if runtime.uses_host_services() {
+                    StartStep::Restore
+                } else {
+                    StartStep::Begin
+                });
+                diagnose_start(&step, || runtime.converge_failed_start(), || {
+                    // Host-composed instances own a typed public chain-database store.
+                    // Restore it before `begin_provider_start` and, critically, before
+                    // the provider's start operation can have any side effect. Legacy
+                    // `citizensdk_create` instances retain their original startup path.
+                    run_start_lifecycle_policy(
+                        runtime.uses_host_services(),
+                        || -> FfiResult<()> {
+                            step.set(StartStep::Restore);
+                            match runtime.drive(runtime.engine().restore_state_from_store()) {
+                                Ok(Ok(_)) => Ok(()),
+                                Ok(Err(error)) => Err(error.into()),
+                                Err(error) => Err(error),
                             }
-                        }
-                    },
-                )?;
+                        },
+                        // A provider import followed by failed CAS is already one-way
+                        // StartFailed; a pre-provider validation error remains Created.
+                        // Publish either exact lifecycle without replacing its cause.
+                        || runtime.converge_failed_start(),
+                        || {
+                            step.set(StartStep::Begin);
+                            runtime
+                                .engine()
+                                .begin_provider_start()
+                                .map_err(FfiError::from)
+                        },
+                        || {
+                            step.set(StartStep::PublishBegin);
+                            runtime.publish_capabilities()?;
+                            runtime.publish_lifecycle()
+                        },
+                        || -> FfiResult<()> {
+                            step.set(StartStep::ProviderStart);
+                            match runtime.provider()?.drive(runtime.provider()?.start()) {
+                                Ok(Ok(())) => Ok(()),
+                                Ok(Err(error)) | Err(error) => {
+                                    runtime.converge_failed_start();
+                                    Err(error.into())
+                                }
+                            }
+                        },
+                    )?;
 
-                // Status refresh is part of startup validation. Once provider
-                // start has had side effects, every later failure converges to a
-                // stopped provider and one-way Engine StartFailed state.
-                if let Err(error) = runtime.refresh_provider_capabilities() {
-                    runtime.converge_failed_start();
-                    return Err(error);
-                }
-
-                match runtime.drive(runtime.engine().complete_provider_start()) {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(error)) => {
-                        runtime.converge_failed_start();
-                        return Err(error.into());
-                    }
-                    Err(error) => {
+                    // Status refresh is part of startup validation. Once provider
+                    // start has had side effects, every later failure converges to a
+                    // stopped provider and one-way Engine StartFailed state.
+                    step.set(StartStep::Refresh);
+                    if let Err(error) = runtime.refresh_provider_capabilities() {
                         runtime.converge_failed_start();
                         return Err(error);
                     }
-                }
 
-                // `complete_provider_start` applies the already sampled provider
-                // readiness through the Engine lifecycle gate.
-                if let Err(error) = runtime.start_product_services() {
-                    runtime.converge_failed_start();
-                    return Err(error);
-                }
-                if let Err(error) = runtime
-                    .publish_capabilities()
-                    .and_then(|_| runtime.publish_lifecycle())
-                {
-                    // 自有 monitor 已启动；末尾事件入队失败也必须排空，不能留后台孤儿。
-                    runtime.converge_failed_start();
-                    return Err(error);
-                }
-                Ok(ResultPayload::Empty)
+                    step.set(StartStep::Complete);
+                    match runtime.drive(runtime.engine().complete_provider_start()) {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => {
+                            runtime.converge_failed_start();
+                            return Err(error.into());
+                        }
+                        Err(error) => {
+                            runtime.converge_failed_start();
+                            return Err(error);
+                        }
+                    }
+
+                    // `complete_provider_start` applies the already sampled provider
+                    // readiness through the Engine lifecycle gate.
+                    step.set(StartStep::Services);
+                    if let Err(error) = runtime.start_product_services() {
+                        runtime.converge_failed_start();
+                        return Err(error);
+                    }
+                    step.set(StartStep::PublishComplete);
+                    if let Err(error) = runtime
+                        .publish_capabilities()
+                        .and_then(|_| runtime.publish_lifecycle())
+                    {
+                        // 自有 monitor 已启动；末尾事件入队失败也必须排空，不能留后台孤儿。
+                        runtime.converge_failed_start();
+                        return Err(error);
+                    }
+                    Ok(ResultPayload::Empty)
+                })
             })
         })
     }
@@ -2190,6 +2284,63 @@ fn wrong_result(expected: &str) -> FfiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "chain")]
+    #[test]
+    fn start_diagnostic_keeps_success_and_errors_but_replaces_panic_payload() {
+        let step = Cell::new(StartStep::Restore);
+        let convergences = Cell::new(0);
+        let converge = || convergences.set(convergences.get() + 1);
+        assert_eq!(diagnose_start(&step, converge, || Ok::<_, FfiError>(7)), Ok(7));
+        let ordinary = FfiError::new(CitizenSdkErrorCode::Network, "ordinary failure");
+        assert_eq!(
+            diagnose_start::<()>(&step, converge, || Err(ordinary.clone())),
+            Err(ordinary),
+        );
+        assert_eq!(convergences.get(), 0);
+        for current in [
+            StartStep::Restore,
+            StartStep::Begin,
+            StartStep::PublishBegin,
+            StartStep::ProviderStart,
+            StartStep::Refresh,
+            StartStep::Complete,
+            StartStep::Services,
+            StartStep::PublishComplete,
+        ] {
+            step.set(current);
+            let error = diagnose_start::<()>(&step, converge, || panic!("untrusted panic payload"))
+                .expect_err("panic must become a fixed failure");
+            assert_eq!(error.code, CitizenSdkErrorCode::Panic);
+            assert_eq!(error.message, format!("CitizenSDK start panicked at {}", current.token()));
+            assert!(!error.message.contains("untrusted"));
+        }
+
+        step.set(StartStep::Restore);
+        assert_eq!(convergences.get(), 8);
+        let error = diagnose_start::<()>(&step, converge, || {
+            run_start_lifecycle_policy(
+                true,
+                || Ok(()),
+                || {},
+                || {
+                    step.set(StartStep::Begin);
+                    Ok(())
+                },
+                || {
+                    step.set(StartStep::PublishBegin);
+                    Ok(())
+                },
+                || {
+                    step.set(StartStep::ProviderStart);
+                    panic!("injected provider failure")
+                },
+            )
+        })
+        .expect_err("a provider panic must keep its startup step");
+        assert_eq!(error.message, "CitizenSDK start panicked at PROVIDER_START");
+        assert_eq!(convergences.get(), 9);
+    }
 
     #[test]
     fn host_lifecycle_uses_exclusive_admission_while_legacy_remains_shared() {

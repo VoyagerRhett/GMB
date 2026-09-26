@@ -5,6 +5,8 @@
 -keep class org.citizen.sdk.internal.CitizenSdkHostServices { *; }
 -keep class org.citizen.sdk.internal.CitizenSdkHostRecord { *; }
 -keep class org.citizen.sdk.internal.CitizenSdkHardwareVault$VaultFailure { *; }
+# Rust JNI 按官方完整名称从 App ClassLoader 查找证书验证器，不能让缩减器移除。
+-keep class org.rustls.platformverifier.** { *; }
 -keep public class org.citizen.sdk.** { public protected *; }
 -keepclasseswithmembers,includedescriptorclasses class * {
     native <methods>;

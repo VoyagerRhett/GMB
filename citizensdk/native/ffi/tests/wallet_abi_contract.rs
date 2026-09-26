@@ -66,7 +66,11 @@ fn header_functions(header: &str) -> BTreeSet<String> {
 
 #[test]
 fn base_wallet_and_qr_exports_are_exact_and_disjoint() {
-    let old = rust_exports(include_str!("../src/lib.rs"));
+    let source = include_str!("../src/lib.rs");
+    let mut old = rust_exports(source);
+    // Android 系统证书初始化仅是 JNI 内部符号，不能混入钱包/QR 的公开 ABI 计数。
+    assert!(source.contains("#[cfg(target_os = \"android\")]\n#[no_mangle]\npub unsafe extern \"C\" fn citizensdk_android_init_tls"));
+    assert!(old.remove("citizensdk_android_init_tls"));
     let wallet = rust_exports(include_str!("../src/wallet_abi.rs"));
     let qr = rust_exports(include_str!("../src/qr_abi.rs"));
     // 无UI钱包/QR及两个独立Host查询按实际所属文件分组，仍是同一公开C闭集。

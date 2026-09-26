@@ -2,6 +2,7 @@
 
 package org.citizen.sdk.internal
 
+import android.content.Context
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.CodingErrorAction
@@ -10,12 +11,15 @@ import org.citizen.sdk.*
 
 /** One private JNI owner; no native identity is returned by a public method. */
 internal class CitizenSdkNative private constructor(
+    context: Context,
     assets: CitizenSdkAssets?,
     hostServices: CitizenSdkHostServices,
     modules: Int,
 ) : AutoCloseable {
     private val calls = CitizenSdkNativeCalls()
+    // Context 只在 nativeCreate 的 JNI 栈帧借用，Rust 验证器自行持有全局引用。
     private val bridge = nativeCreate(
+        context,
         hostServices,
         assets?.manifest ?: byteArrayOf(),
         assets?.chainSpec ?: byteArrayOf(),
@@ -382,6 +386,7 @@ internal class CitizenSdkNative private constructor(
         .decode(ByteBuffer.wrap(value)).toString()
 
     private external fun nativeCreate(
+        context: Context,
         hostServices: CitizenSdkHostServices,
         manifest: ByteArray,
         chainSpec: ByteArray,
@@ -515,10 +520,11 @@ internal class CitizenSdkNative private constructor(
         init { System.loadLibrary("citizensdk_jni") }
 
         internal fun create(
+            context: Context,
             assets: CitizenSdkAssets?,
             hostServices: CitizenSdkHostServices,
             modules: Int = CitizenSdkModules.FULL,
-        ): CitizenSdkNative = CitizenSdkNative(assets, hostServices, modules)
+        ): CitizenSdkNative = CitizenSdkNative(context, assets, hostServices, modules)
 
         // 中文注释：类本身仍是SDK内部实现；这些@JvmStatic JNI成员必须使用JVM public名称，
         // 否则Kotlin会给internal成员追加模块后缀，破坏C++ RegisterNatives唯一准确表。

@@ -10,6 +10,7 @@ use citizen_sdk_contracts::{
     ContractResult, ExportedChainState, FinalizedBlockRef, VerifiedChainClient,
     CITIZENCHAIN_CHAIN_ID, CITIZENCHAIN_GENESIS_HASH, CITIZENCHAIN_PROTOCOL_ID,
 };
+use futures_util::FutureExt;
 use parking_lot::Mutex as ParkingMutex;
 use serde_json::Value;
 use smoldot_light::{
@@ -128,6 +129,21 @@ struct ProviderState {
     pending_import: Option<ExportedChainState>,
 }
 
+/// 启动 Future 的 panic 先收敛生命周期，再由外层固定 ABI 诊断捕获原 unwind。
+async fn converge_start_unwind<T>(state: &Mutex<ProviderState>, operation: impl Future<Output = T>) -> T {
+    match std::panic::AssertUnwindSafe(operation).catch_unwind().await {
+        Ok(result) => result,
+        Err(payload) => {
+            let mut state = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.running = None;
+            state.lifecycle = ProviderLifecycle::StartFailed;
+            // 抛出前释放锁；否则 panic 会把已收敛状态再次变成不可读取的毒化锁。
+            drop(state);
+            std::panic::resume_unwind(payload);
+        }
+    }
+}
+
 /// 随包 smoldot 的真实 `VerifiedChainClient` 实现。
 pub struct SmoldotVerifiedChainClient {
     pub(crate) config: SmoldotProviderConfig,
@@ -188,7 +204,8 @@ impl SmoldotVerifiedChainClient {
                 state.pending_import.clone()
             };
 
-            let result = self.start_inner(pending_import.as_ref()).await;
+            // HTTPS 证书或轻节点启动中的 panic 不能把 STARTING 留给 UI。
+            let result = converge_start_unwind(&self.state, self.start_inner(pending_import.as_ref())).await;
             match result {
                 Ok(running) => {
                     let mut state = self.lock_state()?;
@@ -567,5 +584,24 @@ mod tests {
             panic!("provider runtime must drive the future");
         };
         assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn start_future_panic_converges_once_without_changing_ordinary_results() {
+        let state = Mutex::new(ProviderState {
+            lifecycle: ProviderLifecycle::Starting,
+            running: None,
+            pending_import: None,
+        });
+        // 正常结果和普通失败均由调用方既有分支处理，不能被误判为 panic。
+        assert_eq!(futures::executor::block_on(converge_start_unwind(&state, async { 7_u8 })), 7);
+        assert_eq!(state.lock().expect("state lock").lifecycle, ProviderLifecycle::Starting);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            futures::executor::block_on(converge_start_unwind(&state, async {
+                panic!("injected HTTPS verifier panic")
+            }))
+        }));
+        assert!(panic.is_err());
+        assert_eq!(state.lock().expect("state lock").lifecycle, ProviderLifecycle::StartFailed);
     }
 }

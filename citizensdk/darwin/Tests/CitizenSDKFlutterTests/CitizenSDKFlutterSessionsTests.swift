@@ -13,6 +13,17 @@ import FlutterMacOS
 final class CitizenSDKFlutterSessionsTests: XCTestCase {
     private enum ProbeFailure: Error { case install, close }
 
+    func testCaptureTextureIDsFollowDarwinRegistryContracts() {
+        // iOS 首个真实注册编号是 0；macOS 仅把 0 作为失败哨兵。
+        #if os(iOS)
+        XCTAssertTrue(CitizenSdkFlutterSessions.isCaptureTextureIDValid(0))
+        XCTAssertFalse(CitizenSdkFlutterSessions.isCaptureTextureIDValid(-1))
+        #else
+        XCTAssertFalse(CitizenSdkFlutterSessions.isCaptureTextureIDValid(0))
+        #endif
+        XCTAssertTrue(CitizenSdkFlutterSessions.isCaptureTextureIDValid(1))
+    }
+
     func testVerificationDispatchDoesNotOpenSessionOrSubscribeToEvents() {
         var calls = 0
         let sessions = CitizenSdkFlutterSessions(verifySignature: { account, signature, payload in

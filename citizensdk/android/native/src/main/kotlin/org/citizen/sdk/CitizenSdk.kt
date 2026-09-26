@@ -62,7 +62,9 @@ class CitizenSdk private constructor(
     private val closing = AtomicBoolean(false)
     private var closeActive = false
     private val hostServices = CitizenSdkHostServices(context.applicationContext, modules)
+    // 链实例创建前把应用 Context 交给同一个 JNI 所有者初始化 Android 系统证书验证器。
     private val native = CitizenSdkNative.create(
+        context = context.applicationContext,
         assets = if (modules and CitizenSdkModules.CHAIN != 0) CitizenSdkAssets.load(context.applicationContext) else null,
         modules = modules,
         hostServices = hostServices,
@@ -951,7 +953,8 @@ class CitizenSdk private constructor(
             }
             readinessDesiredGeneration += 1
             if (readinessConvergence.isDone) readinessConvergence = CompletableFuture()
-            ensureReadinessRefreshLocked()
+            // Activity 变化只标记代际；open 和私钥资源的显式等待才提交刷新。
+            // 避免 attachActivity 在 open 返回后抢占紧接着的 Core start 准入。
         }
     }
 

@@ -157,6 +157,12 @@ test('Android独立工具版本由CitizenSDK产品合同固定且不依赖外部
   assert.doesNotMatch(settings, /commandLine|\.\.\/tools|shared\.json/u);
 });
 
+test('Android证书组件仓库对Flutter宿主消费方可见且只解析官方组', () => {
+  const source = readFileSync(join(citizenSdkRoot, 'android/build.gradle'), 'utf8');
+  assert.match(source, /rootProject\.allprojects\s*\{[\s\S]*?citizensdk-verifier-maven[\s\S]*?includeGroup 'rustls'/u);
+  assert.doesNotMatch(source, /(?:^|\n)allprojects\s*\{[\s\S]*?citizensdk-verifier-maven/u);
+});
+
 test('Android独立Flutter测试只借用同一官方embedding且不影响宿主打包', () => {
   const source = readFileSync(join(citizenSdkRoot, 'android/build.gradle'), 'utf8');
   assert.match(source, /standaloneFlutterTests = project == rootProject && sdkSourceValue != null/u);

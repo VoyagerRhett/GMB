@@ -662,25 +662,37 @@ async fn validate_exact_block(
         return Ok(());
     }
 
-    let observed_number = block_number_by_hash(running, block.hash()).await?;
-    if observed_number != block.number() {
-        return Err(contract_error(
-            ContractErrorCode::Integrity,
-            "block hash 对应高度与 VerifiedBlockRef 不一致",
-        ));
+    // smoldot 对非零高度的 chain_getBlockHash 固定返回 null；当前 best 必须用同一份
+    // 已验证 typed 快照核对 hash 与高度。过时 best 只允许转入已证明的 finalized 祖先路径。
+    let heads = storage_batch_heads(running).await?;
+    if !best_block_needs_finalized_proof(block, heads)? {
+        return Ok(());
     }
-    let canonical = running
-        .rpc
-        .request("chain_getBlockHash", json!([block.number()]))
-        .await?;
-    let canonical = parse_hash_value(&canonical, "canonical block hash")?;
-    if canonical != block.hash() {
+    let canonical = finalized_block_at(running, block.number()).await?;
+    if canonical.hash() != block.hash() {
         return Err(contract_error(
             ContractErrorCode::Conflict,
-            "VerifiedBlockRef 已不在轻节点 canonical 视图中",
+            "原 best 块不属于 verified finalized canonical 链",
         ));
     }
     Ok(())
+}
+
+/// 仅当前 verified best 可直接使用；已落入 verified finalized 范围的旧 best 需再验祖先。
+fn best_block_needs_finalized_proof(
+    block: VerifiedBlockRef,
+    heads: StorageBatchHeads,
+) -> ContractResult<bool> {
+    if block == heads.best {
+        return Ok(false);
+    }
+    if block.number() <= heads.verified_finalized.number() {
+        return Ok(true);
+    }
+    Err(contract_error(
+        ContractErrorCode::Conflict,
+        "原 best 块已过期且尚无 verified finalized 证明",
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1451,6 +1463,43 @@ mod tests {
             select_storage_batch_route(finalized.verified(), warp_surface),
             StorageBatchRoute::ExactHash
         );
+    }
+
+    #[test]
+    fn best_block_validation_uses_verified_heads_and_rejects_unproven_history() {
+        let best = VerifiedBlockRef::best(Hash32::from_bytes([0x11; 32]), 11);
+        let verified_finalized = FinalizedBlockRef::from_parts(Hash32::from_bytes([0x09; 32]), 9);
+        let heads = StorageBatchHeads {
+            best,
+            // 表面 finalized 高度不能扩大可接受的历史 best 范围。
+            surface_finalized: FinalizedBlockRef::from_parts(Hash32::from_bytes([0x0a; 32]), 10),
+            verified_finalized,
+        };
+        assert_eq!(
+            best_block_needs_finalized_proof(best, heads).ok(),
+            Some(false)
+        );
+        let old_finalized = VerifiedBlockRef::best(verified_finalized.hash(), 9);
+        assert_eq!(
+            best_block_needs_finalized_proof(old_finalized, heads).ok(),
+            Some(true)
+        );
+        // 高度已 finalized 但 hash 错误时仍必须交给 ancestry 核对，不能直接放行。
+        let wrong_finalized = VerifiedBlockRef::best(Hash32::from_bytes([0xff; 32]), 9);
+        assert_eq!(
+            best_block_needs_finalized_proof(wrong_finalized, heads).ok(),
+            Some(true)
+        );
+        for unproven in [
+            VerifiedBlockRef::best(Hash32::from_bytes([0x0a; 32]), 10),
+            VerifiedBlockRef::best(Hash32::from_bytes([0xff; 32]), 11),
+            VerifiedBlockRef::best(Hash32::from_bytes([0x12; 32]), 12),
+        ] {
+            let error = best_block_needs_finalized_proof(unproven, heads)
+                .err()
+                .unwrap_or_else(|| panic!("unproven best block must fail"));
+            assert_eq!(error.code(), ContractErrorCode::Conflict);
+        }
     }
 
     #[test]

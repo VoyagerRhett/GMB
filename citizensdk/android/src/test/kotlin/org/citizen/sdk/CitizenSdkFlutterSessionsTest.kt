@@ -102,6 +102,30 @@ class CitizenSdkFlutterSessionsTest {
     }
 
     @Test
+    fun startPanicStepUsesOnlyTheFixedClosedSet() {
+        val expected = listOf("RESTORE", "BEGIN", "PUBLISH_BEGIN", "PROVIDER_START",
+            "REFRESH", "COMPLETE", "SERVICES", "PUBLISH_COMPLETE")
+        for (name in expected) {
+            assertEquals(name, citizenSdkFlutterStartStep(CitizenSdkErrorCode.PANIC,
+                "CitizenSDK start panicked at $name").name)
+        }
+        assertEquals(CitizenSdkFlutterDiagnostics.StartStep.NONE,
+            citizenSdkFlutterStartStep(CitizenSdkErrorCode.NETWORK, "CitizenSDK start panicked at RESTORE"))
+        assertEquals(CitizenSdkFlutterDiagnostics.StartStep.NONE,
+            citizenSdkFlutterStartStep(CitizenSdkErrorCode.PANIC, "CitizenSDK start panicked at RESTORE\nprivate"))
+        assertEquals(CitizenSdkFlutterDiagnostics.StartStep.NONE,
+            citizenSdkFlutterStartStep(CitizenSdkErrorCode.PANIC, "arbitrary panic text"))
+
+        val lines = mutableListOf<String>()
+        CitizenSdkFlutterDiagnostics(lines::add).record("start", CitizenSdkFlutterDiagnostics.Phase.COMPLETE,
+            CitizenSdkErrorCode.PANIC, CitizenSdkFailureStage.TEARDOWN,
+            startStep = CitizenSdkFlutterDiagnostics.StartStep.PROVIDER_START)
+        assertEquals(1, lines.size)
+        assertTrue(lines.single().contains("start_step=PROVIDER_START"))
+        assertTrue(lines.single().length < 256)
+    }
+
+    @Test
     fun `queued event token cannot cross cancel and relisten generation`() {
         val gate = CitizenSdkFlutterSubscriptionGate<Any>()
         val firstSink = Any()

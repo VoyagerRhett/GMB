@@ -16,6 +16,8 @@ workspace = true
 blake2-rfc = "=0.2.18"
 citizen-sdk-contracts = { path = "../../contracts" }
 futures-channel = "=0.3.34"
+# 捕获启动 Future 的 unwind，使 provider 先收敛为 StartFailed 再向 ABI 报错。
+futures-util = "=0.3.34"
 hex = "=0.4.3"
 parking_lot = "=0.12.5"
 # SDK 只读取非权威 HTTPS 启动节点建议；不增加远端链 RPC 客户端。

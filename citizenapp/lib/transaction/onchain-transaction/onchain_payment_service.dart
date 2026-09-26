@@ -28,7 +28,9 @@ class OnchainPaymentService {
     final toSs58Address = draft.toSs58Address.trim();
     final symbol = draft.symbol.trim().toUpperCase();
     final remarkBytes = utf8.encode(draft.remark).length;
-    if (toSs58Address.isEmpty || symbol.isEmpty || draft.amount <= 0) {
+    if (toSs58Address.isEmpty || symbol.isEmpty ||
+        !draft.amount.isFinite || !(draft.amount * 100).isFinite ||
+        draft.amount <= 0) {
       throw const OnchainPaymentException(
         OnchainPaymentErrorCode.invalidDraft,
         '交易草稿不合法，请检查收款地址、数量和币种',
@@ -50,23 +52,29 @@ class OnchainPaymentService {
     }
 
     final sourceAccountId = _hexToBytes(wallet.accountId);
-    final callData = OnchainTransferCall.encode(
-      destinationSs58Address: toSs58Address,
-      amountYuan: draft.amount,
-      remark: draft.remark,
-    );
+    // 表单编码错误只属于准备前校验；SDK 的原始错误码和阶段必须原样交还页面。
+    late final Uint8List callData;
     try {
-      return await _transactions.prepareTransaction(
-        Uint8List.fromList(sourceAccountId),
-        callData,
+      callData = OnchainTransferCall.encode(
+        destinationSs58Address: toSs58Address,
+        amountYuan: draft.amount,
+        remark: draft.remark,
       );
-    } catch (e) {
-      if (e is OnchainPaymentException) rethrow;
-      throw OnchainPaymentException(
-        OnchainPaymentErrorCode.broadcastFailed,
-        '交易提交失败: $e',
+    } on FormatException {
+      throw const OnchainPaymentException(
+        OnchainPaymentErrorCode.invalidDraft,
+        '收款地址或金额格式错误',
+      );
+    } on ArgumentError {
+      throw const OnchainPaymentException(
+        OnchainPaymentErrorCode.invalidDraft,
+        '收款地址或金额超出允许范围',
       );
     }
+    return _transactions.prepareTransaction(
+      Uint8List.fromList(sourceAccountId),
+      callData,
+    );
   }
 
   List<int> _hexToBytes(String input) {

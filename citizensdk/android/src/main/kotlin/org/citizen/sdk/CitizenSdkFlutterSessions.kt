@@ -21,19 +21,38 @@ import org.citizen.sdk.internal.CitizenSdkSensitiveBytes
 internal class CitizenSdkFlutterDiagnostics(private val emit: (String) -> Unit) {
     enum class Phase { BEGIN, ADMISSION, DECODE, COMPLETE }
     enum class Sync { UNKNOWN, SYNCING, USABLE, UNAVAILABLE }
+    enum class StartStep { NONE, RESTORE, BEGIN, PUBLISH_BEGIN, PROVIDER_START, REFRESH, COMPLETE, SERVICES, PUBLISH_COMPLETE }
     private val seen = mutableMapOf<String, MutableSet<String>>()
 
     @Synchronized
     fun record(method: String, phase: Phase, code: CitizenSdkErrorCode = CitizenSdkErrorCode.OK,
                stage: CitizenSdkFailureStage? = null, lifecycle: CitizenSdkLifecycle? = null,
-               elapsedNanos: Long = 0, sync: Sync = Sync.UNKNOWN) {
+               elapsedNanos: Long = 0, sync: Sync = Sync.UNKNOWN, startStep: StartStep = StartStep.NONE) {
         if (method !in setOf("open", "start", "getSyncStatus")) return
-        val signature = "phase=${phase.name} code=${code.name} stage=${stage?.name ?: "NONE"} lifecycle=${lifecycle?.name ?: "UNKNOWN"} sync=${sync.name}"
+        val step = if (method == "start") " start_step=${startStep.name}" else ""
+        val signature = "phase=${phase.name} code=${code.name} stage=${stage?.name ?: "NONE"} lifecycle=${lifecycle?.name ?: "UNKNOWN"} sync=${sync.name}$step"
         val entries = seen.getOrPut(method) { mutableSetOf() }
         if (entries.size >= 8 || !entries.add(signature)) return
         val millis = (elapsedNanos.coerceAtLeast(0) / 1_000_000).coerceAtMost(86_400_000)
         // 诊断失效不得改变原请求结果；Android日志缓冲由系统管理，不另存文件。
         try { emit("method=$method $signature elapsed_ms=$millis") } catch (_: Throwable) {}
+    }
+}
+
+/** 只认可Rust固定文案；异常原文、后缀、控制字符和其它方法一律映射为NONE。 */
+internal fun citizenSdkFlutterStartStep(code: CitizenSdkErrorCode, message: String?): CitizenSdkFlutterDiagnostics.StartStep {
+    if (code != CitizenSdkErrorCode.PANIC) return CitizenSdkFlutterDiagnostics.StartStep.NONE
+    val prefix = "CitizenSDK start panicked at "
+    return when (message) {
+        "${prefix}RESTORE" -> CitizenSdkFlutterDiagnostics.StartStep.RESTORE
+        "${prefix}BEGIN" -> CitizenSdkFlutterDiagnostics.StartStep.BEGIN
+        "${prefix}PUBLISH_BEGIN" -> CitizenSdkFlutterDiagnostics.StartStep.PUBLISH_BEGIN
+        "${prefix}PROVIDER_START" -> CitizenSdkFlutterDiagnostics.StartStep.PROVIDER_START
+        "${prefix}REFRESH" -> CitizenSdkFlutterDiagnostics.StartStep.REFRESH
+        "${prefix}COMPLETE" -> CitizenSdkFlutterDiagnostics.StartStep.COMPLETE
+        "${prefix}SERVICES" -> CitizenSdkFlutterDiagnostics.StartStep.SERVICES
+        "${prefix}PUBLISH_COMPLETE" -> CitizenSdkFlutterDiagnostics.StartStep.PUBLISH_COMPLETE
+        else -> CitizenSdkFlutterDiagnostics.StartStep.NONE
     }
 }
 
@@ -1138,9 +1157,13 @@ internal class CitizenSdkFlutterSessions(context: Context, private val textures:
     private fun diagnosticFailure(diagnostics: CitizenSdkFlutterDiagnostics, method: String,
                                   error: Throwable, lifecycle: CitizenSdkLifecycle?, started: Long) {
         val cause = unwrap(error) as? CitizenSdkException
+        val startStep = if (method == "start" && cause != null)
+            citizenSdkFlutterStartStep(cause.code, cause.message)
+        else CitizenSdkFlutterDiagnostics.StartStep.NONE
         diagnostics.record(method, CitizenSdkFlutterDiagnostics.Phase.COMPLETE,
             cause?.code ?: CitizenSdkErrorCode.INTERNAL,
-            cause?.stage ?: CitizenSdkFailureStage.TEARDOWN, lifecycle, System.nanoTime() - started)
+            cause?.stage ?: CitizenSdkFailureStage.TEARDOWN, lifecycle, System.nanoTime() - started,
+            startStep = startStep)
     }
 
     private fun <T> diagnosed(session: Session, method: String, begin: () -> CompletableFuture<T>): CompletableFuture<T> {

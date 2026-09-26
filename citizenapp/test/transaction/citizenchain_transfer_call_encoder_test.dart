@@ -1,6 +1,8 @@
 import 'dart:typed_data';
 
+import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizenapp/transaction/onchain-transaction/citizenchain_transfer_call_encoder.dart';
+import 'package:citizenapp/transaction/onchain-transaction/onchain_payment_models.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -46,5 +48,20 @@ void main() {
       ),
       throwsArgumentError,
     );
+  });
+
+  test('交易失败文案只使用真实步骤和一次原因，不包含SDK异常结构', () {
+    expect(onchainPaymentFailureText(
+      OnchainPaymentStep.preparation, CitizenSdkErrorCode.decode,
+    ), '交易准备失败：链上数据解析异常');
+    expect(onchainPaymentFailureText(
+      OnchainPaymentStep.execution, CitizenSdkErrorCode.network,
+    ), '交易执行失败：区块链暂不可用');
+    expect(onchainPaymentFailureText(
+      OnchainPaymentStep.externalSignature, CitizenSdkErrorCode.cancelled,
+    ), '交易签名失败：操作已取消');
+    expect(onchainPaymentFailureText(
+      OnchainPaymentStep.preparation, CitizenSdkErrorCode.internal,
+    ), '交易准备失败：请稍后重试');
   });
 }

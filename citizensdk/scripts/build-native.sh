@@ -368,6 +368,10 @@ verify_product_abi_symbols() {
   local actual expected forbidden
   actual="$(product_library_symbols "$library" "$nm_bin" "$prefix")"
   expected="$(product_linked_symbols)"
+  # Android 证书初始化只在 Android Core 中导出；其它平台的146个公开函数不变。
+  if [[ "$label" == 'Android libcitizensdk.so' ]]; then
+    expected="$(printf '%s\n%s\n' "$expected" citizensdk_android_init_tls | LC_ALL=C sort -u)"
+  fi
   forbidden="$(printf '%s\n' "$actual" \
     | grep -E '^(smoldot_|citizen_sr25519_|account_crypto_)' || true)"
   [[ -z "$forbidden" ]] \
@@ -838,7 +842,7 @@ build_android() {
   prepare_internal_header
   require_rust_target aarch64-linux-android
   local toolchain gradle_bin android_build_dir gradle_project_cache gradle_user_home
-  local kotlin_persistent_dir gradle_network_arg=''
+  local kotlin_persistent_dir gradle_network_arg='' verifier_maven_dir verifier_link
   local android_gradle_project="$work_dir/gradle-project"
   local core_stage core_destination jni_destination aar_destination source_library
   local built_aar aar_jni nm_bin strip_bin
@@ -891,6 +895,28 @@ build_android() {
     "Android libcitizensdk.so"
   prepare_safe_output_file "$output_dir" "$core_destination" "Android CitizenSDK Core 库"
   cp "$core_stage/libcitizensdk.so" "$core_destination"
+
+  # 仅链接本轮 Cargo 锁定包自带的 Maven 目录，不复制或重打包依赖原件。
+  verifier_maven_dir="$(cargo metadata --manifest-path "$product_ffi_manifest" \
+    --format-version 1 --locked --offline | node -e '
+      let input = "";
+      process.stdin.on("data", chunk => input += chunk);
+      process.stdin.on("end", () => {
+        const matched = JSON.parse(input).packages.filter(packageInfo =>
+          packageInfo.name === "rustls-platform-verifier-android" && packageInfo.version === "0.1.1");
+        if (matched.length !== 1) process.exit(1);
+        process.stdout.write(require("path").join(require("path").dirname(matched[0].manifest_path), "maven"));
+      });
+    ')" || fail "无法定位 Cargo.lock 中的 Android 官方证书组件"
+  [[ -f "$verifier_maven_dir/rustls/rustls-platform-verifier/0.1.1/rustls-platform-verifier-0.1.1.aar" ]] \
+    || fail "锁定的 Android 官方证书组件 AAR 缺失"
+  verifier_link="$gradle_user_home/citizensdk-verifier-maven"
+  if [[ -e "$verifier_link" || -L "$verifier_link" ]]; then
+    [[ -L "$verifier_link" && "$(readlink "$verifier_link")" == "$verifier_maven_dir" ]] \
+      || fail "Android 证书组件 Maven 视图已被其它内容占用"
+  else
+    ln -s "$verifier_maven_dir" "$verifier_link"
+  fi
 
   # Gradle 的 HTML 问题报告会写入源码；关闭该报告，中央日志仍保留完整错误栈。
   # 环境变量必须连续传给同一子进程，续行中插入注释会使变量失去导出效果。

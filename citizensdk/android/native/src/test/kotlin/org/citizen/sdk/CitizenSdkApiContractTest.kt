@@ -81,6 +81,23 @@ class CitizenSdkApiContractTest {
     }
 
     @Test
+    fun `native creation passes application context to Android TLS verifier`() {
+        // 反射真实 JVM 签名，防止 Kotlin 与 RegisterNatives 的 Context 参数再次漂移。
+        assertNotNull(Class.forName(
+            "org.rustls.platformverifier.CertificateVerifier", false, javaClass.classLoader,
+        ))
+        val create = CitizenSdkNative::class.java.getDeclaredMethod(
+            "nativeCreate",
+            android.content.Context::class.java,
+            org.citizen.sdk.internal.CitizenSdkHostServices::class.java,
+            ByteArray::class.java, ByteArray::class.java, ByteArray::class.java,
+            Int::class.javaPrimitiveType,
+        )
+        assertTrue(Modifier.isNative(create.modifiers))
+        assertEquals(Long::class.javaPrimitiveType, create.returnType)
+    }
+
+    @Test
     fun qrReviewAndCaptureExposeDataResourcesWithoutSdkWindows() {
         assertEquals(CitizenSdkOperation::class.java, CitizenSigning::class.java.getMethod("reviewQrRequest", String::class.java).returnType)
         assertEquals(CitizenSdkOperation::class.java, CitizenSigning::class.java.getMethod("signQrRequest", CitizenQrReview::class.java).returnType)

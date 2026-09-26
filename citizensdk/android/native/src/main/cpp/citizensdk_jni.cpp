@@ -16,6 +16,9 @@
 #include "citizensdk_internal.h"
 #include "citizensdk_qr_image.h"
 
+// Android 专用内部 Core 入口；Context 仅用于系统证书验证器初始化，不进入公开 C ABI。
+extern "C" int32_t citizensdk_android_init_tls(void *env, void *context);
+
 namespace citizen::sdk::jni {
 namespace {
 
@@ -556,18 +559,35 @@ bool accounts(JNIEnv *env, jbyteArray source, jint count,
 
 // JNI methods ----------------------------------------------------------------
 
-jlong native_create(JNIEnv *env, jobject, jobject host_services,
+jlong native_create(JNIEnv *env, jobject, jobject context, jobject host_services,
                     jbyteArray manifest, jbyteArray chain_spec,
                     jbyteArray sync_state, jint modules) {
   std::vector<uint8_t> manifest_bytes;
   std::vector<uint8_t> chain_bytes;
   std::vector<uint8_t> sync_bytes;
-  if (host_services == nullptr || !take_bytes(env, manifest, &manifest_bytes) ||
+  if (context == nullptr || host_services == nullptr || !take_bytes(env, manifest, &manifest_bytes) ||
       !take_bytes(env, chain_spec, &chain_bytes) ||
       !take_bytes(env, sync_state, &sync_bytes)) {
     throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT,
               "CitizenSDK assets or host services are invalid");
     return 0;
+  }
+  // 链实例创建前完成 Android 系统证书验证器初始化；异常统一封闭成固定 SDK 错误。
+  if ((static_cast<uint32_t>(modules) & CITIZENSDK_MODULE_CHAIN) != 0) {
+    jclass verifier = env->FindClass("org/rustls/platformverifier/CertificateVerifier");
+    if (verifier == nullptr) {
+      if (env->ExceptionCheck()) env->ExceptionClear();
+      throw_sdk(env, CITIZENSDK_ERROR_UNAVAILABLE,
+                "Android TLS verifier component is missing");
+      return 0;
+    }
+    env->DeleteLocalRef(verifier);
+    if (citizensdk_android_init_tls(env, context) != CITIZENSDK_OK) {
+      if (env->ExceptionCheck()) env->ExceptionClear();
+      throw_sdk(env, CITIZENSDK_ERROR_UNAVAILABLE,
+                "Android TLS verifier initialization failed");
+      return 0;
+    }
   }
   JavaVM *vm = nullptr;
   if (env->GetJavaVM(&vm) != JNI_OK) return 0;
@@ -1867,7 +1887,7 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char *>("verifySignature"), const_cast<char *>("([B[B[B)Z"), reinterpret_cast<void *>(native_verify)},
     {const_cast<char *>("encodeSigningPayload"), const_cast<char *>("(I[B[B)[B"), reinterpret_cast<void *>(native_encode_signing_payload)},
     {const_cast<char *>("nativeCreate"),
-     const_cast<char *>("(Lorg/citizen/sdk/internal/CitizenSdkHostServices;[B[B[BI)J"),
+     const_cast<char *>("(Landroid/content/Context;Lorg/citizen/sdk/internal/CitizenSdkHostServices;[B[B[BI)J"),
      reinterpret_cast<void *>(native_create)},
     {const_cast<char *>("nativeBind"), const_cast<char *>("(J)V"), reinterpret_cast<void *>(native_bind)},
     {const_cast<char *>("nativeLifecycle"), const_cast<char *>("(J)I"), reinterpret_cast<void *>(native_lifecycle)},
