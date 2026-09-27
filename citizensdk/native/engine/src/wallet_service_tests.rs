@@ -2753,7 +2753,7 @@ fn append_reuses_original_key_for_next_and_explicit_accounts() {
         assert_eq!(harness.vault.ensure_calls.load(Ordering::SeqCst), 1, "追加不能重新初始化钱包钥");
         assert_eq!(harness.secrets.load(profile.accounts()[0].secret_ref()).await.unwrap(), original);
         assert_eq!(harness.vault.delete_wallet_calls.load(Ordering::SeqCst), 0);
-        harness.service.signing_service().sign(profile.master_account_id(), b"synthetic-after-append".to_vec())
+        harness.signing_service().sign(profile.master_account_id(), b"synthetic-after-append".to_vec())
             .await.expect("原账户追加后仍可签名");
         let before = harness.profiles.snapshot();
         assert!(harness.service.add_accounts(&known_mnemonic(), "", &[5]).await.is_err());
@@ -2771,7 +2771,8 @@ fn append_cannot_recreate_a_missing_original_wallet_key() {
         let before = harness.profiles.snapshot();
         assert_contract_code(
             harness.service.add_next_account(&known_mnemonic(), "").await.unwrap_err(),
-            ContractErrorCode::KeyInvalidated);
+            // 追加先经过既有钱包认证，缺钥在封装前即被拒绝。
+            ContractErrorCode::AuthenticationRequired);
         assert_eq!(harness.profiles.snapshot(), before);
         assert_eq!(harness.vault.ensure_calls.load(Ordering::SeqCst), 1);
         assert!(!harness.vault.has_key(profile.wallet_index(), profile.generation()));

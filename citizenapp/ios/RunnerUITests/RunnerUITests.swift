@@ -65,14 +65,32 @@ final class RunnerUITests: XCTestCase {
       XCTAssertTrue(exact("身份").waitForExistence(timeout: 10))
     }
     func cidLabel() -> String? {
-      let field = app.descendants(matching: .any).matching(
-        NSPredicate(format: "label CONTAINS %@", "公民号")).firstMatch
-      return field.waitForExistence(timeout: 5) ? field.label : nil
+      // 必须取实际号码所在行，不能把空卡片的“公民号”标题误当成持久化数据。
+      let fields = app.descendants(matching: .any).matching(
+        NSPredicate(format: "label CONTAINS %@", "公民号")).allElementsBoundByIndex
+      for field in fields {
+        let lines = field.label.components(separatedBy: .newlines)
+        for index in lines.indices where lines[index] == "公民号" && index + 1 < lines.count {
+          let value = lines[index + 1]
+          if value.rangeOfCharacter(from: .decimalDigits) != nil { return value }
+        }
+      }
+      return nil
     }
     app.launch()
     try openIdentity()
+    // 升级后首次没有完整本地快照时，允许显式刷新建立快照；普通进入不能代替用户刷新。
+    let hadLocal = cidLabel() != nil
+    NSLog("IDENTITY_UI stage=initial cached=%d", hadLocal ? 1 : 0)
+    if !hadLocal {
+      let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
+      let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
+      start.press(forDuration: 0.1, thenDragTo: end)
+      let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in cidLabel() != nil }, object: nil)
+      XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 60), .completed, "显式刷新后应显示实际公民号")
+    }
     let before = cidLabel()
-    XCTAssertNotNil(before, "本机已有身份的公民号应可直接展示")
+    XCTAssertNotNil(before, "必须读取实际公民号后再比较持久化")
     NSLog("IDENTITY_UI stage=local cid_visible=%d", before == nil ? 0 : 1)
     let back = app.buttons.matching(NSPredicate(format: "label IN %@", ["返回", "Back"])).firstMatch
     XCTAssertTrue(back.exists)
