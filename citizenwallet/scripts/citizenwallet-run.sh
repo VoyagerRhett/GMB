@@ -6,7 +6,7 @@
 # 目标平台是必填参数，不做任何自动探测：探测总要在失败时选一个回落，
 # 而回落的那一端会被当成用户想编的那一端。每个调用方必须明确传入目标平台。
 #
-# 调用方可提供独立工作目录；未提供时使用系统临时目录。
+# 调用方必须提供源码外 Flutter 工程根；其它工作目录未提供时使用系统临时目录。
 set -euo pipefail
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 while [[ -L "$SCRIPT_PATH" ]]; do
@@ -27,15 +27,16 @@ CITIZENWALLET_WORK_DIR="${CITIZENWALLET_WORK_DIR:-${TMPDIR:-/tmp}/citizenwallet/
   echo "citizenwallet本机Build源码身份无效：$CITIZENWALLET_DIR" >&2
   exit 1
 }
-CITIZENWALLET_PROJECT_ROOT="${CITIZENWALLET_PROJECT_ROOT:-$CITIZENWALLET_DIR}"
+export CITIZENWALLET_PROJECT_ROOT="${CITIZENWALLET_PROJECT_ROOT:?必须提供源码外CitizenWallet Flutter工程根}"
 [[ -d "$CITIZENWALLET_PROJECT_ROOT" && -f "$CITIZENWALLET_PROJECT_ROOT/pubspec.yaml" ]] \
   || { echo 'CitizenWallet Flutter 产品目录无效' >&2; exit 1; }
-cd "$CITIZENWALLET_PROJECT_ROOT"
 BUILD_WORK_DIR="${CITIZENWALLET_BUILD_WORK_DIR:-$CITIZENWALLET_WORK_DIR/work}"
 DEPENDENCY_WORK_DIR="${CITIZENWALLET_DEPENDENCY_DIR:-$CITIZENWALLET_WORK_DIR/dependencies}"
 BUILD_DIR="${CITIZENWALLET_BUILD_DIR:-$BUILD_WORK_DIR/flutter}"
 ARTIFACT_ROOT="${CITIZENWALLET_ARTIFACT_DIR:-$CITIZENWALLET_WORK_DIR}"
-python3 - "$CITIZENWALLET_DIR" "$CITIZENWALLET_WORK_DIR" "$BUILD_WORK_DIR" "$DEPENDENCY_WORK_DIR" "$BUILD_DIR" "$ARTIFACT_ROOT" <<'CHECK_OUTPUTS'
+# Pub始终向工程根写.dart_tool；build-dir不能改变这个位置。先解析真实路径，
+# 拒绝工程根及已有.dart_tool链接把生成状态导回产品源码，再允许任何写入。
+python3 - "$CITIZENWALLET_DIR" "$CITIZENWALLET_PROJECT_ROOT" "$CITIZENWALLET_PROJECT_ROOT/.dart_tool" "$CITIZENWALLET_WORK_DIR" "$BUILD_WORK_DIR" "$DEPENDENCY_WORK_DIR" "$BUILD_DIR" "$ARTIFACT_ROOT" <<'CHECK_OUTPUTS'
 from pathlib import Path
 import sys
 source = Path(sys.argv[1]).resolve()
@@ -45,6 +46,7 @@ for value in sys.argv[2:]:
     if not raw.is_absolute() or target == source or source in target.parents:
         raise SystemExit(f'CitizenWallet可写目录必须是源码外绝对路径：{value}')
 CHECK_OUTPUTS
+cd "$CITIZENWALLET_PROJECT_ROOT"
 export CITIZENWALLET_BUILD_DIR="$BUILD_DIR"
 export CITIZENWALLET_NATIVE_ANDROID_DIR="${CITIZENWALLET_NATIVE_ANDROID_DIR:-$BUILD_WORK_DIR/native/android}"
 export CITIZENWALLET_NATIVE_IOS_DIR="${CITIZENWALLET_NATIVE_IOS_DIR:-$BUILD_WORK_DIR/native/ios}"
@@ -58,6 +60,7 @@ export FLUTTER_SUPPRESS_ANALYTICS=true COCOAPODS_DISABLE_STATS=true
 export CITIZENWALLET_GRADLE_INIT_SCRIPT="${CITIZENWALLET_GRADLE_INIT_SCRIPT:-$CITIZENWALLET_WORK_DIR/gradle.init.gradle}"
 export CITIZENWALLET_FLUTTER_GRADLE_BUILD_DIR="${CITIZENWALLET_FLUTTER_GRADLE_BUILD_DIR:-$BUILD_WORK_DIR/flutter-gradle-plugin}"
 mkdir -p "$XDG_CONFIG_HOME" "$TMPDIR" "$CITIZENWALLET_FLUTTER_GRADLE_BUILD_DIR"
+# Flutter Gradle 插件原件只读；其 Kotlin 会话与编译状态必须写入本轮工作目录。
 printf '%s\n' \
   'gradle.beforeProject { project ->' \
   '    def source = System.getenv("CITIZENWALLET_FLUTTER_GRADLE_ROOT")' \
@@ -65,6 +68,7 @@ printf '%s\n' \
   '    if (source && output && project.rootDir.canonicalPath == new File(source).canonicalPath) {' \
   '        def suffix = project.path == ":" ? "root" : project.path.substring(1).replace(":", "/")' \
   '        project.layout.buildDirectory.set(new File(output, suffix))' \
+  '        project.extensions.extraProperties.set("kotlin.project.persistent.dir", new File(output, suffix + "/kotlin-project").path)' \
   '    }' \
   '}' >"$CITIZENWALLET_GRADLE_INIT_SCRIPT"
 # Flutter只接受相对产品根的build-dir配置；把源码外绝对目录换算为相对路径，
@@ -73,14 +77,14 @@ FLUTTER_BUILD_RELATIVE="$(python3 -c 'import os,sys; print(os.path.relpath(sys.a
 flutter config --build-dir="$FLUTTER_BUILD_RELATIVE" >/dev/null
 
 PUB_GET_ARGS=(--enforce-lockfile)
-GRADLE_NETWORK_ARGS=()
+GRADLE_ARGS=(--no-daemon)
 case "${CITIZENWALLET_PUB_OFFLINE:-false}" in
   true|false) ;;
   *) echo 'CITIZENWALLET_PUB_OFFLINE只接受true或false' >&2; exit 1 ;;
 esac
 PUB_OFFLINE="${CITIZENWALLET_PUB_OFFLINE:-false}"
 case "${CITIZENWALLET_OFFLINE:-false}" in
-  true) PUB_OFFLINE=true; GRADLE_NETWORK_ARGS+=(--offline); export CARGO_NET_OFFLINE=true ;;
+  true) PUB_OFFLINE=true; GRADLE_ARGS+=(--offline); export CARGO_NET_OFFLINE=true ;;
   false) ;;
   *) echo 'CITIZENWALLET_OFFLINE只接受true或false' >&2; exit 1 ;;
 esac
@@ -129,7 +133,7 @@ print(",".join(base64.b64encode(f"{name}={value[key]}".encode()).decode() for na
     cd "$CITIZENWALLET_DIR/android"
     ANDROID_HOME="$android_sdk" ANDROID_SDK_ROOT="$android_sdk" JAVA_HOME="$java_home" PATH="$java_home/bin:$PATH" \
     CITIZENWALLET_FLUTTER_GRADLE_ROOT="$flutter_sdk/packages/flutter_tools/gradle" \
-    FLUTTER_ROOT="$flutter_sdk" "$CITIZENWALLET_DIR/android/gradlew" "${GRADLE_NETWORK_ARGS[@]}" --no-daemon --stacktrace --no-problems-report \
+    FLUTTER_ROOT="$flutter_sdk" "$CITIZENWALLET_DIR/android/gradlew" "${GRADLE_ARGS[@]}" --stacktrace --no-problems-report \
       --init-script "$CITIZENWALLET_GRADLE_INIT_SCRIPT" \
       --project-cache-dir "$BUILD_WORK_DIR/gradle-project" \
       -Ptarget-platform=android-arm64 \

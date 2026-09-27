@@ -35,7 +35,8 @@ CitizenWallet 冷钱包 sr25519 原生签名（schnorrkel）。全端唯一实�
 
   # CocoaPods 要求至少有一个源文件；用一个空的占位 .m，真正的实现全在 .a 里。
   s.source_files     = 'placeholder.m'
-  s.vendored_libraries = library_path
+  # 原生库位于本轮外部构建目录；CocoaPods 的 vendored_libraries 只接受相对路径。
+  # 由下方 -force_load 按已编译的绝对路径链接，不把该库声明为 Pod 内文件。
 
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
