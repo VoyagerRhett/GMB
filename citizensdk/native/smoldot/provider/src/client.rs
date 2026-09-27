@@ -18,7 +18,7 @@ use smoldot_light::{
     Client, StartupFinalizedSource,
 };
 
-use crate::legacy::LegacyRpc;
+use crate::{legacy::LegacyRpc, verified_chain_client::RuntimeContexts};
 
 pub(crate) const CHAIN_STATE_FORMAT_VERSION: u32 = 1;
 pub(crate) const MAX_CHAIN_DATABASE_BYTES: usize = 256 * 1024;
@@ -121,6 +121,7 @@ pub(crate) struct RunningProvider {
     pub(crate) client: Arc<ParkingMutex<NativeClient>>,
     pub(crate) chain_id: ChainId,
     pub(crate) rpc: LegacyRpc,
+    pub(crate) runtime_contexts: ParkingMutex<RuntimeContexts>,
 }
 
 struct ProviderState {
@@ -130,11 +131,16 @@ struct ProviderState {
 }
 
 /// 启动 Future 的 panic 先收敛生命周期，再由外层固定 ABI 诊断捕获原 unwind。
-async fn converge_start_unwind<T>(state: &Mutex<ProviderState>, operation: impl Future<Output = T>) -> T {
+async fn converge_start_unwind<T>(
+    state: &Mutex<ProviderState>,
+    operation: impl Future<Output = T>,
+) -> T {
     match std::panic::AssertUnwindSafe(operation).catch_unwind().await {
         Ok(result) => result,
         Err(payload) => {
-            let mut state = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.running = None;
             state.lifecycle = ProviderLifecycle::StartFailed;
             // 抛出前释放锁；否则 panic 会把已收敛状态再次变成不可读取的毒化锁。
@@ -205,7 +211,8 @@ impl SmoldotVerifiedChainClient {
             };
 
             // HTTPS 证书或轻节点启动中的 panic 不能把 STARTING 留给 UI。
-            let result = converge_start_unwind(&self.state, self.start_inner(pending_import.as_ref())).await;
+            let result =
+                converge_start_unwind(&self.state, self.start_inner(pending_import.as_ref())).await;
             match result {
                 Ok(running) => {
                     let mut state = self.lock_state()?;
@@ -256,6 +263,7 @@ impl SmoldotVerifiedChainClient {
                 )
             })?
         };
+        running.runtime_contexts.lock().close();
         Self::remove_running_chain(&running);
         Ok(())
     }
@@ -424,6 +432,7 @@ impl SmoldotVerifiedChainClient {
             client,
             chain_id,
             rpc,
+            runtime_contexts: ParkingMutex::new(RuntimeContexts::default()),
         });
 
         if let Err(error) = verify_started_identity(&running).await {
@@ -594,14 +603,23 @@ mod tests {
             pending_import: None,
         });
         // 正常结果和普通失败均由调用方既有分支处理，不能被误判为 panic。
-        assert_eq!(futures::executor::block_on(converge_start_unwind(&state, async { 7_u8 })), 7);
-        assert_eq!(state.lock().expect("state lock").lifecycle, ProviderLifecycle::Starting);
+        assert_eq!(
+            futures::executor::block_on(converge_start_unwind(&state, async { 7_u8 })),
+            7
+        );
+        assert_eq!(
+            state.lock().expect("state lock").lifecycle,
+            ProviderLifecycle::Starting
+        );
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             futures::executor::block_on(converge_start_unwind(&state, async {
                 panic!("injected HTTPS verifier panic")
             }))
         }));
         assert!(panic.is_err());
-        assert_eq!(state.lock().expect("state lock").lifecycle, ProviderLifecycle::StartFailed);
+        assert_eq!(
+            state.lock().expect("state lock").lifecycle,
+            ProviderLifecycle::StartFailed
+        );
     }
 }

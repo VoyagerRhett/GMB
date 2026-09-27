@@ -1,9 +1,8 @@
-//! Exact finalized reconciliation for SDK-submitted generic transactions.
+//! 对 SDK 已提交的通用交易执行精确的最终确认状态核对。
 //!
-//! No account-wide event indexing or application pallet decoding occurs here.
-//! A batch considers at most 32 durable executions, verifies exact block bodies
-//! and same-index System outcomes, and may rebroadcast each unchanged signed
-//! extrinsic at most once per running Engine generation.
+//! 本模块不索引账户全部事件，也不解码应用 pallet。
+//! 每批最多处理 32 条持久执行记录，核验准确区块体和同索引 System 结果；
+//! 每个运行中的 Engine 代次，至多重新广播每条原始签名 extrinsic 一次。
 
 use std::{
     collections::{BTreeMap, BTreeSet},

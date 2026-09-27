@@ -31,6 +31,105 @@ fn concrete_provider_implements_the_formal_chain_contract() {
     assert_verified_client::<SmoldotVerifiedChainClient>();
 }
 
+/// 冷启动及同块并发/重复读取只读验收；只输出固定阶段、耗时和一致布尔值。
+#[test]
+#[ignore = "需要显式执行Runtime只读实网耗时验收"]
+fn live_runtime_context_reuses_verified_exact_block() {
+    use citizen_sdk_contracts::VerifiedBlockRef;
+    use std::time::{Duration, Instant};
+    for session in 0..2 {
+        let mut spec: serde_json::Value = require_ok(serde_json::from_str(CHAIN_SPEC), "chainspec");
+        spec["lightSyncState"] = require_ok(
+            serde_json::from_str(include_str!(
+                "../../../../assets/citizenchain/light_sync_state.json"
+            )),
+            "checkpoint",
+        );
+        let config = require_ok(
+            SmoldotProviderConfig::try_new(
+                spec.to_string(),
+                "CitizenSDK runtime observation",
+                "2.4.0",
+            ),
+            "config",
+        )
+        .with_bootstrap();
+        let provider = require_ok(SmoldotVerifiedChainClient::new(config), "provider");
+        let result = require_ok(provider.drive(async {
+            tokio::time::timeout(Duration::from_secs(120), async {
+                provider.start().await.ok()?;
+                let block = loop {
+                    if let Ok(Ok(status)) = tokio::time::timeout(Duration::from_secs(3), provider.get_sync_status()).await {
+                        if status.is_usable() && status.peer_count() > 0 && status.best().hash() == status.finalized().hash() { break status.best(); }
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                };
+                let finalized = VerifiedBlockRef::finalized(block.hash(), block.number());
+                let start = Instant::now();
+                let (a,b) = futures::join!(provider.get_runtime_context_at(block), provider.get_runtime_context_at(finalized));
+                let (a,b) = (a.ok()?, b.ok()?);
+                let same = a.metadata() == b.metadata() && a.version() == b.version() && a.block() == block && b.block() == finalized;
+                println!("RUNTIME_OBSERVATION session={session} stage=first_pair elapsed_us={} exact_match={same}", start.elapsed().as_micros());
+                if !same { return None; }
+                for sample in 0..3 {
+                    let start = Instant::now();
+                    let c = provider.get_runtime_context_at(finalized).await.ok()?;
+                    let same = c == b;
+                    println!("RUNTIME_OBSERVATION session={session} stage=repeat sample={sample} elapsed_us={} exact_match={same}", start.elapsed().as_micros());
+                    if !same { return None; }
+                }
+                // 历史块仍经准确身份/状态证明读取；仅核对身份，不输出任何链业务值。
+                if block.number() > 0 {
+                    let historical = provider.get_finalized_block_at(block.number() - 1).await.ok()?;
+                    let start = Instant::now();
+                    let c = provider.get_finalized_runtime_context_at(historical).await.ok()?;
+                    let exact = c.block() == historical.into();
+                    println!("RUNTIME_OBSERVATION session={session} stage=historical elapsed_us={} exact_match={exact}", start.elapsed().as_micros());
+                    if !exact { return None; }
+                }
+                Some(true)
+            }).await
+        }), "executor");
+        require_ok(provider.stop(), "stop");
+        assert_eq!(
+            require_ok(result, "timeout"),
+            Some(true),
+            "Runtime实网验证失败"
+        );
+    }
+}
+
+/// 防止当前块入口重新拆成两个legacy请求或移除状态证明与历史块校验。
+#[test]
+fn runtime_context_entry_preserves_pin_proof_and_history() {
+    let source = include_str!("../../pow/light-base/src/lib.rs");
+    let entry = source
+        .split("pub fn chain_runtime_context_at(")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn chain_account_next_index_snapshot(")
+                .next()
+        })
+        .expect("runtime entry");
+    assert_eq!(entry.matches(".pin_pinned_block_runtime(").count(), 1);
+    assert_eq!(entry.matches(".runtime_call(").count(), 1);
+    assert!(entry.contains("validate_runtime_header("));
+    assert!(entry.contains("compile_runtime_for_block("));
+    assert!(entry.contains("Metadata_metadata"));
+    assert!(entry.contains("1..=2"));
+    assert!(entry.contains("runtime_subscription_cleanup("));
+    let provider = include_str!("../src/verified_chain_client.rs");
+    let entry = provider
+        .split("fn get_runtime_context_at(")
+        .nth(1)
+        .and_then(|tail| tail.split("fn get_block_header_at(").next())
+        .expect("provider entry");
+    assert!(!entry.contains("state_getRuntimeVersion"));
+    assert!(!entry.contains("state_getMetadata"));
+    assert!(entry.contains("cached_runtime_context("));
+    assert_eq!(entry.matches("validate_exact_block(").count(), 2);
+}
+
 /// 真实网络只读nonce验收：每轮新建provider，覆盖首次读取与同块重复读取。
 /// 仅使用合成公有账户，不读取钱包、不提交交易、不输出nonce或块/账户标识。
 #[test]
@@ -106,7 +205,7 @@ fn nonce_entry_uses_one_pinned_runtime_path_and_retains_proof_execution() {
     assert_eq!(entry.matches(".runtime_call(").count(), 1);
     assert!(entry.contains("AccountNonceApi_account_nonce"));
     assert!(entry.contains("1..=1"));
-    assert!(entry.contains("NonceCleanup("));
+    assert!(entry.contains("runtime_subscription_cleanup("));
     assert!(entry.contains("requested_account_id"));
 }
 
@@ -148,7 +247,26 @@ fn nonce_without_proof_never_returns_a_cached_or_fabricated_value() {
         "nonce executor",
     );
     assert!(!matches!(result, Ok(Ok(_))), "没有网络证明不能返回nonce");
+    let runtime = require_ok(
+        provider.drive(async {
+            tokio::time::timeout(
+                Duration::from_millis(300),
+                provider
+                    .get_runtime_context_at(VerifiedBlockRef::best(CITIZENCHAIN_GENESIS_HASH, 0)),
+            )
+            .await
+        }),
+        "runtime executor",
+    );
+    assert!(
+        !matches!(runtime, Ok(Ok(_))),
+        "没有网络证明不能返回Runtime上下文"
+    );
     require_ok(provider.stop(), "stop cancelled provider");
+    assert!(futures::executor::block_on(
+        provider.get_runtime_context_at(VerifiedBlockRef::best(CITIZENCHAIN_GENESIS_HASH, 0))
+    )
+    .is_err());
     let stopped = require_err(
         futures::executor::block_on(provider.account_next_index(
             AccountId32::from_bytes([0x11; 32]),

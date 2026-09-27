@@ -1,4 +1,11 @@
-use std::num::NonZero;
+use futures_channel::oneshot;
+use parking_lot::Mutex;
+use std::{
+    collections::{BTreeMap, VecDeque},
+    future::Future,
+    num::NonZero,
+    sync::Arc,
+};
 
 use citizen_sdk_contracts::{
     validated_finalized_block_range_len, BlockFinality, ChainIdentity, ChainSyncStatus,
@@ -13,7 +20,8 @@ use citizen_sdk_contracts::{
 use futures_channel::mpsc;
 use serde_json::{json, Value};
 use smoldot_light::{
-    ChainFinalizedAncestryError, ChainFinalizedBlocksSnapshot, ChainStorageValuesSnapshot,
+    ChainFinalizedAncestryError, ChainFinalizedBlocksSnapshot, ChainRuntimeContextSnapshot,
+    ChainStorageValuesSnapshot,
 };
 
 use crate::{
@@ -23,6 +31,213 @@ use crate::{
     },
     legacy::subscription_result,
 };
+
+// 缓存只包含本运行实例通过smoldot证明验证的结果；不接收宿主持久记录。
+// 条数、总字节、在途块和等待者均有界；不同块的网络读取互不串行化。
+const MAX_RUNTIME_CONTEXTS: usize = 64;
+const MAX_RUNTIME_CONTEXT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_RUNTIME_WAITERS: usize = 256;
+type RuntimeContextKey = ([u8; 32], u64);
+type RuntimeContextResult = ContractResult<Arc<RuntimeContext>>;
+
+#[derive(Default)]
+pub(crate) struct RuntimeContexts {
+    closed: bool,
+    bytes: usize,
+    ready: VecDeque<Arc<RuntimeContext>>,
+    pending: BTreeMap<RuntimeContextKey, Vec<oneshot::Sender<RuntimeContextResult>>>,
+}
+
+enum RuntimeContextRead {
+    Ready(Arc<RuntimeContext>),
+    Wait(oneshot::Receiver<RuntimeContextResult>),
+    Fetch,
+}
+
+fn runtime_context_key(block: VerifiedBlockRef) -> RuntimeContextKey {
+    (block.hash().into_bytes(), block.number())
+}
+
+impl RuntimeContexts {
+    fn begin(&mut self, block: VerifiedBlockRef) -> ContractResult<RuntimeContextRead> {
+        if self.closed {
+            return Err(contract_error(
+                ContractErrorCode::NotReady,
+                "Runtime实例已停止",
+            ));
+        }
+        let key = runtime_context_key(block);
+        if self.ready.iter().any(|value| {
+            value.block().hash() == block.hash() && value.block().number() != block.number()
+        }) {
+            return Err(contract_error(
+                ContractErrorCode::Integrity,
+                "同一块hash出现不同高度",
+            ));
+        }
+        if let Some(value) = self
+            .ready
+            .iter()
+            .find(|value| runtime_context_key(value.block()) == key)
+        {
+            return Ok(RuntimeContextRead::Ready(Arc::clone(value)));
+        }
+        if let Some(waiters) = self.pending.get_mut(&key) {
+            waiters.retain(|sender| !sender.is_canceled());
+            if waiters.len() >= MAX_RUNTIME_WAITERS {
+                return Err(contract_error(
+                    ContractErrorCode::Unavailable,
+                    "Runtime等待数量已达上限",
+                ));
+            }
+            let (tx, rx) = oneshot::channel();
+            waiters.push(tx);
+            return Ok(RuntimeContextRead::Wait(rx));
+        }
+        if self.pending.len() >= MAX_RUNTIME_CONTEXTS {
+            return Err(contract_error(
+                ContractErrorCode::Unavailable,
+                "Runtime在途块数量已达上限",
+            ));
+        }
+        self.pending.insert(key, Vec::new());
+        Ok(RuntimeContextRead::Fetch)
+    }
+
+    fn complete(
+        &mut self,
+        key: RuntimeContextKey,
+        result: RuntimeContextResult,
+    ) -> RuntimeContextResult {
+        let result = if self.closed {
+            Err(contract_error(
+                ContractErrorCode::NotReady,
+                "Runtime实例已停止",
+            ))
+        } else {
+            result
+        };
+        if let Ok(context) = &result {
+            let size = context.metadata().len();
+            // 超过缓存容量的合法结果仍可返回；不为缓存性能上限改变读取合同。
+            if size <= MAX_RUNTIME_CONTEXT_BYTES {
+                while self.ready.len() >= MAX_RUNTIME_CONTEXTS
+                    || self.bytes + size > MAX_RUNTIME_CONTEXT_BYTES
+                {
+                    if let Some(old) = self.ready.pop_front() {
+                        self.bytes -= old.metadata().len();
+                    } else {
+                        break;
+                    }
+                }
+                self.bytes += size;
+                self.ready.push_back(Arc::clone(context));
+            }
+        }
+        for waiter in self.pending.remove(&key).unwrap_or_default() {
+            let _ = waiter.send(result.clone());
+        }
+        result
+    }
+
+    pub(crate) fn close(&mut self) {
+        self.closed = true;
+        self.bytes = 0;
+        self.ready.clear();
+        for (_, waiters) in std::mem::take(&mut self.pending) {
+            for waiter in waiters {
+                let _ = waiter.send(Err(contract_error(
+                    ContractErrorCode::NotReady,
+                    "Runtime实例已停止",
+                )));
+            }
+        }
+    }
+}
+
+/// 首个请求拥有加载权；任何提前返回或取消都唤醒同块等待者，并移除失败占位。
+struct PendingRuntimeContext<'a> {
+    cache: &'a Mutex<RuntimeContexts>,
+    key: RuntimeContextKey,
+    finished: bool,
+}
+impl PendingRuntimeContext<'_> {
+    fn finish(mut self, result: RuntimeContextResult) -> RuntimeContextResult {
+        let result = self.cache.lock().complete(self.key, result);
+        self.finished = true;
+        result
+    }
+}
+impl Drop for PendingRuntimeContext<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.cache.lock().complete(
+                self.key,
+                Err(contract_error(
+                    ContractErrorCode::Unavailable,
+                    "Runtime读取已取消",
+                )),
+            );
+        }
+    }
+}
+
+/// 同hash/高度只复用不可变Runtime内容；best/finalized标记由每位调用者独立验证。
+async fn cached_runtime_context(
+    cache: &Mutex<RuntimeContexts>,
+    block: VerifiedBlockRef,
+    load: impl Future<Output = ContractResult<RuntimeContext>>,
+) -> ContractResult<RuntimeContext> {
+    let read = cache.lock().begin(block)?;
+    let context = match read {
+        RuntimeContextRead::Ready(context) => {
+            transaction_diagnostic("runtime_context_cache_hit", std::time::Duration::ZERO);
+            context
+        }
+        RuntimeContextRead::Wait(receiver) => {
+            transaction_diagnostic("runtime_context_join", std::time::Duration::ZERO);
+            receiver.await.map_err(|_| {
+                contract_error(ContractErrorCode::Unavailable, "Runtime读取结果丢失")
+            })??
+        }
+        RuntimeContextRead::Fetch => {
+            let pending = PendingRuntimeContext {
+                cache,
+                key: runtime_context_key(block),
+                finished: false,
+            };
+            transaction_diagnostic("runtime_context_fetch", std::time::Duration::ZERO);
+            let result = load.await.and_then(|context| {
+                if runtime_context_key(context.block()) != runtime_context_key(block) {
+                    return Err(contract_error(
+                        ContractErrorCode::Integrity,
+                        "Runtime加载结果区块不匹配",
+                    ));
+                }
+                Ok(Arc::new(context))
+            });
+            pending.finish(result)?
+        }
+    };
+    RuntimeContext::try_new(block, context.version(), context.metadata().to_vec())
+}
+
+fn runtime_context_from_snapshot(
+    block: VerifiedBlockRef,
+    snapshot: ChainRuntimeContextSnapshot,
+) -> ContractResult<RuntimeContext> {
+    if snapshot.block_hash != block.hash().into_bytes() || snapshot.block_number != block.number() {
+        return Err(contract_error(
+            ContractErrorCode::Integrity,
+            "typed Runtime结果区块不匹配",
+        ));
+    }
+    RuntimeContext::try_new(
+        block,
+        RuntimeVersion::new(snapshot.spec_version, snapshot.transaction_version),
+        snapshot.metadata,
+    )
+}
 
 impl VerifiedChainClient for SmoldotVerifiedChainClient {
     fn identity(&self) -> ContractFuture<'_, ChainIdentity> {
@@ -314,28 +529,38 @@ impl VerifiedChainClient for SmoldotVerifiedChainClient {
         Box::pin(async move {
             let running = running?;
             validate_exact_block(&running, block).await?;
-            let hash = hash_hex(block.hash());
-            // 两个请求都显式携带同一个准确 block hash；不允许分别读取“当前”版本与 metadata。
             let started = std::time::Instant::now();
-            let version_value = running
-                .rpc
-                .request("state_getRuntimeVersion", json!([hash]))
-                .await?;
-            transaction_diagnostic("runtime_version", started.elapsed());
-            let started = std::time::Instant::now();
-            let metadata_value = running
-                .rpc
-                .request("state_getMetadata", json!([hash_hex(block.hash())]))
-                .await?;
-            transaction_diagnostic("runtime_metadata", started.elapsed());
-            let spec_version = parse_u32_field(&version_value, "specVersion")?;
-            let transaction_version = parse_u32_field(&version_value, "transactionVersion")?;
-            let metadata = parse_hex_value(&metadata_value, "runtime metadata")?;
-            RuntimeContext::try_new(
-                block,
-                RuntimeVersion::new(spec_version, transaction_version),
-                metadata,
-            )
+            let context = cached_runtime_context(&running.runtime_contexts, block, async {
+                let future = {
+                    let client = running.client.lock();
+                    client
+                        .chain_runtime_context_at(
+                            running.chain_id,
+                            block.hash().into_bytes(),
+                            block.number(),
+                        )
+                        .map_err(provider_error)?
+                };
+                // 有界等待会取消typed Future；其析构负责释放订阅引用。
+                let snapshot = tokio::time::timeout(self.config.request_timeout, future)
+                    .await
+                    .map_err(|_| {
+                        contract_error(ContractErrorCode::Timeout, "准确块Runtime读取超时")
+                    })?
+                    .map_err(provider_error)?;
+                runtime_context_from_snapshot(block, snapshot)
+            })
+            .await?;
+            // 命中也必须核对当前实例和准确块归属；缓存不能把旧分叉或停止实例变为可信。
+            validate_exact_block(&running, block).await?;
+            if !Arc::ptr_eq(&running, &self.running()?) {
+                return Err(contract_error(
+                    ContractErrorCode::Conflict,
+                    "Runtime结果来自旧实例",
+                ));
+            }
+            transaction_diagnostic("runtime_context_total", started.elapsed());
+            Ok(context)
         })
     }
 
@@ -1344,18 +1569,6 @@ fn parse_hex_value(value: &Value, field: &str) -> ContractResult<Vec<u8>> {
     })
 }
 
-fn parse_u32_field(value: &Value, field: &str) -> ContractResult<u32> {
-    let value = value.get(field).ok_or_else(|| {
-        contract_error(
-            ContractErrorCode::Decode,
-            format!("runtime version 缺少 {field}"),
-        )
-    })?;
-    let value = parse_u64_value(value, field)?;
-    u32::try_from(value)
-        .map_err(|_| contract_error(ContractErrorCode::Decode, format!("{field} 超出 u32")))
-}
-
 fn parse_u64_value(value: &Value, field: &str) -> ContractResult<u64> {
     if let Some(number) = value.as_u64() {
         return Ok(number);
@@ -1409,6 +1622,258 @@ fn verify_submitted_hash(
 mod tests {
     use super::*;
     use smoldot_light::ChainFinalizedBlockSnapshot;
+
+    fn runtime_fixture(block: VerifiedBlockRef, version: u32) -> RuntimeContext {
+        RuntimeContext::try_new(block, RuntimeVersion::new(version, 1), vec![version as u8])
+            .expect("fixture")
+    }
+
+    /// 同块finality推进只改变已独立验证的标记；不同块/升级绝不沿用旧内容。
+    #[test]
+    fn runtime_cache_reuses_exact_block_and_separates_forks_and_upgrades() {
+        futures::executor::block_on(async {
+            let cache = Mutex::new(RuntimeContexts::default());
+            let a = VerifiedBlockRef::best(Hash32::from_bytes([1; 32]), 10);
+            let finalized = VerifiedBlockRef::finalized(a.hash(), a.number());
+            cached_runtime_context(&cache, a, async { Ok(runtime_fixture(a, 1)) })
+                .await
+                .expect("first");
+            let second = cached_runtime_context(&cache, finalized, async {
+                panic!("same block must not reload")
+            })
+            .await
+            .expect("hit");
+            assert_eq!(second.block(), finalized);
+            assert_eq!(second.version().spec_version(), 1);
+            let fork = VerifiedBlockRef::best(Hash32::from_bytes([2; 32]), 10);
+            let upgrade = VerifiedBlockRef::best(Hash32::from_bytes([3; 32]), 11);
+            for block in [fork, upgrade] {
+                let value =
+                    cached_runtime_context(&cache, block, async { Ok(runtime_fixture(block, 2)) })
+                        .await
+                        .expect("distinct block");
+                assert_eq!(value.version().spec_version(), 2);
+            }
+            let wrong_height = VerifiedBlockRef::best(a.hash(), 12);
+            assert!(cached_runtime_context(&cache, wrong_height, async {
+                panic!("invalid identity")
+            })
+            .await
+            .is_err());
+        });
+    }
+
+    /// 一个网络读取服务并发请求；另一个块可以在其等待期间独立完成。
+    #[test]
+    fn runtime_cache_coalesces_requests_without_serializing_other_blocks() {
+        futures::executor::block_on(async {
+            let cache = Mutex::new(RuntimeContexts::default());
+            let block = VerifiedBlockRef::best(Hash32::from_bytes([1; 32]), 10);
+            let (tx, rx) = oneshot::channel();
+            let mut owner = Box::pin(cached_runtime_context(&cache, block, async {
+                rx.await.expect("release");
+                Ok(runtime_fixture(block, 1))
+            }));
+            assert!(futures::poll!(&mut owner).is_pending());
+            let mut waiter = Box::pin(cached_runtime_context(&cache, block, async {
+                panic!("duplicate network load")
+            }));
+            assert!(futures::poll!(&mut waiter).is_pending());
+            let other = VerifiedBlockRef::best(Hash32::from_bytes([2; 32]), 11);
+            cached_runtime_context(&cache, other, async { Ok(runtime_fixture(other, 1)) })
+                .await
+                .expect("independent");
+            tx.send(()).expect("send");
+            assert_eq!(owner.await.expect("owner"), waiter.await.expect("waiter"));
+            assert!(cache.lock().pending.is_empty());
+        });
+    }
+
+    /// 失败向全部等待者传播一次且不缓存；下一次显式调用可以重新读取。
+    #[test]
+    fn runtime_cache_failure_is_shared_and_retry_is_not_poisoned() {
+        futures::executor::block_on(async {
+            let cache = Mutex::new(RuntimeContexts::default());
+            let block = VerifiedBlockRef::best(Hash32::from_bytes([1; 32]), 10);
+            let (tx, rx) = oneshot::channel();
+            let mut owner = Box::pin(cached_runtime_context(&cache, block, async {
+                rx.await.expect("release");
+                Err(contract_error(
+                    ContractErrorCode::Network,
+                    "fixture failure",
+                ))
+            }));
+            assert!(futures::poll!(&mut owner).is_pending());
+            let mut waiter = Box::pin(cached_runtime_context(&cache, block, async {
+                panic!("must share failure")
+            }));
+            assert!(futures::poll!(&mut waiter).is_pending());
+            tx.send(()).expect("send");
+            assert_eq!(
+                owner.await.expect_err("failure").code(),
+                ContractErrorCode::Network
+            );
+            assert_eq!(
+                waiter.await.expect_err("failure").code(),
+                ContractErrorCode::Network
+            );
+            assert!(cache.lock().ready.is_empty());
+            cached_runtime_context(&cache, block, async { Ok(runtime_fixture(block, 1)) })
+                .await
+                .expect("retry");
+        });
+    }
+
+    #[test]
+    fn runtime_cache_owner_cancel_wakes_waiters_and_stop_rejects_late_success() {
+        futures::executor::block_on(async {
+            let cache = Mutex::new(RuntimeContexts::default());
+            let block = VerifiedBlockRef::best(Hash32::from_bytes([1; 32]), 10);
+            let mut owner = Box::pin(cached_runtime_context(
+                &cache,
+                block,
+                std::future::pending(),
+            ));
+            assert!(futures::poll!(&mut owner).is_pending());
+            let mut waiter = Box::pin(cached_runtime_context(&cache, block, async {
+                panic!("duplicate")
+            }));
+            assert!(futures::poll!(&mut waiter).is_pending());
+            drop(owner);
+            assert_eq!(
+                waiter.await.expect_err("cancel").code(),
+                ContractErrorCode::Unavailable
+            );
+            assert!(cache.lock().pending.is_empty());
+            let (tx, rx) = oneshot::channel();
+            let mut late = Box::pin(cached_runtime_context(&cache, block, async {
+                rx.await.expect("release");
+                Ok(runtime_fixture(block, 1))
+            }));
+            assert!(futures::poll!(&mut late).is_pending());
+            let mut stopped_waiter = Box::pin(cached_runtime_context(&cache, block, async {
+                panic!("duplicate")
+            }));
+            assert!(futures::poll!(&mut stopped_waiter).is_pending());
+            cache.lock().close();
+            assert_eq!(
+                stopped_waiter.await.expect_err("stop").code(),
+                ContractErrorCode::NotReady
+            );
+            tx.send(()).expect("send");
+            assert_eq!(
+                late.await.expect_err("late").code(),
+                ContractErrorCode::NotReady
+            );
+            assert!(cache.lock().ready.is_empty());
+            assert!(
+                cached_runtime_context(&cache, block, async { panic!("stopped") })
+                    .await
+                    .is_err()
+            );
+        });
+    }
+
+    #[test]
+    fn runtime_cache_waiter_cancel_preserves_owner_and_bounds_requests() {
+        futures::executor::block_on(async {
+            let cache = Mutex::new(RuntimeContexts::default());
+            let block = VerifiedBlockRef::best(Hash32::from_bytes([1; 32]), 10);
+            let (tx, rx) = oneshot::channel();
+            let mut owner = Box::pin(cached_runtime_context(&cache, block, async {
+                rx.await.expect("release");
+                Ok(runtime_fixture(block, 1))
+            }));
+            assert!(futures::poll!(&mut owner).is_pending());
+            let mut waiter = Box::pin(cached_runtime_context(&cache, block, async {
+                panic!("duplicate")
+            }));
+            assert!(futures::poll!(&mut waiter).is_pending());
+            drop(waiter);
+            tx.send(()).expect("send");
+            owner.await.expect("owner survives");
+            for n in 0..=MAX_RUNTIME_CONTEXTS {
+                let next =
+                    VerifiedBlockRef::best(Hash32::from_bytes([(n + 2) as u8; 32]), n as u64);
+                cached_runtime_context(&cache, next, async { Ok(runtime_fixture(next, 1)) })
+                    .await
+                    .expect("bounded insert");
+            }
+            assert_eq!(cache.lock().ready.len(), MAX_RUNTIME_CONTEXTS);
+            assert!(cache.lock().bytes <= MAX_RUNTIME_CONTEXT_BYTES);
+            let mut pending = RuntimeContexts::default();
+            for n in 0..MAX_RUNTIME_CONTEXTS {
+                let next = VerifiedBlockRef::best(Hash32::from_bytes([n as u8; 32]), n as u64);
+                assert!(matches!(pending.begin(next), Ok(RuntimeContextRead::Fetch)));
+            }
+            let next = VerifiedBlockRef::best(Hash32::from_bytes([255; 32]), 255);
+            assert!(pending.begin(next).is_err());
+            let first = VerifiedBlockRef::best(Hash32::from_bytes([0; 32]), 0);
+            let mut receivers = Vec::new();
+            for _ in 0..MAX_RUNTIME_WAITERS {
+                match pending.begin(first).expect("wait") {
+                    RuntimeContextRead::Wait(receiver) => receivers.push(receiver),
+                    _ => panic!("expected wait"),
+                }
+            }
+            assert!(pending.begin(first).is_err());
+            drop(receivers);
+            assert!(matches!(
+                pending.begin(first),
+                Ok(RuntimeContextRead::Wait(_))
+            ));
+        });
+    }
+
+    /// 总字节淘汰与条数淘汰独立，不能让少量大metadata突破内存上限。
+    #[test]
+    fn runtime_cache_evicts_by_total_metadata_bytes() {
+        let mut cache = RuntimeContexts::default();
+        let size = MAX_RUNTIME_CONTEXT_BYTES / 2 + 1;
+        for n in 0..2 {
+            let block = VerifiedBlockRef::best(Hash32::from_bytes([n; 32]), u64::from(n));
+            assert!(matches!(cache.begin(block), Ok(RuntimeContextRead::Fetch)));
+            let context = RuntimeContext::try_new(block, RuntimeVersion::new(1, 1), vec![1; size])
+                .expect("large context");
+            cache
+                .complete(runtime_context_key(block), Ok(Arc::new(context)))
+                .expect("cache insert");
+        }
+        assert_eq!(cache.ready.len(), 1);
+        assert_eq!(cache.bytes, size);
+    }
+
+    #[test]
+    fn runtime_snapshot_rejects_wrong_identity_and_empty_metadata() {
+        let block = VerifiedBlockRef::best(Hash32::from_bytes([1; 32]), 10);
+        for (hash, number, metadata) in [
+            ([2; 32], 10, vec![1]),
+            ([1; 32], 11, vec![1]),
+            ([1; 32], 10, vec![]),
+        ] {
+            assert!(runtime_context_from_snapshot(
+                block,
+                ChainRuntimeContextSnapshot {
+                    block_hash: hash,
+                    block_number: number,
+                    spec_version: 1,
+                    transaction_version: 1,
+                    metadata,
+                }
+            )
+            .is_err());
+        }
+        futures::executor::block_on(async {
+            let cache = Mutex::new(RuntimeContexts::default());
+            let wrong = VerifiedBlockRef::best(Hash32::from_bytes([2; 32]), 10);
+            assert!(
+                cached_runtime_context(&cache, block, async { Ok(runtime_fixture(wrong, 1)) })
+                    .await
+                    .is_err()
+            );
+            assert!(cache.lock().ready.is_empty());
+        });
+    }
 
     #[test]
     fn transaction_diagnostics_only_expose_fixed_categories() {

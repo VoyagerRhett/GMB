@@ -27,6 +27,14 @@
 继续生效，返回的账户、块身份由provider严格核验。该入口的固定阶段耗时默认关闭；
 取消、失败和正常完成共用一次清理动作。RuntimeService和交易池算法均不因该优化改动。
 
+准确块Runtime上下文入口同样位于既有`pow/light-base/src/lib.rs`：在同一次订阅中
+固定请求hash的Runtime，以同一对象读取版本并执行原Metadata API证明。订阅报告之外
+的历史块继续校验目标header hash/高度和代码存储证明，不用当前头替代；报告后pin失败
+直接返回失败。nonce与上下文共用取消安全的订阅释放实现，原RuntimeService不改动。
+SDK自有provider只在本次运行实例中有界缓存成功验证过的准确块上下文并合并同块并发；
+finality每次独立核验，关闭清空缓存并唤醒等待者，失败/取消不缓存，不读取宿主性能缓存
+作为证明。旧JSON-RPC的两个Runtime请求已从正式provider上下文入口移除。
+
 ## 基线已有的 PoW + GRANDPA 改动
 
 收编前相对上游基线已有本地改动：

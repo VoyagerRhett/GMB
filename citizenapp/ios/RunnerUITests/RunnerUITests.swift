@@ -299,7 +299,7 @@ final class RunnerUITests: XCTestCase {
     app.activate()
     guard app.wait(for: .runningForeground, timeout: 20) else {
       NSLog("TRANSFER_DIAG stage=app_unavailable")
-      return
+      throw NSError(domain: "CitizenAppTransferObservationIncomplete", code: 1)
     }
     // 前台进程存在不代表 Flutter 首屏已准备完毕；等待已知路由，避免在启动帧
     // 查到短暂导航后立刻点击失效元素，也不能将启动帧误判为未知二级页面。
@@ -311,7 +311,7 @@ final class RunnerUITests: XCTestCase {
     }, object: nil)
     guard XCTWaiter.wait(for: [ready], timeout: 30) == .completed else {
       NSLog("TRANSFER_DIAG stage=route_not_ready")
-      return
+      throw NSError(domain: "CitizenAppTransferObservationIncomplete", code: 1)
     }
     let keyboardDone = app.keyboards.buttons["完成"].firstMatch
     if keyboardDone.exists { keyboardDone.tap() }
@@ -339,7 +339,7 @@ final class RunnerUITests: XCTestCase {
       app.buttons.firstMatch.tap()
     } else if !sign.exists && !transactionTab.exists {
       NSLog("TRANSFER_DIAG stage=unknown_nested_page")
-      return
+      throw NSError(domain: "CitizenAppTransferObservationIncomplete", code: 1)
     }
     NSLog("TRANSFER_DIAG stage=surface sign=%d tab=%d keyboard=%d",
           sign.exists ? 1 : 0, transactionTab.exists ? 1 : 0, app.keyboards.count > 0 ? 1 : 0)
@@ -350,7 +350,7 @@ final class RunnerUITests: XCTestCase {
         let frame = transactionTab.frame
         guard !frame.isEmpty, app.frame.contains(frame) else {
           NSLog("TRANSFER_DIAG stage=transaction_tab_frame_unavailable")
-          return
+          throw NSError(domain: "CitizenAppTransferObservationIncomplete", code: 1)
         }
         app.coordinate(withNormalizedOffset: .zero)
           .withOffset(CGVector(dx: frame.midX, dy: frame.midY)).tap()
@@ -363,18 +363,18 @@ final class RunnerUITests: XCTestCase {
           let initialConfirmed = transactionCount("已确认", in: app),
           let initialFailed = transactionCount("失败", in: app) else {
       NSLog("TRANSFER_DIAG stage=baseline_missing")
-      return
+      throw NSError(domain: "CitizenAppTransferObservationIncomplete", code: 1)
     }
     app.swipeDown()
     guard sign.waitForExistence(timeout: 20) else {
       NSLog("TRANSFER_DIAG stage=sign_button_missing tab=%d keyboard=%d",
             transactionTab.exists ? 1 : 0, app.keyboards.count > 0 ? 1 : 0)
-      return
+      throw NSError(domain: "CitizenAppTransferObservationIncomplete", code: 1)
     }
     let enabled = expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: sign)
     guard XCTWaiter.wait(for: [enabled], timeout: 120) == .completed else {
       NSLog("TRANSFER_DIAG stage=sign_button_disabled")
-      return
+      throw NSError(domain: "CitizenAppTransferObservationIncomplete", code: 1)
     }
     let startedAt = Date()
     NSLog("TRANSFER_DIAG stage=form_ready t=0 pending=%d confirmed=%d failed=%d",
@@ -382,30 +382,32 @@ final class RunnerUITests: XCTestCase {
     sign.tap()
 
     let dialog = app.staticTexts["确认交易"]
-    guard dialog.waitForExistence(timeout: 15) else {
+    // 余额证明读取有网络等待；观察器必须覆盖该等待，缺失时明确失败。
+    guard dialog.waitForExistence(timeout: 120) else {
       NSLog("TRANSFER_DIAG stage=confirmation_not_shown t=%.1f", Date().timeIntervalSince(startedAt))
-      for phrase in ["请输入收款地址", "请输入金额", "收款地址", "金额必须大于", "余额不足"] {
+      for phrase in ["请输入收款地址", "请输入金额", "金额必须大于", "余额不足"] {
         let visible = app.descendants(matching: .any).matching(
           NSPredicate(format: "label CONTAINS %@", phrase)).count > 0
         if visible { NSLog("TRANSFER_DIAG stage=form_validation kind=%@", phrase) }
       }
-      return
+      throw NSError(domain: "CitizenAppTransferObservationIncomplete", code: 1)
     }
     let confirm = app.buttons["确认"].firstMatch
     guard confirm.exists else {
       NSLog("TRANSFER_DIAG stage=confirm_button_missing t=%.1f", Date().timeIntervalSince(startedAt))
-      return
+      throw NSError(domain: "CitizenAppTransferObservationIncomplete", code: 1)
     }
     NSLog("TRANSFER_DIAG stage=awaiting_owner t=%.1f", Date().timeIntervalSince(startedAt))
     let closed = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: dialog)
     guard XCTWaiter.wait(for: [closed], timeout: 300) == .completed else {
       NSLog("TRANSFER_DIAG stage=owner_did_not_confirm")
-      return
+      throw NSError(domain: "CitizenAppTransferObservationIncomplete", code: 1)
     }
     NSLog("TRANSFER_DIAG stage=dialog_closed t=%.1f", Date().timeIntervalSince(startedAt))
 
     var lastState = "initial"
     var sawConfirmed = false
+    var observedFailure = false
     var firstConfirmedAt: Date?
     var scrolledToHistory = false
     let deadline = Date().addingTimeInterval(120)
@@ -426,6 +428,8 @@ final class RunnerUITests: XCTestCase {
         ("prepare_failure", "交易准备失败"), ("execute_failure", "交易执行失败"),
         ("unexpected_failure", "交易异常"),
       ].filter { item in labels.contains { $0.contains(item.1) } }.map { $0.0 }
+      if let failed, failed > initialFailed { observedFailure = true }
+      if notices.contains("pool_rejected") || notices.contains("finalized_failure") { observedFailure = true }
       // 指标不可见必须明确记为不可读，禁止用基线伪造当前数量。
       let state = "pending=\(pending.map { String($0 - initialPending) } ?? "unreadable"),confirmed=\(confirmed.map { String($0 - initialConfirmed) } ?? "unreadable"),failed=\(failed.map { String($0 - initialFailed) } ?? "unreadable"),busy=\(busy ? 1 : 0),notice=\(notices.isEmpty ? "none" : notices.joined(separator: "+"))"
       if state != lastState {
@@ -440,6 +444,7 @@ final class RunnerUITests: XCTestCase {
       // 确认后继续观察十秒，保留终态是否反复变化的证据。
       if let firstConfirmedAt, Date().timeIntervalSince(firstConfirmedAt) >= 10 {
         NSLog("TRANSFER_DIAG stage=observation_complete t=%.1f", Date().timeIntervalSince(startedAt))
+        XCTAssertFalse(observedFailure, "交易观察期间出现失败分类或拒绝提示")
         return
       }
       if !scrolledToHistory {
@@ -449,6 +454,7 @@ final class RunnerUITests: XCTestCase {
       Thread.sleep(forTimeInterval: 0.25)
     }
     NSLog("TRANSFER_DIAG stage=not_finalized_within_120s")
+    throw NSError(domain: "CitizenAppTransferObservationIncomplete", code: 1)
   }
 
   /// 三处余额的正式包验收：金额只在内存比较，日志仅输出固定步骤与布尔结果。

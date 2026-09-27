@@ -797,7 +797,7 @@ const SDK_TEST_CONTRACT_FILES = Object.freeze({
   'native/signer/tests/substrate_vectors.rs': 'f5587dbce91f9c2014c559bece142e56fe65c81c7cf097df66b6c8125d45eef9',
   'native/smoldot/provider/tests/account_nonce_contract.rs': '13f2d194df11c94527fd5b513228cc1ec917f3735b12f3326c239b600821b754',
   'native/smoldot/provider/tests/legacy_parity.rs': '7db2b3ef4959a7bd1c83b22597666b0448f48b3079b82821f624efd2ccb7d9dc',
-  'native/smoldot/provider/tests/verified_chain_client_contract.rs': 'c6e49dffd68d59b6f43b8006c434dc5eb33440078e24e36a205caefe94593b06',
+  'native/smoldot/provider/tests/verified_chain_client_contract.rs': 'c1fe590bfd7b60b27fa6790f31a3322b1725df1c66e1f110f3b59d78eba45a7e',
   'scripts/release.test.mjs': 'b15025bda4940155619d0c22b97ce9aa841016ba7162dd27b3b99d31c85e16c7',
   'test/api/citizen_sdk_test.dart': '682d5b30eed22732404d83f00da062578e4676fe64ff7e4be33cae2e7c8e9548',
   'test/api/citizen_transaction_test.dart': '323b2315d2b6a6343c682f1626b10938c141348994b566b4ba0e75d2b656a4a8',
@@ -1066,7 +1066,7 @@ const CORE_RUST_BOUNDARY_FILES = Object.freeze({
 // SDK 边界。清单自身再由此哈希固定，CI/Release 不回指 CitizenApp。
 const SMOLDOT_RUST_SOURCE_MANIFEST = Object.freeze({
   path: 'native/smoldot/SOURCE_SHA256.json',
-  sha256: 'd641f0fbaff9a2a6be247654dd6f00b521eb248ef12d9b07e8b66316b2548871',
+  sha256: '06736e180c1469532d7eecf38e5e9c4af80422f230c618208a29bae8b735067c',
 });
 // 这些文件位于各来源单元之外，但仍属于 Release 的正式输入：许可证、来源记录、
 // smoldot 原始 ABI 头文件以及由 light-base 示例通过 include_str! 编译引用的链规范。
@@ -1075,7 +1075,7 @@ const SMOLDOT_RUST_SOURCE_MANIFEST = Object.freeze({
 const SMOLDOT_SUPPORT_FILES = Object.freeze({
   'native/smoldot/LICENSE': 'aab56b4a581fc1c50b7c782eacf2fc8be05a47cd98e4bf4d836dd9b6dd9c86f4',
   'native/smoldot/LICENSE-APACHE-2.0': '4524e4d70a6295dfa882b0411cc49fcca03273e959fea68bbfe7df7ed63e7d78',
-  'native/smoldot/UPSTREAM.md': 'fc25e368951ac0c11b31cc4ba60ff57faab67334ed442c49085a3e5df82fb064',
+  'native/smoldot/UPSTREAM.md': 'b28e30961ab2d6929efadeff13ab16e423b4cdf2725ccf777e681a611f024a19',
   'native/smoldot/include/smoldot.h': 'f7c2645588809f73f8aa799975b363a4a7b22e8de7149da9d0b4c2ea20c90a20',
   'native/smoldot/pow/demo-chain-specs/polkadot.json': '859c8ade8b740e6a106082e0fdb4ae14075d79f8a277f02124bf9856d8a302aa',
   'native/smoldot/pow/demo-chain-specs/polkadot_asset_hub.json': '4909f824189edd0c7c64e444f81a4082fe5bc433861a5ac9e8b00838203a35ab',
