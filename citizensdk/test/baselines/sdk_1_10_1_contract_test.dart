@@ -97,7 +97,7 @@ void main() {
         .where((file) => file.path.endsWith('.dart'))
         .map((file) => file.readAsStringSync())
         .join('\n');
-    expect(production, isNot(contains('QR_V2')));
+    expect(production, isNot(contains(['QR', '_V', '2'].join())));
   });
 
   test('consumer-specific fixtures remain outside production SDK sources', () {

@@ -219,10 +219,8 @@ fn generated_dart_registries_are_current() {
         .and_then(Path::parent)
         .expect("qr-protocol 必须位于 citizenchain/crates/qr-protocol");
 
-    for path in [
-        repo_root.join("citizenapp/lib/qr/generated/qr_action_registry.g.dart"),
-        repo_root.join("citizenwallet/lib/qr/generated/qr_action_registry.g.dart"),
-    ] {
+    {
+        let path = repo_root.join("citizenwallet/lib/qr/generated/qr_action_registry.g.dart");
         let actual = fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("{} 读取失败: {error}", path.display()));
         assert_eq!(
@@ -280,10 +278,6 @@ fn generated_qr_body_validators_are_current() {
         .expect("qr-protocol 必须位于 citizenchain/crates/qr-protocol");
     let cases = [
         (
-            "citizenapp/lib/qr/generated/qr_bodies.g.dart",
-            export_qr_bodies_dart().expect("Dart body schema 必须可生成"),
-        ),
-        (
             "citizenwallet/lib/qr/generated/qr_bodies.g.dart",
             export_qr_bodies_dart().expect("Dart body schema 必须可生成"),
         ),
@@ -306,4 +300,35 @@ fn generated_qr_body_validators_are_current() {
             .unwrap_or_else(|error| panic!("{} 读取失败: {error}", path.display()));
         assert_eq!(actual, expected, "{} 不是最新生成产物", path.display());
     }
+}
+
+/// 公民仅消费SDK公开QR合同；宿主不得恢复已退出的生成器、解析器和动作表。
+#[test]
+fn citizenapp_qr_uses_sdk_public_contract() -> Result<(), Box<dyn std::error::Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or("QR协议仓库根缺失")?;
+    for relative in [
+        "citizenapp/lib/qr/generated/qr_action_registry.g.dart",
+        "citizenapp/lib/qr/generated/qr_bodies.g.dart",
+        "citizenapp/lib/qr/qr_protocols.dart",
+    ] {
+        assert!(
+            !root.join(relative).exists(),
+            "公民不得恢复QR第二实现：{relative}"
+        );
+    }
+    let exports = fs::read_to_string(root.join("citizensdk/lib/citizen_sdk.dart"))?;
+    assert!(exports.contains("export 'src/api/citizen_qr.dart';"));
+    let sdk = fs::read_to_string(root.join("citizensdk/lib/src/api/citizen_qr.dart"))?;
+    assert!(sdk.contains("class CitizenQrActions"));
+    assert!(sdk.contains("parseForPurpose(String text, CitizenQrScanPurpose purpose)"));
+    let caller = fs::read_to_string(root.join("citizenapp/lib/qr/scan_dispatch_flow.dart"))?;
+    assert!(caller.contains("import 'package:citizen_sdk/citizen_sdk.dart';"));
+    assert!(caller.contains(".qr.parseForPurpose("));
+    assert!(caller.contains("CitizenQrActions."));
+    assert!(!caller.contains("package:citizen_sdk/src/"));
+    Ok(())
 }

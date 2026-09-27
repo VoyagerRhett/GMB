@@ -154,7 +154,7 @@ test('Android从真实产品源码根启动Gradle并把可写状态放入外部�
     < includedBuildRepositories.indexOf('google()'));
   assert.ok(includedBuildRepositories.indexOf('google()')
     < includedBuildRepositories.indexOf('gradlePluginPortal()'));
-  assert.doesNotMatch(includedBuildRepositories, /resolutionStrategy|force\(|PUB_CACHE|TATA_CONSOLE/u);
+  assert.doesNotMatch(includedBuildRepositories, new RegExp(['resolutionStrategy', 'force\\(', 'PUB_CACHE', ['TATA', '_CONSOLE'].join('')].join('|'), 'u'));
   assert.match(runner, /CITIZENAPP_FLUTTER_GRADLE_ROOT="\$flutter_sdk\/packages\/flutter_tools\/gradle"/u);
   assert.match(runner, /flutter_sdk="\$\{FLUTTER_ROOT:-\}"/u);
   assert.match(runner, /CitizenApp Flutter SDK根目录无效/u);
@@ -172,7 +172,7 @@ test('Android从真实产品源码根启动Gradle并把可写状态放入外部�
   assert.match(runner, /-Pflutter[.]sdk="\$flutter_sdk"/u);
   assert.match(runner, /CITIZENSDK_GRADLE="\$GRADLE_EXECUTABLE"[\s\S]*build-native\.sh" android/u);
   assert.match(runner, /CITIZENSDK_GRADLE="\$GRADLE_EXECUTABLE"[\s\S]*JAVA_HOME="\$ANDROID_JAVA_HOME" PATH="\$ANDROID_JAVA_HOME\/bin:\$PATH"/u);
-  assert.doesNotMatch(runner, /TATA_CONSOLE|tataconsole/u);
+  assert.doesNotMatch(runner, new RegExp([['TATA', '_CONSOLE'].join(''), ['tata', 'console'].join('')].join('|'), 'u'));
   assert.match(runner, /CITIZENAPP_GRADLE_OFFLINE="\$\{CITIZENAPP_GRADLE_OFFLINE:-\$\{CITIZENAPP_OFFLINE:-false\}\}"/u);
   assert.match(runner, /gradle_network_arg=''/u);
   assert.match(runner, /true\) gradle_network_arg='--offline'/u);

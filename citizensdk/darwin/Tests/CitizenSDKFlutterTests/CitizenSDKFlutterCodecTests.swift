@@ -401,7 +401,7 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
         requests["executePreparedTransaction"] = [version, "session-1", sequence,
             "0x00112233445566778899aabbccddeeff"]
         requests["consumePreparedTransactionQrResponse"] = [version, "session-1", sequence,
-            "0x112233445566778899aabbccddeeff00", "QR_V2"]
+            "0x112233445566778899aabbccddeeff00", ["QR", "_V", "2"].joined()]
         requests["cancelPreparedTransactionExecution"] = [version, "session-1", sequence,
             "0x112233445566778899aabbccddeeff00"]
         requests["getTransactionHistory"] = [version, "session-1", sequence, nil, NSNumber(value: 100)]

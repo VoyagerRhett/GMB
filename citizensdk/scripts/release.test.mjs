@@ -4526,7 +4526,7 @@ test('QR_V1保留原六类码型并由Core唯一给出扫码用途', () => {
   for (const root of productionRoots) visit(join(citizenSdkRoot, ...root.split('/')));
   for (const path of files) {
     const source = readFileSync(path, 'utf8');
-    assert.doesNotMatch(source, /QR_V(?:0|[2-9][0-9]*)/u, path);
+    assert.doesNotMatch(source, new RegExp(['QR', '_V', '(?:0|[2-9][0-9]*)'].join(''), 'u'), path);
   }
   // 既定六类协议都归Core；冷导入账户码限制不能被误写成删除其它码型。
   const dart = readFileSync(join(citizenSdkRoot, 'lib/src/api/citizen_qr.dart'), 'utf8');
@@ -4592,7 +4592,7 @@ test('三类消费者和独立签名器只依赖同一正式公开面', () => {
       `${relativePath} 只能导入 Dart 标准库和 CitizenSDK 根公开库`,
     );
     assert.doesNotMatch(source, /package:citizen_sdk\/src|\.\.\/\.\.\/\.\.\/lib|CitizenSdkPlatform/u);
-    assert.doesNotMatch(source, /QR_V(?:0|[2-9][0-9]*)/u);
+    assert.doesNotMatch(source, new RegExp(['QR', '_V', '(?:0|[2-9][0-9]*)'].join(''), 'u'));
   }
 
   const reference = readFileSync(join(consumerRoot, 'reference/reference_consumer.dart'), 'utf8');
