@@ -127,8 +127,10 @@ describe('CitizenServe产品发布输入', () => {
         ['gh', 'api', 'repos/{owner}/{repo}/actions/runs/123'], ['git', 'rev-parse', 'HEAD'],
         ['gh', 'api', 'repos/{owner}/{repo}/releases?per_page=100&page=1'],
       ]);
+      // Release 作业会先把包版本写为候选版本；无已发布版本时应使用当前包版本作为种子。
+      const seedVersion = JSON.parse(readFileSync(join(projectPath, 'package.json'), 'utf8')).version;
       for (const [releases, version] of [
-        [[], '1.0.0'],
+        [[], seedVersion],
         [[{ tag_name: 'citizenserve-cloudflare-v1.0.99' }], '1.1.0'],
         [[{ tag_name: 'citizenserve-cloudflare-v1.99.99' }], '2.0.0'],
         [[{ tag_name: 'citizenserve-cloudflare-v1.0.16' },
