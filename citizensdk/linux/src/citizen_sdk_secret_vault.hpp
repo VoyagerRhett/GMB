@@ -15,6 +15,8 @@ class SecretVault final {
   explicit SecretVault(SecureStore &secure_store);
 
   citizensdk_host_vault_availability_t availability() const noexcept;
+  void authorize_add_accounts(uint64_t host_operation_id, const WalletKey &key,
+      const std::array<uint8_t, 16> &operation_id);
   void ensure_wallet_kek(uint64_t host_operation_id, const WalletKey &key,
                          const std::array<uint8_t, 16> &operation_id);
   bool has_any_wallet_key(uint32_t wallet_index);

@@ -194,6 +194,15 @@ pub enum VaultAvailability {
 pub trait SecretVault: Send + Sync {
     fn availability(&self) -> ContractFuture<'_, VaultAvailability>;
 
+    /// 对一次完整追加请求进行生物认证；不解封账户，不缓存成功，不修改金库密钥。
+    /// Core固定本次钱包与目标集合，并在认证后重新核对状态；平台仅回报真实认证终态。
+    fn authorize_add_accounts(
+        &self,
+        provisioning_operation_id: [u8; 16],
+        wallet_index: u32,
+        generation: VaultGeneration,
+    ) -> ContractFuture<'_, ()>;
+
     /// 仅新建/导入钱包在取得 provisioning 后调用；同一 generation 只允许原创建操作初始化。
     /// 永久退休的 generation 不能复活；追加账户不得调用本方法。
     fn ensure_wallet_key(

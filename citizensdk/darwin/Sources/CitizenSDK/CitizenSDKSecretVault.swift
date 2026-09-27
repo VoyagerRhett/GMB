@@ -227,6 +227,51 @@ internal final class CitizenSDKSecretVault: @unchecked Sendable {
         }
     }
 
+    /// 一次整批追加仅执行系统生物认证，不解封既有账户，也不保留成功状态。
+    func authorizeAddAccounts(operationID: UInt64, walletIndex: UInt32, generation: Data,
+                              provisioningOperationID: Data,
+                              completion: @escaping (CitizenSDKErrorCode) -> Void) throws {
+        try CitizenSDKChecks.require(operationID != 0 && generation.count == 16 &&
+            provisioningOperationID.count == 16 && provisioningOperationID.contains(where: { $0 != 0 }),
+            "追加认证身份无效")
+        guard try hasWalletKEK(walletIndex: walletIndex, generation: generation) else {
+            throw CitizenSDKError(.keyInvalidated, "wallet KEK is unavailable")
+        }
+        let context = LAContext()
+        context.touchIDAuthenticationAllowableReuseDuration = 0
+        context.localizedFallbackTitle = ""
+        operationLock.lock()
+        guard pendingUnwraps.insert(operationID).inserted else {
+            operationLock.unlock()
+            throw CitizenSDKError(.conflict, "duplicate vault operation identity")
+        }
+        operationLock.unlock()
+        let accepted = CitizenSDKAcceptedVaultOperation(
+            output: UnsafeMutableRawBufferPointer(start: nil, count: 0),
+            releasePending: { [self] in
+                self.operationLock.lock()
+                self.pendingUnwraps.remove(operationID)
+                self.operationLock.unlock()
+                context.invalidate()
+            }, completion: completion)
+        context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics,
+                               localizedReason: "验证身份以添加本批账户") { [self, accepted] success, failure in
+            guard success else {
+                let code = (failure as? LAError)?.code
+                accepted.finish(code == .userCancel || code == .appCancel || code == .systemCancel
+                    ? .authenticationCancelled : .authenticationRequired)
+                return
+            }
+            do {
+                guard try self.hasWalletKEK(walletIndex: walletIndex, generation: generation) else {
+                    accepted.finish(.keyInvalidated); return
+                }
+                accepted.finish(.ok)
+            } catch let failure as CitizenSDKError { accepted.finish(failure.code) }
+            catch { accepted.finish(.internalFailure) }
+        }
+    }
+
     /// Authenticates once and copies the DEK straight into Rust-owned output.
     /// The temporary CFData returned by Security.framework is released in the
     /// same autorelease scope; no plaintext reaches Swift/Dart public APIs.

@@ -172,6 +172,16 @@ internal class CitizenSdkHostServices(context: Context, private val modules: Int
     ): ByteArray = vault.wrapDek(walletIndex, generation, provisioningOperationId, plaintextDek)
 
     @Suppress("unused")
+    fun authorizeAddAccounts(nativeBridge: Long, hostOperationId: Long, walletIndex: Int,
+        generation: ByteArray, provisioningOperationId: ByteArray): Int = try {
+        vault.authorizeAddAccounts(hostOperationId, walletIndex, generation, provisioningOperationId) { code ->
+            CitizenSdkNative.completeVaultStatus(nativeBridge, hostOperationId, code)
+        }
+        CitizenSdkErrorCode.OK.value
+    } catch (error: CitizenSdkHardwareVault.VaultFailure) { error.code.value }
+      catch (_: Throwable) { CitizenSdkErrorCode.INTERNAL.value }
+
+    @Suppress("unused")
     fun unwrapDek(
         nativeBridge: Long,
         hostOperationId: Long,
@@ -187,7 +197,7 @@ internal class CitizenSdkHostServices(context: Context, private val modules: Int
             )
             vault.unwrapDek(hostOperationId, privateRequest != null, privateRequest?.host?.get(),
                 walletIndex, generation, wrappedDek, plaintextDekOut) { errorCode ->
-                CitizenSdkNative.completeVaultUnwrap(nativeBridge, hostOperationId, errorCode)
+                CitizenSdkNative.completeVaultStatus(nativeBridge, hostOperationId, errorCode)
             }
         }
         CitizenSdkErrorCode.OK.value

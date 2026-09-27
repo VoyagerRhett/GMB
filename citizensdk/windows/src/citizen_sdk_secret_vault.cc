@@ -159,6 +159,14 @@ SecretVault::SecretVault(SecureStore &store, WindowRef &parent)
     : secure_store_(store), parent_(&parent), user_auth_(std::make_unique<UserAuth>()) {
   services_.availability = [this] { return cng_.availability(); };
   services_.authentication_available = [this] { return user_auth_->available(); };
+  services_.authorize_add_accounts = [this](uint64_t id) {
+    require_worker(parent_);
+    auto parent = parent_->acquire();
+    require(parent.valid() && parent.get() != nullptr &&
+        ::GetForegroundWindow() == static_cast<HWND>(parent.get()),
+        CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED, "追加认证需要前台窗口");
+    return user_auth_->authorize_add_accounts(id);
+  };
   services_.create_password = [this](uint64_t id) { return user_auth_->create_vault_password(id); };
   services_.unlock_password = [this](uint64_t host_operation_id) {
     return user_auth_->unlock_vault_password(host_operation_id);
@@ -183,7 +191,7 @@ SecretVault::SecretVault(SecureStore &store, WindowRef &parent)
 SecretVault::SecretVault(SecureStore &store, SecretVaultServices services)
     : secure_store_(store), services_(std::move(services)) {
   require(services_.availability && services_.enumerate_wallet_keys && services_.authentication_available &&
-              services_.create_password && services_.unlock_password &&
+              services_.authorize_add_accounts && services_.create_password && services_.unlock_password &&
               services_.create_key && services_.validate_key && services_.encrypt_dek &&
               services_.decrypt_dek && services_.delete_key,
           CITIZENSDK_ERROR_INVALID_ARGUMENT, "CitizenSDK private vault services are incomplete");
@@ -201,6 +209,21 @@ citizensdk_host_vault_availability_t SecretVault::availability() const noexcept 
   } catch (...) {
     return CITIZENSDK_HOST_VAULT_UNAVAILABLE;
   }
+}
+
+// 不持有代际锁等待用户；认证前后重新核对同一代际，退休时绝不恢复钥。
+void SecretVault::authorize_add_accounts(uint64_t host_operation_id, const WalletKey &key,
+    const std::array<uint8_t, 16> &operation_id) {
+  require(host_operation_id != 0 && std::any_of(operation_id.begin(), operation_id.end(),
+      [](uint8_t value) { return value != 0; }), CITIZENSDK_ERROR_INVALID_ARGUMENT, "追加认证身份无效");
+  require(operations_.accept(host_operation_id), CITIZENSDK_ERROR_CONFLICT, "追加认证操作重复");
+  try {
+    require(has_wallet_kek(key), CITIZENSDK_ERROR_KEY_INVALIDATED, "wallet key is unavailable");
+    const auto code = services_.authorize_add_accounts(host_operation_id);
+    require(code == CITIZENSDK_OK, code, "账户追加认证未完成");
+    require(has_wallet_kek(key), CITIZENSDK_ERROR_KEY_INVALIDATED, "wallet key changed during authentication");
+    operations_.finish(host_operation_id);
+  } catch (...) { operations_.finish(host_operation_id); throw; }
 }
 
 void SecretVault::ensure_wallet_kek(

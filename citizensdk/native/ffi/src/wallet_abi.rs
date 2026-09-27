@@ -12,7 +12,7 @@ use std::{
     panic::{catch_unwind, AssertUnwindSafe},
     ptr,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, MutexGuard, OnceLock,
     },
 };
@@ -150,6 +150,7 @@ const MAX_WALLET_CATALOG_ACCOUNTS: usize = MAX_ACCOUNT_BATCH * 2;
 unsafe fn accept_wallet_change_and_write<F>(
     runtime: Arc<NativeRuntime>,
     out_request_id: *mut CitizenSdkRequestId,
+    cancellable: bool,
     operation: F,
 ) -> FfiResult<()>
 where
@@ -158,13 +159,33 @@ where
 {
     require_output(out_request_id, "out_request_id")?;
     let notification = runtime.reserve_wallet_changed()?;
-    accept_and_write(runtime, out_request_id, move |runtime, request_id, cancellation| {
+    let request_id = crate::requests::accept(runtime, cancellable, move |runtime, request_id, cancellation| {
         let outcome = operation(runtime, request_id, cancellation);
         // 槽已预留，正常发送不会QueueFull；dispatcher损坏由既有生命周期处理。
         // 通知错误不得把已经提交的业务结果改写成“未提交”，诱导宿主重复操作。
         let _ = runtime.publish_wallet_changed(notification);
         outcome
-    })
+    })?;
+    ptr::write(out_request_id, request_id);
+    Ok(())
+}
+
+/// 取消必须排空已受理的金库回调；Core在认证后、保存边界重新检查，不能丢弃借用。
+/// 已经完成持久提交时保留成功结果，避免误报取消导致重复添加。
+async fn add_accounts_or_cancellation<F, T>(
+    operation: F, cancellation: Option<crate::requests::RequestCancellation>,
+    cancelled: Arc<AtomicBool>,
+) -> Result<T, EngineError>
+where F: std::future::Future<Output = Result<T, EngineError>> {
+    use futures_util::FutureExt;
+    let Some(cancellation) = cancellation else { return operation.await; };
+    let operation = operation.fuse();
+    let cancellation = cancellation.fuse();
+    futures_util::pin_mut!(operation, cancellation);
+    futures_util::select_biased! {
+        _ = cancellation => { cancelled.store(true, Ordering::Release); operation.await },
+        result = operation => result,
+    }
 }
 
 /// 与公开头唯一对应的无UI接收表；真实请求终态之前由调用者保留线程安全context。
@@ -1126,7 +1147,7 @@ pub unsafe extern "C" fn citizensdk_import_cold_account_id(
             let runtime = handles::get(handle)?;
             let account_id = account_id_from_pointer(account_id, "account_id")?;
             let name = utf8(name, "cold account name", MAX_WALLET_NAME_BYTES)?;
-            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 runtime.drive(
                     runtime
@@ -1162,7 +1183,7 @@ pub unsafe extern "C" fn citizensdk_import_cold_account_ss58(
             let runtime = handles::get(handle)?;
             let ss58_address = utf8(ss58_address, "cold account SS58", 64)?;
             let name = utf8(name, "cold account name", MAX_WALLET_NAME_BYTES)?;
-            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 runtime.drive(runtime.engine().import_cold_wallet_ss58(ss58_address, name))??;
                 let state = runtime.drive(runtime.engine().wallet_state())??;
@@ -1200,7 +1221,7 @@ pub unsafe extern "C" fn citizensdk_reorder_wallet_accounts_without_default_chan
         ffi_status(|| {
             let runtime = handles::get(handle)?;
             let account_ids = copy_wallet_catalog_account_ids(account_ids, account_count)?;
-            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 let state = runtime.drive(
                     runtime
@@ -1230,7 +1251,7 @@ pub unsafe extern "C" fn citizensdk_set_active_wallet(
     #[cfg(feature = "wallet")]
     { ffi_status(|| {
         let runtime = handles::get(handle)?;
-        accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+        accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
             runtime.refresh_provider_capabilities()?;
             let state = runtime.drive(runtime.engine().set_active_wallet(expected_revision, wallet_index))??;
             Ok(ResultPayload::WalletState(Box::new(state)))
@@ -1266,7 +1287,7 @@ pub unsafe extern "C" fn citizensdk_repair_hot_wallet(
     { ffi_status(|| {
         let runtime = handles::get(handle)?;
         let (revision, record) = inspected_record(handle, inspection, wallet_index)?;
-        accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+        accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
             runtime.refresh_provider_capabilities()?;
             let state = runtime.drive(runtime.engine().repair_hot_wallet(revision, record))??;
             Ok(ResultPayload::WalletState(Box::new(state)))
@@ -1289,7 +1310,7 @@ pub unsafe extern "C" fn citizensdk_rename_diagnostic_wallet(
         let runtime = handles::get(handle)?;
         let (revision, record) = inspected_record(handle, inspection, wallet_index)?;
         let name = utf8(name, "wallet name", MAX_WALLET_NAME_BYTES)?;
-        accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+        accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
             runtime.refresh_provider_capabilities()?;
             let state = runtime.drive(runtime.engine().rename_diagnostic_wallet(revision, record, name))??;
             Ok(ResultPayload::WalletState(Box::new(state)))
@@ -1311,7 +1332,7 @@ pub unsafe extern "C" fn citizensdk_delete_diagnostic_wallet(
     { ffi_status(|| {
         let runtime = handles::get(handle)?;
         let (revision, record) = inspected_record(handle, inspection, wallet_index)?;
-        accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+        accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
             runtime.refresh_provider_capabilities()?;
             let state = runtime.drive(runtime.engine().delete_diagnostic_wallet(revision, record))??;
             Ok(ResultPayload::WalletState(Box::new(state)))
@@ -1334,7 +1355,7 @@ pub unsafe extern "C" fn citizensdk_rename_wallet(
     { ffi_status(|| {
         let runtime = handles::get(handle)?;
         let name = utf8(name, "wallet name", MAX_WALLET_NAME_BYTES)?;
-        accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+        accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
             runtime.refresh_provider_capabilities()?;
             let state = runtime.drive(runtime.engine().rename_wallet(expected_revision, wallet_index, name))??;
             Ok(ResultPayload::WalletState(Box::new(state)))
@@ -1364,7 +1385,7 @@ pub unsafe extern "C" fn citizensdk_rename_account(
             let runtime = handles::get(handle)?;
             let account_id = account_id_from_pointer(account_id, "account_id")?;
             let name = utf8(name, "wallet account name", MAX_WALLET_NAME_BYTES)?;
-            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 let state = runtime
                     .drive(runtime.engine().rename_wallet_account_any(account_id, name))??;
@@ -1394,7 +1415,7 @@ pub unsafe extern "C" fn citizensdk_delete_account(
         ffi_status(|| {
             let runtime = handles::get(handle)?;
             let account_id = account_id_from_pointer(account_id, "account_id")?;
-            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 let state =
                     runtime.drive(runtime.engine().delete_wallet_account_any(account_id))??;
@@ -1582,7 +1603,7 @@ pub unsafe extern "C" fn citizensdk_commit_wallet_creation(
         ffi_status(|| {
             let runtime = handles::get(handle)?;
             let claim = claim_prepared_wallet(prepared_wallet, handle)?;
-            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
                 let prepared = claim.consume()?;
                 runtime.refresh_provider_capabilities()?;
                 let profile = runtime.drive(
@@ -1624,7 +1645,7 @@ pub unsafe extern "C" fn citizensdk_import_wallet(
             let mnemonic =
                 secret_buffer(mnemonic, "wallet mnemonic", MAX_WALLET_SECRET_INPUT_BYTES)?;
             let password = secret_utf8(password, "wallet password", MAX_WALLET_SECRET_INPUT_BYTES)?;
-            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 let profile =
                     runtime.drive(runtime.engine().import_wallet(mnemonic, password))??;
@@ -1672,13 +1693,15 @@ pub unsafe extern "C" fn citizensdk_add_wallet_accounts(
                 secret_buffer(mnemonic, "wallet mnemonic", MAX_WALLET_SECRET_INPUT_BYTES)?;
             let password = secret_utf8(password, "wallet password", MAX_WALLET_SECRET_INPUT_BYTES)?;
             let indices = copy_indices(indices, index_count)?;
-            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, true, move |runtime, _, cancellation| {
                 runtime.refresh_provider_capabilities()?;
-                let profile = runtime.drive(
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let profile = runtime.drive(add_accounts_or_cancellation(
                     runtime
                         .engine()
-                        .add_wallet_accounts(mnemonic, password, indices),
-                )??;
+                        .add_wallet_accounts(mnemonic, password, indices, Arc::clone(&cancelled)),
+                    cancellation, cancelled,
+                ))??;
                 Ok(ResultPayload::WalletProfile(Some(profile)))
             })
         })
@@ -1707,9 +1730,10 @@ pub unsafe extern "C" fn citizensdk_add_next_wallet_account(
             let runtime = handles::get(handle)?;
             let mnemonic = secret_buffer(mnemonic, "wallet mnemonic", MAX_WALLET_SECRET_INPUT_BYTES)?;
             let password = secret_utf8(password, "wallet password", MAX_WALLET_SECRET_INPUT_BYTES)?;
-            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, true, move |runtime, _, cancellation| {
                 runtime.refresh_provider_capabilities()?;
-                let profile = runtime.drive(runtime.engine().add_next_wallet_account(mnemonic, password))??;
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let profile = runtime.drive(add_accounts_or_cancellation(runtime.engine().add_next_wallet_account(mnemonic, password, Arc::clone(&cancelled)), cancellation, cancelled))??;
                 Ok(ResultPayload::WalletProfile(Some(profile)))
             })
         })
@@ -1771,7 +1795,7 @@ pub unsafe extern "C" fn citizensdk_rename_wallet_account(
             let runtime = handles::get(handle)?;
             let account_id = account_id_from_pointer(account_id, "account_id")?;
             let name = utf8(name, "wallet account name", MAX_WALLET_NAME_BYTES)?;
-            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 let profile =
                     runtime.drive(runtime.engine().rename_wallet_account(account_id, name))??;
@@ -1806,7 +1830,7 @@ pub unsafe extern "C" fn citizensdk_delete_wallet_account(
         ffi_status(|| {
             let runtime = handles::get(handle)?;
             let account_id = account_id_from_pointer(account_id, "account_id")?;
-            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 runtime.drive(runtime.engine().delete_wallet_account(account_id))??;
                 Ok(ResultPayload::Empty)
@@ -1838,7 +1862,7 @@ pub unsafe extern "C" fn citizensdk_delete_wallet(
     {
         ffi_status(|| {
             let runtime = handles::get(handle)?;
-            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 runtime.drive(runtime.engine().delete_wallet())??;
                 Ok(ResultPayload::Empty)
@@ -1865,7 +1889,7 @@ pub unsafe extern "C" fn citizensdk_sign_and_delete_wallet(
     {
         ffi_status(|| {
             let runtime = handles::get(handle)?;
-            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 runtime.drive(runtime.engine().sign_and_delete_wallet())??;
                 Ok(ResultPayload::Empty)
@@ -1897,7 +1921,7 @@ pub unsafe extern "C" fn citizensdk_reconcile_wallet_cleanup(
     {
         ffi_status(|| {
             let runtime = handles::get(handle)?;
-            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 runtime.drive(runtime.engine().reconcile_wallet_cleanup())??;
                 Ok(ResultPayload::Empty)
@@ -2239,7 +2263,7 @@ pub unsafe extern "C" fn citizensdk_begin_default_account_change(
         ffi_status(|| {
             let runtime = handles::get(handle)?;
             let account_ids = copy_wallet_catalog_account_ids(account_ids, account_count)?;
-            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
                 runtime.refresh_provider_capabilities()?;
                 let authorization =
                     runtime.drive(runtime.engine().prepare_default_wallet_account_change(
@@ -2333,7 +2357,7 @@ pub unsafe extern "C" fn citizensdk_consume_default_account_change(
                 "default change response",
                 citizen_sdk_qr::MAX_QR_TEXT_BYTES,
             )?;
-            accept_wallet_change_and_write(runtime, out_request_id, move |runtime, _, _| {
+            accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
                 let (authorization, signature) = crate::qr_abi::consume_default_account_qr_session(
                     handle,
                     &session_id,

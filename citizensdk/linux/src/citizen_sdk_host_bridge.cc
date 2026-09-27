@@ -316,6 +316,16 @@ citizensdk_error_code_t vault_availability(void *context, uint64_t operation_id,
   return CITIZENSDK_OK;
 }
 
+// 该入口只完成本次追加认证，持久事务和目标账户集合由Core唯一管理。
+citizensdk_error_code_t vault_authorize_add_accounts(void *context, uint64_t operation_id,
+    citizensdk_host_wallet_key_ref_v1_t key, citizensdk_host_id128_t provisioning_id,
+    void *sdk_context, citizensdk_host_status_completion_v1_t completion) {
+  if (completion == nullptr) return CITIZENSDK_ERROR_INVALID_ARGUMENT;
+  try { host(context).vault_authorize_add_accounts(operation_id, wallet_key(key), id16(provisioning_id));
+    complete_status(operation_id, sdk_context, completion, CITIZENSDK_OK);
+    return CITIZENSDK_OK; } catch (...) { return map_exception(); }
+}
+
 citizensdk_error_code_t vault_ensure(void *context, uint64_t operation_id,
     citizensdk_host_wallet_key_ref_v1_t key,
     citizensdk_host_id128_t provisioning_id, void *sdk_context,
@@ -526,7 +536,8 @@ void HostBridge::configure_vtables() noexcept {
   vault_vtable_ = {sizeof(vault_vtable_), 1, this,
     ::citizen_sdk::linux::vault_availability, ::citizen_sdk::linux::vault_ensure,
     ::citizen_sdk::linux::vault_has, ::citizen_sdk::linux::vault_wrap,
-    ::citizen_sdk::linux::vault_unwrap, ::citizen_sdk::linux::vault_retire};
+    ::citizen_sdk::linux::vault_unwrap, ::citizen_sdk::linux::vault_retire,
+    ::citizen_sdk::linux::vault_authorize_add_accounts};
 }
 
 citizensdk_host_services_v1_t HostBridge::services() noexcept {
@@ -1045,6 +1056,13 @@ HostRecord HostBridge::secret_cas(const SecretIdentity &identity,
             "wallet host is disabled");
     return secure_store_->encrypted_secret_compare_and_swap(identity, expected,
                                                              candidate);
+  });
+}
+void HostBridge::vault_authorize_add_accounts(uint64_t host_operation_id, const WalletKey &key,
+    const std::array<uint8_t, 16> &operation_id) {
+  service_call([&] {
+    require(vault_ != nullptr, CITIZENSDK_ERROR_UNSUPPORTED, "wallet host is disabled");
+    vault_->authorize_add_accounts(host_operation_id, key, operation_id);
   });
 }
 void HostBridge::vault_ensure(

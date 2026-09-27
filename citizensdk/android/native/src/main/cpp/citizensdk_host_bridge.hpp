@@ -39,10 +39,10 @@ class CitizenSdkHostBridge final {
   bool forget_prepared(uint64_t token,
                        citizensdk_prepared_wallet_handle_t *out);
 
-  void remember_unwrap(uint64_t operation_id, void *sdk_context,
+  void remember_vault_status(uint64_t operation_id, void *sdk_context,
                        citizensdk_host_status_completion_v1_t completion);
-  bool reject_unwrap(uint64_t operation_id);
-  void complete_unwrap(uint64_t operation_id, int32_t error_code);
+  bool reject_vault_status(uint64_t operation_id);
+  void complete_vault_status(uint64_t operation_id, int32_t error_code);
 
   void dispatch_event(const citizensdk_event_t &event);
   bool has_qr_review(uint64_t result) const;
@@ -52,7 +52,7 @@ class CitizenSdkHostBridge final {
   void release_qr_review(uint64_t result);
 
  private:
-  struct PendingUnwrap {
+  struct PendingVaultStatus {
     void *sdk_context;
     citizensdk_host_status_completion_v1_t completion;
   };
@@ -71,8 +71,8 @@ class CitizenSdkHostBridge final {
   mutable std::mutex prepared_mutex_;
   std::unordered_map<uint64_t, citizensdk_prepared_wallet_handle_t> prepared_;
   std::atomic<uint64_t> next_prepared_{1};
-  std::mutex unwrap_mutex_;
-  std::unordered_map<uint64_t, PendingUnwrap> unwraps_;
+  std::mutex vault_status_mutex_;
+  std::unordered_map<uint64_t, PendingVaultStatus> vault_status_operations_;
   mutable std::mutex qr_mutex_;
   std::unordered_set<uint64_t> qr_reviews_;
   mutable std::mutex inspection_mutex_;

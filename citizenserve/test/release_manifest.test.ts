@@ -9,6 +9,51 @@ import { describe, expect, test } from 'vitest';
 const projectPath = resolve(import.meta.dirname, '..');
 const require = createRequire(import.meta.url);
 
+// 执行真实 Release 入口与 step 0，只在 gh/git 进程边界提供合成响应；不读取真实凭据或访问远端。
+function withReleaseSource(run: (execute: (options?: {
+  values?: Record<string, string>; ci?: Record<string, unknown>; head?: string;
+  releases?: unknown; apiFailure?: boolean; invalidJSON?: boolean; step?: boolean;
+}) => { result: ReturnType<typeof spawnSync>; calls: string[][] }) => void) {
+  const directory = mkdtempSync(join(tmpdir(), 'citizenserve-release-source-'));
+  try {
+    const bin = join(directory, 'bin');
+    const calls = join(directory, 'calls.jsonl');
+    mkdirSync(bin);
+    const sha = 'a'.repeat(40);
+    const values = {
+      'ci-run-id': '123', 'version-tag': 'citizenserve-cloudflare-v1.0.17',
+      'source-sha': sha, prefix: 'citizenserve-cloudflare-v',
+      'product-id': 'citizenserve', target: 'cloudflare', workflow: 'gmb.citizenserve.cloudflare.ci',
+    };
+    run((options = {}) => {
+      writeFileSync(calls, '');
+      const ci = { status: 'completed', conclusion: 'success', event: 'workflow_dispatch',
+        head_branch: 'main', head_sha: sha, display_title: '公民服务端 · Cloudflare · CI',
+        path: '.github/workflows/repository.yml', ...options.ci };
+      const releases = options.releases ?? [{ tag_name: 'citizenserve-cloudflare-v1.0.16', draft: false, prerelease: false }];
+      // 替身只接受实际需要的只读命令；任何新增调用、错误路径或越界参数都会失败。
+      writeFileSync(join(bin, 'gh'), `#!${process.execPath}\nimport fs from 'node:fs';\nconst args=process.argv.slice(2);fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify(['gh',...args])+'\\n');\nif(${options.apiFailure === true})process.exit(29);\nif(${options.invalidJSON === true}){process.stdout.write('invalid JSON');process.exit(0);}\nif(args.length!==2||args[0]!=='api')process.exit(31);\nconst response=args[1]==='repos/{owner}/{repo}/actions/runs/123'?${JSON.stringify(ci)}:args[1]==='repos/{owner}/{repo}/releases?per_page=100&page=1'?${JSON.stringify(releases)}:null;\nif(response===null)process.exit(32);process.stdout.write(JSON.stringify(response));\n`, { mode: 0o755 });
+      writeFileSync(join(bin, 'git'), `#!${process.execPath}\nimport fs from 'node:fs';const args=process.argv.slice(2);fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify(['git',...args])+'\\n');\nif(JSON.stringify(args)!=='["rev-parse","HEAD"]')process.exit(33);process.stdout.write(${JSON.stringify(options.head ?? sha)}+'\\n');\n`, { mode: 0o755 });
+      const current = { ...values, ...options.values };
+      const root = dirname(projectPath);
+      const args = options.step
+        ? [join(projectPath, 'scripts/release/cloudflare/check/execute.mjs'), 'workflow-step', '0']
+        : [join(projectPath, 'scripts/release/cloudflare/index.mjs'), 'version-tag', 'verify-release-source',
+          ...Object.entries(current).flatMap(([key, value]) => [`--${key}`, value])];
+      const result = spawnSync(process.execPath, args, {
+        cwd: root, encoding: 'utf8', timeout: 15_000,
+        env: { PATH: [bin, dirname(process.execPath), '/usr/bin', '/bin'].join(delimiter),
+          TMPDIR: directory, GITHUB_WORKSPACE: root, GITHUB_REPOSITORY: 'VoyagerRhett/GMB',
+          SOURCE_SHA: sha, CI_RUN_ID: '123', SOFTWARE_VERSION: '1.0.17', VERSION_TAG: current['version-tag'],
+          GMB_SOURCE_SHA: sha, GMB_CI_RUN_ID: '123', GMB_VERSION_TAG: current['version-tag'] },
+      });
+      return { result, calls: readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)) };
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 // 直接执行产品的准确 D1 阶段；含空格的源码外目录用于覆盖 shell 参数边界。
 function withD1Project(run: (directory: string, execute: (env?: NodeJS.ProcessEnv) => ReturnType<typeof spawnSync>) => void) {
   const directory = mkdtempSync(join(tmpdir(), 'citizenserve d1 '));
@@ -72,6 +117,79 @@ function withTypesProject(run: (directory: string, execute: (script: string) => 
 }
 
 describe('CitizenServe产品发布输入', () => {
+  test('Release 真实 step 0 接受准确成功 CI 并保留正式版本选择合同', () => {
+    withReleaseSource((execute) => {
+      const { result, calls } = execute({ step: true });
+      expect(result.error).toBeUndefined();
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+      expect(`${result.stdout}`).toContain(`Release 已锁定成功 CI：123 · ${'a'.repeat(40)}`);
+      expect(calls).toEqual([
+        ['gh', 'api', 'repos/{owner}/{repo}/actions/runs/123'], ['git', 'rev-parse', 'HEAD'],
+        ['gh', 'api', 'repos/{owner}/{repo}/releases?per_page=100&page=1'],
+      ]);
+      for (const [releases, version] of [
+        [[], '1.0.0'],
+        [[{ tag_name: 'citizenserve-cloudflare-v1.0.99' }], '1.1.0'],
+        [[{ tag_name: 'citizenserve-cloudflare-v1.99.99' }], '2.0.0'],
+        [[{ tag_name: 'citizenserve-cloudflare-v1.0.16' },
+          { tag_name: 'citizenserve-cloudflare-v9.0.0', draft: true },
+          { tag_name: 'citizenserve-cloudflare-v9.1.0', prerelease: true },
+          { tag_name: 'citizenweb-web-v9.0.0' }], '1.0.17'],
+      ] as const) {
+        const accepted = execute({ releases, values: { 'version-tag': `citizenserve-cloudflare-v${version}` } }).result;
+        expect(accepted.status, `${accepted.stderr}`).toBe(0);
+      }
+      for (const version of ['1.0.16', '1.0.18', '1.0.100']) {
+        expect(execute({ values: { 'version-tag': `citizenserve-cloudflare-v${version}` } }).result.status).toBe(1);
+      }
+    });
+  }, 30_000);
+
+  test('Release 来源拒绝旧文件名、错误产品平台及非法输入且不查询远端', () => {
+    withReleaseSource((execute) => {
+      for (const values of [
+        ...['repository.yml', '.github/workflows/repository.yml', 'gmb.citizenweb.web.ci',
+          'gmb.citizenserve.linux-arm.ci', 'gmb.citizenserve.cloudflare.release',
+          'tata.citizenserve.cloudflare.ci', ''].map((workflow) => ({ workflow })),
+        { 'product-id': 'citizenweb' }, { target: 'linux-arm' },
+        { prefix: 'citizenweb-web-v', 'version-tag': 'citizenweb-web-v1.0.17' },
+        { 'source-sha': 'A'.repeat(40) }, { 'source-sha': 'a'.repeat(39) },
+        { 'ci-run-id': '0' }, { 'ci-run-id': '12x' }, { unknown: 'value' },
+      ] as Record<string, string>[]) {
+        const { result, calls } = execute({ values });
+        expect(result.error).toBeUndefined();
+        expect(result.status, JSON.stringify(values)).toBe(1);
+        expect(calls).toEqual([]);
+      }
+    });
+  }, 30_000);
+
+  test('Release 来源拒绝失败或错身份 CI、错误检出和 API 失败', () => {
+    withReleaseSource((execute) => {
+      for (const ci of [
+        { status: 'in_progress' }, { conclusion: 'failure' }, { conclusion: 'cancelled' },
+        { event: 'push' }, { head_branch: 'other' }, { head_sha: 'b'.repeat(40) },
+        { display_title: '公民聊天服务 · Cloudflare · CI' },
+        { path: 'other/repository.yml' }, { path: '.github/workflows/other.yml' }, { path: null },
+      ]) {
+        const { result, calls } = execute({ ci });
+        expect(result.status, JSON.stringify(ci)).toBe(1);
+        expect(`${result.stderr}`).toContain('Release 来源不是同产品、同端、同 workflow 的成功 CI');
+        expect(calls).toHaveLength(1);
+      }
+      const wrongHead = execute({ head: 'b'.repeat(40) });
+      expect(wrongHead.result.status).toBe(1);
+      expect(`${wrongHead.result.stderr}`).toContain('checkout 与 source_sha 不一致');
+      expect(wrongHead.calls).toHaveLength(2);
+      for (const options of [{ apiFailure: true }, { invalidJSON: true }]) {
+        const rejected = execute(options);
+        expect(rejected.result.error).toBeUndefined();
+        expect(rejected.result.status).toBe(1);
+        expect(rejected.calls).toHaveLength(1);
+      }
+    });
+  }, 30_000);
+
   test('D1 阶段传递完整参数并保留首个失败及旧目录拒绝条件', () => {
     for (const failure of [0, 1, 2]) {
       withD1Project((directory, execute) => {

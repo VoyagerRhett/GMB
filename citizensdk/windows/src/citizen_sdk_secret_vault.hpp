@@ -33,6 +33,7 @@ struct SecretVaultServices final {
   std::function<CngAvailability()> availability;
   std::function<std::vector<std::string>()> enumerate_wallet_keys;
   std::function<bool()> authentication_available;
+  std::function<citizensdk_error_code_t(uint64_t)> authorize_add_accounts;
   std::function<AuthenticationResult(uint64_t)> create_password;
   std::function<AuthenticationResult(uint64_t)> unlock_password;
   std::function<VaultObject(const WalletKey &, const SensitiveBuffer &)> create_key;
@@ -47,6 +48,8 @@ class SecretVault final {
   SecretVault(SecureStore &secure_store, WindowRef &parent);
   SecretVault(SecureStore &secure_store, SecretVaultServices services);
   citizensdk_host_vault_availability_t availability() const noexcept;
+  void authorize_add_accounts(uint64_t host_operation_id, const WalletKey &key,
+      const std::array<uint8_t, 16> &operation_id);
   void ensure_wallet_kek(uint64_t host_operation_id, const WalletKey &key,
                          const std::array<uint8_t, 16> &operation_id);
   bool has_any_wallet_key(uint32_t wallet_index);

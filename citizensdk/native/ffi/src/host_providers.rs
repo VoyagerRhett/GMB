@@ -574,6 +574,16 @@ pub type CitizenSdkHostVaultRetireWalletKekV1 = Option<
     ) -> i32,
 >;
 
+/// 整批追加只认证一次；该回调不创建密钥，也不接收或解封账户秘密。
+pub type CitizenSdkHostVaultAuthorizeAddAccountsV1 = Option<
+    unsafe extern "C" fn(
+        host_context: *mut c_void, host_operation_id: u64,
+        wallet_key: CitizenSdkHostWalletKeyRefV1,
+        provisioning_operation_id: CitizenSdkHostId128,
+        sdk_context: *mut c_void, completion: CitizenSdkHostStatusCompletionV1,
+    ) -> i32,
+>;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct CitizenSdkHostSecretVaultV1 {
@@ -586,6 +596,7 @@ pub struct CitizenSdkHostSecretVaultV1 {
     pub wrap_dek: CitizenSdkHostVaultWrapDekV1,
     pub unwrap_dek: CitizenSdkHostVaultUnwrapDekV1,
     pub retire_wallet_kek: CitizenSdkHostVaultRetireWalletKekV1,
+    pub authorize_add_accounts: CitizenSdkHostVaultAuthorizeAddAccountsV1,
 }
 
 impl Default for CitizenSdkHostSecretVaultV1 {
@@ -600,6 +611,7 @@ impl Default for CitizenSdkHostSecretVaultV1 {
             wrap_dek: None,
             unwrap_dek: None,
             retire_wallet_kek: None,
+            authorize_add_accounts: None,
         }
     }
 }
@@ -956,6 +968,7 @@ pub fn validate_secret_vault_v1(
     )?;
     if provider.availability.is_none()
         || provider.ensure_wallet_kek.is_none()
+        || provider.authorize_add_accounts.is_none()
         || provider.has_wallet_kek.is_none()
         || provider.wrap_dek.is_none()
         || provider.unwrap_dek.is_none()
@@ -3118,6 +3131,24 @@ const MAX_VAULT_CIPHERTEXT_BYTES: usize = 64 * 1024;
 const SECRET_AAD_PREFIX: &[u8] = b"citizensdk\0account-secret\0v1\0";
 
 impl SecretVault for HostSecretVault {
+    fn authorize_add_accounts(&self, operation: [u8; 16], wallet_index: u32,
+        generation: VaultGeneration) -> ContractFuture<'_, ()> {
+        let bridge = Arc::clone(&self.bridge);
+        Box::pin(async move {
+            let vault = bridge.vault.ok_or_else(|| ContractError::new(
+                ContractErrorCode::Unsupported, "host vault is unavailable"))?;
+            let callback = vault.0.authorize_add_accounts.ok_or_else(|| ContractError::new(
+                ContractErrorCode::Internal, "追加认证回调缺失"))?;
+            let context = vault.0.context as usize;
+            let code = bridge.call_status(|id, token, complete| {
+                // SAFETY: 完整表验证及pending注册表保持context至真实回调终态。
+                unsafe { callback(context as *mut c_void, id,
+                    host_wallet_key(wallet_index, generation), host_id(operation), token, complete) }
+            }).await?;
+            require_host_ok(code, "账户追加认证失败")
+        })
+    }
+
     fn has_any_wallet_key(&self, wallet_index: u32) -> ContractFuture<'_, bool> {
         let bridge = Arc::clone(&self.bridge);
         Box::pin(async move {
@@ -3263,6 +3294,15 @@ impl SecretVault for HostSecretVault {
                     })
             })?;
 
+            // 封装前用本次既有DEK校验完整AES-GCM结果；不调用硬件解封、不缓存授权。
+            let verified = Zeroizing::new(cipher.decrypt(Nonce::from_slice(&nonce),
+                Payload { msg: &ciphertext, aad: &aad }).map_err(|_| {
+                    ContractError::new(ContractErrorCode::Integrity, "账户加密结果校验失败")
+                })?);
+            if !secret.with_secret(|bytes| bytes == verified.as_slice()) {
+                return Err(ContractError::new(ContractErrorCode::Integrity, "账户加密回读不一致"));
+            }
+            drop(verified);
             let wrap = vault.0.wrap_dek.ok_or_else(|| {
                 ContractError::new(ContractErrorCode::Internal, "vault DEK wrap missing")
             })?;

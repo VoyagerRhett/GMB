@@ -7,7 +7,7 @@
 
 use std::{
     collections::BTreeSet,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -251,6 +251,7 @@ pub struct WalletService {
     encrypted_secrets: Arc<dyn EncryptedSecretBlobStore>,
     entropy: Arc<dyn WalletEntropySource>,
     clock: Arc<dyn WalletClock>,
+    add_cancelled: Arc<AtomicBool>,
 }
 
 /// 独立签名服务只读取 SDK 安全账户归属资料，不创建钱包、不执行备份或账户管理。
@@ -472,6 +473,19 @@ async fn current_account(
 }
 
 impl WalletService {
+    /// 追加取消属于当前请求；独立实例不共享授权或取消状态。
+    pub(crate) fn with_add_cancellation(mut self, cancelled: Arc<AtomicBool>) -> Self {
+        self.add_cancelled = cancelled;
+        self
+    }
+
+    fn require_add_active(&self) -> Result<(), EngineError> {
+        if self.add_cancelled.load(Ordering::Acquire) {
+            return Err(error(ContractErrorCode::Cancelled, "账户追加已取消"));
+        }
+        Ok(())
+    }
+
     /// 仅内部查看替换同一宿主的带归属观察器金库；普通钱包/签名实例不受影响。
     pub(crate) fn with_private_key_view_vault(
         mut self,
@@ -580,6 +594,7 @@ impl WalletService {
             encrypted_secrets,
             entropy,
             clock,
+            add_cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1398,8 +1413,6 @@ impl WalletService {
                 "助记词或 password 与当前钱包不符",
             ));
         }
-        self.require_usable_account(&profile, profile.master_account_id())
-            .await?;
 
         let generation = profile.generation();
         let mut forbidden: BTreeSet<[u8; 16]> = profile
@@ -1416,6 +1429,13 @@ impl WalletService {
         }
         let operation_id = mint_owner(self.entropy.as_ref(), &forbidden)?;
         let sorted_indices: Vec<_> = unique.into_iter().collect();
+        // 一次认证覆盖本请求固定的完整序号集合；不打开已有账户秘密。
+        self.require_add_active()?;
+        self.vault.authorize_add_accounts(operation_id, profile.wallet_index(), generation).await?;
+        self.require_add_active()?;
+        if self.profiles.load().await? != state {
+            return Err(conflict("追加认证期间钱包状态已变化"));
+        }
         let derived =
             derive_wallet_accounts(self.signer.clone(), mnemonic, password, &sorted_indices)
                 .await?;
@@ -1708,10 +1728,21 @@ impl WalletService {
             }
             self.vault.ensure_wallet_key(operation_id, plan.wallet_index(), plan.generation()).await?;
         }
+        let adding = plan.previous_profile().is_some();
+        let mut saved = Vec::with_capacity(pending.len());
         for pending_secret in pending {
-            self.persist_secret(operation_id, pending_secret).await?;
+            if adding { self.require_add_active()?; }
+            let secret_ref = pending_secret.secret_ref;
+            // 账户身份在加密前由真实派生秘密反证，不能只相信调用方的公开字段。
+            let public_key = self.signer.public_key(&pending_secret.secret).await?;
+            if public_key.as_bytes() != secret_ref.account_id().as_bytes() {
+                return Err(error(ContractErrorCode::Integrity, "待保存秘密与账户不一致"));
+            }
+            saved.push((secret_ref, self.persist_secret(operation_id, pending_secret).await?));
         }
-        self.verify_provisioned(claimed).await?;
+        if adding { self.require_add_active()?; }
+        self.verify_provisioned(claimed, &saved).await?;
+        if adding { self.require_add_active()?; }
         let latest = self.profiles.load().await?;
         if latest.profile() != claimed.profile()
             || latest.provisioning() != claimed.provisioning()
@@ -1734,7 +1765,7 @@ impl WalletService {
         &self,
         operation_id: [u8; 16],
         pending: PendingSecret,
-    ) -> Result<(), EngineError> {
+    ) -> Result<citizen_sdk_contracts::EncryptedSecretEnvelope, EngineError> {
         // 封装前后都核对持久所有权；追加不能因复用硬件钥而绕过账户级操作隔离。
         self.require_secret_write_ownership(operation_id, pending.secret_ref).await?;
         let envelope = self
@@ -1750,7 +1781,7 @@ impl WalletService {
                 provisioning_operation_id,
                 envelope: existing,
             } if *provisioning_operation_id == operation_id && existing == &envelope => {
-                return Ok(());
+                return Ok(envelope);
             }
             EncryptedSecretBlobState::Sealed { .. } => {
                 return Err(conflict("秘密引用已经由不同 provisioning 或密文占用"));
@@ -1761,14 +1792,14 @@ impl WalletService {
         }
         let candidate = EncryptedSecretBlobState::Sealed {
             provisioning_operation_id: operation_id,
-            envelope,
+            envelope: envelope.clone(),
         };
         match self
             .encrypted_secrets
             .compare_and_swap(pending.secret_ref, current.revision(), candidate.clone())
             .await
         {
-            Ok(snapshot) if snapshot.state() == &candidate => Ok(()),
+            Ok(snapshot) if snapshot.state() == &candidate => Ok(envelope.clone()),
             Ok(_) => Err(error(
                 ContractErrorCode::Integrity,
                 "设备密文写入后返回了不同事实",
@@ -1779,7 +1810,7 @@ impl WalletService {
                     .as_ref()
                     .is_ok_and(|snapshot| snapshot.state() == &candidate)
                 {
-                    Ok(())
+                    Ok(envelope)
                 } else {
                     Err(EngineError::from(write_error))
                 }
@@ -1787,7 +1818,7 @@ impl WalletService {
         }
     }
 
-    /// seal 可能触发生物识别并跨越其它进程的恢复动作；返回后必须重新核对公开所有权。
+    /// seal 可跨越其它进程的恢复动作；返回后必须重新核对公开所有权。
     /// 最后的跨存储竞态仍由 blob tombstone 与 vault generation retirement 双重封死。
     async fn require_secret_write_ownership(
         &self,
@@ -1814,7 +1845,9 @@ impl WalletService {
         }
     }
 
-    async fn verify_provisioned(&self, expected: &WalletState) -> Result<(), EngineError> {
+    async fn verify_provisioned(&self, expected: &WalletState,
+        saved: &[(SecretRef, citizen_sdk_contracts::EncryptedSecretEnvelope)],
+    ) -> Result<(), EngineError> {
         let persisted = self.profiles.load().await?;
         if persisted.profile() != expected.profile()
             || persisted.provisioning() != expected.provisioning()
@@ -1835,8 +1868,23 @@ impl WalletService {
                 "钱包硬件密钥写入后复核失败",
             ));
         }
-        for secret_ref in plan.secret_refs() {
-            self.require_secret_matches(*secret_ref).await?;
+        if saved.len() != plan.secret_refs().len() {
+            return Err(error(ContractErrorCode::Integrity, "保存结果数量与计划不一致"));
+        }
+        for (secret_ref, envelope) in saved {
+            if !plan.secret_refs().contains(secret_ref) {
+                return Err(error(ContractErrorCode::Integrity, "保存结果不属于当前计划"));
+            }
+            let snapshot = self.encrypted_secrets.load(*secret_ref).await?;
+            if !matches!(snapshot.state(), EncryptedSecretBlobState::Sealed {
+                provisioning_operation_id, envelope: observed
+            } if provisioning_operation_id == plan.operation_id() && observed == envelope) {
+                return Err(error(ContractErrorCode::Integrity, "账户密文持久回读不一致"));
+            }
+            // 新建/导入保持原硬件解封验收；追加已独立授权并核对加密结果和持久字节。
+            if plan.previous_profile().is_none() {
+                self.require_secret_matches(*secret_ref).await?;
+            }
         }
         Ok(())
     }
@@ -1890,17 +1938,6 @@ impl WalletService {
             }
         }
         Ok(())
-    }
-
-    async fn require_usable_account(
-        &self,
-        profile: &WalletProfile,
-        account_id: AccountId32,
-    ) -> Result<(), EngineError> {
-        let account = profile
-            .account_by_id(account_id)
-            .ok_or_else(|| error(ContractErrorCode::NotFound, "账户不存在"))?;
-        self.require_secret_matches(account.secret_ref()).await
     }
 
     async fn require_secret_matches(&self, secret_ref: SecretRef) -> Result<(), EngineError> {

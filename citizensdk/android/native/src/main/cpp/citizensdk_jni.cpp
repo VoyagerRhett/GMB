@@ -1874,10 +1874,10 @@ void native_destroy(JNIEnv *env, jobject, jlong raw) {
   }
 }
 
-void native_complete_unwrap(JNIEnv *env, jclass, jlong raw,
+void native_complete_vault_status(JNIEnv *env, jclass, jlong raw,
                             jlong operation_id, jint error_code) {
   if (auto bridge = bridge_from(env, raw)) {
-    bridge->complete_unwrap(static_cast<uint64_t>(operation_id), error_code);
+    bridge->complete_vault_status(static_cast<uint64_t>(operation_id), error_code);
   }
 }
 
@@ -1977,7 +1977,7 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char *>("nativeCommitPreparedWallet"), const_cast<char *>("(JJ)J"), reinterpret_cast<void *>(native_commit_prepared)},
     {const_cast<char *>("nativeReleasePreparedWallet"), const_cast<char *>("(JJ)V"), reinterpret_cast<void *>(native_release_prepared)},
     {const_cast<char *>("nativeDestroy"), const_cast<char *>("(J)V"), reinterpret_cast<void *>(native_destroy)},
-    {const_cast<char *>("completeVaultUnwrap"), const_cast<char *>("(JJI)V"), reinterpret_cast<void *>(native_complete_unwrap)},
+    {const_cast<char *>("completeVaultStatus"), const_cast<char *>("(JJI)V"), reinterpret_cast<void *>(native_complete_vault_status)},
 };
 
 }  // namespace

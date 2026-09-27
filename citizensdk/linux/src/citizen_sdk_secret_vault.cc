@@ -21,6 +21,21 @@ citizensdk_host_vault_availability_t SecretVault::availability() const noexcept 
   return CITIZENSDK_HOST_VAULT_AVAILABLE;
 }
 
+// 不持有代际锁等待用户；认证前后重新核对同一代际，退休时绝不恢复钥。
+void SecretVault::authorize_add_accounts(uint64_t host_operation_id, const WalletKey &key,
+    const std::array<uint8_t, 16> &operation_id) {
+  require(host_operation_id != 0 && std::any_of(operation_id.begin(), operation_id.end(),
+      [](uint8_t value) { return value != 0; }), CITIZENSDK_ERROR_INVALID_ARGUMENT, "追加认证身份无效");
+  require(operations_.accept(host_operation_id), CITIZENSDK_ERROR_CONFLICT, "追加认证操作重复");
+  try {
+    require(has_wallet_kek(key), CITIZENSDK_ERROR_KEY_INVALIDATED, "wallet key is unavailable");
+    const auto code = user_auth_.authorize_add_accounts(host_operation_id);
+    require(code == CITIZENSDK_OK, code, "账户追加认证未完成");
+    require(has_wallet_kek(key), CITIZENSDK_ERROR_KEY_INVALIDATED, "wallet key changed during authentication");
+    operations_.finish(host_operation_id);
+  } catch (...) { operations_.finish(host_operation_id); throw; }
+}
+
 void SecretVault::ensure_wallet_kek(
     uint64_t host_operation_id, const WalletKey &key, const std::array<uint8_t, 16> &operation_id) {
   std::lock_guard<std::recursive_mutex> guard(generation_lock_);

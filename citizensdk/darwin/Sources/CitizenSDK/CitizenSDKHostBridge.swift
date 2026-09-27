@@ -159,6 +159,7 @@ internal final class CitizenSDKHostBridge {
         vaultVTable.wrap_dek = citizenSDKVaultWrap
         vaultVTable.unwrap_dek = citizenSDKVaultUnwrap
         vaultVTable.retire_wallet_kek = citizenSDKVaultRetire
+        vaultVTable.authorize_add_accounts = citizenSDKVaultAuthorizeAddAccounts
     }
 
     static func storageRoot(applicationSupport: URL, applicationID: String?) throws -> URL {
@@ -217,6 +218,11 @@ internal final class CitizenSDKHostBridge {
                                plaintext: UnsafeRawBufferPointer) throws -> Data {
         try vault().wrapDEK(walletIndex: key.walletIndex, generation: key.generation,
                           provisioningOperationID: operationID, plaintext: plaintext)
+    }
+    fileprivate func vaultAuthorizeAddAccounts(hostOperationID: UInt64, key: CitizenSDKHostWalletKey,
+        operationID: Data, completion: @escaping (CitizenSDKErrorCode) -> Void) throws {
+        try vault().authorizeAddAccounts(operationID: hostOperationID, walletIndex: key.walletIndex,
+            generation: key.generation, provisioningOperationID: operationID, completion: completion)
     }
     fileprivate func vaultUnwrap(hostOperationID: UInt64, key: CitizenSDKHostWalletKey,
                                  wrapped: Data, output: UnsafeMutableRawBufferPointer,
@@ -531,6 +537,19 @@ private func citizenSDKVaultUnwrap(_ context: UnsafeMutableRawPointer?, _ operat
             wrapped: citizenSDKData(wrapped),
             output: UnsafeMutableRawBufferPointer(start: outputPointer, count: 32)
         ) { code in citizenSDKCompleteStatus(operationID, sdkContext, completion, code) }
+        return 0
+    } catch { return citizenSDKCode(error) }
+}
+
+private func citizenSDKVaultAuthorizeAddAccounts(_ context: UnsafeMutableRawPointer?, _ operationID: UInt64,
+    _ wallet: citizensdk_host_wallet_key_ref_v1_t, _ provisioning: citizensdk_host_id128_t,
+    _ sdkContext: UnsafeMutableRawPointer?, _ completion: citizensdk_host_status_completion_v1_t?) -> Int32 {
+    guard let host = citizenSDKHost(context), completion != nil else { return CitizenSDKErrorCode.invalidArgument.rawValue }
+    do {
+        try host.vaultAuthorizeAddAccounts(hostOperationID: operationID, key: citizenSDKWalletKey(wallet),
+            operationID: citizenSDKFixedData(provisioning.bytes, count: 16)) {
+                code in citizenSDKCompleteStatus(operationID, sdkContext, completion, code)
+            }
         return 0
     } catch { return citizenSDKCode(error) }
 }

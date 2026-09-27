@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{atomic::AtomicBool, Arc, Mutex},
 };
 
 use citizen_sdk_contracts::{
@@ -1290,6 +1290,7 @@ impl CitizenEngine {
         mnemonic: SecretBuffer,
         password: Zeroizing<String>,
         indices: Vec<u32>,
+        cancelled: Arc<AtomicBool>,
     ) -> EngineFuture<'_, WalletProfile> {
         let service = self.local_wallet_service(&[
             CapabilityName::WalletProfile,
@@ -1297,7 +1298,7 @@ impl CitizenEngine {
             CapabilityName::UserAuthentication,
         ]);
         Box::pin(async move {
-            self.with_wallet_monitor_paused(service?.add_accounts(&mnemonic, &password, &indices))
+            self.with_wallet_monitor_paused(service?.with_add_cancellation(cancelled).add_accounts(&mnemonic, &password, &indices))
                 .await
         })
     }
@@ -1307,13 +1308,14 @@ impl CitizenEngine {
         &self,
         mnemonic: SecretBuffer,
         password: Zeroizing<String>,
+        cancelled: Arc<AtomicBool>,
     ) -> EngineFuture<'_, WalletProfile> {
         let service = self.local_wallet_service(&[
             CapabilityName::WalletProfile, CapabilityName::HardwareVault,
             CapabilityName::UserAuthentication,
         ]);
         Box::pin(async move {
-            self.with_wallet_monitor_paused(service?.add_next_account(&mnemonic, &password)).await
+            self.with_wallet_monitor_paused(service?.with_add_cancellation(cancelled).add_next_account(&mnemonic, &password)).await
         })
     }
 

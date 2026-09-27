@@ -208,6 +208,66 @@ internal class CitizenSdkHardwareVault(
         }
     }
 
+    /** 整批追加独立生物认证；不取得原账户私钥，不缓存成功，也不触碰密钥封装格式。 */
+    fun authorizeAddAccounts(hostOperationId: Long, walletIndex: Int, generation: ByteArray,
+        provisioningOperationId: ByteArray, completion: (Int) -> Unit) {
+        require(hostOperationId != 0L && generation.size == 16 && provisioningOperationId.size == 16 &&
+            provisioningOperationId.any { it != 0.toByte() }) { "追加认证身份无效" }
+        if (!hasWalletKek(walletIndex, generation)) throw VaultFailure(
+            CitizenSdkErrorCode.KEY_INVALIDATED, "wallet KEK is unavailable")
+        val host = activities.currentResumed() ?: throw VaultFailure(
+            CitizenSdkErrorCode.AUTHENTICATION_REQUIRED, "no foreground wallet activity")
+        dispatchAuthentication {
+            var prompt: BiometricPrompt? = null
+            var observer: DefaultLifecycleObserver? = null
+            var cancel: (() -> Unit)? = null
+            var finished = false
+            // 全部状态只在主线程访问；迟到或重复系统回调不能再次完成，也不能覆盖取消。
+            fun finish(code: CitizenSdkErrorCode) {
+                if (finished) return
+                finished = true
+                observer?.let { host.lifecycle.removeObserver(it) }
+                cancel?.let { prompts[host]?.remove(it) }
+                if (prompts[host]?.isEmpty() == true) prompts.remove(host)
+                authenticationOperations.remove(hostOperationId)
+                completion(code.value)
+            }
+            try {
+                if (host.isDestroyed || host.isFinishing || activities.currentResumed() !== host ||
+                    !host.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) || host.supportFragmentManager.isStateSaved) {
+                    finish(CitizenSdkErrorCode.AUTHENTICATION_CANCELLED)
+                    return@dispatchAuthentication
+                }
+                prompt = BiometricPrompt(host, ContextCompat.getMainExecutor(host), object : BiometricPrompt.AuthenticationCallback() {
+                    override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                        finish(mapAuthenticationError(errorCode))
+                    }
+                    override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                        if (finished) return
+                        try {
+                            finish(if (hasWalletKek(walletIndex, generation)) CitizenSdkErrorCode.OK
+                                else CitizenSdkErrorCode.KEY_INVALIDATED)
+                        } catch (_: Throwable) { finish(CitizenSdkErrorCode.KEY_INVALIDATED) }
+                    }
+                })
+                cancel = { finish(CitizenSdkErrorCode.AUTHENTICATION_CANCELLED); prompt?.cancelAuthentication() }
+                observer = object : DefaultLifecycleObserver {
+                    override fun onDestroy(owner: LifecycleOwner) { cancel?.invoke() }
+                }
+                prompts.getOrPut(host) { LinkedHashSet() }.add(cancel!!)
+                authenticationOperations[hostOperationId] = WeakReference(host) to cancel!!
+                host.lifecycle.addObserver(observer!!)
+                prompt!!.authenticate(BiometricPrompt.PromptInfo.Builder().setTitle("验证身份")
+                    .setSubtitle("验证身份以添加本批账户")
+                    .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                    .setNegativeButtonText("取消").build())
+            } catch (_: Throwable) {
+                finish(CitizenSdkErrorCode.INTERNAL)
+                prompt?.cancelAuthentication()
+            }
+        }
+    }
+
     /**
      * Authenticates asynchronously, then writes directly into Rust memory.
      * Completion is invoked after the cipher has stopped accessing the view.

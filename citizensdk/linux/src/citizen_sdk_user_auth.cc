@@ -41,7 +41,7 @@ citizensdk_error_code_t UserAuth::configure(const citizensdk_credential_provider
   {
     std::lock_guard<std::recursive_mutex> callbacks(callback_lock_);
     std::lock_guard<std::mutex> guard(lock_);
-    if (!pending_.empty() || (provider_ && provider_->value.idle(provider_->value.context) != 1))
+    if ((!pending_.empty() || !biometric_.empty()) || (provider_ && provider_->value.idle(provider_->value.context) != 1))
       return CITIZENSDK_ERROR_BUSY;
     auto next = provider == nullptr ? std::shared_ptr<Provider>() : std::make_shared<Provider>(*provider);
     previous = std::move(provider_);
@@ -61,7 +61,7 @@ bool UserAuth::idle() const noexcept {
     std::shared_ptr<Provider> provider;
     {
       std::lock_guard<std::mutex> guard(lock_);
-      if (!pending_.empty()) return false;
+      if ((!pending_.empty() || !biometric_.empty())) return false;
       provider = provider_;
     }
     // 不能持有callback_lock_：request可能同步回Host回包，
@@ -133,6 +133,10 @@ citizensdk_error_code_t UserAuth::cancel(uint64_t host_operation_id) {
   std::shared_ptr<Provider> provider;
   {
     std::lock_guard<std::mutex> guard(lock_);
+    if (const auto biometric = biometric_.find(host_operation_id); biometric != biometric_.end()) {
+      biometric->second->store(true);
+      return CITIZENSDK_OK;
+    }
     const auto found = pending_.find(host_operation_id);
     if (found == pending_.end()) return CITIZENSDK_ERROR_INVALID_STATE;
     // 撤销优先于尚未被工作线程领取的成功回包；迟到/重复回包不能恢复它。
@@ -154,6 +158,7 @@ void UserAuth::cancel_all() {
     std::lock_guard<std::mutex> guard(lock_);
     ids.reserve(pending_.size());
     for (const auto &entry : pending_) ids.push_back(entry.first);
+    for (const auto &entry : biometric_) entry.second->store(true);
   }
   for (const auto id : ids) (void)cancel(id);
 }

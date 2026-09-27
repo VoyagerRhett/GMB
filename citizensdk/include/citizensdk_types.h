@@ -475,6 +475,13 @@ typedef citizensdk_error_code_t
         citizensdk_host_id128_t cleanup_operation_id, void *sdk_context,
         citizensdk_host_status_completion_v1_t completion);
 
+/* 本次整批追加独立认证；不接收秘密，不解封账户，不缓存成功。 */
+typedef citizensdk_error_code_t (*citizensdk_host_vault_authorize_add_accounts_v1_t)(
+    void *host_context, uint64_t host_operation_id,
+    citizensdk_host_wallet_key_ref_v1_t wallet_key,
+    citizensdk_host_id128_t provisioning_operation_id, void *sdk_context,
+    citizensdk_host_status_completion_v1_t completion);
+
 typedef struct citizensdk_host_secret_vault_v1 {
   uint32_t struct_size;
   uint32_t abi_version;
@@ -485,6 +492,7 @@ typedef struct citizensdk_host_secret_vault_v1 {
   citizensdk_host_vault_wrap_dek_v1_t wrap_dek;
   citizensdk_host_vault_unwrap_dek_v1_t unwrap_dek;
   citizensdk_host_vault_retire_wallet_kek_v1_t retire_wallet_kek;
+  citizensdk_host_vault_authorize_add_accounts_v1_t authorize_add_accounts;
 } citizensdk_host_secret_vault_v1_t;
 
 /* Vtable pointers are borrowed only during create_with_host and copied by SDK. */

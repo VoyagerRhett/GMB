@@ -621,10 +621,10 @@ int32_t vault_unwrap(void *context, uint64_t operation_id,
       plaintext_dek_out.len != CITIZENSDK_HOST_DEK_BYTES) {
     return CITIZENSDK_ERROR_INVALID_ARGUMENT;
   }
-  bridge->remember_unwrap(operation_id, sdk_context, completion);
+  bridge->remember_vault_status(operation_id, sdk_context, completion);
   ScopedEnv scoped(bridge->vm());
   if (scoped.env == nullptr) {
-    bridge->reject_unwrap(operation_id);
+    bridge->reject_vault_status(operation_id);
     return kInternal;
   }
   JNIEnv *env = scoped.env;
@@ -650,7 +650,32 @@ int32_t vault_unwrap(void *context, uint64_t operation_id,
   if (wrapped != nullptr) env->DeleteLocalRef(wrapped);
   if (direct != nullptr) env->DeleteLocalRef(direct);
   if (env->ExceptionCheck()) code = exception_code(env);
-  if (code != kOk) bridge->reject_unwrap(operation_id);
+  if (code != kOk) bridge->reject_vault_status(operation_id);
+  return code;
+}
+
+// 独立认证没有秘密缓冲；仍由同一操作注册表保持SDK完成回调的生命周期。
+int32_t vault_authorize_add_accounts(void *context, uint64_t operation_id,
+    citizensdk_host_wallet_key_ref_v1_t wallet, citizensdk_host_id128_t provisioning,
+    void *sdk_context, citizensdk_host_status_completion_v1_t completion) {
+  auto *bridge = static_cast<CitizenSdkHostBridge *>(context);
+  bridge->remember_vault_status(operation_id, sdk_context, completion);
+  ScopedEnv scoped(bridge->vm());
+  if (scoped.env == nullptr) { bridge->reject_vault_status(operation_id); return kInternal; }
+  JNIEnv *env = scoped.env;
+  jclass type = env->GetObjectClass(bridge->host_services());
+  jmethodID id = env->GetMethodID(type, "authorizeAddAccounts", "(JJI[B[B)I");
+  jbyteArray generation = java_id(env, wallet.generation);
+  jbyteArray operation = java_id(env, provisioning);
+  jint code = id == nullptr || generation == nullptr || operation == nullptr ? kInternal :
+      env->CallIntMethod(bridge->host_services(), id,
+          static_cast<jlong>(reinterpret_cast<intptr_t>(bridge)), static_cast<jlong>(operation_id),
+          static_cast<jint>(wallet.wallet_index), generation, operation);
+  env->DeleteLocalRef(type);
+  if (generation != nullptr) env->DeleteLocalRef(generation);
+  if (operation != nullptr) env->DeleteLocalRef(operation);
+  if (env->ExceptionCheck()) code = exception_code(env);
+  if (code != kOk) bridge->reject_vault_status(operation_id);
   return code;
 }
 
@@ -702,6 +727,7 @@ CitizenSdkHostBridge::CitizenSdkHostBridge(JavaVM *vm, JNIEnv *env,
   vault_.wrap_dek = vault_wrap;
   vault_.unwrap_dek = vault_unwrap;
   vault_.retire_wallet_kek = vault_retire;
+  vault_.authorize_add_accounts = vault_authorize_add_accounts;
 
   services_.struct_size = sizeof(services_);
   services_.abi_version = CITIZENSDK_ABI_VERSION;
@@ -806,8 +832,8 @@ bool CitizenSdkHostBridge::destroy(JNIEnv *env) {
     }
   }
   {
-    std::lock_guard<std::mutex> lock(unwrap_mutex_);
-    if (!unwraps_.empty()) {
+    std::lock_guard<std::mutex> lock(vault_status_mutex_);
+    if (!vault_status_operations_.empty()) {
       throw_sdk(env, CITIZENSDK_ERROR_BUSY,
                 "CitizenSDK hardware authentication is still pending");
       return false;
@@ -897,27 +923,27 @@ bool CitizenSdkHostBridge::forget_prepared(
   return true;
 }
 
-void CitizenSdkHostBridge::remember_unwrap(
+void CitizenSdkHostBridge::remember_vault_status(
     uint64_t operation_id, void *sdk_context,
     citizensdk_host_status_completion_v1_t completion) {
-  std::lock_guard<std::mutex> lock(unwrap_mutex_);
-  unwraps_.emplace(operation_id, PendingUnwrap{sdk_context, completion});
+  std::lock_guard<std::mutex> lock(vault_status_mutex_);
+  vault_status_operations_.emplace(operation_id, PendingVaultStatus{sdk_context, completion});
 }
 
-bool CitizenSdkHostBridge::reject_unwrap(uint64_t operation_id) {
-  std::lock_guard<std::mutex> lock(unwrap_mutex_);
-  return unwraps_.erase(operation_id) == 1;
+bool CitizenSdkHostBridge::reject_vault_status(uint64_t operation_id) {
+  std::lock_guard<std::mutex> lock(vault_status_mutex_);
+  return vault_status_operations_.erase(operation_id) == 1;
 }
 
-void CitizenSdkHostBridge::complete_unwrap(uint64_t operation_id,
+void CitizenSdkHostBridge::complete_vault_status(uint64_t operation_id,
                                            int32_t error_code) {
-  PendingUnwrap pending{};
+  PendingVaultStatus pending{};
   {
-    std::lock_guard<std::mutex> lock(unwrap_mutex_);
-    const auto found = unwraps_.find(operation_id);
-    if (found == unwraps_.end()) return;
+    std::lock_guard<std::mutex> lock(vault_status_mutex_);
+    const auto found = vault_status_operations_.find(operation_id);
+    if (found == vault_status_operations_.end()) return;
     pending = found->second;
-    unwraps_.erase(found);
+    vault_status_operations_.erase(found);
   }
   complete_status(operation_id, pending.sdk_context, pending.completion,
                   error_code);

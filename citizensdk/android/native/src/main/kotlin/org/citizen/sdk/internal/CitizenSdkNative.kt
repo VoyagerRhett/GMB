@@ -541,7 +541,7 @@ internal class CitizenSdkNative private constructor(
         external fun encodeSigningPayload(kind: Int, fields: ByteArray, payload: ByteArray): ByteArray
 
         @JvmStatic
-        external fun completeVaultUnwrap(nativeBridge: Long, hostOperationId: Long, errorCode: Int)
+        external fun completeVaultStatus(nativeBridge: Long, hostOperationId: Long, errorCode: Int)
     }
 }
 

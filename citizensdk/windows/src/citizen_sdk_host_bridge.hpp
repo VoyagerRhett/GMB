@@ -69,6 +69,8 @@ class HostBridge final : public std::enable_shared_from_this<HostBridge> {
   HostRecord secret_load(const SecretIdentity &identity);
   HostRecord secret_cas(const SecretIdentity &identity, uint64_t expected,
                         const Bytes &candidate);
+  void vault_authorize_add_accounts(uint64_t host_operation_id, const WalletKey &key,
+      const std::array<uint8_t, 16> &operation_id);
   void vault_ensure(uint64_t host_operation_id, const WalletKey &key,
                     const std::array<uint8_t, 16> &operation_id);
   bool vault_has(const WalletKey &key);
