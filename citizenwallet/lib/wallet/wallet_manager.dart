@@ -210,6 +210,13 @@ class WalletManager {
     String password = '',
   }) async {
     final trimmed = mnemonic.trim();
+    // 导入仅接受产品提供的三种词数；不能只依赖页面输入限制或 BIP-39 库的可用长度。
+    final wordCount = trimmed.isEmpty
+        ? 0
+        : trimmed.split(RegExp(r'\s+')).length;
+    if (wordCount != 12 && wordCount != 18 && wordCount != 24) {
+      throw Exception('助记词必须为 12、18 或 24 个单词');
+    }
     if (!_isValidMnemonic(trimmed)) {
       throw Exception('助记词无效，请检查拼写和空格');
     }

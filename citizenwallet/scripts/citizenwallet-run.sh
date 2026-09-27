@@ -35,8 +35,8 @@ DEPENDENCY_WORK_DIR="${CITIZENWALLET_DEPENDENCY_DIR:-$CITIZENWALLET_WORK_DIR/dep
 BUILD_DIR="${CITIZENWALLET_BUILD_DIR:-$BUILD_WORK_DIR/flutter}"
 ARTIFACT_ROOT="${CITIZENWALLET_ARTIFACT_DIR:-$CITIZENWALLET_WORK_DIR}"
 # Pub始终向工程根写.dart_tool；build-dir不能改变这个位置。先解析真实路径，
-# 拒绝工程根及已有.dart_tool链接把生成状态导回产品源码，再允许任何写入。
-python3 - "$CITIZENWALLET_DIR" "$CITIZENWALLET_PROJECT_ROOT" "$CITIZENWALLET_PROJECT_ROOT/.dart_tool" "$CITIZENWALLET_WORK_DIR" "$BUILD_WORK_DIR" "$DEPENDENCY_WORK_DIR" "$BUILD_DIR" "$ARTIFACT_ROOT" <<'CHECK_OUTPUTS'
+# 拒绝工程根、.dart_tool及Kotlin持久目录链接把生成状态导回产品源码，再允许任何写入。
+python3 - "$CITIZENWALLET_DIR" "$CITIZENWALLET_PROJECT_ROOT" "$CITIZENWALLET_PROJECT_ROOT/.dart_tool" "$CITIZENWALLET_WORK_DIR" "$BUILD_WORK_DIR" "$BUILD_WORK_DIR/kotlin-project" "$DEPENDENCY_WORK_DIR" "$BUILD_DIR" "$ARTIFACT_ROOT" <<'CHECK_OUTPUTS'
 from pathlib import Path
 import sys
 source = Path(sys.argv[1]).resolve()
@@ -95,6 +95,7 @@ if [[ "$PUB_OFFLINE" == true ]]; then PUB_GET_ARGS+=(--offline); fi
 
 # Flutter在缓存工程生成配置和插件清单；Gradle只从公民钱包真实android根启动，
 # 项目缓存、依赖缓存、编译物和临时文件继续使用当前Android任务缓存。
+# Kotlin持久状态不受--project-cache-dir控制，必须另传官方工程属性避免源码生成.kotlin。
 build_android_release() {
   local properties flutter_command flutter_sdk android_sdk product_version version_name version_code
   local flutter_version dart_defines link_target java_home
@@ -136,6 +137,7 @@ print(",".join(base64.b64encode(f"{name}={value[key]}".encode()).decode() for na
     FLUTTER_ROOT="$flutter_sdk" "$CITIZENWALLET_DIR/android/gradlew" "${GRADLE_ARGS[@]}" --stacktrace --no-problems-report \
       --init-script "$CITIZENWALLET_GRADLE_INIT_SCRIPT" \
       --project-cache-dir "$BUILD_WORK_DIR/gradle-project" \
+      -Pkotlin.project.persistent.dir="$BUILD_WORK_DIR/kotlin-project" \
       -Ptarget-platform=android-arm64 \
       -Ptarget=lib/main.dart \
       -Pbase-application-name=android.app.Application \

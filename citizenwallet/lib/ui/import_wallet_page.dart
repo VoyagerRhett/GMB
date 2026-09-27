@@ -36,6 +36,15 @@ class _ImportWalletPageState extends State<ImportWalletPage>
       return;
     }
 
+    // 在密码确认前提示词数错误；钱包导入入口仍会独立执行同一闭集校验。
+    final wordCount = mnemonic.split(RegExp(r'\s+')).length;
+    if (wordCount != 12 && wordCount != 18 && wordCount != 24) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('助记词必须为 12、18 或 24 个单词')),
+      );
+      return;
+    }
+
     setState(() => _importing = true);
     try {
       final password = WalletPassword.parse(_passwordController.text);

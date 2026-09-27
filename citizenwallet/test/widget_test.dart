@@ -85,7 +85,7 @@ void main() {
     expect(tester.getTopLeft(find.byIcon(Icons.add_rounded)).dy, lessThan(130));
   });
 
-  testWidgets('创建页原选择控件提供12、18、24词并显示对应熵说明', (tester) async {
+  testWidgets('创建页三种词数仅显示选中态、说明正确且密码框等宽', (tester) async {
     tester.view.physicalSize = const Size(390, 844);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -97,6 +97,14 @@ void main() {
 
     final selector = find.byType(SegmentedButton<int>);
     expect(tester.widget<SegmentedButton<int>>(selector).selected, {12});
+    expect(
+      tester.widget<SegmentedButton<int>>(selector).showSelectedIcon,
+      isFalse,
+    );
+    expect(
+      tester.getSize(selector).width,
+      tester.getSize(find.byType(TextField)).width,
+    );
     expect(find.text('128 位熵，标准安全强度'), findsOneWidget);
     for (final count in [12, 18, 24]) {
       expect(find.text('$count 个单词'), findsOneWidget);
@@ -105,7 +113,7 @@ void main() {
     await tester.tap(find.text('18 个单词'));
     await tester.pump();
     expect(tester.widget<SegmentedButton<int>>(selector).selected, {18});
-    expect(find.text('192 位熵'), findsOneWidget);
+    expect(find.text('192 位熵，词数与安全性平衡'), findsOneWidget);
 
     await tester.tap(find.text('24 个单词'));
     await tester.pump();
@@ -141,5 +149,53 @@ void main() {
       tester.widget<TextField>(mnemonicInput).decoration!.counterText,
       '18 / 12、18 或 24 个单词',
     );
+  });
+
+  testWidgets('导入输入允许24词与修改已有词，拒绝第25词及超长粘贴', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(theme: AppTheme.darkTheme, home: const ImportWalletPage()),
+    );
+    final input = find.byType(TextField).first;
+    final twentyFour = List.filled(24, 'sample').join(' ');
+    await tester.enterText(input, twentyFour);
+    await tester.pump();
+    expect(tester.widget<TextField>(input).controller!.text, twentyFour);
+    expect(
+      tester.widget<TextField>(input).decoration!.counterText,
+      '24 / 12、18 或 24 个单词',
+    );
+
+    // 键盘继续输入第 25 词时保持原值；修改已有词仍可正常进行。
+    await tester.enterText(input, '$twentyFour extra');
+    expect(tester.widget<TextField>(input).controller!.text, twentyFour);
+    final revised = '${List.filled(23, 'sample').join(' ')} other';
+    await tester.enterText(input, revised);
+    expect(tester.widget<TextField>(input).controller!.text, revised);
+
+    await tester.enterText(input, '');
+    await tester.enterText(input, List.filled(25, 'sample').join(' '));
+    expect(tester.widget<TextField>(input).controller!.text, isEmpty);
+  });
+
+  testWidgets('导入候选词补全第24词，并在提交前拒绝非12/18/24词', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(theme: AppTheme.darkTheme, home: const ImportWalletPage()),
+    );
+    final input = find.byType(TextField).first;
+    await tester.enterText(input, '${List.filled(23, 'abandon').join(' ')} ab');
+    await tester.pump();
+    final suggestion = find.text('abandon').last;
+    await tester.ensureVisible(suggestion);
+    await tester.tap(suggestion);
+    await tester.pump();
+    expect(
+      tester.widget<TextField>(input).controller!.text.trim().split(' ').length,
+      24,
+    );
+
+    await tester.enterText(input, List.filled(13, 'sample').join(' '));
+    await tester.tap(find.text('导入钱包'));
+    await tester.pump();
+    expect(find.text('助记词必须为 12、18 或 24 个单词'), findsOneWidget);
   });
 }

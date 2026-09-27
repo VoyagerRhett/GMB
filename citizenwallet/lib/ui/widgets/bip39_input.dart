@@ -1,5 +1,6 @@
 import 'package:bip39_mnemonic/bip39_mnemonic.dart' as bip39m;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../app_theme.dart';
 
@@ -40,6 +41,10 @@ class _Bip39InputFieldState extends State<Bip39InputField> {
 
   void _onTextChanged() {
     final text = widget.controller.text;
+    if (_countWords(text) > 24) {
+      if (_suggestions.isNotEmpty) setState(() => _suggestions = []);
+      return;
+    }
     final currentWord = _currentWord(text);
 
     if (currentWord.isEmpty) {
@@ -77,6 +82,8 @@ class _Bip39InputFieldState extends State<Bip39InputField> {
     }
 
     final newText = '${parts.join(' ')} ';
+    // 候选词通过 controller 直接写入，也要遵守与键盘输入相同的 24 词上限。
+    if (_countWords(newText) > 24) return;
     widget.controller.value = TextEditingValue(
       text: newText,
       selection: TextSelection.collapsed(offset: newText.length),
@@ -84,11 +91,13 @@ class _Bip39InputFieldState extends State<Bip39InputField> {
     setState(() => _suggestions = []);
   }
 
-  int get _enteredWordCount {
-    final text = widget.controller.text.trim();
+  int _countWords(String value) {
+    final text = value.trim();
     if (text.isEmpty) return 0;
     return text.split(RegExp(r'\s+')).length;
   }
+
+  int get _enteredWordCount => _countWords(widget.controller.text);
 
   @override
   Widget build(BuildContext context) {
@@ -97,6 +106,13 @@ class _Bip39InputFieldState extends State<Bip39InputField> {
       children: [
         TextField(
           controller: widget.controller,
+          // 按单词而非字符截断，拒绝键入或粘贴产生的第 25 个词，同时允许修改前 24 词。
+          inputFormatters: [
+            TextInputFormatter.withFunction(
+              (oldValue, newValue) =>
+                  _countWords(newValue.text) <= 24 ? newValue : oldValue,
+            ),
+          ],
           maxLines: 4,
           style: const TextStyle(
             fontFamily: 'monospace',

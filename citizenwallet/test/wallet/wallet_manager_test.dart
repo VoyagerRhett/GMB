@@ -308,6 +308,24 @@ void main() {
     expect((await manager.getWallets()).length, 2);
   });
 
+  test('导入入口仅接受12、18、24词，其他词数不建立钱包', () async {
+    for (final count in [0, 11, 13, 15, 21, 23, 25]) {
+      final phrase = List.filled(count, 'abandon').join(' ');
+      expect(
+        () => manager.importWallet(phrase),
+        throwsA(predicate((e) => '$e'.contains('助记词必须为 12、18 或 24 个单词'))),
+      );
+    }
+    expect(await manager.getWallets(), isEmpty);
+  });
+
+  test('24词创建后按原导入路径恢复同一账户0', () async {
+    final created = await manager.createWallet(wordCount: 24);
+    await manager.deleteWallet(created.wallet.masterId);
+    final restored = await manager.importWallet(created.mnemonic);
+    expect(restored.primaryAccount.accountId, created.primaryAccount.accountId);
+  });
+
   test('importWallet 账户0(//0) 对齐金标', () async {
     final result = await manager.importWallet(kDevPhrase);
     expect(result.primaryAccount.accountId, kAccount0Id);

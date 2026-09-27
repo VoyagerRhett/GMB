@@ -56,6 +56,15 @@ test('钱包真实入口只在源码外工程执行Pub，缺参和链接逃逸�
   assert.match(run(project).stderr, /源码外绝对路径/u);
   assert.equal(existsSync(trace), false);
   unlinkSync(join(project, '.dart_tool'));
+  // Kotlin持久目录同样不能通过已有链接把状态写回源码，且拒绝必须早于Pub。
+  const kotlinState = join(fixture, 'work', 'work', 'kotlin-project');
+  mkdirSync(join(fixture, 'work', 'work'), { recursive: true });
+  symlinkSync(source, kotlinState);
+  for (const platform of ['ios', 'android']) {
+    assert.match(run(project, platform).stderr, /源码外绝对路径/u);
+    assert.equal(existsSync(trace), false);
+  }
+  unlinkSync(kotlinState);
   for (const platform of ['ios', 'android']) {
     const accepted = run(project, platform);
     assert.equal(accepted.status, 73, accepted.stderr);
@@ -94,6 +103,7 @@ test('Android从真实产品源码根启动Gradle并把可写状态放入外部�
   assert.match(application, /System\.getenv\("CITIZENWALLET_NATIVE_ANDROID_DIR"\)/u);
   assert.match(runner, /cd "\$CITIZENWALLET_DIR\/android"/u);
   assert.match(runner, /--init-script "\$CITIZENWALLET_GRADLE_INIT_SCRIPT"/u);
+  assert.match(runner, /-Pkotlin\.project\.persistent\.dir="\$BUILD_WORK_DIR\/kotlin-project"/u);
   assert.match(runner, /CITIZENWALLET_FLUTTER_GRADLE_ROOT="\$flutter_sdk\/packages\/flutter_tools\/gradle"/u);
   assert.match(runner, /cp "\$ANDROID_APK" "\$ARTIFACT_ROOT\/android\.apk"/u);
 });

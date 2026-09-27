@@ -114,22 +114,27 @@ class _CreateWalletPageState extends State<CreateWalletPage>
               ),
             ),
             const SizedBox(height: 32),
-            SegmentedButton<int>(
-              segments: const [
-                ButtonSegment(value: 12, label: Text('12 个单词')),
-                ButtonSegment(value: 18, label: Text('18 个单词')),
-                ButtonSegment(value: 24, label: Text('24 个单词')),
-              ],
-              selected: {_wordCount},
-              onSelectionChanged: (v) => setState(() => _wordCount = v.first),
+            // 选中态仅用原有颜色区分，不显示勾号；词数选项与下方密码框同宽。
+            SizedBox(
+              width: double.infinity,
+              child: SegmentedButton<int>(
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(value: 12, label: Text('12 个单词')),
+                  ButtonSegment(value: 18, label: Text('18 个单词')),
+                  ButtonSegment(value: 24, label: Text('24 个单词')),
+                ],
+                selected: {_wordCount},
+                onSelectionChanged: (v) => setState(() => _wordCount = v.first),
+              ),
             ),
             const SizedBox(height: 10),
             Text(
-              // 只补充 18 词说明，原 12/24 词文案与选择交互保持不变。
+              // 18 词说明与实际 192 位熵一致；12/24 词说明保持原样。
               _wordCount == 24
                   ? '256 位熵，安全性更高'
                   : _wordCount == 18
-                  ? '192 位熵'
+                  ? '192 位熵，词数与安全性平衡'
                   : '128 位熵，标准安全强度',
               style: const TextStyle(
                 color: AppTheme.textTertiary,
@@ -138,7 +143,7 @@ class _CreateWalletPageState extends State<CreateWalletPage>
             ),
             const SizedBox(height: 32),
             SizedBox(
-              width: 320,
+              width: double.infinity,
               child: WalletPasswordField(controller: _passwordController),
             ),
             const SizedBox(height: 20),
