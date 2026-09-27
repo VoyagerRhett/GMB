@@ -83,7 +83,7 @@ describe('CitizenServe产品发布输入', () => {
         const env = { PATH: `${bin}${delimiter}${process.env.PATH}` };
         const result = execute(env);
         expect(result.error).toBeUndefined();
-        expect(result.status, result.stderr).toBe(failure ? 29 : 0);
+        expect(result.status, `${result.stderr}`).toBe(failure ? 29 : 0);
         const calls = readFileSync(log, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
         expect(calls).toEqual([
           ['DB', 'citizenserve.sql'], ['CITIZENCHAIN_DOWNLOAD_DB', 'download.sql'],
