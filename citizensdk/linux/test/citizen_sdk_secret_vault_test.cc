@@ -167,6 +167,15 @@ int main() {
     assert(!vault.has_wallet_kek(missing));
     std::array<uint8_t, 32> output{};
     output.fill(0xa5);
+    // 缺钥封装不得初始化generation；退休后同样不可复活。
+    auto reject_wrap = [&] {
+      bool rejected = false;
+      try { (void)vault.wrap_dek(8, missing, operation, output.data()); }
+      catch (const HostError &error) { rejected = error.code() == CITIZENSDK_ERROR_KEY_INVALIDATED; }
+      assert(rejected);
+    };
+    reject_wrap();
+    assert(!store.is_generation_active(missing));
     bool missing_rejected = false;
     try {
       vault.unwrap_dek(9, missing, Bytes{1, 2}, output.data());
@@ -181,6 +190,7 @@ int main() {
     vault.retire_wallet_kek(missing, operation);
     assert(!vault.has_wallet_kek(missing));
     assert(!store.ensure_generation(missing, operation));
+    reject_wrap();
   }
 
   const std::string source_path =

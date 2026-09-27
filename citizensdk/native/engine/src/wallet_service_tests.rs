@@ -227,6 +227,8 @@ struct MemorySecretVault {
     availability_gate: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
     availability_entered: Mutex<Option<futures::channel::oneshot::Sender<()>>>,
     wallet_keys: Mutex<HashSet<(u32, VaultGeneration)>>,
+    key_owners: Mutex<std::collections::HashMap<(u32, VaultGeneration), [u8; 16]>>,
+    ensure_calls: AtomicUsize,
     retired_wallets: Mutex<HashSet<(u32, VaultGeneration)>>,
     delete_wallet_calls: AtomicUsize,
     open_calls: AtomicUsize,
@@ -243,6 +245,8 @@ impl Default for MemorySecretVault {
             availability_gate: Mutex::new(None),
             availability_entered: Mutex::new(None),
             wallet_keys: Mutex::new(HashSet::new()),
+            key_owners: Mutex::new(std::collections::HashMap::new()),
+            ensure_calls: AtomicUsize::new(0),
             retired_wallets: Mutex::new(HashSet::new()),
             delete_wallet_calls: AtomicUsize::new(0),
             open_calls: AtomicUsize::new(0),
@@ -263,6 +267,22 @@ impl MemorySecretVault {
 }
 
 impl SecretVault for MemorySecretVault {
+    // 模拟真实平台：创建代际绑定唯一操作；seal只复用，不再隐式造钥。
+    fn ensure_wallet_key(&self, operation: [u8; 16], wallet_index: u32,
+        generation: VaultGeneration) -> ContractFuture<'_, ()> {
+        Box::pin(async move {
+            self.ensure_calls.fetch_add(1, Ordering::SeqCst);
+            let key = (wallet_index, generation);
+            let mut owners = self.key_owners.lock().unwrap();
+            if self.retired_wallets.lock().unwrap().contains(&key) ||
+                owners.get(&key).is_some_and(|owner| owner != &operation) {
+                return Err(ContractError::new(ContractErrorCode::KeyInvalidated, "代际退休或创建操作不匹配"));
+            }
+            owners.insert(key, operation);
+            self.wallet_keys.lock().unwrap().insert(key);
+            Ok(())
+        })
+    }
     fn has_any_wallet_key(&self, wallet_index: u32) -> ContractFuture<'_, bool> {
         Box::pin(async move {
             if let Some(code) = *self.presence_error.lock().unwrap() { return Err(ContractError::new(code, "合成物理钥查询失败")); }
@@ -301,10 +321,9 @@ impl SecretVault for MemorySecretVault {
                     "测试 generation 已退休",
                 ));
             }
-            self.wallet_keys
-                .lock()
-                .unwrap()
-                .insert((secret_ref.wallet_index(), secret_ref.generation()));
+            if !self.has_key(secret_ref.wallet_index(), secret_ref.generation()) {
+                return Err(ContractError::new(ContractErrorCode::KeyInvalidated, "已有钱包密钥缺失"));
+            }
             let ciphertext = secret.with_secret(ToOwned::to_owned);
             EncryptedSecretEnvelope::try_new(
                 1,
@@ -2715,5 +2734,46 @@ fn wallet_and_signing_modules_are_independent_without_a_chain_or_history() {
                 .is_ready(),
             "关闭后本地签名也必须失效"
         );
+    });
+}
+
+#[test]
+fn append_reuses_original_key_for_next_and_explicit_accounts() {
+    block_on(async {
+        let harness = Harness::new();
+        let profile = harness.service.import(&known_mnemonic(), "").await.unwrap();
+        let generation = profile.generation();
+        let original = harness.secrets.load(profile.accounts()[0].secret_ref()).await.unwrap();
+        assert_eq!(harness.vault.ensure_calls.load(Ordering::SeqCst), 1);
+        let first = harness.service.add_next_account(&known_mnemonic(), "").await.unwrap();
+        let final_profile = harness.service.add_accounts(&known_mnemonic(), "", &[5, 9]).await.unwrap();
+        assert_eq!(first.generation(), generation);
+        assert_eq!(final_profile.generation(), generation);
+        assert_eq!(final_profile.accounts().len(), 4);
+        assert_eq!(harness.vault.ensure_calls.load(Ordering::SeqCst), 1, "追加不能重新初始化钱包钥");
+        assert_eq!(harness.secrets.load(profile.accounts()[0].secret_ref()).await.unwrap(), original);
+        assert_eq!(harness.vault.delete_wallet_calls.load(Ordering::SeqCst), 0);
+        harness.service.signing_service().sign(profile.master_account_id(), b"synthetic-after-append".to_vec())
+            .await.expect("原账户追加后仍可签名");
+        let before = harness.profiles.snapshot();
+        assert!(harness.service.add_accounts(&known_mnemonic(), "", &[5]).await.is_err());
+        assert_eq!(harness.profiles.snapshot(), before);
+        assert_eq!(harness.vault.ensure_calls.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[test]
+fn append_cannot_recreate_a_missing_original_wallet_key() {
+    block_on(async {
+        let harness = Harness::new();
+        let profile = harness.service.import(&known_mnemonic(), "").await.unwrap();
+        harness.vault.wallet_keys.lock().unwrap().remove(&(profile.wallet_index(), profile.generation()));
+        let before = harness.profiles.snapshot();
+        assert_contract_code(
+            harness.service.add_next_account(&known_mnemonic(), "").await.unwrap_err(),
+            ContractErrorCode::KeyInvalidated);
+        assert_eq!(harness.profiles.snapshot(), before);
+        assert_eq!(harness.vault.ensure_calls.load(Ordering::SeqCst), 1);
+        assert!(!harness.vault.has_key(profile.wallet_index(), profile.generation()));
     });
 }

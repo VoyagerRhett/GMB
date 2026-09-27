@@ -3,6 +3,7 @@
 #
 # 用法：citizenapp-run.sh <ios|android>
 # 只读包检查：citizenapp-run.sh <verify-ios-localization|verify-android-localization> <产物路径>
+# Isar 生成后补齐职责注释：citizenapp-run.sh normalize-isar-comments
 #
 # 目标平台是必填参数，不做任何自动探测：探测总要在失败时选一个回落，
 # 而回落的那一端会被当成用户想编的那一端——「以为编了 iOS、实际编的 Android」
@@ -21,6 +22,44 @@ SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd -P)"
 # 消解 scripts/..，确保直接产品源码身份使用唯一真实路径。
 APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# 只补齐两份既定生成文件的职责说明；全部输入通过检查后才允许写入。
+if [[ "${1:-}" == normalize-isar-comments ]]; then
+  [[ "$#" == 1 ]] || { echo 'Isar 注释规范化不接受额外参数' >&2; exit 1; }
+  node - "$APP_ROOT" <<'NORMALIZE_ISAR_COMMENTS'
+const { lstatSync, readFileSync, writeFileSync } = require('node:fs');
+const { join } = require('node:path');
+const root = process.argv[2];
+for (const path of [root, join(root, 'lib'), join(root, 'lib/isar')]) {
+  if (!lstatSync(path).isDirectory() || lstatSync(path).isSymbolicLink()) {
+    throw new Error('Isar 输入目录必须为真实目录');
+  }
+}
+const entries = [
+  ['user_isar', '// 由 user_isar.dart 生成用户域集合、序列化与查询；身份展示缓存不得作为授权真源。'],
+  ['wallet_isar', '// 由 wallet_isar.dart 生成钱包域集合、序列化与查询；余额展示快照不得作为链上授权真源。'],
+];
+const header = '// GENERATED CODE - DO NOT MODIFY BY HAND\n';
+const updates = entries.map(([name, comment]) => {
+  const path = join(root, 'lib/isar', `${name}.g.dart`);
+  if (!lstatSync(path).isFile() || lstatSync(path).isSymbolicLink()) {
+    throw new Error(`Isar 生成文件必须为普通文件：${name}`);
+  }
+  const original = readFileSync(path, 'utf8');
+  const normalized = `${header}${comment}\n`;
+  const body = original.startsWith(normalized) ? original.slice(normalized.length)
+    : original.startsWith(header) ? original.slice(header.length) : null;
+  if (body === null || !body.startsWith(`\npart of '${name}.dart';\n`)) {
+    throw new Error(`Isar 生成头或所属源文件不匹配：${name}`);
+  }
+  return { path, original, next: normalized + body };
+});
+for (const { path, original, next } of updates) {
+  if (original !== next) writeFileSync(path, next);
+}
+console.log('Isar 两份生成文件职责注释已规范化，生成正文保持不变');
+NORMALIZE_ISAR_COMMENTS
+  exit 0
+fi
 CITIZENSDK_ROOT="$REPO_ROOT/citizensdk"
 TATACHATSDK_ROOT="$(cd "$REPO_ROOT/../TATA/tatachatsdk" && pwd)"
 VIEW_SCRIPT="$SCRIPT_DIR/citizenapp-view.mjs"

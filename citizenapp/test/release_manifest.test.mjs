@@ -37,6 +37,47 @@ const tataChatAttachmentPlatform = readFileSync(
 const tataChatConversation = readFileSync(
   new URL('lib/src/ui/conversation/conversation_page.dart', tataChatRoot), 'utf8');
 
+// 执行真实脚本片段，检查注释幂等、正文保留和任一输入异常时零写入。
+test('CitizenApp Isar 注释规范化保留正文且重复执行一致', () => {
+  const code = runner.match(/<<'NORMALIZE_ISAR_COMMENTS'\n([\s\S]*?)\nNORMALIZE_ISAR_COMMENTS/u)?.[1];
+  assert.ok(code);
+  const fixture = mkdtempSync(join(tmpdir(), 'citizenapp-isar-'));
+  const directory = join(fixture, 'lib/isar');
+  mkdirSync(directory, { recursive: true });
+  const names = ['user_isar', 'wallet_isar'];
+  const originals = names.map(name => `// GENERATED CODE - DO NOT MODIFY BY HAND\n\npart of '${name}.dart';\n\nconst sentinel = 1;\n`);
+  const run = () => spawnSync(process.execPath, ['-', fixture], { input: code, encoding: 'utf8' });
+  try {
+    names.forEach((name, index) => writeFileSync(join(directory, `${name}.g.dart`), originals[index]));
+    const other = join(directory, 'unrelated.g.dart');
+    writeFileSync(other, '保持原样');
+    assert.equal(run().status, 0);
+    const first = names.map(name => readFileSync(join(directory, `${name}.g.dart`), 'utf8'));
+    first.forEach((value, index) => {
+      assert.match(value.split('\n')[1], /^\/\/ 由 .*生成/u);
+      assert.equal(value.replace(/^\/\/ 由 .*\n/mu, ''), originals[index]);
+    });
+    assert.equal(run().status, 0);
+    names.forEach((name, index) => assert.equal(readFileSync(join(directory, `${name}.g.dart`), 'utf8'), first[index]));
+    assert.equal(readFileSync(other, 'utf8'), '保持原样');
+    for (const invalid of ['无效生成头', originals[1].replace('wallet_isar.dart', 'other.dart')]) {
+      writeFileSync(join(directory, 'user_isar.g.dart'), originals[0]);
+      writeFileSync(join(directory, 'wallet_isar.g.dart'), invalid);
+      assert.notEqual(run().status, 0);
+      assert.equal(readFileSync(join(directory, 'user_isar.g.dart'), 'utf8'), originals[0]);
+      assert.equal(readFileSync(join(directory, 'wallet_isar.g.dart'), 'utf8'), invalid);
+    }
+    rmSync(join(directory, 'wallet_isar.g.dart'));
+    assert.notEqual(run().status, 0);
+    symlinkSync(other, join(directory, 'wallet_isar.g.dart'));
+    assert.notEqual(run().status, 0);
+    assert.equal(readFileSync(other, 'utf8'), '保持原样');
+    assert.equal(readFileSync(join(directory, 'user_isar.g.dart'), 'utf8'), originals[0]);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test('CitizenApp locks the shared Dart protocol generator exactly', () => {
   assert.match(pubspec, /^  protoc_plugin: 25[.]0[.]0$/mu);
   assert.doesNotMatch(pubspec, /^  protoc_plugin: [\^~><=]/mu);

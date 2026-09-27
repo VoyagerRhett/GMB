@@ -3,6 +3,34 @@ import XCTest
 @testable import CitizenSDK
 
 final class CitizenSDKSecretVaultTests: XCTestCase {
+
+    /// 缺钥与退休只返回失败；封装不能偷偷创建Keychain钥或改写代际所有者。
+    func testWrapRequiresExistingActiveKeyWithoutInitializingGeneration() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try CitizenSDKSecureStore(directory: directory)
+        defer { store.close() }
+        let vault = try CitizenSDKSecretVault(secureStore: store, applicationID: "org.example.vault")
+        let generation = Data(repeating: 61, count: 16), original = Data(repeating: 62, count: 16)
+        let append = Data(repeating: 63, count: 16), dek = Data(repeating: 64, count: 32)
+        func rejected() {
+            XCTAssertThrowsError(try dek.withUnsafeBytes {
+                try vault.wrapDEK(walletIndex: 0, generation: generation, provisioningOperationID: append, plaintext: $0)
+            }) { error in
+                XCTAssertEqual((error as? CitizenSDKError)?.code, .keyInvalidated)
+            }
+        }
+        rejected()
+        XCTAssertFalse(try store.isGenerationActive(walletIndex: 0, generation: generation))
+        XCTAssertTrue(try store.ensureGeneration(walletIndex: 0, generation: generation, operationID: original))
+        rejected() // 只有活动记录，没有物理钥，仍不得补造。
+        XCTAssertTrue(try store.ensureGeneration(walletIndex: 0, generation: generation, operationID: original))
+        XCTAssertFalse(try store.ensureGeneration(walletIndex: 0, generation: generation, operationID: append))
+        try store.retireGeneration(walletIndex: 0, generation: generation, operationID: append)
+        rejected()
+        XCTAssertFalse(try store.isGenerationActive(walletIndex: 0, generation: generation))
+    }
+
     func testPhysicalPresenceDoesNotGuessUnknownAliasesOrOtherWallets() throws {
         // 调用生产归属判断；这里只提供系统属性的合成返回，不接触Keychain。
         let first = Data("citizensdk_wallet_first".utf8), second = Data("citizensdk_wallet_second".utf8)

@@ -16,6 +16,35 @@ import UIKit
 final class RunnerUITests: XCTestCase {
   private let targetBundleIdentifier = "ios.citizenapp"
 
+
+  /// 测试只打开空输入面板并结束；真实助记词和设备认证由用户在测试结束后填写。
+  func testOpenAddNextAccount() throws { try openAddAccount("添加下一个账户", stage: "next") }
+  func testOpenAddSpecifiedAccount() throws { try openAddAccount("添加指定账户", stage: "specified") }
+
+  private func openAddAccount(_ mode: String, stage: String) throws {
+    let app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
+    app.launch()
+    dismissPermissionGuideIfNeeded(in: app)
+    try requireMainNavigation(in: app)
+    let my = app.buttons.matching(NSPredicate(format:
+      "label CONTAINS %@ AND NOT (label CONTAINS %@)", "我的", "我的通讯录")).firstMatch
+    XCTAssertTrue(my.waitForExistence(timeout: 10))
+    my.tap()
+    let wallet = app.descendants(matching: .any).matching(NSPredicate(format:
+      "label == %@ OR (label CONTAINS %@ AND label CONTAINS %@)", "钱包", "钱包", "管理账户")).firstMatch
+    XCTAssertTrue(wallet.waitForExistence(timeout: 10))
+    wallet.tap()
+    let add = app.buttons.matching(NSPredicate(format: "label == %@", "添加账户 / 导入冷钱包")).firstMatch
+    XCTAssertTrue(add.waitForExistence(timeout: 10))
+    add.tap()
+    let choice = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", mode)).firstMatch
+    XCTAssertTrue(choice.waitForExistence(timeout: 10))
+    choice.tap()
+    let confirm = app.buttons.matching(NSPredicate(format: "label == %@", "确认添加")).firstMatch
+    XCTAssertTrue(confirm.waitForExistence(timeout: 10))
+    NSLog("WALLET_APPEND_UI stage=%@ form_ready=1", stage)
+  }
+
   /// 身份展示验收只比较本机内存中的公民号文本，日志仅记录固定步骤和布尔结果。
   func testIdentityLocalDisplayAndRefresh() throws {
     let app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)

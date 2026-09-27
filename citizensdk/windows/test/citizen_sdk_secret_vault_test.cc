@@ -376,6 +376,8 @@ int wmain(int count, wchar_t **arguments) {
   output.fill(0xa5);
   fails(CITIZENSDK_ERROR_KEY_INVALIDATED, [&] { vault.unwrap_dek(1, wallet, Bytes(256), output.data()); });
   assert(zero() && vault.idle());
+  fails(CITIZENSDK_ERROR_KEY_INVALIDATED, [&] { vault.wrap_dek(102, wallet, operation, output.data()); });
+  assert(!store.is_generation_active(wallet) && system.created == 0);
 
   system.cancel = true;
   fails(CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED, [&] { vault.ensure_wallet_kek(101, wallet, operation); });
@@ -390,7 +392,9 @@ int wmain(int count, wchar_t **arguments) {
   vault.ensure_wallet_kek(101, wallet, operation);
   assert(system.created == 1);
 
-  const Bytes wrapped = vault.wrap_dek(102, wallet, operation, output.data());
+  // 新追加操作复用原钥，不能触发创建认证或改变创建归属。
+  const Bytes wrapped = vault.wrap_dek(102, wallet, competing, output.data());
+  assert(system.created == 1 && system.prompted == prompts);
   assert(wrapped.size() == 256);
   vault.unwrap_dek(2, wallet, wrapped, output.data());
   assert(output[0] == 0x3c && vault.idle());
@@ -422,6 +426,8 @@ int wmain(int count, wchar_t **arguments) {
   system.on_unlock = {};
   assert(zero() && system.decrypted == decryptions && vault.idle() && !vault.has_wallet_kek(wallet));
   fails(CITIZENSDK_ERROR_KEY_INVALIDATED, [&] { vault.ensure_wallet_kek(101, wallet, operation); });
+
+  fails(CITIZENSDK_ERROR_KEY_INVALIDATED, [&] { vault.wrap_dek(102, wallet, competing, output.data()); });
 
   wallet.generation[0] = 2;
   vault.ensure_wallet_kek(101, wallet, operation);

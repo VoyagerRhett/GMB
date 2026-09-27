@@ -3911,6 +3911,9 @@ mod production_tests {
 
     #[derive(Default)]
     struct FakeVault {
+        key_owner: Mutex<Option<(u32, [u8; 16], [u8; 16])>>,
+        retired: Mutex<bool>,
+        ensure_calls: Mutex<usize>,
         seen_plaintext_deks: Mutex<Vec<Vec<u8>>>,
         unwrap_mode: AtomicU8,
         unwrap_operations: Mutex<Vec<u64>>,
@@ -3944,28 +3947,40 @@ mod production_tests {
     }
 
     unsafe extern "C" fn fake_vault_ensure(
-        _host_context: *mut c_void,
-        operation_id: u64,
-        _wallet_key: CitizenSdkHostWalletKeyRefV1,
-        _provisioning_operation_id: CitizenSdkHostId128,
-        sdk_context: *mut c_void,
-        completion: CitizenSdkHostStatusCompletionV1,
+        host_context: *mut c_void, operation_id: u64,
+        wallet_key: CitizenSdkHostWalletKeyRefV1, provisioning: CitizenSdkHostId128,
+        sdk_context: *mut c_void, completion: CitizenSdkHostStatusCompletionV1,
     ) -> i32 {
-        // SAFETY: the fake completes synchronously.
+        // SAFETY: 合成金库由测试持有，持久创建归属和退休规则与平台一致。
+        let fake = unsafe { fake_vault(host_context) };
+        *fake.ensure_calls.lock().unwrap() += 1;
+        let identity = (wallet_key.wallet_index, wallet_key.generation.bytes, provisioning.bytes);
+        let mut owner = fake.key_owner.lock().unwrap();
+        if *fake.retired.lock().unwrap() || owner.as_ref().is_some_and(|old| *old != identity) {
+            return CitizenSdkErrorCode::KeyInvalidated.as_i32();
+        }
+        *owner = Some(identity);
+        drop(owner);
+        // SAFETY: 同步完成后不保留任何输入借用。
         unsafe { complete_status_ok(operation_id, sdk_context, completion) };
         CitizenSdkErrorCode::Ok.as_i32()
     }
 
     unsafe extern "C" fn fake_vault_has(
-        _host_context: *mut c_void,
+        host_context: *mut c_void,
         operation_id: u64,
-        _wallet_key: CitizenSdkHostWalletKeyRefV1,
+        wallet_key: CitizenSdkHostWalletKeyRefV1,
         sdk_context: *mut c_void,
         completion: CitizenSdkHostBoolCompletionV1,
     ) -> i32 {
+        // SAFETY: 测试持有合成金库，存在性必须反映创建和退休后的实际状态。
+        let fake = unsafe { fake_vault(host_context) };
+        let present = !*fake.retired.lock().unwrap()
+            && fake.key_owner.lock().unwrap().as_ref().is_some_and(|key|
+                key.0 == wallet_key.wallet_index && key.1 == wallet_key.generation.bytes);
         let result = CitizenSdkHostBoolResultV1 {
             host_operation_id: operation_id,
-            value: 1,
+            value: u8::from(present),
             ..CitizenSdkHostBoolResultV1::default()
         };
         // SAFETY: the result remains readable for this synchronous call.
@@ -3978,12 +3993,18 @@ mod production_tests {
     unsafe extern "C" fn fake_vault_wrap(
         host_context: *mut c_void,
         operation_id: u64,
-        _wallet_key: CitizenSdkHostWalletKeyRefV1,
+        wallet_key: CitizenSdkHostWalletKeyRefV1,
         _provisioning_operation_id: CitizenSdkHostId128,
         plaintext_dek: CitizenSdkBytesView,
         sdk_context: *mut c_void,
         completion: CitizenSdkHostBytesCompletionV1,
     ) -> i32 {
+        // SAFETY: 合成提供者只允许使用既有活动钥，封装不会隐式创建。
+        let fake = unsafe { fake_vault(host_context) };
+        if *fake.retired.lock().unwrap() || !fake.key_owner.lock().unwrap().as_ref()
+            .is_some_and(|key| key.0 == wallet_key.wallet_index && key.1 == wallet_key.generation.bytes) {
+            return CitizenSdkErrorCode::KeyInvalidated.as_i32();
+        }
         // SAFETY: the SDK lends this exact view for the callback duration.
         let dek = unsafe { borrowed_bytes(plaintext_dek) };
         assert_eq!(dek.len(), CITIZENSDK_HOST_DEK_BYTES as usize);
@@ -4064,13 +4085,15 @@ mod production_tests {
     }
 
     unsafe extern "C" fn fake_vault_retire(
-        _host_context: *mut c_void,
+        host_context: *mut c_void,
         operation_id: u64,
         _wallet_key: CitizenSdkHostWalletKeyRefV1,
         _cleanup_operation_id: CitizenSdkHostId128,
         sdk_context: *mut c_void,
         completion: CitizenSdkHostStatusCompletionV1,
     ) -> i32 {
+        // SAFETY: 退休只改变本测试拥有的合成金库。
+        *unsafe { fake_vault(host_context) }.retired.lock().unwrap() = true;
         // SAFETY: the fake completes synchronously after its durable no-op.
         unsafe { complete_status_ok(operation_id, sdk_context, completion) };
         CitizenSdkErrorCode::Ok.as_i32()
@@ -4097,6 +4120,29 @@ mod production_tests {
         (fake, vault, bridge)
     }
 
+
+    #[test]
+    fn wrapping_reuses_initialized_key_without_rebinding_and_retirement_stays_final() {
+        let (fake, vault, bridge) = vault_harness();
+        let secret_ref = test_secret_ref(1, 2, 3, 4);
+        let seal = || block_on(vault.seal([8; 16], secret_ref, SecretBuffer::try_new(vec![6; 32]).unwrap()));
+        assert_eq!(seal().unwrap_err().code(), ContractErrorCode::KeyInvalidated);
+        assert_eq!(*fake.ensure_calls.lock().unwrap(), 0);
+        assert!(!block_on(vault.has_wallet_key(secret_ref.wallet_index(), secret_ref.generation())).unwrap());
+        block_on(vault.ensure_wallet_key([5; 16], secret_ref.wallet_index(), secret_ref.generation())).unwrap();
+        assert!(seal().is_ok(), "另一追加操作应复用原钥");
+        assert!(block_on(vault.has_wallet_key(secret_ref.wallet_index(), secret_ref.generation())).unwrap());
+        assert_eq!(*fake.ensure_calls.lock().unwrap(), 1);
+        assert_eq!(block_on(vault.ensure_wallet_key([8; 16], secret_ref.wallet_index(), secret_ref.generation()))
+            .unwrap_err().code(), ContractErrorCode::KeyInvalidated, "另一操作不能抢占创建归属");
+        block_on(vault.delete_wallet_key([9; 16], secret_ref.wallet_index(), secret_ref.generation())).unwrap();
+        assert!(!block_on(vault.has_wallet_key(secret_ref.wallet_index(), secret_ref.generation())).unwrap());
+        assert_eq!(seal().unwrap_err().code(), ContractErrorCode::KeyInvalidated);
+        assert_eq!(block_on(vault.ensure_wallet_key([5; 16], secret_ref.wallet_index(), secret_ref.generation()))
+            .unwrap_err().code(), ContractErrorCode::KeyInvalidated);
+        assert_eq!(bridge.pending_count().unwrap(), 0);
+    }
+
     fn rebuild_envelope(
         original: &EncryptedSecretEnvelope,
         digest: [u8; 32],
@@ -4114,6 +4160,7 @@ mod production_tests {
     fn private_view_authorizing_uses_actual_operation_id_and_rejection_drains_without_unwrap() {
         let (fake, ordinary, bridge) = vault_harness();
         let secret_ref = test_secret_ref(7, 8, 9, 10);
+        block_on(ordinary.ensure_wallet_key([11; 16], secret_ref.wallet_index(), secret_ref.generation())).unwrap();
         // 复用既有公开测试材料，只记录非秘密 operation_id，不打印密钥或密文。
         let envelope = block_on(ordinary.seal(
             [11; 16],
@@ -4206,6 +4253,7 @@ mod production_tests {
     fn rust_aes_gcm_round_trip_binds_every_secret_ref_field_and_hides_the_secret() {
         let (fake, vault, bridge) = vault_harness();
         let expected = test_secret_ref(7, 8, 9, 10);
+        block_on(vault.ensure_wallet_key([11; 16], expected.wallet_index(), expected.generation())).unwrap();
         let plaintext = vec![0x37; 32];
         let envelope = block_on(
             vault.seal(
@@ -4289,6 +4337,7 @@ mod production_tests {
     fn vault_envelope_rejects_truncation_tampering_and_incomplete_unwrap() {
         let (fake, vault, _) = vault_harness();
         let secret_ref = test_secret_ref(1, 2, 3, 4);
+        block_on(vault.ensure_wallet_key([5; 16], secret_ref.wallet_index(), secret_ref.generation())).unwrap();
         let envelope = block_on(
             vault.seal(
                 [5; 16],

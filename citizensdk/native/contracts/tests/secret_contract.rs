@@ -92,6 +92,13 @@ struct FakeVault {
 }
 
 impl SecretVault for FakeVault {
+    fn ensure_wallet_key(&self, _: [u8; 16], wallet_index: u32,
+        generation: VaultGeneration) -> ContractFuture<'_, ()> {
+        Box::pin(async move {
+            self.keys.lock().unwrap_or_else(|_| panic!("合成测试锁不可用")).insert((wallet_index, generation));
+            Ok(())
+        })
+    }
     fn has_any_wallet_key(&self, wallet_index: u32) -> ContractFuture<'_, bool> {
         Box::pin(async move {
             if let Some(code) = *self.query_error.lock().unwrap_or_else(|_| panic!("合成测试锁不可用")) {
@@ -112,7 +119,9 @@ impl SecretVault for FakeVault {
         secret: SecretBuffer,
     ) -> ContractFuture<'_, EncryptedSecretEnvelope> {
         Box::pin(async move {
-            self.keys.lock().unwrap_or_else(|_| panic!("合成测试锁不可用")).insert((secret_ref.wallet_index(), secret_ref.generation()));
+            if !self.has_wallet_key(secret_ref.wallet_index(), secret_ref.generation()).await? {
+                return Err(citizen_sdk_contracts::ContractError::new(citizen_sdk_contracts::ContractErrorCode::KeyInvalidated, "合成密钥缺失"));
+            }
             let ciphertext =
                 secret.with_secret(|bytes| bytes.iter().map(|byte| *byte ^ 0xaa).collect());
             EncryptedSecretEnvelope::try_new(1, Hash32Bytes::from_bytes([3; 32]), ciphertext)
@@ -179,6 +188,7 @@ fn signer_and_vault_are_distinct_object_safe_contracts() {
         VaultAvailability::Available
     );
     let secret = value_or_panic(SecretBuffer::try_new(vec![7; 32]));
+    value_or_panic(block_on(vault.ensure_wallet_key([9; 16], 0, generation)));
     let envelope = value_or_panic(block_on(vault.seal([9; 16], secret_ref, secret)));
     let unlocked = value_or_panic(block_on(vault.open(secret_ref, envelope)));
     let public_key = value_or_panic(block_on(signer.public_key(&unlocked)));

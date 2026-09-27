@@ -93,12 +93,20 @@ class _AddAccountSheetState extends State<AddAccountSheet> {
   }
 
   String _describeError(Object error) {
+    // 展示稳定中文类别，不把原生金库描述或调用细节直接交给用户。
     if (error is CitizenSdkException) {
-      return error.message;
+      return switch (error.code) {
+        CitizenSdkErrorCode.keyInvalidated => '钱包安全密钥不可用，无法添加账户',
+        CitizenSdkErrorCode.authenticationCancelled || CitizenSdkErrorCode.cancelled => '已取消添加账户',
+        CitizenSdkErrorCode.authenticationRequired => '请完成设备认证，并确认助记词和钱包密码属于当前钱包',
+        CitizenSdkErrorCode.invalidArgument => '请检查助记词、钱包密码和账户序号',
+        CitizenSdkErrorCode.conflict => '钱包状态已变化，请重新打开添加账户',
+        CitizenSdkErrorCode.busy => '钱包正在处理其他操作，请稍后重试',
+        CitizenSdkErrorCode.storage => '账户保存失败，请重试',
+        _ => '添加账户失败，请重试',
+      };
     }
-    final text = error.toString();
-    const prefix = 'Exception: ';
-    return text.startsWith(prefix) ? text.substring(prefix.length) : text;
+    return '添加账户失败，请重试';
   }
 
   Future<void> _submit() async {

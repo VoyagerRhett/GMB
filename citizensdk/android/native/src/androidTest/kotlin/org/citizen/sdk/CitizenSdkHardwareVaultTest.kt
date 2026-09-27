@@ -13,6 +13,36 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 class CitizenSdkHardwareVaultTest {
+
+    /** 无活动代际、物理钥缺失和已退休都不能由封装隐式创建钥。 */
+    @Test
+    fun wrapNeverInitializesOrRebindsWalletGeneration() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val directory = File(context.noBackupFilesDir, "citizensdk-test/wrap-" + System.nanoTime())
+        try {
+            CitizenSdkSecureStore(directory).use { store ->
+                val vault = CitizenSdkHardwareVault(context, store)
+                val generation = ByteArray(16) { 61 }; val original = ByteArray(16) { 62 }
+                val append = ByteArray(16) { 63 }
+                val dek = java.nio.ByteBuffer.allocateDirect(32)
+                fun rejected() {
+                    val failure = runCatching { vault.wrapDek(0, generation, append, dek) }.exceptionOrNull()
+                    assertTrue(failure is CitizenSdkHardwareVault.VaultFailure)
+                    assertEquals(CitizenSdkErrorCode.KEY_INVALIDATED, (failure as CitizenSdkHardwareVault.VaultFailure).code)
+                }
+                rejected()
+                assertTrue(!store.isGenerationActive(0, generation))
+                assertTrue(store.ensureGeneration(0, generation, original))
+                rejected()
+                assertTrue(store.ensureGeneration(0, generation, original))
+                assertTrue(!store.ensureGeneration(0, generation, append))
+                store.retireGeneration(0, generation, append)
+                rejected()
+                assertTrue(!store.isGenerationActive(0, generation))
+            }
+        } finally { directory.deleteRecursively() }
+    }
+
     @Test
     fun physicalKeyPresenceRejectsUnknownSdkAliases() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()

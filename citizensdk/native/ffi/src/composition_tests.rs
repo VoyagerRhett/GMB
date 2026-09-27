@@ -71,6 +71,9 @@ struct FakeVault {
 }
 
 impl SecretVault for FakeVault {
+    fn ensure_wallet_key(&self, _: [u8; 16], _: u32, _: VaultGeneration) -> ContractFuture<'_, ()> {
+        Box::pin(async { Err(ContractError::new(ContractErrorCode::Unsupported, "装配夹具不创建金库钥")) })
+    }
     fn has_any_wallet_key(&self, _wallet_index: u32) -> ContractFuture<'_, bool> {
         Box::pin(async { Err(ContractError::new(ContractErrorCode::Unsupported, "该装配夹具不模拟物理钥枚举")) })
     }

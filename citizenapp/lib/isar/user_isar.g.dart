@@ -1,4 +1,5 @@
 // GENERATED CODE - DO NOT MODIFY BY HAND
+// 由 user_isar.dart 生成用户域集合、序列化与查询；身份展示缓存不得作为授权真源。
 
 part of 'user_isar.dart';
 
