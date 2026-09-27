@@ -186,16 +186,19 @@ class WalletManager {
   // ── 创建 / 导入 / 加账户 ──
   /// 新建钱包：生成助记词 → 派生账户0（`//0`）→ 存 master 种子 + 助记词。
   ///
-  /// [wordCount] 助记词个数，12（默认）或 24。助记词同时一次性返回展示。
+  /// [wordCount] 助记词个数，12（默认）、18 或 24。助记词同时一次性返回展示。
   Future<WalletCreationResult> createWallet({
     int wordCount = 12,
     String password = '',
   }) async {
-    assert(wordCount == 12 || wordCount == 24);
+    assert(wordCount == 12 || wordCount == 18 || wordCount == 24);
     final mnemonic = bip39m.Mnemonic.generate(
       bip39m.Language.english,
+      // 18 词使用现有依赖的 192 位熵长度；12/24 词仍走原有映射。
       length: wordCount == 24
           ? bip39m.MnemonicLength.words24
+          : wordCount == 18
+          ? bip39m.MnemonicLength.words18
           : bip39m.MnemonicLength.words12,
     ).sentence;
     return _establishWallet(mnemonic, 'created', password: password);

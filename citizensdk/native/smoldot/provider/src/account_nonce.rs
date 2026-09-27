@@ -155,4 +155,19 @@ mod tests {
         };
         assert_eq!(error.code(), ContractErrorCode::InvalidArgument);
     }
+
+    #[test]
+    fn matching_snapshot_preserves_zero_and_maximum_runtime_nonce() {
+        let account_id = account(1);
+        let best = VerifiedBlockRef::best(Hash32::from_bytes([0xaa; 32]), 42);
+        // 固定Runtime复用不能引入nonce缓存、自增或零值替代。
+        for value in [0, u64::from(u32::MAX)] {
+            let mut observed = snapshot(account_id, 0xaa, 42);
+            observed.nonce = value;
+            let Ok(nonce) = account_nonce_from_snapshot(account_id, best, observed) else {
+                panic!("准确快照的合法nonce边界必须保留");
+            };
+            assert_eq!(nonce.value(), value);
+        }
+    }
 }

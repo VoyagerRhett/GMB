@@ -94,7 +94,7 @@ void main() {
     final source = File('lib/wallet/pages/wallet_page.dart').readAsStringSync();
     expect(source, contains('mode: QrScanMode.coldAccountImport'));
     expect(source, contains('CitizenQrScanPurpose.coldAccountImport'));
-    expect(source, contains('.wallet.importColdAccount('));
+    expect(source, matches(RegExp(r'\.wallet\s*\.importColdAccount\(')));
     expect(source, isNot(contains('importColdAccountWithUi')));
     expect(source, isNot(contains('extractColdWalletImportAddress')));
     expect(source, isNot(contains('QrRouter().route')));

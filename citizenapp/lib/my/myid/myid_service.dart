@@ -1,3 +1,4 @@
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
 import 'package:citizen_sdk/citizen_sdk.dart';
 
 import 'dart:convert';
@@ -587,7 +588,10 @@ class MyIdService {
     if (resolvedCidNumber == null || resolvedCidNumber != cidNumber) {
       throw const AccountSecurityException('当前链上身份与待换绑 CID 不一致');
     }
-    final newAccount = _findAccount(await _wallet.getState().result, newAccountId);
+    final newAccount = _findAccount(
+      await _wallet.getState().result,
+      newAccountId,
+    );
     if (newAccount == null) {
       throw const AccountSecurityException('目标账户不存在');
     }
@@ -673,7 +677,8 @@ class MyIdService {
   fetchRegistrationAffordability(String bindAccountId) async {
     final fees = await _chain.getFeeSnapshot();
     final requiredFen = fees.minimumFeeFen + fees.existentialDepositFen;
-    final balance = await _chain.getAccountBalance(bindAccountId);
+    final balance = await AccountBalanceSnapshotStore.forChain(_chain)
+        .getAccountBalance(bindAccountId, forceRefresh: true);
     return (requiredFen: requiredFen, balanceFen: balance.freeFen);
   }
 

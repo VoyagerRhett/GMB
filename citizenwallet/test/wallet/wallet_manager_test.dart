@@ -254,6 +254,60 @@ void main() {
     expect(accounts.single.accountId, result.primaryAccount.accountId);
   });
 
+  test('18词创建、备份与重新导入恢复同一账户和密码派生', () async {
+    const password = 'Aa1!中华';
+    final created = await manager.createWallet(
+      wordCount: 18,
+      password: password,
+    );
+    expect(created.mnemonic.split(' ').length, 18);
+    expect(
+      await manager.getMasterMnemonic(created.wallet.masterId) ==
+          created.mnemonic,
+      isTrue,
+    );
+
+    // 删除后按原导入路径恢复，核对同一助记词和密码仍得到原账户0。
+    await manager.deleteWallet(created.wallet.masterId);
+    final restored = await manager.importWallet(
+      created.mnemonic,
+      password: password,
+    );
+    expect(
+      restored.primaryAccount.accountId == created.primaryAccount.accountId,
+      isTrue,
+    );
+    expect(restored.wallet.masterId == created.wallet.masterId, isTrue);
+    expect(
+      await manager.getMasterMnemonic(restored.wallet.masterId) ==
+          created.mnemonic,
+      isTrue,
+    );
+  });
+
+  test('18词导入拒绝未知词和词数不足，且不新增钱包', () async {
+    final created = await manager.createWallet(wordCount: 18);
+    final words = created.mnemonic.split(' ');
+    final unknownWord = [...words]..[0] = 'notaword';
+    expect(
+      () => manager.importWallet(unknownWord.join(' ')),
+      throwsA(isA<Exception>()),
+    );
+    expect(
+      () => manager.importWallet(words.take(17).join(' ')),
+      throwsA(isA<Exception>()),
+    );
+    expect((await manager.getWallets()).length, 1);
+  });
+
+  test('原12词默认值与24词创建结果保持不变', () async {
+    final twelve = await manager.createWallet();
+    final twentyFour = await manager.createWallet(wordCount: 24);
+    expect(twelve.mnemonic.split(' ').length, 12);
+    expect(twentyFour.mnemonic.split(' ').length, 24);
+    expect((await manager.getWallets()).length, 2);
+  });
+
   test('importWallet 账户0(//0) 对齐金标', () async {
     final result = await manager.importWallet(kDevPhrase);
     expect(result.primaryAccount.accountId, kAccount0Id);

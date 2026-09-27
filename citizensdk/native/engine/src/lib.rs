@@ -65,3 +65,64 @@ pub use wallet_input::{
     wallet_word_suggestions, WalletInputReason, WalletInputValidation,
 };
 pub use wallet_service::{PreparedWalletCreation, WalletInitializationState, WalletStateSnapshot};
+
+/// 定向真机交易诊断只输出编译期阶段名与耗时，不接收账户、签名或错误描述。
+/// 默认关闭；诊断进程显式启用后，失败和取消也由作用域析构记录，避免漏掉慢阶段。
+pub(crate) mod transaction_diagnostic {
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+    pub(crate) struct Span {
+        stage: &'static str,
+        started: Option<Instant>,
+        completed: bool,
+    }
+
+    pub(crate) fn event(stage: &'static str) {
+        if enabled() {
+            eprintln!("CITIZENSDK_TX_DIAG at_ms={} stage={stage}", timestamp());
+        }
+    }
+
+    fn enabled() -> bool {
+        std::env::var_os("CITIZENSDK_TRANSACTION_DIAGNOSTICS").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+    }
+
+    fn timestamp() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |value| value.as_millis())
+    }
+
+    impl Span {
+        pub(crate) fn start(stage: &'static str) -> Self {
+            let started = enabled().then(Instant::now);
+            if started.is_some() {
+                event(stage);
+            }
+            Self {
+                stage,
+                started,
+                completed: false,
+            }
+        }
+
+        pub(crate) fn finish(mut self) {
+            self.completed = true;
+        }
+    }
+
+    impl Drop for Span {
+        fn drop(&mut self) {
+            if let Some(started) = self.started {
+                eprintln!(
+                    "CITIZENSDK_TX_DIAG at_ms={} stage={} elapsed_us={} completed={}",
+                    timestamp(),
+                    self.stage,
+                    started.elapsed().as_micros(),
+                    self.completed
+                );
+            }
+        }
+    }
+}

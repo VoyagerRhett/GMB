@@ -117,6 +117,7 @@ class _CreateWalletPageState extends State<CreateWalletPage>
             SegmentedButton<int>(
               segments: const [
                 ButtonSegment(value: 12, label: Text('12 个单词')),
+                ButtonSegment(value: 18, label: Text('18 个单词')),
                 ButtonSegment(value: 24, label: Text('24 个单词')),
               ],
               selected: {_wordCount},
@@ -124,7 +125,12 @@ class _CreateWalletPageState extends State<CreateWalletPage>
             ),
             const SizedBox(height: 10),
             Text(
-              _wordCount == 24 ? '256 位熵，安全性更高' : '128 位熵，标准安全强度',
+              // 只补充 18 词说明，原 12/24 词文案与选择交互保持不变。
+              _wordCount == 24
+                  ? '256 位熵，安全性更高'
+                  : _wordCount == 18
+                  ? '192 位熵'
+                  : '128 位熵，标准安全强度',
               style: const TextStyle(
                 color: AppTheme.textTertiary,
                 fontSize: 12,

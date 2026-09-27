@@ -36,7 +36,9 @@ impl TransactionExecutionCancellation {
     }
 
     /// ABI在无效回扫后决定保留会话时读取同一个真实执行取消信号。
-    pub fn is_cancelled(&self) -> bool { self.signal.is_cancelled() }
+    pub fn is_cancelled(&self) -> bool {
+        self.signal.is_cancelled()
+    }
 
     fn ensure_active(&self) -> Result<(), EngineError> {
         if self.signal.is_cancelled() {
@@ -76,6 +78,8 @@ pub(crate) async fn persist_submit_and_verify_exact(
     signed_extrinsic: SignedExtrinsic,
     cancellation: Option<&TransactionExecutionCancellation>,
 ) -> Result<TransactionExecutionCompleted, EngineError> {
+    let execution_span = crate::transaction_diagnostic::Span::start("submit_and_observe");
+    let persist_span = crate::transaction_diagnostic::Span::start("persist_before_broadcast");
     ensure_active(cancellation)?;
     let transaction_hash =
         crate::transaction_outcome::signed_extrinsic_hash(&runtime_context, &signed_extrinsic)?;
@@ -107,6 +111,8 @@ pub(crate) async fn persist_submit_and_verify_exact(
         return Err(integrity("通用交易 CAS 写后回读与待广播授权不一致"));
     }
 
+    persist_span.finish();
+    crate::transaction_diagnostic::event("watch_open");
     let mut watch = chain.watch_extrinsic(signed_extrinsic.clone());
     loop {
         let next = match cancellation {
@@ -114,7 +120,19 @@ pub(crate) async fn persist_submit_and_verify_exact(
             None => watch.next().await,
         };
         let Some(item) = next else { break };
-        match item? {
+        let item = item?;
+        // 闭集事件名不携带区块、节点、账户或原始错误文本。
+        crate::transaction_diagnostic::event(match &item {
+            ExtrinsicWatchEvent::Ready => "watch_ready",
+            ExtrinsicWatchEvent::Broadcast { .. } => "watch_broadcast",
+            ExtrinsicWatchEvent::Future => "watch_future",
+            ExtrinsicWatchEvent::InBlock { .. } => "watch_in_block",
+            ExtrinsicWatchEvent::Invalid => "watch_invalid",
+            ExtrinsicWatchEvent::Usurped { .. } => "watch_usurped",
+            ExtrinsicWatchEvent::Finalized { .. } => "watch_finalized",
+            _ => "watch_other",
+        });
+        match item {
             ExtrinsicWatchEvent::Ready
             | ExtrinsicWatchEvent::Broadcast { .. }
             | ExtrinsicWatchEvent::Future => {}
@@ -144,6 +162,7 @@ pub(crate) async fn persist_submit_and_verify_exact(
                         )?,
                     )
                     .await?;
+                execution_span.finish();
                 return Ok(TransactionExecutionCompleted::new(
                     execution_id,
                     source,
@@ -156,6 +175,7 @@ pub(crate) async fn persist_submit_and_verify_exact(
                 ));
             }
             ExtrinsicWatchEvent::Finalized { block } => {
+                let proof_span = crate::transaction_diagnostic::Span::start("finalized_proof");
                 let canonical = provider(
                     cancellation,
                     chain.resolve_finalized_block(block.hash(), block.number()),
@@ -203,6 +223,8 @@ pub(crate) async fn persist_submit_and_verify_exact(
                     )
                     .await?;
                 ensure_active(cancellation)?;
+                proof_span.finish();
+                execution_span.finish();
                 return Ok(TransactionExecutionCompleted::new(
                     execution_id,
                     source,

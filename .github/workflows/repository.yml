@@ -2678,7 +2678,7 @@ jobs:
     if: "${{ inputs.pipeline == 'gmb.citizenchain-runtime.wasm.release' }}"
     needs: validate_pipeline
   flow_033:
-    name: 聊天服务实例合同与上游正式成品检查
+    name: 聊天服务本仓配置与合同检查
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
@@ -2690,7 +2690,6 @@ jobs:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: '1'
       CARGO_INCREMENTAL: '0'
-      GH_TOKEN: "${{ github.token }}"
       GMB_SOURCE_SHA: "${{ github.sha }}"
       SOURCE_SHA: "${{ github.sha }}"
     steps:
@@ -2704,11 +2703,10 @@ jobs:
       uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
       with:
         node-version: 25.2.1
-    - shell: bash
-      env:
-        GH_TOKEN: "${{ github.token }}"
+    - name: 检查本仓合同并生成配置候选
+      shell: bash
       run: node "$GITHUB_WORKSPACE/citizenchatserver/scripts/ci/check/execute.mjs" workflow-step 0
-    - name: 上传不可变 CI 候选
+    - name: 上传本仓 CI 配置候选
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: CitizenChatServer-Cloudflare-CI
@@ -2718,7 +2716,7 @@ jobs:
     needs: validate_pipeline
     if: "${{ inputs.pipeline == 'gmb.citizenchatserver.cloudflare.ci' }}"
   flow_034:
-    name: 封装已通过 CI 的聊天服务正式 Release
+    name: 封装已通过 CI 的公民聊天实例配置正式 Release
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
@@ -2772,7 +2770,7 @@ jobs:
       env:
         GH_TOKEN: "${{ github.token }}"
       run: node "$GITHUB_WORKSPACE/citizenchatserver/scripts/release/package/execute.mjs" workflow-step 2
-    - name: 签署公民聊天服务单一正式包来源
+    - name: 签署公民聊天实例配置正式包来源
       uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
       with:
         subject-path: "${{ runner.temp }}/citizenchatserver-release/citizenchatserver-cloudflare.tar.gz"

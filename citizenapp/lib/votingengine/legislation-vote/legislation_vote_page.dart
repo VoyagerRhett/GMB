@@ -1,3 +1,4 @@
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
 import 'package:citizen_sdk/citizen_sdk.dart';
 
 import 'dart:async';
@@ -160,9 +161,9 @@ class _LegislationVotePageState extends State<LegislationVotePage> {
     setState(() => _submitting = true);
     try {
       final publicKeyBytes = _hexDecode(wallet.accountId);
-      final balance = await context.read<CitizenSdk>().chain.getAccountBalance(
-        wallet.accountId,
-      );
+      final balance = await AccountBalanceSnapshotStore.forChain(
+        context.read<CitizenSdk>().chain,
+      ).getAccountBalance(wallet.accountId, forceRefresh: true);
       if (balance.freeFen <= BigInt.zero) {
         throw StateError('当前钱包余额不足，无法支付链上手续费');
       }
@@ -174,15 +175,13 @@ class _LegislationVotePageState extends State<LegislationVotePage> {
       );
 
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('提交成功')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('提交成功')));
       await _load(showSpinner: false);
     } on Object catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('提交失败：$e')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('提交失败：$e')));
       }
     } finally {
       if (mounted) setState(() => _submitting = false);

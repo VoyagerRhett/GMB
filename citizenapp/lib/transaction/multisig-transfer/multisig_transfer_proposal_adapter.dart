@@ -149,15 +149,9 @@ class MultisigTransferProposalAdapter {
 /// 多签转账模块导出的提案数据源适配器。
 class MultisigTransferProposalFeed {
   MultisigTransferProposalFeed({required MultisigTransferService service})
-      : _service = service;
+    : _service = service;
 
-  static const Duration _balanceCacheTtl = Duration(seconds: 10);
   static const Duration _proposalCacheTtl = Duration(seconds: 20);
-
-  static final Map<String, _TimedValue<double>> _balanceCache = {};
-  static final Map<String, Future<double>> _balanceInFlight = {};
-  static final Map<String, int> _balanceFetchTokens = {};
-  static int _nextFetchToken = 0;
 
   // ADR-018 统一提案查询:当前年全部提案的进程内共享缓存。公民-提案 / 机构详情 /
   // 个人多签同一刷新周期共用同一份,把"每页各自查链"降为"全应用取一次"。
@@ -170,32 +164,11 @@ class MultisigTransferProposalFeed {
     InstitutionInfo institution, {
     bool forceRefresh = false,
   }) {
-    final key = _balanceKey(institution);
-    final cached = _balanceCache[key];
-    if (!forceRefresh && cached != null && cached.isFresh(_balanceCacheTtl)) {
-      return Future.value(cached.value);
-    }
-
-    final inFlight = _balanceInFlight[key];
-    if (!forceRefresh && inFlight != null) return inFlight;
-
-    final token = ++_nextFetchToken;
-    _balanceFetchTokens[key] = token;
-    final future = _service.fetchInstitutionBalance(institution).then((value) {
-      if (_balanceFetchTokens[key] == token) {
-        _balanceCache[key] = _TimedValue(value);
-      }
-      return value;
-    });
-    _balanceInFlight[key] = future;
-    return future.whenComplete(() {
-      if (_balanceInFlight[key] == future) {
-        _balanceInFlight.remove(key);
-      }
-      if (_balanceFetchTokens[key] == token) {
-        _balanceFetchTokens.remove(key);
-      }
-    });
+    // 余额查询、持久化与并发合并统一由 wallet 所有者负责。
+    return _service.fetchInstitutionBalance(
+      institution,
+      forceRefresh: forceRefresh,
+    );
   }
 
   /// ADR-018 统一提案查询入口:当前年全部提案,进程内共享缓存(TTL 20s)。
@@ -260,15 +233,8 @@ class MultisigTransferProposalFeed {
   }
 
   static void clearCache() {
-    _balanceCache.clear();
-    _balanceInFlight.clear();
-    _balanceFetchTokens.clear();
     _yearProposalsCache = null;
     _yearProposalsInFlight = null;
-  }
-
-  static String _balanceKey(InstitutionInfo institution) {
-    return '${institution.cidNumber}:${institution.mainAccountId}';
   }
 }
 

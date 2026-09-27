@@ -27,6 +27,7 @@ import 'personal_manage_discovery_service.dart';
 import 'personal_manage_models.dart';
 import 'personal_manage_service.dart';
 import 'personal_proposal_history_service.dart';
+
 import 'package:citizenapp/ui/app_layout.dart';
 
 class PersonalAccountListPage extends StatefulWidget {
@@ -131,11 +132,13 @@ class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
     });
 
     final filter = personalAccounts?.map(_requireAccountId).toSet();
-    final targets = snapshot.personals.where((item) {
-      final address = _requireAccountId(item.accountId);
-      if (filter != null && !filter.contains(address)) return false;
-      return force || _shouldRefreshStatus(snapshot.statuses[address]);
-    }).toList(growable: false);
+    final targets = snapshot.personals
+        .where((item) {
+          final address = _requireAccountId(item.accountId);
+          if (filter != null && !filter.contains(address)) return false;
+          return force || _shouldRefreshStatus(snapshot.statuses[address]);
+        })
+        .toList(growable: false);
 
     if (targets.isEmpty) return;
     await _syncPersonalStatuses(targets);
@@ -154,7 +157,8 @@ class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
   }
 
   Future<void> _syncPersonalStatuses(
-      List<PersonalAccountEntity> personals) async {
+    List<PersonalAccountEntity> personals,
+  ) async {
     if (personals.isEmpty) return;
     Map<String, AccountInfo?> infos;
     try {
@@ -178,8 +182,8 @@ class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
         final status = info == null
             ? PersonalMultisigLocalState.statusClosed
             : info.status == MultisigStatus.active
-                ? PersonalMultisigLocalState.statusActive
-                : PersonalMultisigLocalState.statusPending;
+            ? PersonalMultisigLocalState.statusActive
+            : PersonalMultisigLocalState.statusPending;
         await WalletIsar.instance.writeTxn((isar) async {
           await PersonalMultisigLocalState.putStatusInTxn(
             isar,
@@ -192,10 +196,6 @@ class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
               personal.accountId,
             );
           } else {
-            final previousDetail = await PersonalMultisigLocalState.readDetail(
-              isar,
-              personal.accountId,
-            );
             await PersonalMultisigLocalState.putDetailInTxn(
               isar,
               personal.accountId,
@@ -203,9 +203,6 @@ class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
                 status: status,
                 admins: info.admins,
                 threshold: info.threshold,
-                balanceYuan: previousDetail?.balanceYuan,
-                lastBalanceRefreshAtMillis:
-                    previousDetail?.lastBalanceRefreshAtMillis,
                 updatedAtMillis: DateTime.now().millisecondsSinceEpoch,
                 lastChainRefreshAtMillis: DateTime.now().millisecondsSinceEpoch,
               ),
@@ -343,10 +340,9 @@ class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
       ),
     ).then((_) {
       if (!mounted) return;
-      unawaited(_refreshKnownStatuses(
-        force: true,
-        personalAccounts: {item.accountId},
-      ));
+      unawaited(
+        _refreshKnownStatuses(force: true, personalAccounts: {item.accountId}),
+      );
     });
   }
 
@@ -358,8 +354,9 @@ class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
         title: Text(
           '多签账户',
           style: TextStyle(
-              fontSize: AppLayout.scaled(context, 17),
-              fontWeight: FontWeight.w700),
+            fontSize: AppLayout.scaled(context, 17),
+            fontWeight: FontWeight.w700,
+          ),
         ),
         centerTitle: true,
         backgroundColor: Colors.white,
@@ -381,8 +378,8 @@ class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
                 : _items.isEmpty
-                    ? _buildEmpty()
-                    : _buildList(),
+                ? _buildEmpty()
+                : _buildList(),
           ),
         ],
       ),
@@ -394,8 +391,9 @@ class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
       width: double.infinity,
       color: AppTheme.primaryDark.withValues(alpha: 0.06),
       padding: EdgeInsets.symmetric(
-          horizontal: AppLayout.scaledValue(16),
-          vertical: AppLayout.scaledValue(8)),
+        horizontal: AppLayout.scaledValue(16),
+        vertical: AppLayout.scaledValue(8),
+      ),
       child: Row(
         children: [
           SizedBox(
@@ -424,15 +422,19 @@ class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
       child: ListView(
         children: [
           SizedBox(height: AppLayout.scaledValue(80)),
-          Icon(Icons.account_tree_outlined,
-              size: AppLayout.scaledValue(64), color: AppTheme.border),
+          Icon(
+            Icons.account_tree_outlined,
+            size: AppLayout.scaledValue(64),
+            color: AppTheme.border,
+          ),
           SizedBox(height: AppLayout.scaledValue(12)),
           Center(
             child: Text(
               '暂无多签账户',
               style: TextStyle(
-                  fontSize: AppLayout.scaledValue(16),
-                  color: AppTheme.textTertiary),
+                fontSize: AppLayout.scaledValue(16),
+                color: AppTheme.textTertiary,
+              ),
             ),
           ),
           SizedBox(height: AppLayout.scaledValue(6)),
@@ -441,8 +443,9 @@ class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
               '点击右上角 + 新增个人多签;\n你作为管理员参与的个人多签会自动出现在此',
               textAlign: TextAlign.center,
               style: TextStyle(
-                  fontSize: AppLayout.scaledValue(13),
-                  color: AppTheme.textTertiary),
+                fontSize: AppLayout.scaledValue(13),
+                color: AppTheme.textTertiary,
+              ),
             ),
           ),
         ],
@@ -483,8 +486,9 @@ class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
         borderRadius: BorderRadius.circular(AppLayout.scaledValue(12)),
         child: Padding(
           padding: EdgeInsets.symmetric(
-              horizontal: AppLayout.scaledValue(14),
-              vertical: AppLayout.scaledValue(12)),
+            horizontal: AppLayout.scaledValue(14),
+            vertical: AppLayout.scaledValue(12),
+          ),
           child: Row(
             children: [
               Container(
@@ -492,8 +496,9 @@ class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
                 height: AppLayout.scaledValue(40),
                 decoration: BoxDecoration(
                   color: AppTheme.accent.withValues(alpha: 0.08),
-                  borderRadius:
-                      BorderRadius.circular(AppLayout.scaledValue(10)),
+                  borderRadius: BorderRadius.circular(
+                    AppLayout.scaledValue(10),
+                  ),
                 ),
                 child: Icon(
                   Icons.person,
@@ -510,12 +515,14 @@ class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
                       children: [
                         Container(
                           padding: EdgeInsets.symmetric(
-                              horizontal: AppLayout.scaledValue(6),
-                              vertical: AppLayout.scaledValue(2)),
+                            horizontal: AppLayout.scaledValue(6),
+                            vertical: AppLayout.scaledValue(2),
+                          ),
                           decoration: BoxDecoration(
                             color: AppTheme.accent.withValues(alpha: 0.12),
-                            borderRadius:
-                                BorderRadius.circular(AppLayout.scaledValue(4)),
+                            borderRadius: BorderRadius.circular(
+                              AppLayout.scaledValue(4),
+                            ),
                           ),
                           child: Text(
                             '个人',
@@ -530,13 +537,16 @@ class _PersonalAccountListPageState extends State<PersonalAccountListPage> {
                           SizedBox(width: AppLayout.scaledValue(6)),
                           Container(
                             padding: EdgeInsets.symmetric(
-                                horizontal: AppLayout.scaledValue(6),
-                                vertical: AppLayout.scaledValue(2)),
+                              horizontal: AppLayout.scaledValue(6),
+                              vertical: AppLayout.scaledValue(2),
+                            ),
                             decoration: BoxDecoration(
-                              color:
-                                  AppTheme.textTertiary.withValues(alpha: 0.12),
+                              color: AppTheme.textTertiary.withValues(
+                                alpha: 0.12,
+                              ),
                               borderRadius: BorderRadius.circular(
-                                  AppLayout.scaledValue(4)),
+                                AppLayout.scaledValue(4),
+                              ),
                             ),
                             child: Text(
                               '已注销',

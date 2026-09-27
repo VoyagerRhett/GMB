@@ -1,3 +1,4 @@
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
 import 'package:citizen_sdk/citizen_sdk.dart';
 
 import 'dart:async' show unawaited;
@@ -57,10 +58,9 @@ class _PersonalManageAccountInfoPageState
   List<AdminPerson> _admins = const [];
   String _localStatus = PersonalMultisigLocalState.statusPending;
   int? _lastDetailRefreshAtMillis;
-  int? _lastBalanceRefreshAtMillis;
   bool _isClosed = false;
 
-  /// 账户余额(元):Active 来自链上 free_balance,Pending 来自本机 Isar
+  /// 账户余额(元):Active 来自链上 freeFen,Pending 来自本机 Isar
   /// PersonalAccountProposalEntity.snapshotJson.amount_fen(发起人承诺入金)。
   double? _balanceYuan;
 
@@ -142,11 +142,18 @@ class _PersonalManageAccountInfoPageState
               admins: normalizedAdmins,
               status: statusEnum,
             );
+      final balanceSnapshot = await AccountBalanceSnapshotStore.forChain(_chain)
+          .read(widget.institution.personalAccountId);
       final balance = isClosed
           ? null
           : statusEnum == MultisigStatus.active
-          ? local.detail?.balanceYuan
-          : local.pendingBalance ?? local.detail?.balanceYuan;
+          ? (balanceSnapshot == null
+                ? null
+                : balanceSnapshot.freeFen.toDouble() / 100)
+          : local.pendingBalance ??
+                (balanceSnapshot == null
+                    ? null
+                    : balanceSnapshot.freeFen.toDouble() / 100);
 
       if (!mounted) return;
       setState(() {
@@ -158,7 +165,6 @@ class _PersonalManageAccountInfoPageState
         _lastDetailRefreshAtMillis =
             local.detail?.lastChainRefreshAtMillis ??
             local.status?.lastSyncAtMillis;
-        _lastBalanceRefreshAtMillis = local.detail?.lastBalanceRefreshAtMillis;
       });
     } catch (_) {
       // 本地读取失败也不能让详情页进入全屏错误；保留入口传入的
@@ -177,52 +183,20 @@ class _PersonalManageAccountInfoPageState
     return DateTime.now().difference(lastSyncAt) >= ttl;
   }
 
-  bool _shouldRefreshBalance() {
-    if (_localStatus != PersonalMultisigLocalState.statusActive) return false;
-    if (_balanceYuan == null) return true;
-    if (_lastBalanceRefreshAtMillis == null) return true;
-    final lastSyncAt = DateTime.fromMillisecondsSinceEpoch(
-      _lastBalanceRefreshAtMillis!,
-    );
-    return DateTime.now().difference(lastSyncAt) >= const Duration(minutes: 10);
-  }
-
+  /// 余额刷新策略只由 wallet 决定，详情不再另存余额值和刷新时间。
   Future<void> _refreshBalanceIfNeeded({bool force = false}) async {
-    if (!force && !_shouldRefreshBalance()) return;
+    if (_localStatus != PersonalMultisigLocalState.statusActive) return;
     try {
-      final snapshot = await _chain.getAccountBalance(
-        widget.institution.personalAccountId,
-      );
-      final balance = snapshot.freeFen.toDouble() / 100;
-      final now = DateTime.now().millisecondsSinceEpoch;
-      await WalletIsar.instance.writeTxn((isar) async {
-        final previous = await PersonalMultisigLocalState.readDetail(
-          isar,
-          widget.institution.personalAccountId,
-        );
-        await PersonalMultisigLocalState.putDetailInTxn(
-          isar,
-          widget.institution.personalAccountId,
-          MultisigLocalDetailSnapshot(
-            status: previous?.status ?? _localStatus,
-            admins: previous?.admins ?? _admins,
-            threshold: previous?.threshold ?? _accountInfo?.threshold,
-            balanceYuan: balance,
-            lastChainRefreshAtMillis:
-                previous?.lastChainRefreshAtMillis ??
-                _lastDetailRefreshAtMillis,
-            lastBalanceRefreshAtMillis: now,
-            updatedAtMillis: now,
-          ),
-        );
-      });
-      if (!mounted) return;
-      setState(() {
-        _balanceYuan = balance;
-        _lastBalanceRefreshAtMillis = now;
-      });
+      final snapshot = await AccountBalanceSnapshotStore.forChain(_chain)
+          .getAccountBalance(
+            widget.institution.personalAccountId,
+            forceRefresh: force,
+          );
+      if (mounted) {
+        setState(() => _balanceYuan = snapshot.freeFen.toDouble() / 100);
+      }
     } catch (_) {
-      // 余额失败只保留本地旧余额；不要影响详情页其他信息。
+      // 刷新失败保留最近成功显示；不能把失败写成零余额。
     }
   }
 
@@ -236,7 +210,9 @@ class _PersonalManageAccountInfoPageState
       final status = info == null
           ? PersonalMultisigLocalState.statusClosed
           : _localStatusFromInfo(info.status);
-      final balance = info == null ? null : await _resolveBalance(info.status);
+      final balance = info == null
+          ? null
+          : await _resolveBalance(info.status, force: force);
       final now = DateTime.now().millisecondsSinceEpoch;
 
       await WalletIsar.instance.writeTxn((isar) async {
@@ -251,10 +227,6 @@ class _PersonalManageAccountInfoPageState
             widget.institution.personalAccountId,
           );
         } else {
-          final previous = await PersonalMultisigLocalState.readDetail(
-            isar,
-            widget.institution.personalAccountId,
-          );
           await PersonalMultisigLocalState.putDetailInTxn(
             isar,
             widget.institution.personalAccountId,
@@ -262,12 +234,7 @@ class _PersonalManageAccountInfoPageState
               status: status,
               admins: info.admins,
               threshold: info.threshold,
-              balanceYuan: balance ?? previous?.balanceYuan,
               lastChainRefreshAtMillis: now,
-              lastBalanceRefreshAtMillis:
-                  info.status == MultisigStatus.active && balance != null
-                  ? now
-                  : previous?.lastBalanceRefreshAtMillis,
               updatedAtMillis: now,
             ),
           );
@@ -282,23 +249,23 @@ class _PersonalManageAccountInfoPageState
         _admins = _normalizeAdmins(info?.admins);
         _balanceYuan = _isClosed ? null : balance ?? _balanceYuan;
         _lastDetailRefreshAtMillis = now;
-        if (_isClosed) {
-          _lastBalanceRefreshAtMillis = null;
-        } else if (balance != null) {
-          _lastBalanceRefreshAtMillis = now;
-        }
       });
     } catch (_) {
       // 链上刷新失败只保留本地详情，不弹进度提示或全屏失败。
     }
   }
 
-  Future<double?> _resolveBalance(MultisigStatus? status) async {
+  Future<double?> _resolveBalance(
+    MultisigStatus? status, {
+    bool force = false,
+  }) async {
     if (status == MultisigStatus.active) {
       try {
-        final snapshot = await _chain.getAccountBalance(
-          widget.institution.personalAccountId,
-        );
+        final snapshot = await AccountBalanceSnapshotStore.forChain(_chain)
+            .getAccountBalance(
+              widget.institution.personalAccountId,
+              forceRefresh: force,
+            );
         return snapshot.freeFen.toDouble() / 100;
       } catch (_) {
         return null;
@@ -741,7 +708,7 @@ class _PersonalManageAccountInfoPageState
                     },
                   ),
                   if (!_isClosed) ...[
-                    // 账户余额：Active 显示链上 free_balance，Pending 显示
+                    // 账户余额：Active 显示链上 freeFen，Pending 显示
                     // 发起人承诺金额；注销账户不再显示旧金额。
                     Divider(height: AppLayout.scaledValue(20)),
                     _buildBalanceRow(_statusEnumFromLocal(_localStatus)),
@@ -912,7 +879,7 @@ class _PersonalManageAccountInfoPageState
   }
 
   /// 账户余额行(bug 4):
-  /// - Active:链上 free_balance 实时(无标签)
+  /// - Active:wallet 持久化 finalized freeFen(无标签)
   /// - Pending:发起人承诺金额(snapshot.amount_fen)+ "不可用" 灰色标签
   Widget _buildBalanceRow(MultisigStatus? status) {
     final balanceStr = _balanceYuan == null

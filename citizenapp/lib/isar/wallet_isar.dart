@@ -165,38 +165,32 @@ class MultisigLocalDetailSnapshot {
     required this.status,
     required this.admins,
     this.threshold,
-    this.balanceYuan,
     this.lastChainRefreshAtMillis,
-    this.lastBalanceRefreshAtMillis,
     this.updatedAtMillis,
   });
 
   final String status;
   final List<AdminPerson> admins;
   final int? threshold;
-  final double? balanceYuan;
   final int? lastChainRefreshAtMillis;
-  final int? lastBalanceRefreshAtMillis;
   final int? updatedAtMillis;
 
   Map<String, dynamic> toJson() => {
-        'status': status,
-        'admins': admins
-            .map(
-              (admin) => {
-                'account_id': admin.account_id,
-                'cid_number': admin.cid_number,
-                'family_name': admin.family_name,
-                'given_name': admin.given_name,
-              },
-            )
-            .toList(growable: false),
-        'threshold': threshold,
-        'balance_yuan': balanceYuan,
-        'last_chain_refresh_at_millis': lastChainRefreshAtMillis,
-        'last_balance_refresh_at_millis': lastBalanceRefreshAtMillis,
-        'updated_at_millis': updatedAtMillis,
-      };
+    'status': status,
+    'admins': admins
+        .map(
+          (admin) => {
+            'account_id': admin.account_id,
+            'cid_number': admin.cid_number,
+            'family_name': admin.family_name,
+            'given_name': admin.given_name,
+          },
+        )
+        .toList(growable: false),
+    'threshold': threshold,
+    'last_chain_refresh_at_millis': lastChainRefreshAtMillis,
+    'updated_at_millis': updatedAtMillis,
+  };
 
   static MultisigLocalDetailSnapshot? fromJsonString(String? raw) {
     if (raw == null || raw.isEmpty) return null;
@@ -239,12 +233,8 @@ class MultisigLocalDetailSnapshot {
         status: status,
         admins: admins,
         threshold: _toInt(decoded['threshold']),
-        balanceYuan: _toDouble(decoded['balance_yuan']),
         lastChainRefreshAtMillis: _toInt(
           decoded['last_chain_refresh_at_millis'],
-        ),
-        lastBalanceRefreshAtMillis: _toInt(
-          decoded['last_balance_refresh_at_millis'],
         ),
         updatedAtMillis: _toInt(decoded['updated_at_millis']),
       );
@@ -257,13 +247,6 @@ class MultisigLocalDetailSnapshot {
     if (value == null) return null;
     if (value is int) return value;
     return int.tryParse(value.toString());
-  }
-
-  static double? _toDouble(Object? value) {
-    if (value == null) return null;
-    if (value is double) return value;
-    if (value is int) return value.toDouble();
-    return double.tryParse(value.toString());
   }
 }
 
@@ -320,16 +303,20 @@ class PersonalMultisigLocalState {
     MultisigLocalDetailSnapshot snapshot,
   ) async {
     final accountId = _requireAccountId(personalAccountId);
-    final entity = await isar.walletPersonalMultisigStateEntitys
-            .getByPersonalAccountId(accountId) ??
+    final entity =
+        await isar.walletPersonalMultisigStateEntitys.getByPersonalAccountId(
+          accountId,
+        ) ??
         (WalletPersonalMultisigStateEntity()..personalAccountId = accountId);
     entity
       ..detailJson = jsonEncode(snapshot.toJson())
-      ..detailUpdatedAtMillis = snapshot.lastChainRefreshAtMillis ??
+      ..detailUpdatedAtMillis =
+          snapshot.lastChainRefreshAtMillis ??
           snapshot.updatedAtMillis ??
           DateTime.now().millisecondsSinceEpoch;
-    await isar.walletPersonalMultisigStateEntitys
-        .putByPersonalAccountId(entity);
+    await isar.walletPersonalMultisigStateEntitys.putByPersonalAccountId(
+      entity,
+    );
   }
 
   /// 写入个人多签本地状态；调用方必须处在 Isar writeTxn 内。
@@ -339,14 +326,17 @@ class PersonalMultisigLocalState {
     String status,
   ) async {
     final accountId = _requireAccountId(personalAccountId);
-    final entity = await isar.walletPersonalMultisigStateEntitys
-            .getByPersonalAccountId(accountId) ??
+    final entity =
+        await isar.walletPersonalMultisigStateEntitys.getByPersonalAccountId(
+          accountId,
+        ) ??
         (WalletPersonalMultisigStateEntity()..personalAccountId = accountId);
     entity
       ..status = status
       ..lastSyncAtMillis = DateTime.now().millisecondsSinceEpoch;
-    await isar.walletPersonalMultisigStateEntitys
-        .putByPersonalAccountId(entity);
+    await isar.walletPersonalMultisigStateEntitys.putByPersonalAccountId(
+      entity,
+    );
   }
 
   /// 删除个人多签本地状态；调用方必须处在 Isar writeTxn 内。
@@ -586,7 +576,6 @@ class LocalTxEntity {
   String? failureReason;
 }
 
-
 enum _WalletIsarLifecycle { active, closing, closed }
 
 /// 数据库打开期间收到关闭请求时使用的内部终止信号。
@@ -660,10 +649,7 @@ class WalletIsarConsumerLease {
 }
 
 class _WalletIsarConsumerRegistration {
-  _WalletIsarConsumerRegistration({
-    required this.lease,
-    required this.cancel,
-  });
+  _WalletIsarConsumerRegistration({required this.lease, required this.cancel});
 
   final WalletIsarConsumerLease lease;
   final Future<void> Function() cancel;
@@ -728,23 +714,23 @@ class WalletIsar {
   /// Wallet 域的唯一 schema 清单；正常打开与终态擦除必须使用同一真源。
   static const List<CollectionSchema<dynamic>> _schemas =
       <CollectionSchema<dynamic>>[
-    WalletAccountDataHandoverEntitySchema,
-    WalletAttestationEntitySchema,
-    WalletAccountBalanceSnapshotEntitySchema,
-    WalletPersonalMultisigStateEntitySchema,
-    WalletPersonalMultisigDiscoveryEntitySchema,
-    WalletProposalSummaryEntitySchema,
-    WalletProposalIndexEntitySchema,
-    WalletProposalDetailEntitySchema,
-    WalletLegislationSnapshotEntitySchema,
-    WalletAdminActivationStateEntitySchema,
-    WalletMembershipStateEntitySchema,
-    WalletCreatorStateEntitySchema,
-    InstitutionEntitySchema,
-    PersonalAccountEntitySchema,
-    PersonalAccountProposalEntitySchema,
-    LocalTxEntitySchema,
-  ];
+        WalletAccountDataHandoverEntitySchema,
+        WalletAttestationEntitySchema,
+        WalletAccountBalanceSnapshotEntitySchema,
+        WalletPersonalMultisigStateEntitySchema,
+        WalletPersonalMultisigDiscoveryEntitySchema,
+        WalletProposalSummaryEntitySchema,
+        WalletProposalIndexEntitySchema,
+        WalletProposalDetailEntitySchema,
+        WalletLegislationSnapshotEntitySchema,
+        WalletAdminActivationStateEntitySchema,
+        WalletMembershipStateEntitySchema,
+        WalletCreatorStateEntitySchema,
+        InstitutionEntitySchema,
+        PersonalAccountEntitySchema,
+        PersonalAccountProposalEntitySchema,
+        LocalTxEntitySchema,
+      ];
 
   /// 给低优先级后台任务判断是否让路；前台读写仍应直接排队执行。
   bool get hasActiveOperation => _operationActive;
@@ -822,9 +808,7 @@ class WalletIsar {
     }
   }
 
-  Future<Isar> _resolveOpening(
-    Future<_WalletOpeningOutcome> task,
-  ) async {
+  Future<Isar> _resolveOpening(Future<_WalletOpeningOutcome> task) async {
     final outcome = await task;
     final error = outcome.error;
     if (error != null) {
@@ -858,9 +842,7 @@ class WalletIsar {
 
   Future<T> _enqueue<T>(Future<T> Function() action) {
     if (identical(Zone.current[_operationZoneKey], this)) {
-      throw StateError(
-        '禁止在 WalletIsar 操作回调内再次进入 WalletIsar；请先返回快照，再执行后续工作。',
-      );
+      throw StateError('禁止在 WalletIsar 操作回调内再次进入 WalletIsar；请先返回快照，再执行后续工作。');
     }
 
     _ensureActive();
@@ -927,8 +909,8 @@ class WalletIsar {
     }
 
     try {
-      final deleted =
-          await _deleteInstance(opened).timeout(_forcedDeleteTimeout);
+      final deleted = await _deleteInstance(opened)
+          .timeout(_forcedDeleteTimeout);
       if (!deleted) {
         throw StateError('Wallet 数据库仍被其它实例持有，未实际关闭并删除。');
       }
@@ -1061,9 +1043,7 @@ class WalletIsar {
         final error = outcome.error;
         if (error is _WalletOpeningCancelled) {
           if (error.cleanupError != null) {
-            failures.add(
-              '取消 Wallet 数据库打开后的删除失败：${error.cleanupError}',
-            );
+            failures.add('取消 Wallet 数据库打开后的删除失败：${error.cleanupError}');
           }
         } else if (error != null) {
           failures.add('等待 Wallet 数据库打开任务失败：$error');
@@ -1084,8 +1064,8 @@ class WalletIsar {
       if (!candidate.isOpen) continue;
       deleteWasAttempted = true;
       try {
-        final deleted =
-            await _deleteInstance(candidate).timeout(_forcedDeleteTimeout);
+        final deleted = await _deleteInstance(candidate)
+            .timeout(_forcedDeleteTimeout);
         if (!deleted) {
           failures.add('Wallet 数据库仍被其它实例持有，未实际关闭并删除。');
         }
@@ -1110,8 +1090,9 @@ class WalletIsar {
     if (!deleteWasAttempted) {
       try {
         // 上一进程留下的冷库在本进程没有注册实例；仍须真实打开后删除。
-        final coldDatabase =
-            await _openDatabaseFile().timeout(_openingSettleTimeout);
+        final coldDatabase = await _openDatabaseFile().timeout(
+          _openingSettleTimeout,
+        );
         final deleted = await coldDatabase
             .close(deleteFromDisk: true)
             .timeout(_forcedDeleteTimeout);
@@ -1134,13 +1115,11 @@ class WalletIsar {
     await Future.wait<void>(
       registrations.map((registration) async {
         try {
-          await registration
-              .cancelSingleFlight()
-              .timeout(_consumerDrainTimeout);
-        } on TimeoutException {
-          failures.add(
-            '等待 Wallet 外部消费者取消超时：lease=${registration.lease._id}',
+          await registration.cancelSingleFlight().timeout(
+            _consumerDrainTimeout,
           );
+        } on TimeoutException {
+          failures.add('等待 Wallet 外部消费者取消超时：lease=${registration.lease._id}');
         } catch (error) {
           failures.add(
             '取消 Wallet 外部消费者失败：lease=${registration.lease._id}，$error',

@@ -64,7 +64,7 @@
         },
         {
           "path": "src/account_nonce.rs",
-          "sha256": "5fcf4d7d87b85761b3a3f3c6c0fff85c95b98acb09007231135b3e12c8e19425"
+          "sha256": "5cc10fae8704729cc481baf3b8f4975dbce5ff10a6d00aac1073518de5be3140"
         },
         {
           "path": "src/bootstrap_tests.rs",
@@ -88,7 +88,7 @@
         },
         {
           "path": "src/verified_chain_client.rs",
-          "sha256": "9b17b463cddcf2efb882619351f4280d3a1c5940fb8c4e1e8eec2e59b06b7848"
+          "sha256": "6164fa081b9cf2f7dac9218c0f035e48661b08f9bf604b5aeb507b3964870877"
         },
         {
           "path": "tests/account_nonce_contract.rs",
@@ -104,7 +104,7 @@
         },
         {
           "path": "tests/verified_chain_client_contract.rs",
-          "sha256": "2239b6e9a0a3375bfa45d9a7fdf2157eee6696ff75c1e5154aba373f8ef17de8"
+          "sha256": "c6e49dffd68d59b6f43b8006c434dc5eb33440078e24e36a205caefe94593b06"
         }
       ],
       "excluded": [],
@@ -198,10 +198,6 @@
           "sha256": "b2d34d3fc0b57ab70b808ddce7a1195a566e53c5b11d4dcf52715a13e847310e"
         },
         {
-          "path": "src/transactions_service.rs",
-          "sha256": "8cb27c4add97783cb91df5b1bc56be6a169105413d8fc68cb51889cb5d87edf6"
-        },
-        {
           "path": "src/util.rs",
           "sha256": "567ad0d158c686c74c5fb29ee90a3b4f09ea9e573ae7293b61c17e3a4f773b5a"
         }
@@ -209,7 +205,11 @@
       "adapted": [
         {
           "path": "src/lib.rs",
-          "sha256": "209e2cd56c23047a6b52d0721dd6f37e68949920c3109cbf9a73cc5d709682ce"
+          "sha256": "85fc49c04c49351bc8ccbe80f00c5e74ea5ccf5cc449716f66a7901f42f87e1a"
+        },
+        {
+          "path": "src/transactions_service.rs",
+          "sha256": "a22c5b78e047265031300d9d1d427355382b3456a7116dc0b06f851904c65318"
         }
       ],
       "sdk_only": [

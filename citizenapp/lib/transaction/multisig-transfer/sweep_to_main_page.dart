@@ -11,7 +11,7 @@ import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/transaction/onchain-transaction/onchain_transfer_call.dart';
 import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_balance_guard.dart';
 import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_service.dart';
-import 'package:citizenapp/transaction/shared/account_balance_snapshot_store.dart';
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/widgets/chain_progress_banner.dart';
 import 'package:citizenapp/my/util/amount_format.dart';
@@ -90,38 +90,28 @@ class _SweepToMainPageState extends State<SweepToMainPage> {
     return Keyring().encodeAddress(Uint8List.fromList(bytes), kGmbSs58Prefix);
   }
 
-  Future<void> _fetchBalance() async {
-    final chain = context.read<CitizenSdk>().chain;
-    final store = AccountBalanceSnapshotStore.instance;
-    final local = await store.read(_feeAccountId);
-    if (local != null && mounted) {
-      setState(() {
-        _availableBalance = local.balanceYuan;
-        _loadingBalance = false;
-      });
-      if (local.isFresh(AccountBalanceSnapshotStore.displayTtl)) return;
-    }
+  /// 页面进入读取 wallet 持久余额，交易前校验由既有余额守卫强制刷新。
+  Future<bool> _fetchBalance({bool forceRefresh = false}) async {
+    if (forceRefresh && mounted) setState(() => _loadingBalance = true);
     try {
-      final balanceSnapshot = await chain.getAccountBalance(_feeAccountId);
-      final balance = balanceSnapshot.freeFen.toDouble() / 100;
-      try {
-        await store.put(accountId: _feeAccountId, balanceYuan: balance);
-      } catch (_) {
-        // 余额快照写入失败不影响当前链上余额展示。
-      }
-      if (!mounted) return;
+      final snapshot = await AccountBalanceSnapshotStore.forChain(
+        context.read<CitizenSdk>().chain,
+      ).getAccountBalance(_feeAccountId, forceRefresh: forceRefresh);
+      if (!mounted) return false;
       setState(() {
-        _availableBalance = balance;
+        _availableBalance = snapshot.freeFen.toDouble() / 100;
         _loadingBalance = false;
       });
+      return true;
     } catch (_) {
-      if (!mounted) return;
-      if (local == null) {
-        setState(() {
-          _availableBalance = null;
-          _loadingBalance = false;
-        });
+      if (mounted) {
+        setState(() => _loadingBalance = false);
+        if (forceRefresh) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(const SnackBar(content: Text('余额校验失败，请刷新后重试')));
+        }
       }
+      return false;
     }
   }
 
@@ -161,18 +151,19 @@ class _SweepToMainPageState extends State<SweepToMainPage> {
   Future<void> _submit() async {
     final blockedReason = _submitBlockedReason;
     if (blockedReason != null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(blockedReason)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(blockedReason)));
       return;
     }
+
+    if (!await _fetchBalance(forceRefresh: true)) return;
+    if (!mounted) return;
 
     if (!_validateAmount()) return;
     final proposerRoleCode = _proposerRoleCodeController.text.trim();
     if (proposerRoleCode.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('请输入提案发起岗位码')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('请输入提案发起岗位码')));
       return;
     }
 
@@ -190,9 +181,8 @@ class _SweepToMainPageState extends State<SweepToMainPage> {
         );
     if (balanceBlockedReason != null) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(balanceBlockedReason)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(balanceBlockedReason)));
       return;
     }
 
@@ -228,14 +218,12 @@ class _SweepToMainPageState extends State<SweepToMainPage> {
       Navigator.of(context).pop(true);
     } on AccountSecurityException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(e.message)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.message)));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('提交失败：$e')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('提交失败：$e')));
     } finally {
       if (mounted) {
         setState(() => _submitting = false);

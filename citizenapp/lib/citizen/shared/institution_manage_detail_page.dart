@@ -1,3 +1,4 @@
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
 import 'package:citizen_sdk/citizen_sdk.dart';
 
 import 'dart:async';
@@ -541,7 +542,8 @@ class _MultisigProposalDetailPageState
       if (ticket == null) throw StateError('已取消选择投票岗位');
       if (!mounted) return;
       final sdk = context.read<CitizenSdk>();
-      final balance = await sdk.chain.getAccountBalance(accountId);
+      final balance = await AccountBalanceSnapshotStore.forChain(sdk.chain)
+          .getAccountBalance(accountId, forceRefresh: true);
       if (balance.freeFen <= BigInt.zero) {
         throw StateError('当前投票钱包余额不足，无法支付链上投票手续费');
       }

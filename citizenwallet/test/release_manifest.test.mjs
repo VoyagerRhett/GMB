@@ -45,5 +45,8 @@ test('Android从真实产品源码根启动Gradle并把可写状态放入外部�
 test('CitizenWallet依赖准备默认联网且离线模式必须显式选择', () => {
   assert.match(runner, /PUB_GET_ARGS=\(--enforce-lockfile\)/u);
   assert.match(runner, /CITIZENWALLET_OFFLINE:-false/u);
+  assert.match(runner, /CITIZENWALLET_PUB_OFFLINE:-false/u);
+  assert.match(runner, /true\) PUB_OFFLINE=true; GRADLE_NETWORK_ARGS\+=\(--offline\); export CARGO_NET_OFFLINE=true/u);
+  assert.match(runner, /if \[\[ "\$PUB_OFFLINE" == true \]\]; then PUB_GET_ARGS\+=\(--offline\); fi/u);
   assert.match(runner, /flutter pub get "\$\{PUB_GET_ARGS\[@\]\}"/u);
 });

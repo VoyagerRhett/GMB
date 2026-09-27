@@ -255,6 +255,40 @@ final class RunnerUITests: XCTestCase {
     attachScreenshot(app, name: "CitizenApp-交易Tab公民链状态")
   }
 
+  /// 只读实网观察：只提取公开最终块高度及连接标志，不读取表单、不截图、不发交易。
+  /// 界面没有 best，不能用此测试单独推断手机进程内 best == finalized。
+  func testChainStatusReadOnlyObservation() throws {
+    let app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
+    app.launch()
+    XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20))
+    dismissPermissionGuideIfNeeded(in: app)
+    try requireMainNavigation(in: app)
+    let transactionTab = app.buttons.matching(NSPredicate(format:
+      "label CONTAINS %@ AND NOT (label CONTAINS %@)", "交易", "选择交易钱包")).firstMatch
+    XCTAssertTrue(transactionTab.waitForExistence(timeout: 20), "交易主导航不可读")
+    transactionTab.tap()
+    let chainStatus = app.descendants(matching: .any).matching(NSPredicate(format:
+      "label BEGINSWITH %@ AND label CONTAINS %@", "公民链", "最终区块")).firstMatch
+    let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      chainStatus.exists && chainStatus.label.contains("连接正常") &&
+        self.finalizedHeight(from: chainStatus.label) != nil
+    }, object: nil)
+    XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 60), .completed, "真实链状态未就绪")
+    let start = Date()
+    var previous: UInt64?
+    for _ in 0..<12 {
+      let label = chainStatus.label
+      let height = try XCTUnwrap(finalizedHeight(from: label), "最终块高度不可读")
+      let connected = label.contains("连接正常")
+      NSLog("CHAIN_OBSERVATION elapsed_s=%.1f finalized=%llu connected=%d",
+        Date().timeIntervalSince(start), height, connected ? 1 : 0)
+      XCTAssertTrue(connected, "采样期间链连接不可用")
+      if let previous { XCTAssertGreaterThanOrEqual(height, previous, "最终块高度回退") }
+      previous = height
+      Thread.sleep(forTimeInterval: 3)
+    }
+  }
+
   /// 只用于用户当场确认的一次真机交易诊断；测试绝不点击最终“确认”。
   /// 由 App 自身校验已填表单；不读取输入值、不截图、不记录交易标识。
   func testUserConfirmedTransferDiagnostic() throws {
@@ -265,6 +299,18 @@ final class RunnerUITests: XCTestCase {
     app.activate()
     guard app.wait(for: .runningForeground, timeout: 20) else {
       NSLog("TRANSFER_DIAG stage=app_unavailable")
+      return
+    }
+    // 前台进程存在不代表 Flutter 首屏已准备完毕；等待已知路由，避免在启动帧
+    // 查到短暂导航后立刻点击失效元素，也不能将启动帧误判为未知二级页面。
+    let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      app.buttons["签名交易"].exists ||
+        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "交易")).count > 0 ||
+        app.descendants(matching: .any).matching(NSPredicate(format: "label IN %@",
+          ["选择交易钱包", "我的钱包", "钱包详情", "账户详情"])).count > 0
+    }, object: nil)
+    guard XCTWaiter.wait(for: [ready], timeout: 30) == .completed else {
+      NSLog("TRANSFER_DIAG stage=route_not_ready")
       return
     }
     let keyboardDone = app.keyboards.buttons["完成"].firstMatch
@@ -338,6 +384,11 @@ final class RunnerUITests: XCTestCase {
     let dialog = app.staticTexts["确认交易"]
     guard dialog.waitForExistence(timeout: 15) else {
       NSLog("TRANSFER_DIAG stage=confirmation_not_shown t=%.1f", Date().timeIntervalSince(startedAt))
+      for phrase in ["请输入收款地址", "请输入金额", "收款地址", "金额必须大于", "余额不足"] {
+        let visible = app.descendants(matching: .any).matching(
+          NSPredicate(format: "label CONTAINS %@", phrase)).count > 0
+        if visible { NSLog("TRANSFER_DIAG stage=form_validation kind=%@", phrase) }
+      }
       return
     }
     let confirm = app.buttons["确认"].firstMatch
@@ -400,6 +451,173 @@ final class RunnerUITests: XCTestCase {
     NSLog("TRANSFER_DIAG stage=not_finalized_within_120s")
   }
 
+  /// 三处余额的正式包验收：金额只在内存比较，日志仅输出固定步骤与布尔结果。
+  /// 不选择新的付款钱包、不触发交易，不附加截图或暴露账户行的原始语义。
+  func testWalletBalanceSurfacesReadPersistedValues() throws {
+    let app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
+    // 本用例在用户交易观察完成后独立执行，重启以验证持久化并从准确主导航开始。
+    app.launch()
+    XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20))
+
+    func tapObserved(_ element: XCUIElement) -> Bool {
+      guard element.waitForExistence(timeout: 10) else { return false }
+      let frame = element.frame
+      let visibleFrame = frame.intersection(app.frame)
+      guard !visibleFrame.isEmpty, !visibleFrame.isNull else {
+        NSLog("BALANCE_DIAG stage=frame_unavailable x=%.1f y=%.1f width=%.1f height=%.1f app_width=%.1f app_height=%.1f keyboard=%d",
+          frame.minX, frame.minY, frame.width, frame.height, app.frame.width, app.frame.height, app.keyboards.count)
+        return false
+      }
+      app.coordinate(withNormalizedOffset: .zero)
+        .withOffset(CGVector(dx: visibleFrame.midX, dy: visibleFrame.midY)).tap()
+      return true
+    }
+    func exact(_ text: String) -> XCUIElement {
+      app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", text)).firstMatch
+    }
+    func back() -> Bool {
+      tapObserved(app.buttons.matching(NSPredicate(format: "label IN %@", ["返回", "Back"])).firstMatch)
+    }
+    func tab(_ label: String) -> XCUIElement? {
+      // 排除同词二级入口后要求唯一主Tab；保留惰性查询，不保存会随Flutter重建漂移的列表索引。
+      let candidates = app.buttons.matching(NSPredicate(format:
+        "label CONTAINS %@ AND NOT (label CONTAINS %@) AND NOT (label CONTAINS %@)",
+        label, "我的通讯录", "选择交易钱包"))
+      let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+        candidates.count == 1
+      }, object: nil)
+      return XCTWaiter.wait(for: [ready], timeout: 10) == .completed ? candidates.firstMatch : nil
+    }
+    func decimal(in text: String) -> String? {
+      guard let regex = try? NSRegularExpression(pattern: #"[0-9][0-9,]*\.[0-9]{2}"#),
+            let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text)),
+            let range = Range(match.range, in: text) else { return nil }
+      return String(text[range])
+    }
+    func availableBalance() -> String? {
+      let value = app.descendants(matching: .any).matching(
+        NSPredicate(format: "label CONTAINS %@", "钱包可用余额：")).firstMatch
+      guard value.waitForExistence(timeout: 15) else { return nil }
+      let parts = value.label.components(separatedBy: "钱包可用余额：")
+      return parts.count > 1 ? decimal(in: parts[1]) : nil
+    }
+    func totalBalance() -> String? {
+      // 热钱包进入“账户详情”，total显示在“充值”列；冷钱包才使用“链上余额”标题。
+      // 已有余额必须在详情出现后直接可读；只检查该列，不轮询金额等待网络补齐。
+      for title in ["充值", "链上余额"] {
+          let header = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label CONTAINS %@", title)).firstMatch
+          guard header.exists else { continue }
+          let parts = header.label.components(separatedBy: title)
+          if parts.count > 1, let value = decimal(in: parts[1]) {
+            return value
+          }
+          let titleFrame = header.frame
+          let values = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label MATCHES %@", #"[0-9][0-9,]*\.[0-9]{2}(\s*元)?"#))
+            .allElementsBoundByIndex.filter {
+              $0.frame.midY > titleFrame.midY &&
+              $0.frame.midY - titleFrame.midY < 100 &&
+              abs($0.frame.midX - titleFrame.midX) < 50
+            }.sorted { $0.frame.midY < $1.frame.midY }
+          if let label = values.first?.label, let value = decimal(in: label) {
+            return value
+          }
+      }
+      return nil
+    }
+    func rowBalance(_ row: XCUIElement) -> String? {
+      // Flutter 在 iOS 上把有独立标识的金额暴露为并列节点。按实际钱包行矩形
+      // 定位唯一金额，不假设无障碍父子关系，不输出金额或用金额构造查询。
+      let frame = row.frame
+      let values = app.descendants(matching: .any).matching(identifier: "wallet-balance")
+        .allElementsBoundByIndex.filter { frame.contains($0.frame) }
+      guard values.count == 1 else {
+        NSLog("BALANCE_DIAG stage=row_balance_nodes count=%d", values.count)
+        return nil
+      }
+      return decimal(in: values[0].label)
+    }
+    func waitForDetail() -> Bool {
+      app.descendants(matching: .any).matching(NSPredicate(format:
+        "label IN %@", ["账户详情", "钱包详情"])).firstMatch.waitForExistence(timeout: 10)
+    }
+
+    XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "交易"))
+      .firstMatch.waitForExistence(timeout: 20))
+    XCTAssertTrue(tapObserved(try XCTUnwrap(tab("交易"), "交易Tab不可读")))
+    let free = try XCTUnwrap(availableBalance(), "交易余额不可读")
+    NSLog("BALANCE_DIAG stage=transaction_available present=1")
+    for visit in 0..<2 {
+      XCTAssertTrue(tapObserved(app.buttons["选择交易钱包"]))
+      XCTAssertTrue(exact("选择交易钱包").waitForExistence(timeout: 10))
+      // 只等待钱包行出现；行出现时已有余额必须可读，禁止等待链查询后才判通过。
+      let walletRows = app.descendants(matching: .any).matching(NSPredicate(format:
+        "identifier IN %@", ["wallet-hot-row", "wallet-cold-row"]))
+      XCTAssertTrue(walletRows.firstMatch.waitForExistence(timeout: 10))
+      // 钱包行出现后立即读取固定余额节点；不轮询金额，也不把 XCTest 语义查询耗时
+      // 当成网络加载耗时。一秒 predicate 等待会在实际相等时仍因查询调度超时报失败。
+      let amounts = app.descendants(matching: .any).matching(identifier: "wallet-balance")
+        .allElementsBoundByIndex.compactMap { decimal(in: $0.label) }
+      let matching = amounts.contains(free)
+      NSLog("BALANCE_DIAG stage=picker_rows count=%d matched=%d", amounts.count, matching ? 1 : 0)
+      // 只断言布尔结果，禁止XCTAssertEqual将真实金额写入失败消息。
+      XCTAssertTrue(matching, "钱包选择页未显示交易余额")
+      NSLog("BALANCE_DIAG stage=picker visit=%d matched=1", visit)
+      XCTAssertTrue(back())
+      XCTAssertTrue(availableBalance() == free, "返回交易页余额不一致")
+    }
+    XCTAssertTrue(tapObserved(try XCTUnwrap(tab("我的"), "我的Tab不可读")))
+    NSLog("BALANCE_DIAG stage=my_tab")
+    // 入口的标题与副标题可能合并为一个Flutter语义节点。
+    XCTAssertTrue(tapObserved(app.descendants(matching: .any).matching(NSPredicate(format:
+      "label == %@ OR (label CONTAINS %@ AND label CONTAINS %@)", "钱包", "钱包", "管理账户")).firstMatch))
+    NSLog("BALANCE_DIAG stage=wallet_list")
+    XCTAssertTrue(exact("我的钱包").waitForExistence(timeout: 15))
+    let defaultRow = app.descendants(matching: .any).matching(
+      NSPredicate(format: "label CONTAINS %@", "默认")).firstMatch
+    // 冷钱包使用固定类型标识定位，读取金额仅留在内存，不打印真实行内容。
+    let coldRow = app.descendants(matching: .any).matching(identifier: "wallet-cold-row").firstMatch
+    XCTAssertTrue(coldRow.waitForExistence(timeout: 10), "缺少本次冷钱包余额验收前置条件")
+    let coldAmount = try XCTUnwrap(rowBalance(coldRow), "冷钱包卡片首次出现时余额不可读")
+    XCTAssertTrue(tapObserved(coldRow))
+    XCTAssertTrue(waitForDetail())
+    let coldTotal = try XCTUnwrap(totalBalance(), "冷钱包详情已有余额不可读")
+    XCTAssertTrue(back())
+    XCTAssertTrue(exact("我的钱包").waitForExistence(timeout: 10))
+    XCTAssertTrue(rowBalance(coldRow) == coldAmount, "冷钱包列表重进余额不一致")
+    XCTAssertTrue(tapObserved(coldRow))
+    XCTAssertTrue(waitForDetail())
+    XCTAssertTrue(totalBalance() == coldTotal, "冷钱包详情重进余额不一致")
+    XCTAssertTrue(back())
+    XCTAssertTrue(exact("我的钱包").waitForExistence(timeout: 10))
+    NSLog("BALANCE_DIAG stage=cold_wallet_reentry matched=1")
+    XCTAssertTrue(tapObserved(defaultRow))
+    XCTAssertTrue(waitForDetail())
+    let total = try XCTUnwrap(totalBalance(), "充值区域链上余额不可读")
+    NSLog("BALANCE_DIAG stage=wallet_total present=1")
+    XCTAssertTrue(back())
+    XCTAssertTrue(exact("我的钱包").waitForExistence(timeout: 10))
+    XCTAssertTrue(tapObserved(defaultRow))
+    XCTAssertTrue(waitForDetail())
+    XCTAssertTrue(totalBalance() == total, "钱包详情重进余额不一致")
+    NSLog("BALANCE_DIAG stage=wallet_reentry matched=1")
+    XCTAssertTrue(back())
+    // 每次返回先确认准确目标页，避免Flutter转场未结束时连续点中同一个返回按钮。
+    XCTAssertTrue(exact("我的钱包").waitForExistence(timeout: 10))
+    XCTAssertTrue(back())
+    XCTAssertTrue(tapObserved(try XCTUnwrap(tab("交易"), "交易Tab不可读")))
+    XCTAssertTrue(availableBalance() == free, "交易Tab重进余额不一致")
+    // 重启正式App验证落盘读取；不继承原生诊断环境，不触发新的交易。
+    app.launch()
+    XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "交易"))
+      .firstMatch.waitForExistence(timeout: 20))
+    XCTAssertTrue(tapObserved(try XCTUnwrap(tab("交易"), "重启后交易Tab不可读")))
+    XCTAssertTrue(availableBalance() == free, "重启后交易余额不一致")
+    NSLog("BALANCE_DIAG stage=relaunch matched=1")
+    NSLog("BALANCE_DIAG stage=completed")
+  }
+
   /// 只读取固定状态名后面的整数；不得枚举或输出交易记录的其他语义值。
   private func transactionCount(_ status: String, in app: XCUIApplication) -> Int? {
     let candidates = app.descendants(matching: .any).matching(
@@ -430,10 +648,54 @@ final class RunnerUITests: XCTestCase {
       throw XCTSkip("真实交易诊断只允许在用户当场确认的定向测试中启用")
     }
     let app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
-    app.activate()
+    // 仅在诊断包更新后的定向验收重启一次，后续交易用例继续复用原进程和表单。
+    if ProcessInfo.processInfo.environment["CITIZENAPP_RELAUNCH_DIAGNOSTIC"] == "1" {
+      app.launchEnvironment["CITIZENSDK_TRANSACTION_DIAGNOSTICS"] = "1"
+      app.launch()
+    } else {
+      app.activate()
+    }
     guard app.wait(for: .runningForeground, timeout: 20) else {
       NSLog("TRANSFER_READBACK stage=app_unavailable")
       return
+    }
+    let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      app.buttons["重试"].exists || app.buttons["签名交易"].exists ||
+        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "交易")).count > 0
+    }, object: nil)
+    _ = XCTWaiter.wait(for: [ready], timeout: 30)
+    // 标题白名单来自产品源码固定文案，只回报序号；未知标签和用户内容永不输出。
+    let allowedTitles = (ProcessInfo.processInfo.environment["CITIZENAPP_DIAGNOSTIC_TITLES"] ?? "")
+      .components(separatedBy: "\n").filter { !$0.isEmpty }
+    let titlePredicate = NSCompoundPredicate(orPredicateWithSubpredicates:
+      allowedTitles.map { NSPredicate(format: "label CONTAINS %@", $0) })
+    let visibleLabels = app.descendants(matching: .any).matching(titlePredicate)
+      .allElementsBoundByIndex.map { $0.label }
+    for (index, title) in allowedTitles.enumerated() {
+      if visibleLabels.contains(where: { $0.contains(title) }) {
+        NSLog("TRANSFER_READBACK title_index=%d", index)
+      }
+    }
+    if let regex = try? NSRegularExpression(pattern: #"CitizenSdkException\(([A-Za-z]+)(?:/([A-Za-z]+))?(?:@([A-Za-z]+))?"#) {
+      for label in visibleLabels {
+        let range = NSRange(label.startIndex..<label.endIndex, in: label)
+        if let match = regex.firstMatch(in: label, range: range),
+           let code = Range(match.range(at: 1), in: label) {
+          NSLog("TRANSFER_READBACK sdk_code=%@", String(label[code]))
+          for (index, name) in [(2, "stage"), (3, "method")] {
+            if let range = Range(match.range(at: index), in: label) {
+              NSLog("TRANSFER_READBACK sdk_%@=%@", name, String(label[range]))
+            }
+          }
+        }
+      }
+    }
+    if visibleLabels.contains(where: { $0.hasPrefix("本地钱包读取失败") }),
+       app.buttons.count == 1, app.buttons["重试"].exists {
+      NSLog("TRANSFER_READBACK stage=retry_wallet_gate")
+      app.buttons["重试"].tap()
+      _ = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "交易"))
+        .firstMatch.waitForExistence(timeout: 20)
     }
     let walletPickerTitle = app.descendants(matching: .any).matching(
       NSPredicate(format: "label == %@", "选择交易钱包")

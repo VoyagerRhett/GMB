@@ -2246,57 +2246,79 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         String,
     > {
         let services = self.clone_chain_services(chain_id)?;
+        let platform = self.platform.clone();
 
         Ok(Box::pin(async move {
+            let subscribe_span = NonceDiagnosticSpan::start("nonce_subscribe");
             let subscribe_all = services
                 .runtime_service
                 .subscribe_all(16, NonZero::<usize>::new(32).unwrap())
                 .await;
-            let finalized_header = subscribe_all.finalized_block_scale_encoded_header.clone();
-            let best_non_finalized_hash = subscribe_all
-                .non_finalized_blocks_ancestry_order
-                .iter()
-                .find(|block| block.is_new_best)
-                .map(|block| header::hash_from_scale_encoded_header(&block.scale_encoded_header));
-            let subscription = subscribe_all.new_blocks;
+            subscribe_span.finish(true);
+            let block_hash = nonce_block_hash(
+                &subscribe_all.finalized_block_scale_encoded_header,
+                &subscribe_all.non_finalized_blocks_ancestry_order,
+            );
+            let mut pinned_hashes = vec![header::hash_from_scale_encoded_header(
+                &subscribe_all.finalized_block_scale_encoded_header,
+            )];
+            pinned_hashes.extend(
+                subscribe_all
+                    .non_finalized_blocks_ancestry_order
+                    .iter()
+                    .map(|block| {
+                        header::hash_from_scale_encoded_header(&block.scale_encoded_header)
+                    }),
+            );
+            let mut subscription = subscribe_all.new_blocks;
+            let subscription_id = subscription.id();
+            let cleanup_service = services.runtime_service.clone();
+            let (cleanup_tx, cleanup_rx) = futures_channel::oneshot::channel();
+            // Future被取消也必须释放本订阅报告的固定引用。清理任务独立持有订阅，
+            // 不等待新区块；使用可容忍失效订阅的上游API，不对同一引用重复unpin。
+            let cleanup = NonceCleanup(Some(move || {
+                platform.spawn_task("nonce-subscription-release".into(), async move {
+                    use futures_util::FutureExt as _;
+                    let span = NonceDiagnosticSpan::start("nonce_cleanup");
+                    while let Some(Some(notification)) = subscription.next().now_or_never() {
+                        if let runtime_service::Notification::Block(block) = notification {
+                            pinned_hashes.push(header::hash_from_scale_encoded_header(
+                                &block.scale_encoded_header,
+                            ));
+                        }
+                    }
+                    drop(subscription);
+                    pinned_hashes.sort_unstable();
+                    pinned_hashes.dedup();
+                    for hash in pinned_hashes {
+                        cleanup_service.unpin_block(subscription_id, hash).await;
+                    }
+                    span.finish(true);
+                    let _ = cleanup_tx.send(());
+                });
+            }));
 
-            let (pinned_runtime, block_hash, block_state_trie_root_hash, block_number, unpin_hash) =
-                if let Some(best_block_hash) = best_non_finalized_hash {
-                    let (pinned_runtime, block_state_trie_root_hash, block_number) = services
-                        .runtime_service
-                        .pin_pinned_block_runtime(subscription.id(), best_block_hash)
-                        .await
-                        .map_err(|error| format!("Failed to pin best block runtime: {error}"))?;
-                    (
-                        pinned_runtime,
-                        best_block_hash,
-                        block_state_trie_root_hash,
-                        block_number,
-                        Some(best_block_hash),
-                    )
-                } else {
-                    let finalized_block_hash =
-                        header::hash_from_scale_encoded_header(&finalized_header);
-                    let (pinned_runtime, block_state_trie_root_hash, block_number) =
-                        compile_runtime_for_block(
-                            services.sync_service.clone(),
-                            services.runtime_service.clone(),
-                            finalized_block_hash,
-                            &finalized_header,
-                        )
-                        .await?;
-                    (
-                        pinned_runtime,
-                        finalized_block_hash,
-                        block_state_trie_root_hash,
-                        block_number,
-                        None,
-                    )
-                };
+            // subscribe_all已经固定最终块与已报告的非最终块Runtime。两种best状态
+            // 必须使用同一pin入口，不能再下载:code/:heappages后重新查编译缓存。
+            let pin_span = NonceDiagnosticSpan::start("nonce_pin_runtime");
+            let pinned = services
+                .runtime_service
+                .pin_pinned_block_runtime(subscription_id, block_hash)
+                .await;
+            pin_span.finish(pinned.is_ok());
+            let (pinned_runtime, block_state_trie_root_hash, block_number) = match pinned {
+                Ok(pinned) => pinned,
+                Err(error) => {
+                    drop(cleanup);
+                    let _ = cleanup_rx.await;
+                    return Err(format!("Failed to pin best block runtime: {error}"));
+                }
+            };
 
             // 保留调用账户用于结果身份绑定；传给 runtime 的字节来自同一份输入，不允许
             // provider 在返回后重新拼接另一账户。
             let requested_account_id = account_id.clone();
+            let call_span = NonceDiagnosticSpan::start("nonce_runtime_call");
             let nonce_result = services
                 .runtime_service
                 .runtime_call(
@@ -2315,22 +2337,19 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 .map_err(|error| {
                     format!("Failed to execute AccountNonceApi_account_nonce: {error}")
                 });
-
-            if let Some(best_block_hash) = unpin_hash {
-                subscription.unpin_block(best_block_hash).await;
-            }
+            call_span.finish(nonce_result.is_ok());
+            drop(cleanup);
+            let _ = cleanup_rx.await;
 
             let nonce_result = nonce_result?;
-            let nonce_bytes: [u8; 4] = nonce_result
-                .output
-                .as_slice()
-                .try_into()
-                .map_err(|_| "Failed to decode runtime output".to_string())?;
+            let decode_span = NonceDiagnosticSpan::start("nonce_decode");
+            let nonce = decode_account_nonce(&nonce_result.output);
+            decode_span.finish(nonce.is_ok());
             Ok(ChainAccountNonceSnapshot {
                 account_id: requested_account_id,
                 block_number,
                 block_hash,
-                nonce: u64::from(u32::from_le_bytes(nonce_bytes)),
+                nonce: nonce?,
             })
         }))
     }
@@ -3102,6 +3121,163 @@ fn convert_runtime_version_snapshot(
             .apis
             .map(|api| (api.name_hash.to_vec(), api.version))
             .collect(),
+    }
+}
+
+/// 同次订阅只有一个best；没有非最终best时，准确目标就是已固定的最终块。
+fn nonce_block_hash(
+    finalized_header: &[u8],
+    blocks: &[runtime_service::BlockNotification],
+) -> [u8; 32] {
+    blocks.iter().find(|block| block.is_new_best).map_or_else(
+        || header::hash_from_scale_encoded_header(finalized_header),
+        |block| header::hash_from_scale_encoded_header(&block.scale_encoded_header),
+    )
+}
+
+/// AccountNonceApi v1在本链返回SCALE u32；拒绝截断、空值和多余字节。
+fn decode_account_nonce(output: &[u8]) -> Result<u64, String> {
+    let bytes: [u8; 4] = output
+        .try_into()
+        .map_err(|_| "Failed to decode runtime output".to_string())?;
+    Ok(u64::from(u32::from_le_bytes(bytes)))
+}
+
+/// 只拥有一次释放动作；正常完成、错误返回与Future取消共用同一析构路径。
+struct NonceCleanup<F: FnOnce()>(Option<F>);
+
+impl<F: FnOnce()> Drop for NonceCleanup<F> {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.0.take() {
+            cleanup();
+        }
+    }
+}
+
+/// 定向诊断默认关闭，只接受源码固定阶段名与结果布尔值；不接收业务值或错误文本。
+/// no_std构建完全移除系统环境、时钟及输出，仍使用完全相同的nonce读取逻辑。
+struct NonceDiagnosticSpan {
+    #[cfg(feature = "std")]
+    inner: Option<(&'static str, std::time::Instant)>,
+}
+
+impl NonceDiagnosticSpan {
+    fn start(_stage: &'static str) -> Self {
+        Self {
+            #[cfg(feature = "std")]
+            inner: (std::env::var_os("CITIZENSDK_TRANSACTION_DIAGNOSTICS").as_deref()
+                == Some(std::ffi::OsStr::new("1")))
+            .then(|| (_stage, std::time::Instant::now())),
+        }
+    }
+
+    fn finish(mut self, success: bool) {
+        self.record(if success { "success" } else { "failed" });
+    }
+
+    fn record(&mut self, _result: &'static str) {
+        #[cfg(feature = "std")]
+        if let Some((stage, started)) = self.inner.take() {
+            let at_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |value| value.as_millis());
+            eprintln!(
+                "CITIZENSDK_TX_DIAG at_ms={at_ms} stage={stage} elapsed_us={} result={_result}",
+                started.elapsed().as_micros()
+            );
+        }
+    }
+}
+
+impl Drop for NonceDiagnosticSpan {
+    fn drop(&mut self) {
+        self.record("cancelled");
+    }
+}
+
+#[cfg(test)]
+mod account_nonce_tests {
+    use super::*;
+
+    fn block(header: u8, best: bool) -> runtime_service::BlockNotification {
+        runtime_service::BlockNotification {
+            is_new_best: best,
+            scale_encoded_header: vec![header],
+            parent_hash: [0; 32],
+            new_runtime: None,
+        }
+    }
+
+    #[test]
+    fn finalized_best_and_non_finalized_best_use_the_reported_identity() {
+        let finalized = [1];
+        let finalized_hash = header::hash_from_scale_encoded_header(&finalized);
+        assert_eq!(nonce_block_hash(&finalized, &[]), finalized_hash);
+        // 存在分叉不代表best在分叉上，必须继续选择最终根。
+        assert_eq!(
+            nonce_block_hash(&finalized, &[block(2, false)]),
+            finalized_hash
+        );
+        let blocks = [block(2, false), block(3, true), block(4, false)];
+        assert_eq!(
+            nonce_block_hash(&finalized, &blocks),
+            header::hash_from_scale_encoded_header(&[3])
+        );
+    }
+
+    #[test]
+    fn nonce_decode_accepts_u32_boundaries_and_rejects_malformed_output() {
+        for value in [0, 17, u32::MAX] {
+            assert_eq!(
+                decode_account_nonce(&value.to_le_bytes()).ok(),
+                Some(u64::from(value))
+            );
+        }
+        for length in [0, 1, 3, 5, 8] {
+            assert!(decode_account_nonce(&vec![0; length]).is_err());
+        }
+    }
+
+    #[test]
+    fn cancelling_pending_nonce_scope_releases_once() {
+        use core::{
+            future::Future as _,
+            task::{Context, Poll},
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let releases = Arc::new(AtomicUsize::new(0));
+        let observed = releases.clone();
+        let mut query = Box::pin(async move {
+            let _cleanup = NonceCleanup(Some(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }));
+            core::future::pending::<()>().await;
+        });
+        let mut context = Context::from_waker(futures_util::task::noop_waker_ref());
+        assert!(matches!(query.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(releases.load(Ordering::SeqCst), 0);
+        drop(query);
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn completed_and_failed_nonce_scopes_release_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for success in [true, false] {
+            let releases = AtomicUsize::new(0);
+            let result = (|| -> Result<(), ()> {
+                let cleanup = NonceCleanup(Some(|| {
+                    releases.fetch_add(1, Ordering::SeqCst);
+                }));
+                if !success {
+                    return Err(());
+                }
+                drop(cleanup);
+                Ok(())
+            })();
+            assert_eq!(result.is_ok(), success);
+            assert_eq!(releases.load(Ordering::SeqCst), 1);
+        }
     }
 }
 

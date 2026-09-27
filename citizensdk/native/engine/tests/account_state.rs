@@ -631,3 +631,228 @@ fn assert_integrity<T>(result: Result<T, EngineError>) {
         Ok(_) => panic!("integrity mismatch must fail"),
     }
 }
+
+// 经过真实 Engine 准备与冷签执行入口，验证执行不再二次读取链状态或 nonce。
+#[test]
+fn prepared_execution_reads_nonce_once_and_keeps_single_use_and_source_isolation() {
+    use citizen_sdk_contracts::{
+        citizen_ss58_address, CapabilityName, ColdWalletAccount, TransactionExecutionId,
+        TransactionHistoryCursor, TransactionHistoryIndex, TransactionHistoryMutation,
+        TransactionHistoryQueryKind, TransactionHistoryRecordBatch,
+        TransactionHistoryRecordSnapshot, TransactionHistoryStore, WalletProfileStore, WalletState,
+    };
+    use citizen_sdk_contracts::{
+        EncryptedSecretBlobSnapshot, EncryptedSecretBlobState, EncryptedSecretBlobStore,
+        EncryptedSecretEnvelope, SecretBuffer, SecretRef, SecretVault, VaultAvailability,
+        VaultGeneration,
+    };
+    use citizen_sdk_engine::TransactionExecutionStart;
+    // 冷签只读取公开目录；任何秘密、金库或密文操作都会使本测试失败。
+    struct NoSecrets;
+    impl SecretVault for NoSecrets {
+        fn availability(&self) -> ContractFuture<'_, VaultAvailability> {
+            panic!("冷签不能读取金库")
+        }
+        fn seal(
+            &self,
+            _: [u8; 16],
+            _: SecretRef,
+            _: SecretBuffer,
+        ) -> ContractFuture<'_, EncryptedSecretEnvelope> {
+            panic!("冷签不能写秘密")
+        }
+        fn open(
+            &self,
+            _: SecretRef,
+            _: EncryptedSecretEnvelope,
+        ) -> ContractFuture<'_, SecretBuffer> {
+            panic!("冷签不能打开秘密")
+        }
+        fn has_any_wallet_key(&self, _: u32) -> ContractFuture<'_, bool> {
+            panic!("冷签不能查询金库")
+        }
+        fn has_wallet_key(&self, _: u32, _: VaultGeneration) -> ContractFuture<'_, bool> {
+            panic!("冷签不能查询金库")
+        }
+        fn delete_wallet_key(
+            &self,
+            _: [u8; 16],
+            _: u32,
+            _: VaultGeneration,
+        ) -> ContractFuture<'_, ()> {
+            panic!("冷签不能删除金库")
+        }
+    }
+    impl EncryptedSecretBlobStore for NoSecrets {
+        fn has_account_secret(&self, _: AccountId32) -> ContractFuture<'_, bool> {
+            panic!("冷签不能查询密文")
+        }
+        fn load(&self, _: SecretRef) -> ContractFuture<'_, EncryptedSecretBlobSnapshot> {
+            panic!("冷签不能读取密文")
+        }
+        fn compare_and_swap(
+            &self,
+            _: SecretRef,
+            _: u64,
+            _: EncryptedSecretBlobState,
+        ) -> ContractFuture<'_, EncryptedSecretBlobSnapshot> {
+            panic!("冷签不能修改密文")
+        }
+    }
+    struct Nonce(AtomicUsize);
+    impl AccountNonceSource for Nonce {
+        fn account_next_index(
+            &self,
+            account: AccountId32,
+            block: VerifiedBlockRef,
+        ) -> ContractFuture<'_, AccountNonce> {
+            let attempt = self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                AccountNonce::try_new(
+                    &ChainIdentity::citizenchain(),
+                    block,
+                    account,
+                    attempt as u64,
+                )
+            })
+        }
+    }
+    struct Profile(WalletState);
+    impl WalletProfileStore for Profile {
+        fn load(&self) -> ContractFuture<'_, WalletState> {
+            Box::pin(async { Ok(self.0.clone()) })
+        }
+        fn compare_and_swap(&self, _: u64, _: WalletState) -> ContractFuture<'_, WalletState> {
+            Box::pin(async { panic!("准备/冷签不能改写钱包") })
+        }
+    }
+    struct History;
+    impl TransactionHistoryStore for History {
+        fn load_index(&self) -> ContractFuture<'_, TransactionHistoryIndex> {
+            Box::pin(async { Ok(TransactionHistoryIndex::empty()) })
+        }
+        fn load_record(
+            &self,
+            _: u64,
+            _: TransactionExecutionId,
+        ) -> ContractFuture<'_, TransactionHistoryRecordSnapshot> {
+            Box::pin(async { panic!("空历史不应读取交易记录") })
+        }
+        fn load_page(
+            &self,
+            _: u64,
+            _: TransactionHistoryQueryKind,
+            _: Option<TransactionHistoryCursor>,
+            _: usize,
+        ) -> ContractFuture<'_, TransactionHistoryRecordBatch> {
+            Box::pin(async {
+                TransactionHistoryRecordBatch::try_new(
+                    TransactionHistoryIndex::empty(),
+                    Vec::new(),
+                    false,
+                )
+            })
+        }
+        fn compare_and_swap(
+            &self,
+            _: TransactionHistoryMutation,
+        ) -> ContractFuture<'_, TransactionHistoryIndex> {
+            Box::pin(async { panic!("未完成用户冷签不得持久化或广播") })
+        }
+    }
+    let account = AccountId32::from_bytes([0x51; 32]);
+    let finalized = FinalizedBlockRef::from_parts(Hash32::from_bytes([0x42; 32]), 42);
+    let best = VerifiedBlockRef::best(finalized.hash(), finalized.number());
+    let chain = Arc::new(TestClient::new(best, finalized));
+    let metadata = decode_metadata(&chain.metadata);
+    let pallet = metadata.pallet_by_name("System").expect("System metadata");
+    let call = pallet
+        .call_variant_by_name("remark")
+        .expect("remark metadata");
+    let call_data = vec![pallet.index(), call.index, 0];
+    let profile = WalletState::try_from_catalog_parts(
+        1,
+        None,
+        vec![
+            ColdWalletAccount::try_new(2, account, citizen_ss58_address(account), "合成钱包", 0)
+                .expect("synthetic cold account"),
+        ],
+        vec![account],
+        3,
+        None,
+        None,
+        Vec::new(),
+    )
+    .expect("synthetic wallet state");
+    let nonce = Arc::new(Nonce(AtomicUsize::new(0)));
+    let engine = CitizenEngine::new(
+        EngineComponents::new(
+            Some(chain.clone()),
+            Some(Arc::new(citizen_signer::Sr25519SoftwareSigner)),
+            Some(Arc::new(NoSecrets)),
+            None,
+            None,
+            Some(Arc::new(Profile(profile))),
+            Some(Arc::new(History)),
+            Some(Arc::new(NoSecrets)),
+        )
+        .with_account_nonce_source(nonce.clone()),
+    );
+    engine
+        .update_capabilities(
+            CapabilityName::ALL
+                .into_iter()
+                .map(CapabilityProbe::ready)
+                .collect(),
+        )
+        .expect("capabilities");
+    engine.begin_provider_start().expect("start");
+    futures::executor::block_on(engine.complete_provider_start()).expect("started");
+    engine
+        .update_capabilities(
+            CapabilityName::ALL
+                .into_iter()
+                .map(CapabilityProbe::ready)
+                .collect(),
+        )
+        .expect("running capabilities");
+    let prepared =
+        futures::executor::block_on(engine.prepare_transaction(account, call_data.clone()))
+            .expect("one preparation");
+    let reads = chain.reads.load(Ordering::SeqCst);
+    assert_eq!(nonce.0.load(Ordering::SeqCst), 1);
+    assert!(
+        futures::executor::block_on(engine.prepare_transaction(account, call_data.clone()))
+            .is_err()
+    );
+    let execution =
+        futures::executor::block_on(engine.execute_prepared_transaction(prepared.preparation_id()))
+            .expect("frozen preparation reaches cold signing without another nonce");
+    let TransactionExecutionStart::ExternalSigning { execution_id, .. } = execution else {
+        panic!("cold wallet must await its external signature");
+    };
+    assert_eq!(nonce.0.load(Ordering::SeqCst), 1);
+    assert_eq!(chain.reads.load(Ordering::SeqCst), reads);
+    assert!(futures::executor::block_on(
+        engine.execute_prepared_transaction(prepared.preparation_id())
+    )
+    .is_err());
+    assert!(
+        futures::executor::block_on(engine.prepare_transaction(account, call_data.clone()))
+            .is_err()
+    );
+    engine
+        .cancel_transaction_execution(execution_id)
+        .expect("cancel cold execution");
+    let next = futures::executor::block_on(engine.prepare_transaction(account, call_data))
+        .expect("new user operation can prepare once again");
+    assert_eq!(nonce.0.load(Ordering::SeqCst), 2);
+    engine
+        .cancel_prepared_transaction(next.preparation_id())
+        .expect("cancel preparation");
+    assert!(futures::executor::block_on(
+        engine.execute_prepared_transaction(next.preparation_id())
+    )
+    .is_err());
+    assert_eq!(nonce.0.load(Ordering::SeqCst), 2);
+}

@@ -1,3 +1,5 @@
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
+
 import 'dart:async';
 
 import 'package:citizen_sdk/citizen_sdk.dart';
@@ -14,10 +16,7 @@ import 'package:citizenapp/ui/app_layout.dart';
 /// **只读展示**entity 岗位任职与 PublicAdmins 管理员钱包；不做冷钱包导入/扫码激活
 /// ——那是治理机构 `AdminListPage` 的能力,公权端本期不引入重型桥接。无管理员时显示占位。
 class PublicInstitutionAdminListPage extends StatefulWidget {
-  const PublicInstitutionAdminListPage({
-    super.key,
-    required this.admins,
-  });
+  const PublicInstitutionAdminListPage({super.key, required this.admins});
 
   final List<InstitutionAdminView> admins;
 
@@ -44,13 +43,7 @@ class _PublicInstitutionAdminListPageState
     }
   }
 
-  static String _balanceKey(String accountId) {
-    final trimmed = accountId.trim();
-    return (trimmed.startsWith('0x') || trimmed.startsWith('0X')
-            ? trimmed.substring(2)
-            : trimmed)
-        .toLowerCase();
-  }
+  static String _balanceKey(String accountId) => accountId;
 
   Future<void> _loadBalances() async {
     final accountIds = {
@@ -61,8 +54,9 @@ class _PublicInstitutionAdminListPageState
       return;
     }
     try {
-      final snapshots =
-          await context.read<CitizenSdk>().chain.getAccountBalances(accountIds);
+      final snapshots = await AccountBalanceSnapshotStore.forChain(
+        context.read<CitizenSdk>().chain,
+      ).getAccountBalances(accountIds);
       final balances = <String, double>{
         for (final snapshot in snapshots)
           snapshot.accountId: snapshot.freeFen.toDouble() / 100,
@@ -82,8 +76,9 @@ class _PublicInstitutionAdminListPageState
         title: Text(
           '管理员列表',
           style: TextStyle(
-              fontSize: AppLayout.scaled(context, 17),
-              fontWeight: FontWeight.w700),
+            fontSize: AppLayout.scaled(context, 17),
+            fontWeight: FontWeight.w700,
+          ),
         ),
         centerTitle: true,
         backgroundColor: AppTheme.surfaceCard,
@@ -102,8 +97,10 @@ class _PublicInstitutionAdminListPageState
                 return InstitutionAssignmentCard(
                   adminView: adminView,
                   index: i + 1,
-                  balanceYuan: _balanceByAccountId[
-                      _balanceKey(adminView.admin.account_id)],
+                  balanceYuan:
+                      _balanceByAccountId[_balanceKey(
+                        adminView.admin.account_id,
+                      )],
                 );
               },
             ),
@@ -117,20 +114,27 @@ class _PublicInstitutionAdminListPageState
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.group_outlined,
-                size: AppLayout.scaledValue(44), color: AppTheme.textTertiary),
+            Icon(
+              Icons.group_outlined,
+              size: AppLayout.scaledValue(44),
+              color: AppTheme.textTertiary,
+            ),
             SizedBox(height: AppLayout.scaledValue(12)),
-            Text('暂无管理员',
-                style: TextStyle(
-                    fontSize: AppLayout.scaledValue(14),
-                    color: AppTheme.textSecondary)),
+            Text(
+              '暂无管理员',
+              style: TextStyle(
+                fontSize: AppLayout.scaledValue(14),
+                color: AppTheme.textSecondary,
+              ),
+            ),
             SizedBox(height: AppLayout.scaledValue(6)),
             Text(
               '该机构链上暂无管理员',
               textAlign: TextAlign.center,
               style: TextStyle(
-                  fontSize: AppLayout.scaledValue(12.5),
-                  color: AppTheme.textTertiary),
+                fontSize: AppLayout.scaledValue(12.5),
+                color: AppTheme.textTertiary,
+              ),
             ),
           ],
         ),

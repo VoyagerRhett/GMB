@@ -85,6 +85,38 @@ void main() {
     expect(tester.getTopLeft(find.byIcon(Icons.add_rounded)).dy, lessThan(130));
   });
 
+  testWidgets('创建页原选择控件提供12、18、24词并显示对应熵说明', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MaterialApp(theme: AppTheme.darkTheme, home: const CreateWalletPage()),
+    );
+
+    final selector = find.byType(SegmentedButton<int>);
+    expect(tester.widget<SegmentedButton<int>>(selector).selected, {12});
+    expect(find.text('128 位熵，标准安全强度'), findsOneWidget);
+    for (final count in [12, 18, 24]) {
+      expect(find.text('$count 个单词'), findsOneWidget);
+    }
+
+    await tester.tap(find.text('18 个单词'));
+    await tester.pump();
+    expect(tester.widget<SegmentedButton<int>>(selector).selected, {18});
+    expect(find.text('192 位熵'), findsOneWidget);
+
+    await tester.tap(find.text('24 个单词'));
+    await tester.pump();
+    expect(find.text('256 位熵，安全性更高'), findsOneWidget);
+
+    await tester.tap(find.text('12 个单词'));
+    await tester.pump();
+    expect(find.text('128 位熵，标准安全强度'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('导入页顶部统一为输入助记词且没有重复标题', (tester) async {
     await tester.pumpWidget(
       MaterialApp(theme: AppTheme.darkTheme, home: const ImportWalletPage()),
@@ -97,6 +129,17 @@ void main() {
         matching: find.text('输入助记词'),
       ),
       findsOneWidget,
+    );
+    final mnemonicInput = find.byType(TextField).first;
+    expect(
+      tester.widget<TextField>(mnemonicInput).decoration!.counterText,
+      '0 / 12、18 或 24 个单词',
+    );
+    await tester.enterText(mnemonicInput, List.filled(18, 'sample').join(' '));
+    await tester.pump();
+    expect(
+      tester.widget<TextField>(mnemonicInput).decoration!.counterText,
+      '18 / 12、18 或 24 个单词',
     );
   });
 }

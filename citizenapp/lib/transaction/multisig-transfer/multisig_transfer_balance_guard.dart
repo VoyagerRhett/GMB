@@ -1,3 +1,4 @@
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizenapp/my/util/amount_format.dart';
 import 'package:citizenapp/citizen/shared/multisig_create_amount_rules.dart';
@@ -20,7 +21,8 @@ class MultisigTransferBalanceGuard {
     double additionalDebitYuan = 0,
   }) {
     final additionalDebitFen = BigInt.from((additionalDebitYuan * 100).round());
-    final requiredFen = MultisigCreateAmountRules.minOnchainFeeFen +
+    final requiredFen =
+        MultisigCreateAmountRules.minOnchainFeeFen +
         additionalDebitFen +
         MultisigCreateAmountRules.existentialDepositFen;
     return MultisigCreateAmountRules.fenToYuan(requiredFen);
@@ -35,7 +37,8 @@ class MultisigTransferBalanceGuard {
     double additionalDebitYuan = 0,
     required CitizenChain chain,
   }) async {
-    final balance = await chain.getAccountBalance(feeAccountId);
+    final balance = await AccountBalanceSnapshotStore.forChain(chain)
+        .getAccountBalance(feeAccountId, forceRefresh: true);
     final balanceYuan = balance.freeFen.toDouble() / 100;
     final additionalDebitFen = BigInt.from((additionalDebitYuan * 100).round());
     final requiredYuan = institutionFeeAccountRequiredYuan(
@@ -58,7 +61,8 @@ class MultisigTransferBalanceGuard {
     required String actionLabel,
     required CitizenChain chain,
   }) async {
-    final balance = await chain.getAccountBalance(wallet.accountId);
+    final balance = await AccountBalanceSnapshotStore.forChain(chain)
+        .getAccountBalance(wallet.accountId, forceRefresh: true);
     final balanceYuan = balance.freeFen.toDouble() / 100;
     final edYuan = MultisigCreateAmountRules.fenToYuan(
       MultisigCreateAmountRules.existentialDepositFen,

@@ -77,7 +77,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::{cmp, iter, num::NonZero, pin, time::Duration};
+use core::{cmp, iter, mem, num::NonZero, pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::stream::FuturesUnordered;
@@ -388,13 +388,8 @@ enum InvalidOrError {
 enum ValidationError {
     InvalidOrError(InvalidOrError),
     ObsoleteSubscription,
-    /// 校验启动后、真正取 runtime 之前，目标块被链重组挤掉并解除 pin
-    /// （`PinPinnedBlockRuntimeError::BlockNotPinned`）。
-    ///
-    /// 本链每块都可能重组（日志可见 `inBlock → retracted → inBlock → finalized`），
-    /// 这是**常态而非异常**：本轮校验作废即可，交易留在池里等下一个块重新校验。
-    /// 曾是 `unreachable!()`，真机上表现为交易确认瞬间整个 App SIGABRT 闪退。
-    BlockObsolete,
+    // 验证 Future 开始前区块可能已被释放；重新选择当前块，不把交易判成无效。
+    ObsoleteBlock,
 }
 
 /// Message sent from the foreground service to the background.
@@ -517,6 +512,13 @@ async fn background_task<TPlat: PlatformRef>(
             finalized_block_hash: initial_finalized_block_hash,
         });
 
+        // Runtime 订阅已固定此块；池根不保存 Block，因此单独保留最终块头供验证使用。
+        // 订阅重建时此上下文随旧订阅一起丢弃，不跨订阅复用引用。
+        let mut finalized_block = FinalizedBlock {
+            hash: initial_finalized_block_hash,
+            scale_encoded_header: subscribe_all.finalized_block_scale_encoded_header.clone(),
+        };
+
         for block in subscribe_all.non_finalized_blocks_ancestry_order {
             let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
             worker.pending_transactions.add_block(
@@ -594,16 +596,13 @@ async fn background_task<TPlat: PlatformRef>(
                     // Find which block to validate the transaction against.
                     let block_hash = *worker.pending_transactions.best_block_hash();
 
-                    // It is possible for the current best block to be equal to the finalized
-                    // block, in which case it will not be in the data structure and will already
-                    // be unpinned in the runtime service.
-                    // In that situation, we simply don't start any validation.
-                    // TODO: is this problem worth solving? ^
-                    let scale_encoded_header =
-                        match worker.pending_transactions.block_user_data(&block_hash) {
-                            Some(b) => b.scale_encoded_header.clone(),
-                            None => break,
-                        };
+                    // best==finalized 时使用已固定的最终块，仍执行同一 Runtime 验证再广播。
+                    let scale_encoded_header = match finalized_block
+                        .validation_header(&worker.pending_transactions, &block_hash)
+                    {
+                        Some(header) => header.to_vec(),
+                        None => break,
+                    };
 
                     // Make copies of everything in order to move the values into the future.
                     let runtime_service = worker.runtime_service.clone();
@@ -615,7 +614,7 @@ async fn background_task<TPlat: PlatformRef>(
                         .scale_encoding(to_start_validate)
                         .unwrap()
                         .to_owned();
-                    // TODO: race condition /!\ the block could be pruned and unpinned before this future starts executing
+                    // Future 实际开始前块可能被释放；validate_transaction 将其归为过期块并重选。
                     async move {
                         let result = validate_transaction(
                             &platform,
@@ -772,9 +771,10 @@ async fn background_task<TPlat: PlatformRef>(
                         .join(", ")
                 );
 
-                // All blocks in `pending_transactions` are pinned within the runtime service.
-                // Unpin them when they're removed.
-                subscribe_all.new_blocks.unpin_block(block.block_hash).await;
+                // 当前最终块虽移出池，仍保留 Runtime 引用供空闲链验证；其它已清理块照常释放。
+                if block.block_hash != finalized_block.hash {
+                    subscribe_all.new_blocks.unpin_block(block.block_hash).await;
+                }
 
                 debug_assert!(!block.user_data.downloading);
                 for mut tx in block.included_transactions {
@@ -859,6 +859,13 @@ async fn background_task<TPlat: PlatformRef>(
                 })) => {
                     if let Some(best_block_hash_if_changed) = best_block_hash_if_changed {
                         worker.set_best_block(&config.log_target, &best_block_hash_if_changed);
+                    }
+                    // 新最终块已由订阅固定。旧最终块若仍在池中，交给原清理循环释放；
+                    // 若已移出池，则在更替上下文时释放，避免重复释放或持续积累引用。
+                    if let Some(old_hash) =
+                        finalized_block.advance(&worker.pending_transactions, hash)
+                    {
+                        subscribe_all.new_blocks.unpin_block(old_hash).await;
                     }
                     for pruned in worker.pending_transactions.set_finalized_block(&hash) {
                         log!(
@@ -975,12 +982,16 @@ async fn background_task<TPlat: PlatformRef>(
                         continue;
                     }
 
-                    // Don't gossip if already included in best chain.
-                    // 允许未验证的交易被广播——PoW 链 best == finalized 时本地验证
-                    // 会被跳过，但全节点仍然能验证并入池。
+                    // Don't gossip the transaction if it hasn't been validated or is already
+                    // included.
+                    // TODO: if best block changes, we would need to reset all the re-announce period of all transactions, awkward!
+                    // TODO: also, if this is false, then the transaction might never be re-announced ever again
                     if worker
                         .pending_transactions
                         .is_included_best_chain(maybe_reannounce_tx_id)
+                        || !worker
+                            .pending_transactions
+                            .is_valid_against_best_block(maybe_reannounce_tx_id)
                     {
                         continue;
                     }
@@ -1059,14 +1070,8 @@ async fn background_task<TPlat: PlatformRef>(
                             .as_mut()
                             .and_then(|f| f.now_or_never())
                         {
-                            None => continue, // Normal. `maybe_validated_tx_id` is just a hint.
-                            // 校验 future 被取消（理论上不会发生）：清掉在途标记、跳过本轮，
-                            // 交易留在池里等下次重新校验。绝不 panic —— 原 `unreachable!()`
-                            // 会 abort 掉整个 App，代价与收益完全不成比例。
-                            Some(Err(_)) => {
-                                tx.validation_in_progress = None;
-                                continue;
-                            }
+                            None => continue,               // Normal. `maybe_validated_tx_id` is just a hint.
+                            Some(Err(_)) => unreachable!(), // Validations are never interrupted.
                             Some(Ok(result)) => {
                                 tx.validation_in_progress = None;
                                 result
@@ -1085,7 +1090,10 @@ async fn background_task<TPlat: PlatformRef>(
                     // of the chain is tracked using the sync service. As such, it is
                     // possible for the validation to have been performed against a block
                     // that has already been finalized and removed from the pool.
-                    if !worker.pending_transactions.has_block(&block_hash) {
+                    if finalized_block
+                        .validation_header(&worker.pending_transactions, &block_hash)
+                        .is_none()
+                    {
                         log!(
                             &worker.platform,
                             Debug,
@@ -1121,14 +1129,11 @@ async fn background_task<TPlat: PlatformRef>(
                                 )
                             );
 
-                            // 交易可能在本轮处理途中已被移出池（重组/最终化并发发生）：
-                            // 取不到就跳过状态更新，绝不 panic。
-                            if let Some(tx) = worker
+                            worker
                                 .pending_transactions
                                 .transaction_user_data_mut(maybe_validated_tx_id)
-                            {
-                                tx.update_status(TransactionStatus::Validated);
-                            }
+                                .unwrap_or_else(|| unreachable!())
+                                .update_status(TransactionStatus::Validated);
 
                             // Schedule this transaction for announcement.
                             worker
@@ -1142,20 +1147,8 @@ async fn background_task<TPlat: PlatformRef>(
                             // rebuild it.
                             continue 'channels_rebuild;
                         }
-                        Err(ValidationError::BlockObsolete) => {
-                            // 目标块被重组挤掉：本轮校验作废，交易留在池里等下个块重新
-                            // 校验（`validation_in_progress` 已在上面清空）。与 1084 行
-                            // “块已不在池中”同属常态，只记 Debug，不重建通道、不判失败。
-                            log!(
-                                &worker.platform,
-                                Debug,
-                                &config.log_target,
-                                "transaction-validation-block-obsolete",
-                                transaction = HashDisplay(&tx_hash),
-                                block = HashDisplay(&block_hash)
-                            );
-                            continue;
-                        }
+                        // 释放先于异步验证开始时，下一轮以当前块重试，不能写入过期结果。
+                        Err(ValidationError::ObsoleteBlock) => continue,
                         Err(ValidationError::InvalidOrError(InvalidOrError::Invalid(error))) => {
                             log!(
                                 &worker.platform,
@@ -1260,7 +1253,7 @@ async fn background_task<TPlat: PlatformRef>(
                     }
 
                     // Success path. Inserting in pool.
-                    let new_tx_id = worker.pending_transactions.add_unvalidated(
+                    worker.pending_transactions.add_unvalidated(
                         transaction_bytes,
                         PendingTransaction {
                             when_reannounce: worker.platform.now(),
@@ -1279,20 +1272,6 @@ async fn background_task<TPlat: PlatformRef>(
                             validation_in_progress: None,
                         },
                     );
-
-                    // PoW 链交易池空时不出块，best == finalized，本地验证会被跳过。
-                    // 立即 schedule announce，不等验证，让全节点来验证。
-                    log!(
-                        &worker.platform,
-                        Info,
-                        &config.log_target,
-                        "tx-added-to-pool",
-                        tx_id = ?new_tx_id,
-                        pool_size = worker.pending_transactions.num_transactions(),
-                    );
-                    worker
-                        .next_reannounce
-                        .push(Box::pin(async move { new_tx_id }));
                 }
             }
         }
@@ -1323,8 +1302,8 @@ struct Worker<TPlat: PlatformRef> {
     /// still represent transactions that we're trying to include but whose status isn't
     /// interesting the frontend.
     ///
-    /// All the blocks within this data structure are also pinned within the runtime service. They
-    /// must be unpinned when they leave the data structure.
+    /// 池内块由 Runtime 订阅固定；当前最终块移出池后由 FinalizedBlock 继续保留，
+    /// 其它块离开池时释放，订阅重建时统一释放该订阅剩余引用。
     pending_transactions: light_pool::LightPool<PendingTransaction<TPlat>, Block, InvalidOrError>,
 
     /// See [`Config::max_pending_transactions`].
@@ -1414,6 +1393,44 @@ impl<TPlat: PlatformRef> Worker<TPlat> {
                 block_hash: Some((block_hash, block_body_index)),
             });
         }
+    }
+}
+
+/// 当前已验证最终块的头；同一 Runtime 订阅保持此块固定直到下一最终块接替。
+struct FinalizedBlock {
+    hash: [u8; 32],
+    scale_encoded_header: Vec<u8>,
+}
+
+impl FinalizedBlock {
+    /// 使用池内块或当前最终块的准确头；已丢弃分叉和旧根都不得重新进入验证结果路径。
+    fn validation_header<'a, TTx, TErr: Clone>(
+        &'a self,
+        pool: &'a light_pool::LightPool<TTx, Block, TErr>,
+        hash: &[u8; 32],
+    ) -> Option<&'a [u8]> {
+        pool.block_user_data(hash)
+            .map(|block| block.scale_encoded_header.as_slice())
+            .or_else(|| (*hash == self.hash).then_some(self.scale_encoded_header.as_slice()))
+    }
+
+    /// 切换到订阅报告的新最终块；仅返回已经脱离池、需要本处释放的旧固定块。
+    fn advance<TTx, TErr: Clone>(
+        &mut self,
+        pool: &light_pool::LightPool<TTx, Block, TErr>,
+        hash: [u8; 32],
+    ) -> Option<[u8; 32]> {
+        if hash == self.hash {
+            return None;
+        }
+        let header = pool
+            .block_user_data(&hash)
+            .unwrap()
+            .scale_encoded_header
+            .clone();
+        let old_hash = mem::replace(&mut self.hash, hash);
+        self.scale_encoded_header = header;
+        (!pool.has_block(&old_hash)).then_some(old_hash)
     }
 }
 
@@ -1520,10 +1537,8 @@ async fn validate_transaction<TPlat: PlatformRef>(
         Err(runtime_service::PinPinnedBlockRuntimeError::ObsoleteSubscription) => {
             return Err(ValidationError::ObsoleteSubscription);
         }
-        // 目标块已被重组挤掉、pin 已释放：本轮校验作废，交给上层按常态处理，
-        // 绝不 panic（原 `unreachable!()` 会 abort 掉整个 App）。
         Err(runtime_service::PinPinnedBlockRuntimeError::BlockNotPinned) => {
-            return Err(ValidationError::BlockObsolete);
+            return Err(ValidationError::ObsoleteBlock);
         }
     };
 
@@ -1593,4 +1608,150 @@ async fn validate_transaction<TPlat: PlatformRef>(
 /// Utility. Calculates the BLAKE2 hash of the given bytes.
 fn blake2_hash(bytes: &[u8]) -> [u8; 32] {
     <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], bytes).as_bytes()).unwrap()
+}
+
+#[cfg(test)]
+mod finalized_validation_tests {
+    use super::*;
+
+    type Pool = light_pool::LightPool<(), Block, &'static str>;
+
+    // 合成块仅测试已验证头的选择与池状态；真实 Runtime 执行由 provider 实网回归覆盖。
+    fn pool() -> (Pool, FinalizedBlock) {
+        (
+            Pool::new(light_pool::Config {
+                transactions_capacity: 4,
+                blocks_capacity: 4,
+                finalized_block_hash: [0; 32],
+            }),
+            FinalizedBlock {
+                hash: [0; 32],
+                scale_encoded_header: vec![0],
+            },
+        )
+    }
+
+    fn block(number: u8) -> Block {
+        Block {
+            scale_encoded_header: vec![number],
+            failed_downloads: 0,
+            downloading: false,
+        }
+    }
+
+    fn valid() -> validate::ValidTransaction {
+        validate::ValidTransaction {
+            priority: 1,
+            longevity: NonZero::<u64>::new(8).unwrap(),
+            requires: Vec::new(),
+            provides: vec![vec![1]],
+            propagate: true,
+        }
+    }
+
+    #[test]
+    fn idle_finalized_root_can_validate_but_cannot_announce_before_success() {
+        let (mut pool, finalized) = pool();
+        let tx = pool.add_unvalidated(vec![1], ());
+        assert!(!pool.has_block(pool.best_block_hash()));
+        assert_eq!(
+            finalized.validation_header(&pool, pool.best_block_hash()),
+            Some(&[0][..])
+        );
+        assert!(!pool.is_valid_against_best_block(tx));
+        pool.set_validation_result(tx, &finalized.hash, Ok(valid()));
+        assert!(pool.is_valid_against_best_block(tx));
+        assert_eq!(pool.unvalidated_transactions().count(), 0);
+    }
+
+    #[test]
+    fn idle_finalized_root_keeps_real_invalid_transaction_rejected() {
+        let (mut pool, finalized) = pool();
+        let tx = pool.add_unvalidated(vec![2], ());
+        assert!(
+            finalized
+                .validation_header(&pool, pool.best_block_hash())
+                .is_some()
+        );
+        pool.set_validation_result(tx, &finalized.hash, Err("invalid"));
+        assert!(!pool.is_valid_against_best_block(tx));
+        let rejected = pool
+            .invalid_transactions_finalized_block()
+            .next()
+            .unwrap()
+            .0;
+        assert_eq!(rejected, tx);
+        pool.remove_transaction(rejected);
+        assert_eq!(pool.transactions_iter().count(), 0);
+    }
+
+    #[test]
+    fn finalized_advance_releases_old_root_and_accepts_new_root_after_pruning() {
+        let (mut pool, mut finalized) = pool();
+        pool.add_block([1; 32], &[0; 32], block(1));
+        let _ = pool.set_best_block(&[1; 32]);
+        assert_eq!(
+            finalized.validation_header(&pool, pool.best_block_hash()),
+            Some(&[1][..])
+        );
+        assert_eq!(finalized.advance(&pool, [1; 32]), Some([0; 32]));
+        assert_eq!(finalized.advance(&pool, [1; 32]), None);
+        assert_eq!(pool.set_finalized_block(&[1; 32]).count(), 0);
+        let pruned = pool.prune_finalized_with_body().collect::<Vec<_>>();
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].block_hash, finalized.hash);
+        assert!(!pool.has_block(&finalized.hash));
+        assert_eq!(
+            finalized.validation_header(&pool, pool.best_block_hash()),
+            Some(&[1][..])
+        );
+        // 迟到的旧根结果不再进入 set_validation_result，避免使用过期根或触发池断言。
+        assert!(finalized.validation_header(&pool, &[0; 32]).is_none());
+        let tx = pool.add_unvalidated(vec![3], ());
+        pool.set_validation_result(tx, &finalized.hash, Ok(valid()));
+        assert!(pool.is_valid_against_best_block(tx));
+    }
+
+    #[test]
+    fn multiple_finalizations_keep_one_root_pin_without_double_release() {
+        let (mut pool, mut finalized) = pool();
+        pool.add_block([1; 32], &[0; 32], block(1));
+        pool.add_block([2; 32], &[1; 32], block(2));
+        let _ = pool.set_best_block(&[2; 32]);
+        let mut released = Vec::new();
+        released.extend(finalized.advance(&pool, [1; 32]));
+        assert_eq!(pool.set_finalized_block(&[1; 32]).count(), 0);
+        // 第一最终块尚在池里，第二次通知不能提前或重复释放它。
+        released.extend(finalized.advance(&pool, [2; 32]));
+        assert_eq!(pool.set_finalized_block(&[2; 32]).count(), 0);
+        for pruned in pool.prune_finalized_with_body() {
+            if pruned.block_hash != finalized.hash {
+                released.push(pruned.block_hash);
+            }
+        }
+        released.sort();
+        assert_eq!(released, vec![[0; 32], [1; 32]]);
+        assert_eq!(
+            finalized.validation_header(&pool, pool.best_block_hash()),
+            Some(&[2][..])
+        );
+        assert!(finalized.validation_header(&pool, &[1; 32]).is_none());
+    }
+
+    #[test]
+    fn pruned_fork_result_is_rejected_while_finalized_root_stays_available() {
+        let (mut pool, mut finalized) = pool();
+        pool.add_block([1; 32], &[0; 32], block(1));
+        pool.add_block([2; 32], &[0; 32], block(2));
+        let _ = pool.set_best_block(&[2; 32]);
+        assert!(finalized.validation_header(&pool, &[2; 32]).is_some());
+        let _ = pool.set_best_block(&[1; 32]);
+        assert_eq!(finalized.advance(&pool, [1; 32]), Some([0; 32]));
+        let discarded = pool.set_finalized_block(&[1; 32]).collect::<Vec<_>>();
+        assert_eq!(discarded.len(), 1);
+        assert_eq!(discarded[0].0, [2; 32]);
+        let _ = pool.prune_finalized_with_body().count();
+        assert!(finalized.validation_header(&pool, &[2; 32]).is_none());
+        assert!(finalized.validation_header(&pool, &[1; 32]).is_some());
+    }
 }

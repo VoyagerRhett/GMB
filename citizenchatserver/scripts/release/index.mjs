@@ -1,20 +1,20 @@
 #!/usr/bin/env node
 
-// 中文注释：单平台 RELEASE_BUILD: full，CARGO_INCREMENTAL=0。Release 只封装准确成功 CI
-// 候选，禁止重新下载上游、读取增量缓存或重新构建。
+// 中文注释：单平台 RELEASE_BUILD: full，CARGO_INCREMENTAL=0。正式包必须绑定准确成功 CI
+// 的本仓配置候选；正式包只包含公民实例配置和来源证明。
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
   cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
-  readdirSync, rmSync, writeFileSync,
+  readdirSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
+import { verifyCandidate, verifyConfiguration } from '../ci/index.mjs';
 const repository = 'VoyagerRhett/GMB';
 const prefix = 'citizenchatserver-cloudflare-v';
-const ciPipeline = 'gmb.citizenchatserver.cloudflare.ci';
 const ciTitle = '公民聊天服务 · Cloudflare · CI';
 
 function fail(message) { throw new Error(message); }
@@ -96,40 +96,6 @@ function regularFiles(root) {
   walk(root);
   return rows;
 }
-function verifyCandidate(root, sourceSHA) {
-  const expected = [];
-  for (const line of readFileSync(join(root, 'SHA256SUMS'), 'utf8').trim().split('\n')) {
-    const match = /^([0-9a-f]{64})  ([^\r\n]+)$/.exec(line);
-    if (!match || match[2].split('/').includes('..') || sha256(join(root, match[2])) !== match[1]) fail('CI 候选哈希闭集无效');
-    expected.push(match[2]);
-  }
-  const actual = regularFiles(root).filter((path) => path !== 'SHA256SUMS');
-  if (JSON.stringify(actual) !== JSON.stringify([...expected].sort())) fail('CI 候选文件闭集无效');
-  const product = JSON.parse(readFileSync(join(root, 'product.json'), 'utf8'));
-  const productKeys = [
-    'platform', 'product_id', 'public_url', 'realtime_url', 'source_product_id',
-    'source_repository', 'version',
-  ];
-  const upstream = JSON.parse(readFileSync(join(root, 'upstream-release.json'), 'utf8'));
-  const upstreamKeys = [
-    'git_commit_sha', 'instance_source_sha', 'product_id', 'release_asset_sha256',
-    'repository', 'version_tag',
-  ];
-  if (JSON.stringify(Object.keys(product).sort()) !== JSON.stringify(productKeys)
-      || product.product_id !== 'citizenchatserver' || product.platform !== 'cloudflare'
-      || product.source_repository !== 'VoyagerRhett/TATA'
-      || product.source_product_id !== 'tatachatserver'
-      || product.public_url !== 'https://chat.crcfrcn.com'
-      || product.realtime_url !== 'wss://chat.crcfrcn.com/realtime'
-      || JSON.stringify(Object.keys(upstream).sort()) !== JSON.stringify(upstreamKeys)
-      || upstream.instance_source_sha !== sourceSHA || upstream.repository !== 'VoyagerRhett/TATA'
-      || upstream.product_id !== 'tatachatserver'
-      || !/^tatachatserver-cloudflare-v\d+\.\d{1,2}\.\d{1,2}$/.test(upstream.version_tag)
-      || !/^[0-9a-f]{40}$/.test(upstream.git_commit_sha)
-      || !/^[0-9a-f]{64}$/.test(upstream.release_asset_sha256)) {
-    fail('CI 候选产品、上游或当前源码锚点无效');
-  }
-}
 function verifyReleaseSource(values) {
   const ciRunID = values['ci-run-id'];
   const sourceSHA = values['source-sha'];
@@ -188,7 +154,7 @@ export function verifyPackagedRelease({ archive }) {
   } catch {
     fail('CitizenChatServer Release 归档格式无效');
   }
-  if (!rows.length || rows.some((path) => path.startsWith('/') || path.split('/').includes('..'))
+  if (!rows.length || new Set(rows).size !== rows.length || rows.some((path) => path.startsWith('/') || path.split('/').includes('..'))
       || detailRows.length !== rows.length || detailRows.some((line) => line[0] !== '-')) {
     fail('CitizenChatServer Release 归档路径或文件类型无效');
   }
@@ -201,8 +167,7 @@ export function verifyPackagedRelease({ archive }) {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
     const manifestKeys = [
       'ci_run_id', 'files', 'git_commit_sha', 'platform', 'product_id', 'schema',
-      'software_version', 'upstream_git_commit_sha', 'upstream_product_id',
-      'upstream_repository', 'upstream_version_tag',
+      'software_version',
     ];
     if (JSON.stringify(Object.keys(manifest).sort()) !== JSON.stringify(manifestKeys)
         || manifest.schema !== 1 || manifest.product_id !== 'citizenchatserver'
@@ -210,10 +175,6 @@ export function verifyPackagedRelease({ archive }) {
         || !Number.isSafeInteger(manifest.ci_run_id) || manifest.ci_run_id <= 0
         || !/^\d+\.\d+\.\d+$/.test(manifest.software_version)
         || !/^[0-9a-f]{40}$/.test(manifest.git_commit_sha)
-        || manifest.upstream_repository !== 'VoyagerRhett/TATA'
-        || manifest.upstream_product_id !== 'tatachatserver'
-        || !/^tatachatserver-cloudflare-v\d+\.\d+\.\d+$/.test(manifest.upstream_version_tag)
-        || !/^[0-9a-f]{40}$/.test(manifest.upstream_git_commit_sha)
         || !Array.isArray(manifest.files) || !manifest.files.length) {
       fail('CitizenChatServer Release manifest 无效');
     }
@@ -238,31 +199,13 @@ export function verifyPackagedRelease({ archive }) {
     assertChecksumClosure(
       checksumMap(join(extracted, 'SHA256SUMS')), internal, '单包内部 SHA256SUMS',
     );
+    // 中文注释：正式配置包复用 CI 的唯一配置验证，来源与版本必须和自身 manifest 一致。
+    verifyConfiguration(extracted);
     const product = JSON.parse(readFileSync(join(extracted, 'product.json'), 'utf8'));
-    const productKeys = [
-      'platform', 'product_id', 'public_url', 'realtime_url', 'source_product_id',
-      'source_repository', 'version',
-    ];
-    const upstream = JSON.parse(readFileSync(join(extracted, 'upstream-release.json'), 'utf8'));
-    const upstreamKeys = [
-      'git_commit_sha', 'instance_source_sha', 'product_id', 'release_asset_sha256',
-      'repository', 'version_tag',
-    ];
-    if (JSON.stringify(Object.keys(product).sort()) !== JSON.stringify(productKeys)
-        || product.product_id !== manifest.product_id || product.platform !== manifest.platform
+    if (JSON.stringify([...files.keys()]) !== JSON.stringify(['product.json', 'source-sha.txt', 'wrangler.jsonc'])
         || product.version !== manifest.software_version
-        || product.source_repository !== manifest.upstream_repository
-        || product.source_product_id !== manifest.upstream_product_id
-        || product.public_url !== 'https://chat.crcfrcn.com'
-        || product.realtime_url !== 'wss://chat.crcfrcn.com/realtime'
-        || JSON.stringify(Object.keys(upstream).sort()) !== JSON.stringify(upstreamKeys)
-        || upstream.repository !== manifest.upstream_repository
-        || upstream.product_id !== manifest.upstream_product_id
-        || upstream.version_tag !== manifest.upstream_version_tag
-        || upstream.git_commit_sha !== manifest.upstream_git_commit_sha
-        || upstream.instance_source_sha !== manifest.git_commit_sha
-        || !/^[0-9a-f]{64}$/.test(upstream.release_asset_sha256)) {
-      fail('CitizenChatServer Release 内外身份不一致');
+        || readFileSync(join(extracted, 'source-sha.txt'), 'utf8') !== manifest.git_commit_sha + '\n') {
+      fail('CitizenChatServer Release 配置或源码身份不一致');
     }
     return manifest;
   } finally {
@@ -270,7 +213,7 @@ export function verifyPackagedRelease({ archive }) {
   }
 }
 
-/// 只负责从准确 CI 候选生成可离线验证的唯一正式包；GitHub 正式分发仍只由 action() 执行。
+// 中文注释：只封装准确成功 CI 的实例配置；不下载或重组装服务程序。
 export function packageRelease(values) {
   const candidate = resolve(values.candidate ?? '');
   const output = resolve(values.output ?? '');
@@ -285,6 +228,14 @@ export function packageRelease(values) {
   const candidateFromOutput = relative(output, candidate);
   const inside = (value) => value === '' || (value !== '..' && !value.startsWith(`..${sep}`));
   if (inside(outputFromCandidate) || inside(candidateFromOutput)) fail('Release 候选与输出目录不得重叠');
+  // 中文注释：同时约束真实父目录，防止链接把正式包写回源码或输入候选。
+  const physicalOutput = join(realpathSync(dirname(output)), basename(output));
+  const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
+  if ([output, physicalOutput].some((path) => inside(relative(repositoryRoot, path)))) {
+    fail('Release 输出不得进入源码仓库');
+  }
+  if (inside(relative(realpathSync(candidate), physicalOutput))
+      || inside(relative(physicalOutput, realpathSync(candidate)))) fail('Release 候选与输出目录不得重叠');
   verifyCandidate(candidate, sourceSHA);
   const temporary = mkdtempSync(join(tmpdir(), 'citizenchatserver-release-'));
   try {
@@ -299,12 +250,9 @@ export function packageRelease(values) {
     if (!payloadFiles.length || payloadFiles.some((path) => (
       path.startsWith('/') || path.split('/').includes('..') || !/^[A-Za-z0-9._/-]+$/.test(path)
     ))) fail('CitizenChatServer Release 归档文件名无效');
-    const upstream = JSON.parse(readFileSync(join(stage, 'upstream-release.json'), 'utf8'));
     const manifest = {
       schema: 1, product_id: 'citizenchatserver', platform: 'cloudflare',
       software_version: softwareVersion, git_commit_sha: sourceSHA, ci_run_id: Number(ciRunID),
-      upstream_repository: upstream.repository, upstream_product_id: upstream.product_id,
-      upstream_version_tag: upstream.version_tag, upstream_git_commit_sha: upstream.git_commit_sha,
       files: payloadFiles.map((path) => ({ path, sha256: sha256(join(stage, path)) })),
     };
     const manifestPath = join(stage, 'release-manifest.json');
@@ -341,7 +289,8 @@ function publish(values) {
       || !/^\d+\.\d+\.\d+$/.test(softwareVersion ?? '')
       || versionTag !== `${prefix}${softwareVersion}`) fail('Release 发布输入无效');
   const manifest = verifyPackagedRelease({ archive });
-  if (manifest.git_commit_sha !== sourceSHA || manifest.software_version !== softwareVersion) {
+  if (manifest.git_commit_sha !== sourceSHA || manifest.software_version !== softwareVersion
+      || manifest.ci_run_id !== Number(ciRunID)) {
     fail('Release 单包与发布输入不一致');
   }
   let exists = true;

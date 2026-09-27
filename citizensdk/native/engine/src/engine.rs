@@ -47,8 +47,7 @@ use crate::{
     transaction_history::TransactionHistoryService,
     transaction_outcome::{verify_transaction_outcome, TransactionEvidence},
     transaction_prepare::{
-        build_prepared_transaction, revalidate_prepared_transaction, PreparedTransaction,
-        PreparedTransactionRegistry,
+        build_prepared_transaction, PreparedTransaction, PreparedTransactionRegistry,
     },
 };
 
@@ -853,18 +852,13 @@ impl CitizenEngine {
             let summary = prepared.summary();
             let source = summary.source_account_id();
             let result = async {
-                revalidate_prepared_transaction(
-                    &prepared,
-                    self.components.chain_client()?.as_ref(),
-                    self.components
-                        .account_nonce_source()
-                        .ok_or_else(|| component_missing("account_nonce_source"))?
-                        .as_ref(),
-                )
-                .await?;
+                // 准备阶段已冻结同一准确块的 Runtime、nonce 和待签字节。
+                // 执行只消费这一份结果；账户并发门及验签继续生效，不再联网重建或换 nonce。
                 let execution_is_current = {
                     let state = self.state.lock().map_err(|_| EngineError::StatePoisoned)?;
-                    state.lifecycle == EngineLifecycle::Running && state.generation == generation
+                    state.lifecycle == EngineLifecycle::Running
+                        && state.generation == generation
+                        && prepared.generation() == generation
                 };
                 if !execution_is_current {
                     return Err(EngineError::contract(

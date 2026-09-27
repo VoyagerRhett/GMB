@@ -74,11 +74,18 @@ flutter config --build-dir="$FLUTTER_BUILD_RELATIVE" >/dev/null
 
 PUB_GET_ARGS=(--enforce-lockfile)
 GRADLE_NETWORK_ARGS=()
+case "${CITIZENWALLET_PUB_OFFLINE:-false}" in
+  true|false) ;;
+  *) echo 'CITIZENWALLET_PUB_OFFLINE只接受true或false' >&2; exit 1 ;;
+esac
+PUB_OFFLINE="${CITIZENWALLET_PUB_OFFLINE:-false}"
 case "${CITIZENWALLET_OFFLINE:-false}" in
-  true) PUB_GET_ARGS+=(--offline); GRADLE_NETWORK_ARGS+=(--offline); export CARGO_NET_OFFLINE=true ;;
+  true) PUB_OFFLINE=true; GRADLE_NETWORK_ARGS+=(--offline); export CARGO_NET_OFFLINE=true ;;
   false) ;;
   *) echo 'CITIZENWALLET_OFFLINE只接受true或false' >&2; exit 1 ;;
 esac
+# 任务级Pub预装只约束Pub；原整体离线开关仍同时约束Pub、Gradle和Cargo。
+if [[ "$PUB_OFFLINE" == true ]]; then PUB_GET_ARGS+=(--offline); fi
 
 # Flutter 版本及依赖配置由产品工程自行决定。
 

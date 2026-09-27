@@ -16,7 +16,7 @@ class Bip39InputField extends StatefulWidget {
 
   final TextEditingController controller;
 
-  /// 期望的助记词单词数量（12 或 24）。
+  /// 期望的助记词单词数量（12、18 或 24；0 表示导入时不预选数量）。
   final int wordCount;
 
   @override
@@ -107,7 +107,7 @@ class _Bip39InputFieldState extends State<Bip39InputField> {
           decoration: InputDecoration(
             hintText: '输入助记词，选择匹配的单词',
             counterText:
-                '$_enteredWordCount / ${widget.wordCount > 0 ? widget.wordCount : "12 或 24"} 个单词',
+                '$_enteredWordCount / ${widget.wordCount > 0 ? widget.wordCount : "12、18 或 24"} 个单词',
           ),
           textInputAction: TextInputAction.done,
           autocorrect: false,

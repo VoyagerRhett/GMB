@@ -1,11 +1,12 @@
+import 'dart:async';
+
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
 import 'package:citizen_sdk/citizen_sdk.dart';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:citizenapp/log/app_log.dart';
 
 import 'package:citizenapp/ui/app_theme.dart';
-import 'package:citizenapp/my/util/amount_format.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
 /// 钱包详情页主视觉中的链上余额区。
@@ -36,53 +37,47 @@ class WalletOnchainBalanceCard extends StatefulWidget {
 /// State 类公开(去掉下划线)是为了支持外层 [GlobalKey] 引用,
 /// 下拉刷新时由 [WalletDetailPage] 通过 key 调 [refresh()]。
 class WalletOnchainBalanceCardState extends State<WalletOnchainBalanceCard> {
-  /// 查询结果(yuan),null 表示尚未查询或加载中。
-  double? _balance;
-
-  /// 最近一次查询是否失败。没有成功值时显示原点击重试入口；已有成功值时
-  /// 保留原金额，仍由外层下拉刷新重试，不改变历史展示规则。
-  bool _hasError = false;
-
-  /// 是否正在刷新。用于防止重复触发刷新。
-  bool _isLoading = false;
+  late WalletBalanceState<CitizenAccountBalance> _balance;
 
   @override
   void initState() {
     super.initState();
-    refresh();
+    _bind();
   }
 
-  /// 拉取链上 finalized total 余额。
-  ///
-  /// 公开方法,供外层 [WalletDetailPage] 通过 [GlobalKey] 触发下拉刷新。
-  Future<void> refresh() async {
-    if (_isLoading) return;
-    setState(() {
-      _isLoading = true;
-      _hasError = false;
-    });
-    try {
-      final loader =
-          widget.balanceLoader ??
-          context.read<CitizenSdk>().chain.getAccountBalance;
-      final snapshot = await loader(widget.wallet.accountId);
-      final total = snapshot.totalFen.toDouble() / 100;
-      if (!mounted) return;
-      setState(() {
-        _balance = total;
-        _isLoading = false;
-      });
-    } catch (e) {
-      AppLog.d(
-        '[WalletOnchainBalanceCard] getAccountBalance failed: $e',
-      );
-      if (!mounted) return;
-      setState(() {
-        _hasError = true;
-        _isLoading = false;
-      });
+  // 各次进入直接绑定同一个 wallet 状态，页面不另存金额、失败或刷新标志。
+  void _bind() {
+    final loader = widget.balanceLoader;
+    _balance = loader == null
+        ? AccountBalanceSnapshotStore.forChain(context.read<CitizenSdk>().chain)
+              .accountState(widget.wallet.accountId)
+        : WalletBalanceState((_) => loader(widget.wallet.accountId));
+    _balance.addListener(_changed);
+    unawaited(refresh(forceRefresh: false));
+  }
+
+  void _changed() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didUpdateWidget(covariant WalletOnchainBalanceCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.wallet.accountId != widget.wallet.accountId ||
+        oldWidget.balanceLoader != widget.balanceLoader) {
+      _balance.removeListener(_changed);
+      _bind();
     }
   }
+
+  @override
+  void dispose() {
+    _balance.removeListener(_changed);
+    super.dispose();
+  }
+
+  Future<void> refresh({bool forceRefresh = true}) =>
+      _balance.load(forceRefresh: forceRefresh);
 
   @override
   Widget build(BuildContext context) {
@@ -111,7 +106,7 @@ class WalletOnchainBalanceCardState extends State<WalletOnchainBalanceCard> {
   /// 金额区:根据状态切换占位 / 错误提示 / 正常金额。
   Widget _buildAmountSection() {
     // 错误态:点击再次触发刷新。
-    if (_hasError && _balance == null) {
+    if (_balance.hasError && _balance.value == null) {
       return Material(
         color: Colors.transparent,
         child: InkWell(
@@ -135,7 +130,7 @@ class WalletOnchainBalanceCardState extends State<WalletOnchainBalanceCard> {
       );
     }
     // 加载态 / 初始态：金额与单位分开排版，确保单位仅出现一次。
-    if (_balance == null) {
+    if (_balance.value == null) {
       return Row(
         crossAxisAlignment: CrossAxisAlignment.baseline,
         textBaseline: TextBaseline.alphabetic,
@@ -169,7 +164,7 @@ class WalletOnchainBalanceCardState extends State<WalletOnchainBalanceCard> {
         textBaseline: TextBaseline.alphabetic,
         children: [
           Text(
-            AmountFormat.format(_balance!, symbol: ''),
+            AccountBalanceSnapshotStore.formatFen(_balance.value!.totalFen),
             style: TextStyle(
               fontSize: AppLayout.scaledValue(44),
               fontWeight: FontWeight.w700,

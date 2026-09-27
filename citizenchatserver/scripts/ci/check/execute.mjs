@@ -473,7 +473,8 @@ function requireExactRemoteJobEnvironment() {
     throw new Error('准确远端Job仓库身份无效');
   }
 }
-const workflowSteps = Object.freeze({"0":{"shell":"bash","source":"test \"$(git rev-parse HEAD)\" = \"$GMB_SOURCE_SHA\"\nnode --test citizenchatserver/test/*.test.mjs\nnode \"$GITHUB_WORKSPACE/citizenchatserver/scripts/ci/index.mjs\" action --instance citizenchatserver --output \"$RUNNER_TEMP/citizenchatserver-cloudflare-candidate\" --source-sha \"$GMB_SOURCE_SHA\"\n"}});
+// 中文注释：单一步骤先核对本仓源码与测试，再生成无上游运行模块的配置候选。
+const workflowSteps = Object.freeze({"0":{"shell":"bash","source":"test \"$(git rev-parse HEAD)\" = \"$GMB_SOURCE_SHA\"\nnode --test citizenchatserver/test/*.test.mjs citizenchatserver/scripts/ci/check/test.mjs\nnode \"$GITHUB_WORKSPACE/citizenchatserver/scripts/ci/index.mjs\" action --instance citizenchatserver --output \"$RUNNER_TEMP/citizenchatserver-cloudflare-candidate\" --source-sha \"$GMB_SOURCE_SHA\"\n"}});
 
 function runExactWorkflowStep(index) {
   requireExactRemoteJobEnvironment();

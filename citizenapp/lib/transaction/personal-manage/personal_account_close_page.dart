@@ -13,10 +13,11 @@ import 'package:citizenapp/qr/widgets/address_scan_button.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/widgets/chain_progress_banner.dart';
 import 'package:citizenapp/my/util/amount_format.dart';
-import 'package:citizenapp/transaction/shared/account_balance_snapshot_store.dart';
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
 
 import 'personal_manage_service.dart';
 import 'personal_proposal_history_service.dart';
+
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
@@ -81,38 +82,32 @@ class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
     super.dispose();
   }
 
-  Future<void> _fetchBalance() async {
-    final chain = context.read<CitizenSdk>().chain;
-    final store = AccountBalanceSnapshotStore.instance;
-    final local = await store.read(widget.institution.personalAccountId);
-    if (local != null && mounted) {
-      setState(() {
-        _availableBalance = local.balanceYuan;
-        _loadingBalance = false;
-      });
-      if (local.isFresh(AccountBalanceSnapshotStore.displayTtl)) return;
-    }
+  /// 页面进入读取 wallet 持久余额，交易前校验由既有余额守卫强制刷新。
+  Future<bool> _fetchBalance({bool forceRefresh = false}) async {
+    if (forceRefresh && mounted) setState(() => _loadingBalance = true);
     try {
-      final snapshot = await chain.getAccountBalance(
-        widget.institution.personalAccountId,
-      );
-      final balance = snapshot.freeFen.toDouble() / 100;
-      try {
-        await store.put(
-          accountId: widget.institution.personalAccountId,
-          balanceYuan: balance,
-        );
-      } catch (_) {
-        // 余额快照写入失败不影响当前链上余额展示。
-      }
-      if (!mounted) return;
+      final snapshot =
+          await AccountBalanceSnapshotStore.forChain(
+            context.read<CitizenSdk>().chain,
+          ).getAccountBalance(
+            widget.institution.personalAccountId,
+            forceRefresh: forceRefresh,
+          );
+      if (!mounted) return false;
       setState(() {
-        _availableBalance = balance;
+        _availableBalance = snapshot.freeFen.toDouble() / 100;
         _loadingBalance = false;
       });
+      return true;
     } catch (_) {
-      if (!mounted) return;
-      if (local == null) setState(() => _loadingBalance = false);
+      if (mounted) {
+        setState(() => _loadingBalance = false);
+        if (forceRefresh) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(const SnackBar(content: Text('余额校验失败，请刷新后重试')));
+        }
+      }
+      return false;
     }
   }
 
@@ -146,11 +141,13 @@ class _PersonalAccountClosePageState extends State<PersonalAccountClosePage> {
     final chain = context.read<CitizenSdk>().chain;
     final blockedReason = _submitBlockedReason;
     if (blockedReason != null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(blockedReason)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(blockedReason)));
       return;
     }
+
+    if (!await _fetchBalance(forceRefresh: true)) return;
+    if (!mounted) return;
 
     final beneficiary = _beneficiaryController.text.trim();
     if (!_validateAddress(beneficiary)) return;

@@ -269,15 +269,24 @@ pub(crate) async fn build_prepared_transaction(
     source_account_id: AccountId32,
     call: OpaqueTransactionCall,
 ) -> Result<PreparedTransaction, EngineError> {
+    let preparation_span = crate::transaction_diagnostic::Span::start("prepare_build");
     let identity = verified_identity(chain_client).await?;
+    let best_span = crate::transaction_diagnostic::Span::start("prepare_best");
     let best = chain_client.get_best_head().await?;
+    best_span.finish();
+    let runtime_span = crate::transaction_diagnostic::Span::start("prepare_runtime");
     let runtime_context = verified_runtime_context(chain_client, best).await?;
+    runtime_span.finish();
+    let metadata_span = crate::transaction_diagnostic::Span::start("prepare_metadata_decode");
     let metadata = decode_metadata_strict(runtime_context.metadata())?;
     validate_opaque_runtime_call(&metadata, &call)?;
+    metadata_span.finish();
 
+    let nonce_span = crate::transaction_diagnostic::Span::start("prepare_nonce");
     let nonce = nonce_source
         .account_next_index(source_account_id, best)
         .await?;
+    nonce_span.finish();
     if nonce.account_id() != source_account_id || nonce.best_block() != best {
         return Err(EngineError::contract(
             ContractErrorCode::Integrity,
@@ -355,7 +364,7 @@ pub(crate) async fn build_prepared_transaction(
         runtime_context.version(),
         nonce.value(),
     )?;
-    Ok(PreparedTransaction {
+    let prepared = PreparedTransaction {
         summary,
         identity,
         runtime_context,
@@ -367,40 +376,9 @@ pub(crate) async fn build_prepared_transaction(
         signature_offset,
         signed_extensions: extensions,
         generation,
-    })
-}
-
-/// Rebuild against current best state and require every signing-relevant fact to remain identical.
-pub(crate) async fn revalidate_prepared_transaction(
-    prepared: &PreparedTransaction,
-    chain_client: &dyn VerifiedChainClient,
-    nonce_source: &dyn AccountNonceSource,
-) -> Result<(), EngineError> {
-    let rebuilt = build_prepared_transaction(
-        chain_client,
-        nonce_source,
-        prepared.summary.preparation_id(),
-        prepared.generation,
-        prepared.summary.source_account_id(),
-        OpaqueTransactionCall::try_new(prepared.call_data.to_vec())?,
-    )
-    .await?;
-    if rebuilt.identity != prepared.identity
-        || rebuilt.runtime_context.version() != prepared.runtime_context.version()
-        || rebuilt.nonce.value() != prepared.nonce.value()
-        || rebuilt.summary.call_data_hash() != prepared.summary.call_data_hash()
-        || rebuilt.signed_extensions != prepared.signed_extensions
-        || rebuilt.full_signing_payload != prepared.full_signing_payload
-        || rebuilt.signing_message != prepared.signing_message
-        || rebuilt.extrinsic_template != prepared.extrinsic_template
-        || rebuilt.signature_offset != prepared.signature_offset
-    {
-        return Err(EngineError::contract(
-            ContractErrorCode::Conflict,
-            "transaction preparation 的 chain/runtime/nonce/template 已漂移",
-        ));
-    }
-    Ok(())
+    };
+    preparation_span.finish();
+    Ok(prepared)
 }
 
 /// Reconstruct a persisted generic authorization from its opaque call and exact current runtime.

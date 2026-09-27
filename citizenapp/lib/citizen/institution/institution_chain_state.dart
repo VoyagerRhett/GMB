@@ -1,3 +1,4 @@
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
 // 统一机构链态读服务(ADR-028 决策 2)——合并公权 `LivePublicInstitutionChainData`
 // 与治理侧 admins 读取为一套:按机构 CID 过滤提案,按具体机构账户读余额。
 //
@@ -28,12 +29,12 @@ class InstitutionProposalSummary {
   final int status;
 
   String get statusLabel => switch (status) {
-        1 => '已通过',
-        2 => '已否决',
-        3 => '已执行',
-        4 => '执行失败',
-        _ => '表决中',
-      };
+    1 => '已通过',
+    2 => '已否决',
+    3 => '已执行',
+    4 => '执行失败',
+    _ => '表决中',
+  };
 }
 
 /// 统一机构链态读服务接口(可注入 fake 单测)。
@@ -55,15 +56,16 @@ class LiveInstitutionChainState implements InstitutionChainState {
     required CitizenTransactions transactions,
     InstitutionAdminService? adminService,
     MultisigTransferProposalFeed? feed,
-  })  : _chain = chain,
-        _adminService = adminService ?? InstitutionAdminService(chain: chain),
-        _feed = feed ??
-            MultisigTransferProposalFeed(
-              service: MultisigTransferService(
-                chain: chain,
-                transactions: transactions,
-              ),
-            );
+  }) : _chain = chain,
+       _adminService = adminService ?? InstitutionAdminService(chain: chain),
+       _feed =
+           feed ??
+           MultisigTransferProposalFeed(
+             service: MultisigTransferService(
+               chain: chain,
+               transactions: transactions,
+             ),
+           );
 
   final CitizenChain _chain;
   final InstitutionAdminService _adminService;
@@ -72,7 +74,8 @@ class LiveInstitutionChainState implements InstitutionChainState {
   @override
   Future<Map<String, double>> balances(List<String> accountIds) async {
     if (accountIds.isEmpty) return Future.value(const {});
-    final snapshots = await _chain.getAccountBalances(accountIds);
+    final snapshots = await AccountBalanceSnapshotStore.forChain(_chain)
+        .getAccountBalances(accountIds);
     return <String, double>{
       for (final snapshot in snapshots)
         snapshot.accountId: snapshot.freeFen.toDouble() / 100,
@@ -89,16 +92,19 @@ class LiveInstitutionChainState implements InstitutionChainState {
 
   @override
   Future<List<InstitutionProposalSummary>> proposals(
-      Institution institution) async {
+    Institution institution,
+  ) async {
     final all = await _feed.currentYearProposals();
     final out = <InstitutionProposalSummary>[];
     for (final p in all) {
       if (p.meta.subjectCidNumbers.contains(institution.cidNumber)) {
-        out.add(InstitutionProposalSummary(
-          proposalId: p.meta.proposalId,
-          idLabel: '提案 #${p.meta.proposalId}',
-          status: p.meta.status,
-        ));
+        out.add(
+          InstitutionProposalSummary(
+            proposalId: p.meta.proposalId,
+            idLabel: '提案 #${p.meta.proposalId}',
+            status: p.meta.status,
+          ),
+        );
       }
     }
     return out;

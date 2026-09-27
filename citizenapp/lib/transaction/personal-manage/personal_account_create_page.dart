@@ -1,3 +1,4 @@
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
 import 'package:citizen_sdk/citizen_sdk.dart';
 
 import 'dart:convert';
@@ -156,17 +157,15 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
       final document = await context.read<CitizenSdk>().qr.parse(result.trim());
       if (document.kind != CitizenQrKind.userContact) {
         if (!mounted) return;
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('请扫描用户主页中的用户码')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('请扫描用户主页中的用户码')));
         return;
       }
       await _promptAdminNamesAndAdd(document.accountId!);
     } on CitizenSdkException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('二维码格式错误：$e')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('二维码格式错误：$e')));
     }
   }
 
@@ -184,15 +183,13 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
 
   void _addAdmin(AdminPerson admin) {
     if (_admins.any((item) => item.account_id == admin.account_id)) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('该管理员已在列表中')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('该管理员已在列表中')));
       return;
     }
     if (_admins.length >= 64) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('管理员数量已达上限（64）')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('管理员数量已达上限（64）')));
       return;
     }
     setState(() {
@@ -337,9 +334,9 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
     required CitizenWalletStateAccount wallet,
     required BigInt initialAmountFen,
   }) async {
-    final balance = await context.read<CitizenSdk>().chain.getAccountBalance(
-      wallet.accountId,
-    );
+    final balance = await AccountBalanceSnapshotStore.forChain(
+      context.read<CitizenSdk>().chain,
+    ).getAccountBalance(wallet.accountId, forceRefresh: true);
     final balanceYuan = balance.freeFen.toDouble() / 100;
     final balanceFen = MultisigCreateAmountRules.yuanToFen(balanceYuan);
     final requiredFen = MultisigCreateAmountRules.requiredBalanceFen(
@@ -357,9 +354,8 @@ class _PersonalAccountCreatePageState extends State<PersonalAccountCreatePage> {
     final chain = context.read<CitizenSdk>().chain;
     final error = _validate();
     if (error != null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(error)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(error)));
       return;
     }
 

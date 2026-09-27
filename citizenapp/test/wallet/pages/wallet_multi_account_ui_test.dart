@@ -23,6 +23,7 @@ import 'package:citizenapp/security/local_data_key.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/widgets/shimmer_loading.dart';
 import 'package:citizenapp/wallet/pages/wallet_page.dart';
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
 import 'package:citizenapp/transaction/onchain-transaction/onchain_payment_service.dart';
 import 'package:citizenapp/transaction/onchain-transaction/onchain_payment_models.dart';
 import 'package:flutter/material.dart';
@@ -68,9 +69,11 @@ class _Security implements AccountSecurityService {
 class _CurrentUser extends Fake implements CurrentUserContext {}
 class _Sessions extends Fake implements SquareSessionProvider {}
 class _Resolver extends Fake implements FinalizedIdentityResolver {
-  @override Future<FinalizedIdentity?> resolve() async => _identity;
+  @override Future<FinalizedIdentity?> resolve() async =>
+      _identityGate == null ? _identity : await _identityGate!.future;
 }
 FinalizedIdentity? _identity;
+Completer<FinalizedIdentity?>? _identityGate;
 
 late CitizenSdk _sdk;
 late TestCitizenSdkTransport _transport;
@@ -126,7 +129,7 @@ List<Object?> _stateTuple(CitizenWalletState state) => [
     if (value.cleanupTargets == null) null else [value.cleanupTargets!.accountIds, value.cleanupTargets!.deleteWalletWideKey]]],
 ];
 
-Widget _walletTabHost(Future<CitizenWalletState> Function() loader) {
+Widget _walletTabHost(Future<CitizenWalletState> Function() loader, {bool selectForTrade = false}) {
   _snapshotLoader = loader;
   return MultiProvider(providers: [
     Provider<CitizenSdk>.value(value: _sdk),
@@ -134,7 +137,7 @@ Widget _walletTabHost(Future<CitizenWalletState> Function() loader) {
     Provider<CurrentUserContext>(create: (_) => _CurrentUser()),
     Provider<FinalizedIdentityResolver>(create: (_) => _Resolver()),
     Provider<SquareSessionProvider>(create: (_) => _Sessions()),
-  ], child: const MaterialApp(home: WalletTab()));
+  ], child: MaterialApp(home: WalletTab(selectForTrade: selectForTrade)));
 }
 
 void _disposeWidgetBeforeStores(WidgetTester tester) {
@@ -159,11 +162,22 @@ Future<void> _pumpUntil(WidgetTester tester, bool Function() done) async {
   expect(done(), isTrue, reason: '等待实际隔离库/SDK回调完成，不能用帧稳定代替I/O完成');
 }
 
+// 钱包首帧恢复读取真实隔离 Isar；虚拟帧稳定不能替代异步文件 I/O 完成。
+Future<void> _settleWallet(WidgetTester tester) async {
+  for (var i = 0; i < 100; i++) {
+    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 5)));
+    await tester.pump(const Duration(milliseconds: 100));
+    if (!tester.binding.hasScheduledFrame && !WalletIsar.instance.hasActiveOperation) return;
+  }
+  fail('钱包页面或本地 I/O 未在有界等待内完成');
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   useIsolatedIsar();
   setUp(() async {
     _identity = null;
+    _identityGate = null;
     SharedPreferences.setMockInitialValues({});
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
       const MethodChannel('citizenapp/security'), (_) async => null);
@@ -199,6 +213,35 @@ void main() {
     _security.revision.dispose();
   });
 
+  for (final selectForTrade in [false, true]) {
+    testWidgets('冷钱包已有余额在卡片首次出现时显示，身份未返回不阻塞：$selectForTrade', (tester) async {
+      _disposeWidgetBeforeStores(tester);
+      final snapshot = _coldWalletSnapshot();
+      final store = AccountBalanceSnapshotStore.forChain(_sdk.chain);
+      await tester.runAsync(() => store.getAccountBalance(snapshot.accounts.single.accountId));
+      // 清空内存且保留隔离库，验证首次卡片真正恢复磁盘余额，不能靠预热内存通过。
+      await tester.runAsync(() => store.forget([snapshot.accounts.single.accountId]));
+      expect(store.accountState(snapshot.accounts.single.accountId).value, isNull);
+      var queries = 0;
+      _transport.handlers['getAccountBalance'] = (_) { queries++; throw StateError('禁止重复余额查询'); };
+      _transport.handlers['getAccountBalances'] = (_) { queries++; throw StateError('禁止重复余额查询'); };
+      final identity = _identityGate = Completer<FinalizedIdentity?>();
+      await tester.pumpWidget(_walletTabHost(() async => snapshot, selectForTrade: selectForTrade));
+      // 只等待钱包目录使卡片可见；不等待身份或余额从网络回来。
+      await _pumpUntil(tester, () => find.byType(WalletListTile).evaluate().isNotEmpty);
+      expect(identity.isCompleted, isFalse);
+      expect(find.text('1.00'), findsOneWidget);
+      expect(queries, 0);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpWidget(_walletTabHost(() async => snapshot, selectForTrade: selectForTrade));
+      await _pumpUntil(tester, () => find.byType(WalletListTile).evaluate().isNotEmpty);
+      expect(find.text('1.00'), findsOneWidget);
+      expect(queries, 0);
+      identity.complete(null);
+      await tester.pump();
+    });
+  }
+
 
 
 
@@ -227,9 +270,9 @@ void main() {
       state = orderedState(revision: 2, name: '新默认冷钱包');
       return [['completed', hot.accounts.single.accountId, '0x${'22' * 32}', '2', null, null, null]];
     };
-    await tester.pumpWidget(_walletTabHost(() async => state)); await tester.pumpAndSettle();
+    await tester.pumpWidget(_walletTabHost(() async => state)); await _settleWallet(tester);
     tester.widget<SliverReorderableList>(find.byType(SliverReorderableList)).onReorderItem!(0, 1);
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     expect(tester.widget<WalletListTile>(find.byType(WalletListTile)).isDefault, isTrue);
     expect(state.activeWalletIndex, 0);
     expect(_transport.calls, isNot(contains('setActiveWallet')));
@@ -250,11 +293,11 @@ void main() {
       state = const CitizenSdkFlutterCodec().decodeWalletState(next);
       return [next];
     };
-    await tester.pumpWidget(_walletTabHost(() async => state)); await tester.pumpAndSettle();
+    await tester.pumpWidget(_walletTabHost(() async => state)); await _settleWallet(tester);
     final row = find.ancestor(of: find.text('账户1'), matching: find.byType(WalletAccountTile));
     await tester.tap(find.descendant(of: row, matching: find.byTooltip('账户操作')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('删除账户')); await tester.pumpAndSettle();
+    await _settleWallet(tester);
+    await tester.tap(find.text('删除账户')); await _settleWallet(tester);
     expect(find.byType(AlertDialog), findsNothing);
     expect(find.text('账户1'), findsNothing);
     expect(_security.preparedIds, [childId]);
@@ -277,11 +320,11 @@ void main() {
       'signer_account_id': state.accounts.first.accountId, 'review_payload': '0x0c0001',
     })];
     _transport.handlers['cancelSigning'] = (_) => [true];
-    await tester.pumpWidget(_walletTabHost(() async => state)); await tester.pumpAndSettle();
+    await tester.pumpWidget(_walletTabHost(() async => state)); await _settleWallet(tester);
     final reorder = tester.widget<SliverReorderableList>(find.byType(SliverReorderableList)).onReorderItem;
-    reorder!(0, 1); await tester.pumpAndSettle();
+    reorder!(0, 1); await _settleWallet(tester);
     expect(find.byType(QrSignSessionPage), findsOneWidget);
-    await tester.tap(find.text('取消')); await tester.pumpAndSettle();
+    await tester.tap(find.text('取消')); await _settleWallet(tester);
     expect(find.text('已取消默认账户切换'), findsOneWidget);
     expect(_transport.calls.where((m) => m == 'cancelSigning'), hasLength(1));
     expect(_transport.calls, isNot(contains('consumeDefaultAccountChange')));
@@ -293,14 +336,19 @@ void main() {
     var state = orderedState();
     final pending = Completer<List<Object?>>();
     _transport.handlers['beginDefaultAccountChange'] = (_) => pending.future;
-    await tester.pumpWidget(_walletTabHost(() async => state)); await tester.pumpAndSettle();
+    await tester.pumpWidget(_walletTabHost(() async => state)); await _settleWallet(tester);
     tester.widget<SliverReorderableList>(find.byType(SliverReorderableList)).onReorderItem!(0, 1);
     await tester.pump();
     state = orderedState(revision: 2, name: '新修订冷钱包');
-    await tester.widget<RefreshIndicator>(find.byType(RefreshIndicator)).onRefresh();
-    await tester.pumpAndSettle();
+    // SDK 回调使用测试时钟，Isar 使用真实 I/O；按既有有界等待同时驱动两者。
+    var refreshed = false;
+    final refreshing = tester.widget<RefreshIndicator>(find.byType(RefreshIndicator)).onRefresh();
+    unawaited(refreshing.whenComplete(() => refreshed = true));
+    await _pumpUntil(tester, () => refreshed);
+    await refreshing;
+    await _settleWallet(tester);
     pending.completeError(const CitizenSdkException(code: CitizenSdkErrorCode.conflict, message: '旧修订已失效'));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     expect(find.text('新修订冷钱包'), findsOneWidget);
     expect(find.text('原冷钱包'), findsNothing);
     expect(find.text('旧修订已失效'), findsOneWidget);
@@ -315,11 +363,11 @@ void main() {
           initializationState: CitizenWalletInitializationState.empty, cleanupPending: false);
         return [];
       };
-      await tester.pumpWidget(_walletTabHost(() async => state)); await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('账户操作')); await tester.pumpAndSettle();
-      await tester.tap(find.text('删除钱包')); await tester.pumpAndSettle();
+      await tester.pumpWidget(_walletTabHost(() async => state)); await _settleWallet(tester);
+      await tester.tap(find.byTooltip('账户操作')); await _settleWallet(tester);
+      await tester.tap(find.text('删除钱包')); await _settleWallet(tester);
       expect(find.text('签名并删除'), findsOneWidget);
-      await tester.tap(find.text(cancel ? '取消' : '签名并删除')); await tester.pumpAndSettle();
+      await tester.tap(find.text(cancel ? '取消' : '签名并删除')); await _settleWallet(tester);
       expect(_transport.calls.where((m) => m == 'signAndDeleteWallet'), hasLength(cancel ? 0 : 1));
       expect(_transport.calls, isNot(contains('deleteWallet')));
       if (!cancel) {
@@ -338,10 +386,10 @@ void main() {
       throw const CitizenSdkException(code: CitizenSdkErrorCode.storage, message: '合成安全清理未完成');
     };
     _security.cleanupError = const AccountSecurityException('等待SDK安全清理');
-    await tester.pumpWidget(_walletTabHost(() async => state)); await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('账户操作')); await tester.pumpAndSettle();
-    await tester.tap(find.text('删除钱包')); await tester.pumpAndSettle();
-    await tester.tap(find.text('签名并删除')); await tester.pumpAndSettle();
+    await tester.pumpWidget(_walletTabHost(() async => state)); await _settleWallet(tester);
+    await tester.tap(find.byTooltip('账户操作')); await _settleWallet(tester);
+    await tester.tap(find.text('删除钱包')); await _settleWallet(tester);
+    await tester.tap(find.text('签名并删除')); await _settleWallet(tester);
     expect(find.textContaining('事实已移除，但本机安全清理未完成'), findsOneWidget);
     expect(find.byKey(const ValueKey('wallet-pending-cleanup-banner')), findsOneWidget);
     expect(find.textContaining('删除未完成：'), findsNothing);
@@ -367,14 +415,14 @@ void main() {
         accountId: Uint8List.fromList(List.filled(32, 1)), bindingRevision: 1,
         votingIdentity: bytes));
     _identity = identity(null);
-    await tester.pumpWidget(_walletTabHost(() async => state)); await tester.pumpAndSettle();
+    await tester.pumpWidget(_walletTabHost(() async => state)); await _settleWallet(tester);
     await _pumpUntil(tester, () => _transport.calls.contains('getAccountBalances'));
     expect(find.text('身份钱包'), findsNothing);
     _identity = identity(voting()); _security.revision.value++;
     await _pumpUntil(tester, () => find.text('身份钱包').evaluate().length == 1);
     expect(find.text('身份钱包'), findsOneWidget);
     _identity = null; _security.revision.value++;
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     expect(find.text('身份钱包'), findsNothing);
   });
 
@@ -389,12 +437,13 @@ void main() {
         ['0x${'00' * 32}', '1', 'finalized'],
       ]];
       await tester.pumpWidget(_walletTabHost(() async => _coldWalletSnapshot()));
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       final expected = switch (code) {
         CitizenSdkErrorCode.unavailable || CitizenSdkErrorCode.integrity => '区块链暂不可用，请检查网络连接后重试',
         CitizenSdkErrorCode.notReady => '轻节点正在同步链状态，请稍后再试',
         _ => '区块链读取失败，请稍后再试',
       };
+      await _pumpUntil(tester, () => find.text(expected).evaluate().isNotEmpty);
       expect(find.text(expected), findsOneWidget);
       expect(find.text('公民链余额暂时不可用'), findsNothing);
       expect(find.text('设备网络不可用，请检查网络后重试'), findsNothing);
@@ -411,7 +460,8 @@ void main() {
     _transport.handlers['getAccountBalances'] = (_) => throw const CitizenSdkException(
       code: CitizenSdkErrorCode.network, message: '合成启动后错误');
     await tester.pumpWidget(_walletTabHost(() async => _coldWalletSnapshot()));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
+    await _pumpUntil(tester, () => find.text('轻节点初始化失败，请检查网络后重试').evaluate().isNotEmpty);
     expect(find.text('轻节点初始化失败，请检查网络后重试'), findsOneWidget);
   });
 
@@ -422,7 +472,8 @@ void main() {
     _transport.handlers['getSyncStatus'] = (_) => throw const CitizenSdkException(
       code: CitizenSdkErrorCode.unavailable, message: '合成状态不可读');
     await tester.pumpWidget(_walletTabHost(() async => _coldWalletSnapshot()));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
+    await _pumpUntil(tester, () => find.text('区块链读取失败，请稍后再试').evaluate().isNotEmpty);
     expect(find.text('区块链读取失败，请稍后再试'), findsOneWidget);
     expect(find.text('轻节点正在同步链状态，请稍后再试'), findsNothing);
   });
@@ -441,15 +492,15 @@ void main() {
         state = const CitizenSdkFlutterCodec().decodeWalletState(raw);
         return [raw];
       };
-      await tester.pumpWidget(_walletTabHost(() async => state)); await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('账户操作')); await tester.pumpAndSettle();
-      await tester.tap(find.text('重命名')); await tester.pumpAndSettle();
+      await tester.pumpWidget(_walletTabHost(() async => state)); await _settleWallet(tester);
+      await tester.tap(find.byTooltip('账户操作')); await _settleWallet(tester);
+      await tester.tap(find.text('重命名')); await _settleWallet(tester);
       expect(find.text('重命名账户'), findsOneWidget);
       await tester.enterText(find.byType(TextField), '原账户新名称');
       await tester.tap(find.text(cancel ? '取消' : '保存'));
       await tester.pump(const Duration(milliseconds: 50));
       expect(tester.takeException(), isNull);
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       expect(tester.takeException(), isNull);
       if (cancel) { expect(submitted, isNull); }
       else { expect(submitted, [testCitizenAccountId, '原账户新名称']); expect(find.text('原账户新名称'), findsOneWidget); }
@@ -476,10 +527,10 @@ void main() {
               MaterialPageRoute(builder: (_) => const ImportColdWalletPage()));
           }, child: const Text('打开冷导入')),
         )))));
-      await tester.tap(find.text('打开冷导入')); await tester.pumpAndSettle();
+      await tester.tap(find.text('打开冷导入')); await _settleWallet(tester);
       final address = _makeColdWallet().ss58Address;
       await tester.enterText(find.byType(TextField), address);
-      await tester.tap(find.text('确认导入')); await tester.pumpAndSettle();
+      await tester.tap(find.text('确认导入')); await _settleWallet(tester);
       expect(submitted, [address, '']);
       if (failImport) {
         expect(find.byType(ImportColdWalletPage), findsOneWidget);
@@ -487,7 +538,7 @@ void main() {
         expect(tester.widget<TextField>(find.byType(TextField)).controller!.text, address);
       } else { expect(result, isTrue); expect(find.text('打开冷导入'), findsOneWidget); }
       expect(_transport.calls, isNot(contains('importWallet')));
-      await tester.pumpWidget(const SizedBox.shrink()); await tester.pumpAndSettle();
+      await tester.pumpWidget(const SizedBox.shrink()); await _settleWallet(tester);
     });
   }
 
@@ -503,10 +554,10 @@ void main() {
       accountId: _makeColdWallet().accountId,
       cidNumber: 'GD-CTZN1-8F3A2B'))).canonicalText;
     for (final raw in ['not-an-account-code', userCode, accountCode]) {
-      await tester.tap(find.byTooltip('扫码填入地址')); await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('扫码填入地址')); await _settleWallet(tester);
       // 只替身路由返回值，调用方仍经实际SDK解析，不声称摄像验收。
       Navigator.of(tester.element(find.byType(QrScanPage))).pop(raw);
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       if (raw != accountCode) {
         expect(find.text('未识别到可导入的钱包账户地址'), findsOneWidget);
         expect(_transport.calls, isNot(contains('importColdAccountSs58')));
@@ -515,7 +566,7 @@ void main() {
     expect(tester.widget<TextField>(find.byType(TextField)).controller!.text, address);
     expect(find.text('未识别到可导入的钱包账户地址'), findsNothing);
     expect(_transport.calls, isNot(contains('importColdAccountSs58')));
-    await tester.pumpWidget(const SizedBox.shrink()); await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox.shrink()); await _settleWallet(tester);
   });
 
   for (final accountPage in [false, true]) {
@@ -537,21 +588,21 @@ void main() {
       await tester.pumpWidget(Provider<CitizenSdk>.value(value: _sdk,
         child: MaterialApp(home: accountPage ? AccountDetailPage(account: account)
           : WalletDetailPage(wallet: account, walletName: '原钱包', expectedRevision: BigInt.one))));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(Icons.more_vert)); await tester.pumpAndSettle();
-      await tester.tap(find.text('查看私钥')); await tester.pumpAndSettle();
+      await _settleWallet(tester);
+      await tester.tap(find.byIcon(Icons.more_vert)); await _settleWallet(tester);
+      await tester.tap(find.text('查看私钥')); await _settleWallet(tester);
       expect(find.text(accountPage
         ? '私钥泄露将导致该账户资产被盗（仅该账户，不影响本钱包其他账户）。\n\n确认要查看吗？'
         : '私钥是核心机密信息，泄露将导致资产被盗。\n\n确认要查看吗？'), findsOneWidget);
-      await tester.tap(find.text('查看')); await tester.pumpAndSettle();
+      await tester.tap(find.text('查看')); await _settleWallet(tester);
       expect(find.text('私钥'), findsOneWidget);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       expect(find.text('私钥'), findsNothing);
       expect(_transport.calls.where((m) => m == 'closePrivateKey'), hasLength(1));
-      await tester.pumpWidget(const SizedBox.shrink()); await tester.pumpAndSettle();
+      await tester.pumpWidget(const SizedBox.shrink()); await _settleWallet(tester);
       expect(tester.takeException(), isNull);
     });
   }
@@ -563,7 +614,7 @@ void main() {
       if (fail) throw StateError('合成钱包刷新失败');
       return _coldWalletSnapshot();
     }));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     Widget bodyContent() {
       final scaffold = tester.widget<Scaffold>(find.byType(Scaffold).first);
       expect(scaffold.body, isA<Builder>());
@@ -576,7 +627,7 @@ void main() {
     expect(bodyContent(), isA<RefreshIndicator>());
     fail = true;
     _security.revision.value++;
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     final failedBody = bodyContent() as Column;
     expect(failedBody.children, hasLength(2));
     expect(failedBody.children.first, isA<Material>());
@@ -586,15 +637,15 @@ void main() {
 
     // 连续失败不能把同一轻提示排队重复显示；横幅仍保留重试入口。
     _security.revision.value++;
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     await tester.pump(const Duration(seconds: 5));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     expect(find.text('钱包刷新失败，已保留上次成功加载的数据'), findsNothing);
     expect(find.byKey(const ValueKey('wallet-refresh-retry')), findsOneWidget);
 
     fail = false;
     await tester.tap(find.byKey(const ValueKey('wallet-refresh-retry')));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     expect(bodyContent(), isA<RefreshIndicator>());
     expect(find.byKey(const ValueKey('wallet-refresh-retry')), findsNothing);
     expect(tester.takeException(), isNull);
@@ -603,7 +654,7 @@ void main() {
   // 以下七项详情布局/菜单/返回断言从历史原件恢复，仅替换SDK模型与注入。
     testWidgets('顶部完整地址和卡片右上角二维码，删除/私钥/清算行不残留在正文', (tester) async {
       _disposeWidgetBeforeStores(tester);
-      addTearDown(() async { await tester.pumpWidget(const SizedBox.shrink()); await tester.pumpAndSettle(); });
+      addTearDown(() async { await tester.pumpWidget(const SizedBox.shrink()); await _settleWallet(tester); });
       tester.view.physicalSize = const Size(1200, 3200);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.reset);
@@ -660,7 +711,7 @@ void main() {
 
     testWidgets('AppBar 右侧竖三点只有「清算行 / 查看私钥」', (tester) async {
       _disposeWidgetBeforeStores(tester);
-      addTearDown(() async { await tester.pumpWidget(const SizedBox.shrink()); await tester.pumpAndSettle(); });
+      addTearDown(() async { await tester.pumpWidget(const SizedBox.shrink()); await _settleWallet(tester); });
       await tester.pumpWidget(Provider<CitizenSdk>.value(value: _sdk, child:
         MaterialApp(
           home: AccountDetailPage(account: _makeAccount(index: 0, name: '账户0')),
@@ -668,7 +719,7 @@ void main() {
       ));
       await tester.pump();
       await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       expect(find.text('清算行'), findsOneWidget);
       expect(find.text('查看私钥'), findsOneWidget);
       expect(find.text('删除钱包'), findsNothing);
@@ -677,14 +728,14 @@ void main() {
 
     testWidgets('账户右上角二维码打开固定账户码弹窗', (tester) async {
       _disposeWidgetBeforeStores(tester);
-      addTearDown(() async { await tester.pumpWidget(const SizedBox.shrink()); await tester.pumpAndSettle(); });
+      addTearDown(() async { await tester.pumpWidget(const SizedBox.shrink()); await _settleWallet(tester); });
       final account = _makeAccount(index: 5, name: '日常账户');
       await tester.pumpWidget(Provider<CitizenSdk>.value(value: _sdk, child:
         MaterialApp(home: AccountDetailPage(account: account)),
       ));
       await tester.pump();
       await tester.tap(find.byTooltip('账户二维码'));
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       expect(find.byType(Dialog), findsOneWidget);
       expect(find.byType(AlertDialog), findsNothing);
       expect(
@@ -699,13 +750,13 @@ void main() {
 
     testWidgets('账户清算行入口只提示暂未上线', (tester) async {
       _disposeWidgetBeforeStores(tester);
-      addTearDown(() async { await tester.pumpWidget(const SizedBox.shrink()); await tester.pumpAndSettle(); });
+      addTearDown(() async { await tester.pumpWidget(const SizedBox.shrink()); await _settleWallet(tester); });
       await tester.pumpWidget(Provider<CitizenSdk>.value(value: _sdk, child:
         MaterialApp(home: AccountDetailPage(account: _makeAccount(index: 0))),
       ));
       await tester.pump();
       await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       await tester.tap(find.text('清算行'));
       await tester.pump();
 
@@ -715,7 +766,7 @@ void main() {
 
     testWidgets('iOS 左边缘手势可从账户详情返回上一级', (tester) async {
       _disposeWidgetBeforeStores(tester);
-      addTearDown(() async { await tester.pumpWidget(const SizedBox.shrink()); await tester.pumpAndSettle(); });
+      addTearDown(() async { await tester.pumpWidget(const SizedBox.shrink()); await _settleWallet(tester); });
       await tester.pumpWidget(Provider<CitizenSdk>.value(value: _sdk, child:
         MaterialApp(
           theme: ThemeData(platform: TargetPlatform.iOS),
@@ -735,11 +786,11 @@ void main() {
         ),
       ));
       await tester.tap(find.text('打开账户详情'));
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       expect(find.widgetWithText(AppBar, '账户详情'), findsOneWidget);
 
       await tester.dragFrom(const Offset(1, 300), const Offset(500, 0));
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
 
       expect(find.text('打开账户详情'), findsOneWidget);
       expect(find.widgetWithText(AppBar, '账户详情'), findsNothing);
@@ -747,7 +798,7 @@ void main() {
 
     testWidgets('iOS 左边缘手势可从钱包详情返回上一级', (tester) async {
       _disposeWidgetBeforeStores(tester);
-      addTearDown(() async { await tester.pumpWidget(const SizedBox.shrink()); await tester.pumpAndSettle(); });
+      addTearDown(() async { await tester.pumpWidget(const SizedBox.shrink()); await _settleWallet(tester); });
       await tester.pumpWidget(Provider<CitizenSdk>.value(value: _sdk, child:
         MaterialApp(
           theme: ThemeData(platform: TargetPlatform.iOS),
@@ -766,11 +817,11 @@ void main() {
         ),
       ));
       await tester.tap(find.text('打开钱包详情'));
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       expect(find.widgetWithText(AppBar, '钱包详情'), findsOneWidget);
 
       await tester.dragFrom(const Offset(1, 300), const Offset(500, 0));
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
 
       expect(find.text('打开钱包详情'), findsOneWidget);
       expect(find.widgetWithText(AppBar, '钱包详情'), findsNothing);
@@ -778,13 +829,13 @@ void main() {
 
     testWidgets('冷钱包清算行入口只提示暂未上线', (tester) async {
       _disposeWidgetBeforeStores(tester);
-      addTearDown(() async { await tester.pumpWidget(const SizedBox.shrink()); await tester.pumpAndSettle(); });
+      addTearDown(() async { await tester.pumpWidget(const SizedBox.shrink()); await _settleWallet(tester); });
       await tester.pumpWidget(Provider<CitizenSdk>.value(value: _sdk, child:
         MaterialApp(home: WalletDetailPage(wallet: _makeColdWallet(), walletName: '冷钱包', expectedRevision: BigInt.one)),
       ));
       await tester.pump();
       await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       await tester.tap(find.text('清算行'));
       await tester.pump();
 
@@ -803,16 +854,17 @@ void main() {
     List<Object?>? fields;
     _transport.handlers['repairHotWallet'] = (value) { fields = value; current = _hotWalletSnapshot(); return [_stateTuple(current)]; };
     await tester.pumpWidget(_walletTabHost(() async => current));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     expect(find.text('钱包数据异常，请验证热钱包或重新导入冷钱包'), findsOneWidget);
-    await tester.tap(find.text('原异常钱包')); await tester.pumpAndSettle();
+    await tester.tap(find.text('原异常钱包')); await _settleWallet(tester);
     expect(find.text('验证热钱包'), findsOneWidget);
     expect(find.text('仅当该账户私钥保存在本机时才能验证为热钱包。如果这是冷钱包，请取消并从“导入冷钱包”重新扫描同一账户。'), findsOneWidget);
-    await tester.tap(find.text('取消')); await tester.pumpAndSettle();
+    await tester.tap(find.text('取消')); await _settleWallet(tester);
     expect(fields, isNull);
-    await tester.tap(find.text('原异常钱包')); await tester.pumpAndSettle();
-    await tester.tap(find.text('验证')); await tester.pumpAndSettle();
+    await tester.tap(find.text('原异常钱包')); await _settleWallet(tester);
+    await tester.tap(find.text('验证')); await _settleWallet(tester);
     expect(fields, ['inspection-1', 0]);
+    await _pumpUntil(tester, () => find.text('已验证为热钱包').evaluate().isNotEmpty);
     expect(find.text('已验证为热钱包'), findsOneWidget);
     expect(_transport.calls, contains('releaseWalletInspection'));
     expect(_transport.calls, isNot(contains('signWalletPayload')));
@@ -833,11 +885,11 @@ void main() {
         initializationState: CitizenWalletInitializationState.empty, cleanupPending: false);
       return [_stateTuple(current)];
     };
-    await tester.pumpWidget(_walletTabHost(() async => current)); await tester.pumpAndSettle();
-    await tester.tap(find.byIcon(Icons.more_vert)); await tester.pumpAndSettle();
-    await tester.tap(find.text('删除钱包')); await tester.pumpAndSettle();
+    await tester.pumpWidget(_walletTabHost(() async => current)); await _settleWallet(tester);
+    await tester.tap(find.byIcon(Icons.more_vert)); await _settleWallet(tester);
+    await tester.tap(find.text('删除钱包')); await _settleWallet(tester);
     expect(find.text('确认删除「异常热钱包」？此操作无法撤销。'), findsOneWidget);
-    await tester.tap(find.text('删除')); await tester.pumpAndSettle();
+    await tester.tap(find.text('删除')); await _settleWallet(tester);
     expect(submitted, ['inspection-1', 0]);
     expect(_security.preparedIds, [id, second]); expect(_security.preparedWallets, {0}); expect(_security.preparedWide, isTrue);
     expect(find.text('已删除「异常热钱包」'), findsOneWidget);
@@ -848,14 +900,15 @@ void main() {
       _disposeWidgetBeforeStores(tester);
     _security.cleanupError = const AccountSecurityException('合成清理失败');
     _transport.handlers['reconcileWalletCleanup'] = (_) => [null];
-    await tester.pumpWidget(_walletTabHost(() async => _coldWalletSnapshot())); await tester.pumpAndSettle();
+    await tester.pumpWidget(_walletTabHost(() async => _coldWalletSnapshot())); await _settleWallet(tester);
     expect(find.text('钱包事实已移除，但部分后续缓存清理尚未完成'), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('wallet-pending-cleanup-retry'))); await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('wallet-pending-cleanup-retry'))); await _settleWallet(tester);
     expect(find.textContaining('部分后续清理仍未完成'), findsOneWidget);
     _security.cleanupError = null;
     // 等原失败SnackBar按自身时长退场，成功提示不会被前一条队列遮住。
-    await tester.pump(const Duration(seconds: 5)); await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('wallet-pending-cleanup-retry'))); await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 5)); await _settleWallet(tester);
+    await tester.tap(find.byKey(const ValueKey('wallet-pending-cleanup-retry'))); await _settleWallet(tester);
+    await _pumpUntil(tester, () => find.text('待清理缓存已全部处理').evaluate().isNotEmpty);
     expect(find.byKey(const ValueKey('wallet-pending-cleanup-banner')), findsNothing);
     expect(find.text('待清理缓存已全部处理'), findsOneWidget);
   });
@@ -889,9 +942,9 @@ void main() {
       child: const Text('打开选择'),
     ))))));
     await tester.tap(find.text('打开选择'));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     await tester.tap(find.text('选择此冷钱包'));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     expect(submitted, ['1', 2]);
     expect(returned, isTrue);
     expect(current.defaultAccount!.accountId, hot.defaultAccount!.accountId);
@@ -972,9 +1025,9 @@ void main() {
     Provider<FinalizedIdentityResolver>(create: (_) => _Resolver()),
     Provider<SquareSessionProvider>(create: (_) => _Sessions()),
     ], child: const MaterialApp(home: WalletTab(selectForTrade: true))));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     await tester.tap(find.text('测试冷钱包'));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     expect(find.byType(WalletTab), findsOneWidget);
     expect(find.textContaining('目录已变化'), findsOneWidget);
     expect(_transport.calls.where((method) => method == 'setActiveWallet'), hasLength(1));
@@ -993,7 +1046,7 @@ void main() {
     Provider<FinalizedIdentityResolver>(create: (_) => _Resolver()),
     Provider<SquareSessionProvider>(create: (_) => _Sessions()),
     ], child: const MaterialApp(home: WalletTab(selectForTrade: true))));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     expect(find.text('原独立钱包名'), findsOneWidget);
     expect(find.text(state.accounts.single.name), findsNothing);
   });
@@ -1010,14 +1063,14 @@ void main() {
       return [_stateTuple(changed)];
     };
     await tester.pumpWidget(_walletTabHost(() async => _coldWalletSnapshot()));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     await tester.tap(find.byIcon(Icons.more_vert));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     await tester.tap(find.text('重命名'));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     await tester.enterText(find.byType(TextField), '新钱包名称');
     await tester.tap(find.text('保存'));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     expect(submitted, ['1', 2, '新钱包名称']);
     expect(_transport.calls, isNot(contains('renameAccount')));
     expect(find.text('新钱包名称'), findsOneWidget);
@@ -1115,7 +1168,7 @@ void main() {
       expect(find.text('导入冷钱包'), findsNothing);
 
       pending.complete(_coldWalletSnapshot());
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
     });
 
     testWidgets('首次失败显示重试，失败和重试加载期间＋都禁用', (tester) async {
@@ -1133,7 +1186,7 @@ void main() {
           return retryPending.future;
         }),
       );
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
 
       expect(find.text('钱包加载失败'), findsOneWidget);
       expect(find.textContaining('首次读取失败'), findsOneWidget);
@@ -1165,7 +1218,7 @@ void main() {
       );
 
       retryPending.complete(_coldWalletSnapshot());
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       expect(find.text('钱包加载失败'), findsNothing);
       expect(find.text('测试冷钱包'), findsOneWidget);
       expect(calls, 2);
@@ -1176,14 +1229,14 @@ void main() {
       await tester.pumpWidget(
         _walletTabHost(() async => _hotWalletSnapshot()),
       );
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
 
       final addButton = tester.widget<IconButton>(
         find.byKey(const ValueKey('wallet-add-entry')),
       );
       expect(addButton.onPressed, isNotNull);
       await tester.tap(find.byKey(const ValueKey('wallet-add-entry')));
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
 
       expect(find.text('添加下一个账户'), findsOneWidget);
       expect(find.text('添加指定账户'), findsOneWidget);
@@ -1195,10 +1248,10 @@ void main() {
       await tester.pumpWidget(
         _walletTabHost(() async => _coldWalletSnapshot()),
       );
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
 
       await tester.tap(find.byKey(const ValueKey('wallet-add-entry')));
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       expect(find.text('导入冷钱包'), findsOneWidget);
       expect(find.text('添加下一个账户'), findsNothing);
       expect(find.text('添加指定账户'), findsNothing);
@@ -1218,7 +1271,7 @@ void main() {
           );
         }),
       );
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       expect(find.text('测试冷钱包'), findsOneWidget);
 
       await tester.drag(
@@ -1226,7 +1279,7 @@ void main() {
         const Offset(0, 320),
       );
       await tester.pump();
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
 
       expect(calls, 2);
       expect(find.text('测试冷钱包'), findsOneWidget);
@@ -1246,7 +1299,7 @@ void main() {
       );
 
       await tester.tap(find.byKey(const ValueKey('wallet-add-entry')));
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       expect(find.text('导入冷钱包'), findsOneWidget);
       expect(find.text('添加下一个账户'), findsNothing);
       expect(find.text('添加指定账户'), findsNothing);
@@ -1280,13 +1333,13 @@ void main() {
           }
         }),
       );
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
 
       await tester.drag(
         find.byType(CustomScrollView),
         const Offset(0, 320),
       );
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       expect(
         find.byKey(const ValueKey('wallet-refresh-retry')),
         findsOneWidget,
@@ -1300,11 +1353,11 @@ void main() {
       expect(calls, 4);
 
       newerRequest.complete(_coldWalletSnapshot(name: '最新钱包'));
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       expect(find.text('最新钱包'), findsOneWidget);
 
       olderRequest.complete(_coldWalletSnapshot(name: '过期钱包'));
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       expect(find.text('最新钱包'), findsOneWidget);
       expect(find.text('过期钱包'), findsNothing);
       expect(
@@ -1341,13 +1394,13 @@ void main() {
           }
         }),
       );
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
 
       await tester.drag(
         find.byType(CustomScrollView),
         const Offset(0, 320),
       );
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       await tester.tap(find.byKey(const ValueKey('wallet-refresh-retry')));
       await tester.pump();
       await tester.tap(find.byKey(const ValueKey('wallet-refresh-retry')));
@@ -1355,9 +1408,9 @@ void main() {
       expect(calls, 4);
 
       newerRequest.complete(_coldWalletSnapshot(name: '最新钱包'));
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       olderRequest.completeError(StateError('过期请求失败'));
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
 
       expect(find.text('最新钱包'), findsOneWidget);
       expect(find.text('钱包加载失败'), findsNothing);
@@ -1482,14 +1535,14 @@ void main() {
       expect(find.text('扫一扫'), findsNothing);
 
       await tester.tap(menu);
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       final scan = find.text('扫一扫');
       final rename = find.text('重命名');
       expect(scan, findsOneWidget);
       expect(tester.getCenter(scan).dy, lessThan(tester.getCenter(rename).dy));
 
       await tester.tap(scan);
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       expect(scanned, isTrue);
       expect(cardTapped, isFalse);
     });
@@ -1510,7 +1563,7 @@ void main() {
         ),
       );
       await tester.tap(find.byTooltip('账户操作'));
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       expect(find.text('扫一扫'), findsOneWidget);
       expect(find.text('重命名'), findsOneWidget);
       expect(find.text('账户详情'), findsNothing);
@@ -1534,7 +1587,7 @@ void main() {
         ),
       );
       await tester.tap(find.byTooltip('账户操作'));
-      await tester.pumpAndSettle();
+      await _settleWallet(tester);
       expect(find.text('删除账户'), findsOneWidget);
       expect(find.text('删除钱包'), findsNothing);
     });
@@ -1577,16 +1630,16 @@ void main() {
   testWidgets('冷钱包重命名保留原钱包标题与提示，取消不提交SDK', (tester) async {
       _disposeWidgetBeforeStores(tester);
     await tester.pumpWidget(_walletTabHost(() async => _coldWalletSnapshot()));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     await tester.tap(find.byIcon(Icons.more_vert));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     await tester.tap(find.text('重命名'));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     expect(find.text('重命名钱包'), findsOneWidget);
     expect(find.text('重命名账户'), findsNothing);
     expect(tester.widget<TextField>(find.byType(TextField)).decoration?.hintText, '输入新的钱包名称');
     await tester.tap(find.text('取消'));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     expect(_transport.calls, isNot(contains('renameAccount')));
   });
 
@@ -1595,7 +1648,7 @@ void main() {
     await tester.pumpWidget(_walletTabHost(() => Future.error(
       const CitizenSdkException(code: CitizenSdkErrorCode.integrity, message: '合成目录不一致'),
     )));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     expect(find.text('钱包加载失败'), findsOneWidget);
     expect(find.byType(WalletEmptyChoices), findsNothing);
     expect(tester.widget<IconButton>(find.byKey(const ValueKey('wallet-add-entry'))).onPressed, isNull);
@@ -1609,7 +1662,7 @@ void main() {
       onScan: () { actions++; }, onRename: () { actions++; }, onDelete: () { actions++; },
     ))));
     await tester.tap(find.byTooltip('账户操作'));
-    await tester.pumpAndSettle();
+    await _settleWallet(tester);
     expect(find.text('扫一扫'), findsNothing);
     expect(find.text('重命名'), findsNothing);
     expect(actions, 0);

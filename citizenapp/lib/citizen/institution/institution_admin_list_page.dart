@@ -1,3 +1,5 @@
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
+
 import 'dart:async';
 
 import 'package:citizen_sdk/citizen_sdk.dart';
@@ -85,10 +87,9 @@ class _AdminListPageState extends State<AdminListPage> {
       return;
     }
     try {
-      final snapshots = await context
-          .read<CitizenSdk>()
-          .chain
-          .getAccountBalances(accountIds);
+      final snapshots = await AccountBalanceSnapshotStore.forChain(
+        context.read<CitizenSdk>().chain,
+      ).getAccountBalances(accountIds);
       final balances = <String, double>{
         for (final snapshot in snapshots)
           snapshot.accountId: snapshot.freeFen.toDouble() / 100,
@@ -270,17 +271,15 @@ class _AdminTile extends StatelessWidget {
 
     if (wallet == null) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('未找到对应钱包')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('未找到对应钱包')));
       return;
     }
 
     if (wallet.signMode != CitizenWalletSignMode.cold) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('管理员仅支持冷钱包激活')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('管理员仅支持冷钱包激活')));
       return;
     }
     if (!context.mounted) return;
@@ -313,14 +312,12 @@ class _AdminTile extends StatelessWidget {
       );
       onActivated();
       if (!context.mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('管理员激活成功')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('管理员激活成功')));
     } catch (e) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('激活失败：$e')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('激活失败：$e')));
     }
   }
 

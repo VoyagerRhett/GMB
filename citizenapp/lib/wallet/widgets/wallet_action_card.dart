@@ -1,13 +1,14 @@
+import 'dart:async';
+
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import 'package:citizenapp/transaction/onchain-topup/onchain_topup_page.dart';
-import 'package:citizenapp/transaction/offchain-transaction/rpc/offchain_clearing_rpc.dart';
 import 'package:citizenapp/transaction/offchain-transaction/services/clearing_bank_prefs.dart';
 import 'package:citizenapp/transaction/offchain-transaction/pages/petty_wallet_page.dart';
 import 'package:citizenapp/transaction/offchain-transaction/pages/withdraw_page.dart';
-import 'package:citizenapp/my/util/amount_format.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 
@@ -43,65 +44,110 @@ class WalletActionCard extends StatefulWidget {
 
 class WalletActionCardState extends State<WalletActionCard> {
   ClearingBankBindingSnapshot? _binding;
-  String _balanceText = '读取中';
-  String _onchainBalanceText = '读取中';
+  bool _bindingLoaded = false;
+  WalletBalanceState<CitizenAccountBalance>? _onchain;
+  WalletBalanceState<BigInt>? _clearing;
+  WalletBalanceState<BigInt>? _testBalance;
+
+  String get _onchainBalanceText {
+    final value = _onchain?.value?.totalFen ?? _testBalance?.value;
+    if (value != null) {
+      return '${AccountBalanceSnapshotStore.formatFen(value)} 元';
+    }
+    return (_onchain?.hasError ?? _testBalance?.hasError ?? false)
+        ? '查询失败'
+        : '读取中';
+  }
+
+  String get _balanceText {
+    if (!_bindingLoaded) return '读取中';
+    if (_binding == null) return '未绑定';
+    final value = _clearing?.value;
+    if (value != null) {
+      return '${AccountBalanceSnapshotStore.formatFen(value)} 元';
+    }
+    return _clearing?.hasError == true ? '节点不可达' : '读取中';
+  }
 
   @override
   void initState() {
     super.initState();
-    refresh();
+    _bindOnchain();
+    unawaited(refresh(forceRefresh: false));
   }
 
-  Future<void> refresh() async {
-    final onchainFuture = _loadOnchainBalance();
-    final binding = await ClearingBankPrefs.loadSnapshot(widget.accountId);
-    if (!mounted) return;
-    setState(() {
-      _binding = binding;
-      _balanceText = binding == null ? '未绑定' : '查询中';
-    });
-    if (binding != null) {
-      await _loadBalance(binding);
-    }
-    await onchainFuture;
-  }
-
-  /// 充值列展示该账户 finalized total 链上余额，数据源与原钱包余额卡完全一致。
-  Future<void> _loadOnchainBalance() async {
-    if (mounted) {
-      setState(() => _onchainBalanceText = '查询中');
-    }
-    try {
-      final loader = widget.finalizedBalanceLoader ??
-          (accountId) async {
-            final balance = await context
-                .read<CitizenSdk>()
-                .chain
-                .getAccountBalance(accountId);
-            return balance.totalFen.toDouble() / 100;
-          };
-      final balance = await loader(widget.accountId);
-      if (!mounted) return;
-      setState(() {
-        _onchainBalanceText = '${AmountFormat.format(balance, symbol: '')} 元';
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _onchainBalanceText = '查询失败');
+  void _bindOnchain() {
+    final accountId = widget.accountId;
+    final loader = widget.finalizedBalanceLoader;
+    if (loader == null) {
+      _onchain = AccountBalanceSnapshotStore.forChain(
+        context.read<CitizenSdk>().chain,
+      ).accountState(accountId)..addListener(_changed);
+    } else {
+      // 既有布局测试注入仍复用相同状态机；正式页面始终绑定唯一余额所有者。
+      _testBalance = WalletBalanceState(
+        (_) async => BigInt.from((await loader(accountId) * 100).round()),
+      )..addListener(_changed);
     }
   }
 
-  Future<void> _loadBalance(ClearingBankBindingSnapshot binding) async {
-    try {
-      final balance = await OffchainClearingBankRpc(
-        binding.wssUrl,
-      ).queryBalance(widget.ss58Address);
-      if (!mounted) return;
-      setState(() => _balanceText = _fenToYuan(balance));
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _balanceText = '节点不可达');
+  void _changed() {
+    if (mounted) setState(() {});
+  }
+
+  void _unbind() {
+    _onchain?.removeListener(_changed);
+    _clearing?.removeListener(_changed);
+    _testBalance?.removeListener(_changed);
+    _onchain = null;
+    _clearing = null;
+    _testBalance = null;
+  }
+
+  @override
+  void didUpdateWidget(covariant WalletActionCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.accountId != widget.accountId ||
+        oldWidget.ss58Address != widget.ss58Address ||
+        oldWidget.finalizedBalanceLoader != widget.finalizedBalanceLoader) {
+      _unbind();
+      _binding = null;
+      _bindingLoaded = false;
+      _bindOnchain();
+      unawaited(refresh(forceRefresh: false));
     }
+  }
+
+  @override
+  void dispose() {
+    _unbind();
+    super.dispose();
+  }
+
+  Future<void> refresh({bool forceRefresh = true}) async {
+    final accountId = widget.accountId;
+    final onchainFuture =
+        _onchain?.load(forceRefresh: forceRefresh) ??
+        _testBalance!.load(forceRefresh: forceRefresh);
+    final binding = await ClearingBankPrefs.loadSnapshot(accountId);
+    if (!mounted || widget.accountId != accountId) return;
+    _clearing?.removeListener(_changed);
+    _binding = binding;
+    _bindingLoaded = true;
+    _clearing = binding == null
+        ? null
+        : AccountBalanceSnapshotStore.forChain(context.read<CitizenSdk>().chain)
+              .clearingState(
+                accountId: accountId,
+                ss58Address: widget.ss58Address,
+                wssUrl: binding.wssUrl,
+              );
+    _clearing?.addListener(_changed);
+    setState(() {});
+    await Future.wait([
+      onchainFuture,
+      if (_clearing != null) _clearing!.load(forceRefresh: forceRefresh),
+    ]);
   }
 
   @override
@@ -110,13 +156,12 @@ class WalletActionCardState extends State<WalletActionCard> {
       key: const ValueKey('wallet-action-card'),
       decoration: const BoxDecoration(
         color: AppTheme.surfaceCard,
-        border: Border(
-          bottom: BorderSide(color: AppTheme.divider),
-        ),
+        border: Border(bottom: BorderSide(color: AppTheme.divider)),
       ),
       padding: EdgeInsets.symmetric(
-          vertical: AppLayout.scaled(context, 20),
-          horizontal: AppLayout.scaled(context, 12)),
+        vertical: AppLayout.scaled(context, 20),
+        horizontal: AppLayout.scaled(context, 12),
+      ),
       child: Row(
         children: [
           Expanded(
@@ -155,7 +200,7 @@ class WalletActionCardState extends State<WalletActionCard> {
         builder: (_) => OnchainTopupPage(accountId: widget.accountId),
       ),
     );
-    await refresh();
+    await refresh(forceRefresh: false);
   }
 
   Future<void> _openWithdraw(BuildContext context) async {
@@ -174,7 +219,7 @@ class WalletActionCardState extends State<WalletActionCard> {
         ),
       ),
     );
-    await refresh();
+    await refresh(forceRefresh: false);
   }
 
   /// 零钱包 = 进清算行零钱包详情页(余额 + 充值到零钱包 + 提现);需已绑定。
@@ -195,7 +240,7 @@ class WalletActionCardState extends State<WalletActionCard> {
         ),
       ),
     );
-    await refresh();
+    await refresh(forceRefresh: false);
   }
 
   static void _showNeedBinding(BuildContext context) {
@@ -205,12 +250,6 @@ class WalletActionCardState extends State<WalletActionCard> {
         duration: Duration(seconds: 2),
       ),
     );
-  }
-
-  static String _fenToYuan(int fen) {
-    final yuan = fen ~/ 100;
-    final cents = (fen % 100).abs();
-    return '$yuan.${cents.toString().padLeft(2, '0')} 元';
   }
 }
 

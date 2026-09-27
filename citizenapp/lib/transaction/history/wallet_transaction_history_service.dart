@@ -1,4 +1,7 @@
 import 'dart:async';
+
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
+
 import 'dart:typed_data';
 
 import 'package:citizen_sdk/citizen_sdk.dart';
@@ -21,10 +24,10 @@ final class WalletTransactionHistoryService {
     required CitizenChain chain,
     required CitizenSdkWallet wallet,
     required Stream<CitizenSdkEvent> events,
-  })  : _history = history,
-        _chain = chain,
-        _wallet = wallet,
-        _sdkEvents = events;
+  }) : _history = history,
+       _chain = chain,
+       _wallet = wallet,
+       _sdkEvents = events;
 
   final CitizenHistory _history;
   final CitizenChain _chain;
@@ -55,11 +58,12 @@ final class WalletTransactionHistoryService {
   }
 
   void _enqueue(Future<void> Function() operation) {
-    _tail = _tail.then((_) => operation()).catchError(
-      (Object error, StackTrace stackTrace) {
-        AppLog.d('[TransactionHistory] 业务投影失败: $error\n$stackTrace');
-      },
-    );
+    _tail = _tail.then((_) => operation()).catchError((
+      Object error,
+      StackTrace stackTrace,
+    ) {
+      AppLog.d('[TransactionHistory] 业务投影失败: $error\n$stackTrace');
+    });
   }
 
   /// 把 SDK 公开 execution history 终态投影到已存在的 App 业务记录。
@@ -75,9 +79,7 @@ final class WalletTransactionHistoryService {
       if (!consumedCursors.add(cursor)) {
         throw StateError('CitizenSDK history 返回了重复分页游标');
       }
-      page = await _history.getTransactionHistory(
-        beforeExecutionId: cursor,
-      );
+      page = await _history.getTransactionHistory(beforeExecutionId: cursor);
     }
   }
 
@@ -114,7 +116,8 @@ final class WalletTransactionHistoryService {
           txHash: txHash,
           executionId: executionId,
           callDataHash: callDataHash,
-          failureReason: record.poolRejectionReason ??
+          failureReason:
+              record.poolRejectionReason ??
               (record.status == CitizenTransactionHistoryStatus.poolRejected
                   ? '交易池拒绝'
                   : '链上执行失败'),
@@ -134,6 +137,17 @@ final class WalletTransactionHistoryService {
         );
         break;
     }
+    final block = record.block;
+    if (block != null &&
+        (record.status == CitizenTransactionHistoryStatus.finalizedSuccess ||
+            record.status == CitizenTransactionHistoryStatus.finalizedFailed)) {
+      try {
+        await AccountBalanceSnapshotStore.forChain(_chain)
+            .afterFinalized(block, [accountId]);
+      } catch (_) {
+        // 交易的链上结果已确认；余额刷新失败不得把结果降为失败或清空原快照。
+      }
+    }
   }
 
   /// 只解码 SDK 已验证 finalized 块中的 CitizenApp 转账业务事件。
@@ -152,6 +166,7 @@ final class WalletTransactionHistoryService {
       for (final account in wallet.accounts)
         account.accountId: account.ss58Address,
     };
+    final changedAccounts = <String>{};
     for (final transfer in decoded.transfers) {
       final outcome = transfer.extrinsicIndex == null
           ? null
@@ -161,6 +176,12 @@ final class WalletTransactionHistoryService {
       if (transfer.extrinsicIndex != null && outcome?.succeeded != true) {
         continue;
       }
+      changedAccounts.addAll(
+        [
+          transfer.fromAccountId,
+          transfer.toAccountId,
+        ].where(ss58ByAccountId.containsKey),
+      );
       await _writeTransferSide(
         accountId: transfer.toAccountId,
         ss58ByAccountId: ss58ByAccountId,
@@ -179,6 +200,12 @@ final class WalletTransactionHistoryService {
           counterpartyAccountId: transfer.toAccountId,
         );
       }
+    }
+    try {
+      await AccountBalanceSnapshotStore.forChain(_chain)
+          .afterFinalized(finalized, changedAccounts);
+    } catch (_) {
+      // 收款和付款共用 wallet 更新；余额失败不得撤销已证明的交易记录。
     }
   }
 
@@ -216,10 +243,8 @@ final class WalletTransactionHistoryService {
     );
   }
 
-  String _ss58(String accountId) => Keyring().encodeAddress(
-        _accountIdBytes(accountId),
-        kGmbSs58Prefix,
-      );
+  String _ss58(String accountId) =>
+      Keyring().encodeAddress(_accountIdBytes(accountId), kGmbSs58Prefix);
 
   static Uint8List _accountIdBytes(String accountId) {
     if (!isAccountIdText(accountId)) {
@@ -235,9 +260,37 @@ final class WalletTransactionHistoryService {
       bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
 
   static final Uint8List _systemEventsStorageKey = Uint8List.fromList(<int>[
-    0x26, 0xaa, 0x39, 0x4e, 0xea, 0x56, 0x30, 0xe0,
-    0x7c, 0x48, 0xae, 0x0c, 0x95, 0x58, 0xce, 0xf7,
-    0x80, 0xd4, 0x1e, 0x5e, 0x16, 0x05, 0x67, 0x65,
-    0xbc, 0x84, 0x6f, 0x2b, 0xb2, 0x0c, 0x7a, 0xa9,
+    0x26,
+    0xaa,
+    0x39,
+    0x4e,
+    0xea,
+    0x56,
+    0x30,
+    0xe0,
+    0x7c,
+    0x48,
+    0xae,
+    0x0c,
+    0x95,
+    0x58,
+    0xce,
+    0xf7,
+    0x80,
+    0xd4,
+    0x1e,
+    0x5e,
+    0x16,
+    0x05,
+    0x67,
+    0x65,
+    0xbc,
+    0x84,
+    0x6f,
+    0x2b,
+    0xb2,
+    0x0c,
+    0x7a,
+    0xa9,
   ]);
 }

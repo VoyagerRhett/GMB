@@ -12,6 +12,21 @@
 本目录不保存 `.git`、构建产物或临时 patch，CI/Release 也不联网拉取上游源码。GMB
 `citizensdk` 是发布时的唯一源码输入。
 
+交易服务 `pow/light-base/src/transactions_service.rs` 从上述官方基线恢复原有顺序后，
+仅增加已确认的 best==finalized 验证支持：保留当前最终块头及该订阅的 Runtime 固定引用，
+使用同一 Runtime 验证函数；接受当前最终块的结果，丢弃旧根及已清理分叉的迟到结果。
+最终块更替时准确释放旧引用，订阅重建时不复用旧上下文，异步启动前已释放的块重新选择。
+交易池 `pow/lib/src/transactions/light_pool.rs` 保持官方原件；验证、广播、无效清理和最终化
+保留官方顺序，不添加提前广播或已入块优先的分支，也不插入诊断。
+`SOURCE_SHA256.json` 的 adapted 类别记录交易服务当前源码及内联回归摘要。
+空闲链验收必须证明无需新区块即可执行验证，源码摘要或离线通过不能代替真实验证。
+
+`pow/light-base/src/lib.rs`的SDK typed nonce入口统一使用同次订阅的
+`pin_pinned_block_runtime`，best为最终根或非最终块时均复用准确块已有Runtime，
+不额外下载`:code`和`:heappages`。原`runtime_call`的API版本、状态证明和输出解码
+继续生效，返回的账户、块身份由provider严格核验。该入口的固定阶段耗时默认关闭；
+取消、失败和正常完成共用一次清理动作。RuntimeService和交易池算法均不因该优化改动。
+
 ## 基线已有的 PoW + GRANDPA 改动
 
 收编前相对上游基线已有本地改动：

@@ -17,7 +17,9 @@ import 'package:citizenapp/my/myid/citizen_identity_transaction.dart';
 import 'package:citizenapp/security/local_data_key.dart';
 import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
+
 import '../../support/fake_citizen_sdk.dart';
+import '../../support/isar_test_env.dart';
 
 /// Alice 通用 SS58(校验和有效),仅用于让 `decodeAddress` 解出 32 字节账户;
 /// 护照 App 真号是 prefix=2027,这里只需一个可解码地址驱动 storage key。
@@ -51,6 +53,7 @@ final _aliceWallet = _testAccount(
 void main() {
   TestCitizenSdkHarness();
   TestWidgetsFlutterBinding.ensureInitialized();
+  useIsolatedIsar();
 
   MyIdService buildService({
     CitizenWalletStateAccount? wallet,
@@ -731,19 +734,25 @@ class _FakeWalletManager
   pendingHandover;
 
   @override
-  CitizenSdkOperation<CitizenWalletState> getState() => testCitizenOperation(() async => CitizenWalletState(
-    initializationState: _wallet == null && accounts.isEmpty ? CitizenWalletInitializationState.empty : CitizenWalletInitializationState.ready,
-    cleanupPending: false,
-    revision: BigInt.one,
-    hotProfile: null,
-    accounts: <CitizenWalletStateAccount>[
-      if (_wallet != null) _wallet,
-      ...accounts.where((account) => account.accountId != _wallet?.accountId),
-    ],
-  ));
+  CitizenSdkOperation<CitizenWalletState> getState() => testCitizenOperation(
+    () async => CitizenWalletState(
+      initializationState: _wallet == null && accounts.isEmpty
+          ? CitizenWalletInitializationState.empty
+          : CitizenWalletInitializationState.ready,
+      cleanupPending: false,
+      revision: BigInt.one,
+      hotProfile: null,
+      accounts: <CitizenWalletStateAccount>[
+        if (_wallet != null) _wallet,
+        ...accounts.where((account) => account.accountId != _wallet?.accountId),
+      ],
+    ),
+  );
 
   @override
-  CitizenSdkOperation<CitizenSigningOutcome> begin(CitizenSigningIntent intent) => testCitizenOperation(() async {
+  CitizenSdkOperation<CitizenSigningOutcome> begin(
+    CitizenSigningIntent intent,
+  ) => testCitizenOperation(() async {
     signCalls++;
     return CitizenSigningCompleted(
       accountId: intent.accountId,

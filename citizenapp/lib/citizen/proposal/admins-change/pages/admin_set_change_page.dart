@@ -1,3 +1,4 @@
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
 import 'package:citizen_sdk/citizen_sdk.dart';
 
 import 'dart:async';
@@ -50,8 +51,9 @@ class _AdminsChangePageState extends State<AdminsChangePage> {
   @override
   void initState() {
     super.initState();
-    _selectedWallet =
-        widget.adminWallets.isNotEmpty ? widget.adminWallets.first : null;
+    _selectedWallet = widget.adminWallets.isNotEmpty
+        ? widget.adminWallets.first
+        : null;
   }
 
   @override
@@ -87,9 +89,7 @@ class _AdminsChangePageState extends State<AdminsChangePage> {
         if (account != null) _syncThresholdInput(account, _admins.length);
         _loading = false;
       });
-      unawaited(
-        _loadBalances(account?.admins ?? const <AdminPerson>[]),
-      );
+      unawaited(_loadBalances(account?.admins ?? const <AdminPerson>[]));
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -107,33 +107,33 @@ class _AdminsChangePageState extends State<AdminsChangePage> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : account == null
-              ? Center(child: Text(_error ?? '未查询到管理员账户'))
-              : ListView(
-                  padding: EdgeInsets.all(AppLayout.scaled(context, 16)),
-                  children: [
-                    AdminAccountCard(account: account),
-                    SizedBox(height: AppLayout.scaled(context, 12)),
-                    _buildWalletSelector(),
-                    SizedBox(height: AppLayout.scaled(context, 12)),
-                    AdminSetEditor(
-                      admins: _admins,
-                      balances: _balanceByAccountId,
-                      onChanged: (value) => _setNewAdmins(account, value),
-                    ),
-                    SizedBox(height: AppLayout.scaled(context, 12)),
-                    _buildThresholdCard(account),
-                    SizedBox(height: AppLayout.scaled(context, 12)),
-                    AdminSetDiffCard(
-                      currentAdmins: account.admins,
-                      admins: _admins,
-                      balances: _balanceByAccountId,
-                    ),
-                    if (_error != null) ...[
-                      SizedBox(height: AppLayout.scaled(context, 12)),
-                      Text(_error!, style: const TextStyle(color: Colors.red)),
-                    ],
-                  ],
+          ? Center(child: Text(_error ?? '未查询到管理员账户'))
+          : ListView(
+              padding: EdgeInsets.all(AppLayout.scaled(context, 16)),
+              children: [
+                AdminAccountCard(account: account),
+                SizedBox(height: AppLayout.scaled(context, 12)),
+                _buildWalletSelector(),
+                SizedBox(height: AppLayout.scaled(context, 12)),
+                AdminSetEditor(
+                  admins: _admins,
+                  balances: _balanceByAccountId,
+                  onChanged: (value) => _setNewAdmins(account, value),
                 ),
+                SizedBox(height: AppLayout.scaled(context, 12)),
+                _buildThresholdCard(account),
+                SizedBox(height: AppLayout.scaled(context, 12)),
+                AdminSetDiffCard(
+                  currentAdmins: account.admins,
+                  admins: _admins,
+                  balances: _balanceByAccountId,
+                ),
+                if (_error != null) ...[
+                  SizedBox(height: AppLayout.scaled(context, 12)),
+                  Text(_error!, style: const TextStyle(color: Colors.red)),
+                ],
+              ],
+            ),
       bottomNavigationBar: account == null
           ? null
           : AdminsChangeActionBar(
@@ -149,8 +149,10 @@ class _AdminsChangePageState extends State<AdminsChangePage> {
       initialValue: _selectedWallet,
       decoration: const InputDecoration(labelText: '发起管理员钱包'),
       items: widget.adminWallets
-          .map((wallet) =>
-              DropdownMenuItem(value: wallet, child: Text(wallet.name)))
+          .map(
+            (wallet) =>
+                DropdownMenuItem(value: wallet, child: Text(wallet.name)),
+          )
           .toList(),
       onChanged: _submitting
           ? null
@@ -166,13 +168,7 @@ class _AdminsChangePageState extends State<AdminsChangePage> {
     unawaited(_loadBalances(value));
   }
 
-  static String _balanceKey(String accountId) {
-    final trimmed = accountId.trim();
-    return (trimmed.startsWith('0x') || trimmed.startsWith('0X')
-            ? trimmed.substring(2)
-            : trimmed)
-        .toLowerCase();
-  }
+  static String _balanceKey(String accountId) => accountId;
 
   Future<void> _loadBalances(List<AdminPerson> admins) async {
     final accountIds = {
@@ -183,8 +179,9 @@ class _AdminsChangePageState extends State<AdminsChangePage> {
       return;
     }
     try {
-      final snapshots =
-          await context.read<CitizenSdk>().chain.getAccountBalances(accountIds);
+      final snapshots = await AccountBalanceSnapshotStore.forChain(
+        context.read<CitizenSdk>().chain,
+      ).getAccountBalances(accountIds);
       final balances = <String, double>{
         for (final snapshot in snapshots)
           snapshot.accountId: snapshot.freeFen.toDouble() / 100,
@@ -210,8 +207,9 @@ class _AdminsChangePageState extends State<AdminsChangePage> {
           keyboardType: TextInputType.number,
           decoration: InputDecoration(
             labelText: '通过阈值',
-            helperText:
-                _admins.isEmpty ? '请先添加管理员' : '范围：$min ~ ${_admins.length}',
+            helperText: _admins.isEmpty
+                ? '请先添加管理员'
+                : '范围：$min ~ ${_admins.length}',
           ),
         ),
       ),
@@ -256,8 +254,9 @@ class _AdminsChangePageState extends State<AdminsChangePage> {
         account: account,
         admins: validated.admins,
         newThreshold: validated.threshold,
-        signerPublicKey:
-            AdminAccountIdCodec.fromAccountIdText(wallet.accountId),
+        signerPublicKey: AdminAccountIdCodec.fromAccountIdText(
+          wallet.accountId,
+        ),
         externalSigning: (pending) => showCitizenSdkQrResponse(
           context,
           request: pending.qrRequest,
@@ -271,7 +270,8 @@ class _AdminsChangePageState extends State<AdminsChangePage> {
       if (!mounted) return;
       await Navigator.of(context).push(
         MaterialPageRoute(
-            builder: (_) => AdminsChangeConfirmPage(txHash: result.txHash)),
+          builder: (_) => AdminsChangeConfirmPage(txHash: result.txHash),
+        ),
       );
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {

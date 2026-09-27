@@ -240,6 +240,7 @@ impl FinalizedHistoryRuntime {
             match matches.as_slice() {
                 [] => {}
                 [(index, extrinsic)] => {
+                    crate::transaction_diagnostic::event("history_exact_inclusion");
                     let conclusion = verify_transaction_outcome(TransactionEvidence {
                         block: block.verified(),
                         runtime_context: &runtime,

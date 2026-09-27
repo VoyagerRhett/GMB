@@ -316,14 +316,18 @@ impl VerifiedChainClient for SmoldotVerifiedChainClient {
             validate_exact_block(&running, block).await?;
             let hash = hash_hex(block.hash());
             // 两个请求都显式携带同一个准确 block hash；不允许分别读取“当前”版本与 metadata。
+            let started = std::time::Instant::now();
             let version_value = running
                 .rpc
                 .request("state_getRuntimeVersion", json!([hash]))
                 .await?;
+            transaction_diagnostic("runtime_version", started.elapsed());
+            let started = std::time::Instant::now();
             let metadata_value = running
                 .rpc
                 .request("state_getMetadata", json!([hash_hex(block.hash())]))
                 .await?;
+            transaction_diagnostic("runtime_metadata", started.elapsed());
             let spec_version = parse_u32_field(&version_value, "specVersion")?;
             let transaction_version = parse_u32_field(&version_value, "transactionVersion")?;
             let metadata = parse_hex_value(&metadata_value, "runtime metadata")?;
@@ -1224,7 +1228,11 @@ async fn parse_watch_event(
             Ok((ExtrinsicWatchEvent::Finalized { block }, true))
         }
         "invalid" => {
-            validate_transaction_watch_error(map.get("error"), "invalid")?;
+            let error = validate_transaction_watch_error(map.get("error"), "invalid")?;
+            transaction_diagnostic(
+                transaction_invalid_category(error),
+                std::time::Duration::ZERO,
+            );
             Ok((ExtrinsicWatchEvent::Invalid, true))
         }
         "dropped" => {
@@ -1248,6 +1256,37 @@ async fn parse_watch_event(
             ContractErrorCode::Decode,
             format!("未知 transactionWatch_v1 状态: {name}"),
         )),
+    }
+}
+
+/// 原始错误可能携带节点自由文本；诊断仅保留与随包 smoldot 官方枚举一致的闭集。
+fn transaction_invalid_category(error: &str) -> &'static str {
+    match error {
+        "Invalid transaction: Stale" => "invalid_stale",
+        "Invalid transaction: Future" => "invalid_future",
+        "Invalid transaction: Payment" => "invalid_payment",
+        "Invalid transaction: BadProof" => "invalid_bad_proof",
+        "Invalid transaction: Call" => "invalid_call",
+        "Invalid transaction: AncientBirthBlock" => "invalid_ancient_birth_block",
+        "Invalid transaction: ExhaustsResources" => "invalid_exhausts_resources",
+        "Invalid transaction: BadMandatory" => "invalid_bad_mandatory",
+        "Invalid transaction: MandatoryDispatch" => "invalid_mandatory_dispatch",
+        _ => "invalid_other",
+    }
+}
+
+/// 仅定向真机进程启用；禁止启用上游全量日志，避免把交易哈希带入输出。
+fn transaction_diagnostic(stage: &'static str, elapsed: std::time::Duration) {
+    if std::env::var_os("CITIZENSDK_TRANSACTION_DIAGNOSTICS").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+    {
+        let at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |value| value.as_millis());
+        eprintln!(
+            "CITIZENSDK_TX_DIAG at_ms={at_ms} stage={stage} elapsed_us={}",
+            elapsed.as_micros()
+        );
     }
 }
 
@@ -1370,6 +1409,28 @@ fn verify_submitted_hash(
 mod tests {
     use super::*;
     use smoldot_light::ChainFinalizedBlockSnapshot;
+
+    #[test]
+    fn transaction_diagnostics_only_expose_fixed_categories() {
+        // 成功分类、未知内容、伪装前缀和超长输入都不能透传任意描述。
+        assert_eq!(
+            transaction_invalid_category("Invalid transaction: Stale"),
+            "invalid_stale"
+        );
+        assert_eq!(
+            transaction_invalid_category("Invalid transaction: Payment"),
+            "invalid_payment"
+        );
+        assert_eq!(
+            transaction_invalid_category("Invalid transaction: Stale extra"),
+            "invalid_other"
+        );
+        assert_eq!(transaction_invalid_category(""), "invalid_other");
+        assert_eq!(
+            transaction_invalid_category(&"x".repeat(4096)),
+            "invalid_other"
+        );
+    }
 
     #[test]
     fn strict_hash_parser_rejects_wrong_width_and_prefix() {

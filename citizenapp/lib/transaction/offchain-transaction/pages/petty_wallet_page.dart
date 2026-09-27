@@ -1,9 +1,12 @@
+import 'dart:async';
+
+import 'package:provider/provider.dart';
+import 'package:citizen_sdk/citizen_sdk.dart';
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
 import 'package:flutter/material.dart';
 
-import 'package:citizenapp/my/util/amount_format.dart';
 import 'package:citizenapp/transaction/offchain-transaction/pages/deposit_page.dart';
 import 'package:citizenapp/transaction/offchain-transaction/pages/withdraw_page.dart';
-import 'package:citizenapp/transaction/offchain-transaction/rpc/offchain_clearing_rpc.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
@@ -36,33 +39,50 @@ class PettyWalletPage extends StatefulWidget {
 }
 
 class _PettyWalletPageState extends State<PettyWalletPage> {
-  String _balanceText = '查询中';
+  late WalletBalanceState<BigInt> _balance;
+
+  String get _balanceText {
+    final value = _balance.value;
+    if (value != null) {
+      return '¥${AccountBalanceSnapshotStore.formatFen(value)}';
+    }
+    return _balance.hasError ? '节点不可达' : '查询中';
+  }
 
   @override
   void initState() {
     super.initState();
-    _loadBalance();
+    _balance =
+        AccountBalanceSnapshotStore.forChain(context.read<CitizenSdk>().chain)
+            .clearingState(
+              accountId: widget.accountId,
+              ss58Address: widget.ss58Address,
+              wssUrl: widget.wssUrl,
+            )
+          ..addListener(_changed);
+    unawaited(_loadBalance());
   }
 
-  Future<void> _loadBalance() async {
-    try {
-      final fen = await OffchainClearingBankRpc(widget.wssUrl)
-          .queryBalance(widget.ss58Address);
-      if (!mounted) return;
-      setState(
-          () => _balanceText = '¥${AmountFormat.formatThousands(fen / 100.0)}');
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _balanceText = '节点不可达');
-    }
+  void _changed() {
+    if (mounted) setState(() {});
   }
+
+  @override
+  void dispose() {
+    _balance.removeListener(_changed);
+    super.dispose();
+  }
+
+  // 返回和下拉只通知 wallet 唯一状态，不另存零钱包金额。
+  Future<void> _loadBalance({bool forceRefresh = false}) =>
+      _balance.load(forceRefresh: forceRefresh);
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('零钱包'), centerTitle: true),
       body: RefreshIndicator(
-        onRefresh: _loadBalance,
+        onRefresh: () => _loadBalance(forceRefresh: true),
         child: ListView(
           padding: EdgeInsets.all(AppLayout.scaled(context, 16)),
           physics: const AlwaysScrollableScrollPhysics(),
@@ -73,21 +93,30 @@ class _PettyWalletPageState extends State<PettyWalletPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(widget.displayTitle,
-                      style: TextStyle(
-                          fontSize: AppLayout.scaled(context, 13),
-                          color: AppTheme.textSecondary)),
+                  Text(
+                    widget.displayTitle,
+                    style: TextStyle(
+                      fontSize: AppLayout.scaled(context, 13),
+                      color: AppTheme.textSecondary,
+                    ),
+                  ),
                   SizedBox(height: AppLayout.scaled(context, 10)),
-                  Text(_balanceText,
-                      style: TextStyle(
-                          fontSize: AppLayout.scaled(context, 28),
-                          fontWeight: FontWeight.w700,
-                          color: AppTheme.primaryDark)),
+                  Text(
+                    _balanceText,
+                    style: TextStyle(
+                      fontSize: AppLayout.scaled(context, 28),
+                      fontWeight: FontWeight.w700,
+                      color: AppTheme.primaryDark,
+                    ),
+                  ),
                   SizedBox(height: AppLayout.scaled(context, 4)),
-                  Text('零钱包余额（链下清算行）',
-                      style: TextStyle(
-                          fontSize: AppLayout.scaled(context, 12),
-                          color: AppTheme.textTertiary)),
+                  Text(
+                    '零钱包余额（链下清算行）',
+                    style: TextStyle(
+                      fontSize: AppLayout.scaled(context, 12),
+                      color: AppTheme.textTertiary,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -112,7 +141,7 @@ class _PettyWalletPageState extends State<PettyWalletPage> {
   }
 
   Future<void> _openDeposit() async {
-    await Navigator.push(
+    final submitted = await Navigator.push<bool>(
       context,
       MaterialPageRoute(
         builder: (_) => DepositPage(
@@ -121,11 +150,11 @@ class _PettyWalletPageState extends State<PettyWalletPage> {
         ),
       ),
     );
-    await _loadBalance();
+    await _loadBalance(forceRefresh: submitted == true);
   }
 
   Future<void> _openWithdraw() async {
-    await Navigator.push(
+    final submitted = await Navigator.push<bool>(
       context,
       MaterialPageRoute(
         builder: (_) => WithdrawPage(
@@ -135,7 +164,7 @@ class _PettyWalletPageState extends State<PettyWalletPage> {
         ),
       ),
     );
-    await _loadBalance();
+    await _loadBalance(forceRefresh: submitted == true);
   }
 }
 
@@ -171,9 +200,11 @@ class _ActionTile extends StatelessWidget {
                   color: AppTheme.primary.withAlpha(26),
                   shape: BoxShape.circle,
                 ),
-                child: Icon(icon,
-                    size: AppLayout.scaled(context, 22),
-                    color: AppTheme.primaryDark),
+                child: Icon(
+                  icon,
+                  size: AppLayout.scaled(context, 22),
+                  color: AppTheme.primaryDark,
+                ),
               ),
               SizedBox(width: AppLayout.scaled(context, 14)),
               Expanded(
@@ -181,22 +212,30 @@ class _ActionTile extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(title,
-                        style: TextStyle(
-                            fontSize: AppLayout.scaled(context, 16),
-                            fontWeight: FontWeight.w600,
-                            color: AppTheme.textPrimary)),
+                    Text(
+                      title,
+                      style: TextStyle(
+                        fontSize: AppLayout.scaled(context, 16),
+                        fontWeight: FontWeight.w600,
+                        color: AppTheme.textPrimary,
+                      ),
+                    ),
                     SizedBox(height: AppLayout.scaled(context, 2)),
-                    Text(subtitle,
-                        style: TextStyle(
-                            fontSize: AppLayout.scaled(context, 12),
-                            color: AppTheme.textTertiary)),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        fontSize: AppLayout.scaled(context, 12),
+                        color: AppTheme.textTertiary,
+                      ),
+                    ),
                   ],
                 ),
               ),
-              Icon(Icons.chevron_right,
-                  size: AppLayout.scaled(context, 18),
-                  color: AppTheme.textTertiary),
+              Icon(
+                Icons.chevron_right,
+                size: AppLayout.scaled(context, 18),
+                color: AppTheme.textTertiary,
+              ),
             ],
           ),
         ),

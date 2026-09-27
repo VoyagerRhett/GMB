@@ -6,7 +6,7 @@ import 'dart:io';
 ///
 /// - 对接 `citizenchain/node/src/transaction/offchain_transaction/rpc.rs::OffchainClearingRpcImpl`,
 ///   命名空间 `offchain`。
-/// - Step 1 提供 3 个只读方法:`queryBalance` / `queryNextNonce` / `queryPendingCount`。
+/// - 余额查询与缓存唯一归 wallet；本类只提供通用 RPC 传输及支付协议方法。
 /// - Step 2c-i 起补充 `submitPayment`(扫码付款提交)+ `queryUserBank`(付款方
 ///   绑定的清算行查询)+ `queryFeeRate`(费率查询)。WebSocket 订阅(实时 push
 ///   settlement 回执)留后续里程碑。
@@ -19,24 +19,15 @@ class OffchainClearingBankRpc {
 
   final String wssUrl;
 
-  /// 查询 L3 在该清算行的可用存款余额(分)。
-  ///
-  /// 可用余额 = `confirmed - pending_debit`(节点本地缓存,与链上 `DepositBalance`
-  /// 同步)。
-  Future<int> queryBalance(String userAccountId) async {
-    final result = await _callRpc('offchain_queryBalance', [userAccountId]);
-    return _parseInt(result, fallback: 0);
-  }
-
   /// 查询 L3 下一个应使用的支付 nonce(Step 2 扫码支付前调用)。
   Future<int> queryNextNonce(String userAccountId) async {
-    final result = await _callRpc('offchain_queryNextNonce', [userAccountId]);
+    final result = await call('offchain_queryNextNonce', [userAccountId]);
     return _parseInt(result, fallback: 1);
   }
 
   /// 查询本清算行待上链笔数(运维查看)。
   Future<int> queryPendingCount() async {
-    final result = await _callRpc('offchain_queryPendingCount', const []);
+    final result = await call('offchain_queryPendingCount', const []);
     return _parseInt(result, fallback: 0);
   }
 
@@ -45,7 +36,7 @@ class OffchainClearingBankRpc {
   /// 对应节点侧 `UserBank[user]` storage。返回该用户绑定清算行的 **CID 文本**
   /// (机构唯一永久主键);扫码付款前调用以确定 `payer_bank_cid` / `recipient_bank_cid`。
   Future<String?> queryUserBank(String userAccountId) async {
-    final result = await _callRpc('offchain_queryUserBank', [userAccountId]);
+    final result = await call('offchain_queryUserBank', [userAccountId]);
     if (result == null) return null;
     if (result is String) return result;
     throw Exception('offchain_queryUserBank 返回类型异常:$result');
@@ -58,14 +49,16 @@ class OffchainClearingBankRpc {
   /// `fee = max(round(amount * rateBp / 10000), minFeeFen)`,四舍五入规则与
   /// runtime `fee_config::calc_fee` 对齐(余数 ≥ 5000 进位)。
   Future<({int rateBp, int minFeeFen})> queryFeeRate(String bankCid) async {
-    final result = await _callRpc('offchain_queryFeeRate', [bankCid]);
+    final result = await call('offchain_queryFeeRate', [bankCid]);
     if (result is! Map) {
       throw Exception('offchain_queryFeeRate 返回类型异常:$result');
     }
     final map = result.cast<String, dynamic>();
     final rateBp = _parseInt(map['rate_bp'] ?? map['rateBp'], fallback: 0);
-    final minFeeFen =
-        _parseInt(map['min_fee_fen'] ?? map['minFeeFen'], fallback: 1);
+    final minFeeFen = _parseInt(
+      map['min_fee_fen'] ?? map['minFeeFen'],
+      fallback: 1,
+    );
     return (rateBp: rateBp, minFeeFen: minFeeFen);
   }
 
@@ -85,10 +78,10 @@ class OffchainClearingBankRpc {
     required String intentHex,
     required String payerSigHex,
   }) async {
-    final result = await _callRpc(
-      'offchain_submitPayment',
-      [intentHex, payerSigHex],
-    );
+    final result = await call('offchain_submitPayment', [
+      intentHex,
+      payerSigHex,
+    ]);
     if (result is! Map) {
       throw Exception('offchain_submitPayment 返回类型异常:$result');
     }
@@ -106,9 +99,10 @@ class OffchainClearingBankRpc {
   }
 
   /// 通用 JSON-RPC over WSS 调用,带超时和错误传播。
-  Future<dynamic> _callRpc(String method, List<dynamic> params) async {
-    final ws =
-        await WebSocket.connect(wssUrl).timeout(const Duration(seconds: 10));
+  /// 通用 WSS 传输；余额方法选择、数据校验和持久化由 wallet 所有者实现。
+  Future<dynamic> call(String method, List<dynamic> params) async {
+    final ws = await WebSocket.connect(wssUrl)
+        .timeout(const Duration(seconds: 10));
     try {
       final request = jsonEncode({
         'jsonrpc': '2.0',
@@ -122,9 +116,7 @@ class OffchainClearingBankRpc {
       final json = jsonDecode(response as String) as Map<String, dynamic>;
       if (json.containsKey('error')) {
         final error = json['error'] as Map<String, dynamic>;
-        throw Exception(
-          '清算行 RPC 调用失败:${error['message'] ?? '未知错误'}',
-        );
+        throw Exception('清算行 RPC 调用失败:${error['message'] ?? '未知错误'}');
       }
       return json['result'];
     } finally {

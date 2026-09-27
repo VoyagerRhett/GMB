@@ -1,7 +1,9 @@
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
 import 'package:citizen_sdk/citizen_sdk.dart';
 
 import 'dart:async';
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:citizenapp/log/app_log.dart';
@@ -26,8 +28,9 @@ import 'package:citizenapp/wallet/pages/wallet_page.dart';
 import 'package:citizenapp/transaction/history/presentation/transaction_history_page.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
-typedef OnchainPaymentExtraEntriesBuilder =
-    List<Widget> Function(BuildContext context);
+typedef OnchainPaymentExtraEntriesBuilder = List<Widget> Function(
+  BuildContext context,
+);
 
 /// 交易表单四个输入框(收款地址 / 金额 / 币种 / 备注)共用的装饰。
 ///
@@ -70,8 +73,10 @@ InputDecoration transactionFieldDecoration({
 typedef OnchainWalletPicker = Future<bool?> Function();
 typedef OnchainCurrentWalletLoader =
     Future<CitizenWalletStateAccount?> Function();
-typedef OnchainLocalRecordsLoader =
-    Future<List<LocalTxEntity>> Function(String accountId, {int limit});
+typedef OnchainLocalRecordsLoader = Future<List<LocalTxEntity>> Function(
+  String accountId, {
+  int limit,
+});
 typedef OnchainContactPageBuilder = Widget Function(ContactPickMode mode);
 
 class OnchainPaymentPage extends StatelessWidget {
@@ -155,9 +160,23 @@ class _OnchainPaymentPanelState extends State<OnchainPaymentPanel>
   final String _selectedSymbol = 'GMB';
 
   CitizenWalletStateAccount? _currentWallet;
-  double _currentBalance = 0;
+  WalletBalanceState<CitizenAccountBalance>? _walletBalance;
+  double _testBalance = 0;
+  int _walletLoadGeneration = 0;
+  double get _currentBalance => widget.balanceLoader != null
+      ? _testBalance : (_walletBalance?.value?.freeFen.toDouble() ?? 0) / 100;
+  String get _balanceText {
+    if (widget.balanceLoader != null) return AmountFormat.format(_testBalance, symbol: '');
+    final value = _walletBalance?.value;
+    return value == null ? '—' : AccountBalanceSnapshotStore.formatFen(value.freeFen);
+  }
+
+  void _onBalanceChanged() {
+    if (mounted) setState(() {});
+  }
   bool _loadingWallet = true;
   bool _submitting = false;
+  bool _checkingBalance = false;
   CitizenChainSyncStatus? _chainProgress;
   String? _chainProgressError;
 
@@ -207,6 +226,8 @@ class _OnchainPaymentPanelState extends State<OnchainPaymentPanel>
         AppLog.d('[Transaction] 链上支付 watcher 停止失败: $error\n$stackTrace');
       }),
     );
+    _walletBalance?.removeListener(_onBalanceChanged);
+    _walletLoadGeneration += 1;
     _accountSecurity?.revision.removeListener(_onWalletsChanged);
     _remarkController.removeListener(_onRemarkChanged);
     _toController.dispose();
@@ -304,49 +325,64 @@ class _OnchainPaymentPanelState extends State<OnchainPaymentPanel>
       )
       .length;
 
-  Future<void> _reloadWallet() async {
+  Future<void> _reloadWallet({bool forceBalance = false}) async {
+    final generation = ++_walletLoadGeneration;
     CitizenWalletStateAccount? wallet;
-    var balance = 0.0;
+    WalletBalanceState<CitizenAccountBalance>? balance;
+    double testBalance = 0;
     try {
       final loader = widget.currentWalletLoader;
-      wallet = loader != null
-          ? await loader()
-          : await _paymentService!.getCurrentWallet();
+      wallet = loader != null ? await loader() : await _paymentService!.getCurrentWallet();
+      if (!mounted || generation != _walletLoadGeneration) return;
       if (wallet != null) {
-        balance =
-            await (widget.balanceLoader?.call(wallet.accountId) ??
-                _loadFinalizedBalance(wallet.accountId));
+        final injected = widget.balanceLoader;
+        if (injected != null) {
+          testBalance = await injected(wallet.accountId);
+        } else {
+          final store = AccountBalanceSnapshotStore.forChain(context.read<CitizenSdk>().chain);
+          await store.restore([wallet.accountId]);
+          balance = store.accountState(wallet.accountId);
+        }
       }
     } catch (e, st) {
       if (!WalletIsar.instance.isBusyError(e)) {
         AppLog.d('[链上交易] 当前钱包加载失败: $e\n$st');
       }
     }
-    if (!mounted) {
-      return;
-    }
+    if (!mounted || generation != _walletLoadGeneration) return;
     final nextAccountId = _accountIdOf(wallet);
-    final currentAccountId = _accountIdOf(_currentWallet);
+    final changed = nextAccountId != _accountIdOf(_currentWallet);
+    _walletBalance?.removeListener(_onBalanceChanged);
+    _walletBalance = balance;
+    _walletBalance?.addListener(_onBalanceChanged);
     setState(() {
       _currentWallet = wallet;
-      _currentBalance = balance;
+      _testBalance = testBalance;
       _loadingWallet = false;
-      if (nextAccountId != currentAccountId) {
-        _localTxRecords = [];
-      }
+      if (changed) _localTxRecords = [];
     });
     startTxAutoRefresh(nextAccountId);
+    // 普通进入先显示本地快照；首次缺失在共享状态中补齐，主动刷新才等待网络。
+    final refresh = balance?.load(forceRefresh: forceBalance);
+    if (forceBalance) {
+      await refresh;
+    } else if (refresh != null) {
+      unawaited(refresh);
+    }
   }
 
-  Future<double> _loadFinalizedBalance(String accountId) async {
-    final balance = await context.read<CitizenSdk>().chain.getAccountBalance(
-      accountId,
-    );
+  Future<double> _loadFinalizedBalance(
+    String accountId, {
+    bool forceRefresh = false,
+  }) async {
+    final balance = await AccountBalanceSnapshotStore.forChain(
+      context.read<CitizenSdk>().chain,
+    ).getAccountBalance(accountId, forceRefresh: forceRefresh);
     return balance.freeFen.toDouble() / 100;
   }
 
-  Future<void> _reloadWalletAndLocalRecords() async {
-    await _reloadWallet();
+  Future<void> _reloadWalletAndLocalRecords({bool forceBalance = false}) async {
+    await _reloadWallet(forceBalance: forceBalance);
     await _loadLocalRecords();
   }
 
@@ -355,7 +391,7 @@ class _OnchainPaymentPanelState extends State<OnchainPaymentPanel>
   Future<void> _onPullRefresh() async {
     if (mounted) setState(() => _refreshing = true);
     try {
-      await _reloadWalletAndLocalRecords();
+      await _reloadWalletAndLocalRecords(forceBalance: true);
     } finally {
       if (mounted) setState(() => _refreshing = false);
     }
@@ -399,9 +435,8 @@ class _OnchainPaymentPanelState extends State<OnchainPaymentPanel>
     final blockedReason = _submitBlockedReason;
     if (blockedReason != null) {
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(blockedReason)));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(blockedReason)));
       }
       return;
     }
@@ -409,9 +444,8 @@ class _OnchainPaymentPanelState extends State<OnchainPaymentPanel>
       return;
     }
     if (_currentWallet == null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('请先创建或导入钱包')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('请先创建或导入钱包')));
       await _openWalletTab();
       return;
     }
@@ -419,9 +453,8 @@ class _OnchainPaymentPanelState extends State<OnchainPaymentPanel>
     final toSs58Address = _toController.text.trim();
     final amountRaw = _amountController.text.trim();
     if (toSs58Address.isEmpty || amountRaw.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('请先填写完整的收款地址和金额')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('请先填写完整的收款地址和金额')));
       return;
     }
     final amountText = AmountFormat.stripCommas(amountRaw);
@@ -446,11 +479,12 @@ class _OnchainPaymentPanelState extends State<OnchainPaymentPanel>
     }
 
     final amount = double.tryParse(amountText);
-    if (amount == null || !amount.isFinite || !(amount * 100).isFinite ||
+    if (amount == null ||
+        !amount.isFinite ||
+        !(amount * 100).isFinite ||
         amount <= 0) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('金额格式不正确')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('金额格式不正确')));
       return;
     }
     final remark = _remarkController.text;
@@ -467,6 +501,24 @@ class _OnchainPaymentPanelState extends State<OnchainPaymentPanel>
     }
 
     // 预估手续费，展示确认对话框
+    if (_checkingBalance) return;
+    final balanceAccountId = _currentWallet!.accountId;
+    setState(() => _checkingBalance = true);
+    try {
+      final fresh =
+          await (widget.balanceLoader?.call(balanceAccountId) ??
+              _loadFinalizedBalance(balanceAccountId, forceRefresh: true));
+      if (!mounted || _currentWallet?.accountId != balanceAccountId) return;
+      if (widget.balanceLoader != null) setState(() => _testBalance = fresh);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('余额校验失败，请刷新后重试')));
+      }
+      return;
+    } finally {
+      if (mounted) setState(() => _checkingBalance = false);
+    }
     final estimatedFee = OnchainTransferCall.estimateTransferFeeYuan(amount);
 
     // 余额校验：转账金额 + 手续费 ≤ 可用余额（余额 - ED）
@@ -615,16 +667,14 @@ class _OnchainPaymentPanelState extends State<OnchainPaymentPanel>
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(e.message)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.message)));
     } on OnchainPaymentException catch (e) {
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(e.message)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.message)));
     } on CitizenSdkException catch (e) {
       // 诊断仅含固定步骤和SDK枚举；不得记录错误描述、账户或交易载荷。
       final method = switch (e.method) {
@@ -634,21 +684,22 @@ class _OnchainPaymentPanelState extends State<OnchainPaymentPanel>
           'consumePreparedTransactionQrResponse',
         _ => 'unknown',
       };
-      AppLog.d('[链上交易] step=${paymentStep.name} code=${e.code.name} '
-          'stage=${e.stage.name} method=$method');
+      AppLog.d(
+        '[链上交易] step=${paymentStep.name} code=${e.code.name} '
+        'stage=${e.stage.name} method=$method',
+      );
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(onchainPaymentFailureText(paymentStep, e.code)),
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(onchainPaymentFailureText(paymentStep, e.code))),
+      );
     } catch (e) {
       if (!mounted) {
         return;
       }
       // 未分类异常不得把可能携带交易内容的原始描述写入日志或弹窗。
       AppLog.d('[链上交易] 未分类异常类型: ${e.runtimeType}');
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('交易异常，请稍后重试')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('交易异常，请稍后重试')));
     } finally {
       if (mounted) {
         setState(() {
@@ -773,7 +824,7 @@ class _OnchainPaymentPanelState extends State<OnchainPaymentPanel>
                     ),
                     SizedBox(width: AppLayout.scaledValue(6)),
                     Text(
-                      '钱包可用余额：${AmountFormat.format(_currentBalance, symbol: '')} GMB',
+                      '钱包可用余额：$_balanceText GMB',
                       style: TextStyle(
                         fontSize: AppLayout.scaledValue(14),
                         color: AppTheme.textSecondary,
@@ -1112,12 +1163,16 @@ class _OnchainPaymentPanelState extends State<OnchainPaymentPanel>
 
   bool get _canSubmit =>
       !_submitting &&
+      !_checkingBalance &&
       !_loadingWallet &&
       _currentWallet != null &&
       _submitBlockedReason == null;
 
   String? get _submitBlockedReason {
-    if (_submitting || _loadingWallet || _currentWallet == null) {
+    if (_submitting ||
+        _checkingBalance ||
+        _loadingWallet ||
+        _currentWallet == null) {
       return null;
     }
     if (_transferRemarkBytes > OnchainTransferCall.maxTransferRemarkBytes) {

@@ -31,6 +31,191 @@ fn concrete_provider_implements_the_formal_chain_contract() {
     assert_verified_client::<SmoldotVerifiedChainClient>();
 }
 
+/// 真实网络只读nonce验收：每轮新建provider，覆盖首次读取与同块重复读取。
+/// 仅使用合成公有账户，不读取钱包、不提交交易、不输出nonce或块/账户标识。
+#[test]
+#[ignore = "需要显式执行nonce只读实网耗时验收"]
+fn live_nonce_queries_reuse_pinned_runtime_without_transaction_submission() {
+    use citizen_sdk_contracts::{AccountId32, AccountNonceSource};
+    use std::time::{Duration, Instant};
+
+    for session in 0..2 {
+        let mut spec: serde_json::Value = require_ok(serde_json::from_str(CHAIN_SPEC), "chainspec");
+        spec["lightSyncState"] = require_ok(
+            serde_json::from_str(include_str!(
+                "../../../../assets/citizenchain/light_sync_state.json"
+            )),
+            "light sync state",
+        );
+        let config = require_ok(
+            SmoldotProviderConfig::try_new(
+                spec.to_string(),
+                "CitizenSDK nonce observation",
+                "2.4.0",
+            ),
+            "config",
+        )
+        .with_bootstrap();
+        let provider = require_ok(SmoldotVerifiedChainClient::new(config), "provider");
+        let result = require_ok(provider.drive(async {
+            tokio::time::timeout(Duration::from_secs(120), async {
+                provider.start().await.ok()?;
+                let best = loop {
+                    if let Ok(Ok(status)) = tokio::time::timeout(Duration::from_secs(3), provider.get_sync_status()).await {
+                        if status.is_usable() && status.peer_count() > 0 && status.best().hash() == status.finalized().hash() {
+                            break provider.get_best_head().await.ok()?;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                };
+                let account_id = AccountId32::from_bytes([0x11; 32]);
+                let mut previous = None;
+                for sample in 0..3 {
+                    let started = Instant::now();
+                    let nonce = provider.account_next_index(account_id, best).await.ok()?;
+                    let matches = nonce.account_id() == account_id && nonce.best_block() == best;
+                    let stable = previous.is_none_or(|value| value == nonce.value());
+                    previous = Some(nonce.value());
+                    println!("NONCE_OBSERVATION session={session} sample={sample} elapsed_us={} identity_match={matches} same_block_value={stable}", started.elapsed().as_micros());
+                    if !matches || !stable { return None; }
+                }
+                let after = provider.get_sync_status().await.ok()?;
+                Some(after.best().hash() == best.hash() && after.best().hash() == after.finalized().hash())
+            }).await
+        }), "nonce executor");
+        require_ok(provider.stop(), "stop provider");
+        assert_eq!(
+            require_ok(result, "nonce observation timeout"),
+            Some(true),
+            "nonce真实读取或准确空闲块条件失败"
+        );
+    }
+}
+
+#[test]
+fn nonce_entry_uses_one_pinned_runtime_path_and_retains_proof_execution() {
+    let source = include_str!("../../pow/light-base/src/lib.rs");
+    let entry = source
+        .split("pub fn chain_account_next_index_snapshot(")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn add_chain(").next())
+        .expect("nonce entry");
+    // 防止最终根分支重新走代码下载，或优化时误删证明执行、API版本和准确身份。
+    assert!(!entry.contains("compile_runtime_for_block("));
+    assert_eq!(entry.matches(".pin_pinned_block_runtime(").count(), 1);
+    assert_eq!(entry.matches(".runtime_call(").count(), 1);
+    assert!(entry.contains("AccountNonceApi_account_nonce"));
+    assert!(entry.contains("1..=1"));
+    assert!(entry.contains("NonceCleanup("));
+    assert!(entry.contains("requested_account_id"));
+}
+
+/// 无peer时不能把已固定Runtime误当作账户状态证明；超时取消后必须能停止实例。
+#[test]
+fn nonce_without_proof_never_returns_a_cached_or_fabricated_value() {
+    use citizen_sdk_contracts::{AccountId32, AccountNonceSource, VerifiedBlockRef};
+    use std::time::Duration;
+    let mut spec: serde_json::Value = require_ok(serde_json::from_str(CHAIN_SPEC), "chainspec");
+    spec["bootNodes"] = serde_json::json!([]);
+    spec["lightSyncState"] = require_ok(
+        serde_json::from_str(include_str!(
+            "../../../../assets/citizenchain/light_sync_state.json"
+        )),
+        "light sync state",
+    );
+    let provider = require_ok(
+        SmoldotVerifiedChainClient::new(require_ok(
+            SmoldotProviderConfig::try_new(spec.to_string(), "CitizenSDK offline nonce", "2.4.0"),
+            "config",
+        )),
+        "provider",
+    );
+    require_ok(
+        require_ok(provider.drive(provider.start()), "start executor"),
+        "start provider",
+    );
+    let result = require_ok(
+        provider.drive(async {
+            tokio::time::timeout(
+                Duration::from_millis(300),
+                provider.account_next_index(
+                    AccountId32::from_bytes([0x11; 32]),
+                    VerifiedBlockRef::best(CITIZENCHAIN_GENESIS_HASH, 0),
+                ),
+            )
+            .await
+        }),
+        "nonce executor",
+    );
+    assert!(!matches!(result, Ok(Ok(_))), "没有网络证明不能返回nonce");
+    require_ok(provider.stop(), "stop cancelled provider");
+    let stopped = require_err(
+        futures::executor::block_on(provider.account_next_index(
+            AccountId32::from_bytes([0x11; 32]),
+            VerifiedBlockRef::best(CITIZENCHAIN_GENESIS_HASH, 0),
+        )),
+        "stopped provider must reject nonce",
+    );
+    assert_eq!(stopped.code(), ContractErrorCode::NotReady);
+}
+
+/// 与手机相同 provider、随包信任资产及节点发现的只读实网验收。
+/// 不提交交易；只输出公开高度和固定状态，不输出块哈希、账户或原始错误。
+/// 必须显式选择，离线回归不依赖实网；宿主观测不能冒充手机进程内部状态。
+#[test]
+#[ignore = "需要显式执行只读实网链状态验收"]
+fn live_chain_status_observation_without_transaction_submission() {
+    use std::time::{Duration, Instant};
+
+    let mut spec: serde_json::Value = require_ok(serde_json::from_str(CHAIN_SPEC), "chainspec");
+    spec["lightSyncState"] = require_ok(
+        serde_json::from_str(include_str!(
+            "../../../../assets/citizenchain/light_sync_state.json"
+        )),
+        "light sync state",
+    );
+    let config = require_ok(
+        SmoldotProviderConfig::try_new(spec.to_string(), "CitizenSDK chain observation", "2.4.0"),
+        "config",
+    )
+    .with_bootstrap();
+    let provider = require_ok(SmoldotVerifiedChainClient::new(config), "provider");
+    let started = require_ok(
+        provider
+            .drive(async { tokio::time::timeout(Duration::from_secs(60), provider.start()).await }),
+        "start executor",
+    );
+    require_ok(require_ok(started, "start timeout"), "start failed");
+
+    let (usable_samples, equal_samples) = require_ok(provider.drive(async {
+        let start = Instant::now();
+        let mut usable_samples = 0;
+        let mut equal_samples = 0;
+        while start.elapsed() < Duration::from_secs(90) && usable_samples < 12 {
+            match tokio::time::timeout(Duration::from_secs(3), provider.get_sync_status()).await {
+                Ok(Ok(status)) => {
+                    let equal = status.best().hash() == status.finalized().hash();
+                    println!("CHAIN_OBSERVATION elapsed_s={} best={} finalized={} equal={} peers={} syncing={} usable={}",
+                        start.elapsed().as_secs(), status.best().number(), status.finalized().number(),
+                        equal, status.peer_count(), status.is_syncing(), status.is_usable());
+                    if status.is_usable() && status.peer_count() > 0 {
+                        usable_samples += 1;
+                        equal_samples += usize::from(equal);
+                    }
+                }
+                Ok(Err(_)) => println!("CHAIN_OBSERVATION status=unavailable"),
+                Err(_) => println!("CHAIN_OBSERVATION status=timeout"),
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+        (usable_samples, equal_samples)
+    }), "observation executor");
+    // 无可用 peer、超时或同步未完成均不能当成空闲链证据；先结束实例再断言。
+    require_ok(provider.stop(), "stop provider");
+    println!("CHAIN_OBSERVATION usable_samples={usable_samples} equal_samples={equal_samples}");
+    assert_eq!(usable_samples, 12, "实网可用状态样本不足");
+}
+
 #[test]
 fn finalized_subscription_before_start_fails_once_and_ends() {
     use futures::StreamExt;
@@ -45,6 +230,113 @@ fn finalized_subscription_before_start_fails_once_and_ends() {
     let first = futures::executor::block_on(stream.next());
     assert!(matches!(first, Some(Err(error)) if error.code() == ContractErrorCode::NotReady));
     assert!(futures::executor::block_on(stream.next()).is_none());
+}
+
+/// 用无账户、无签名的 Timestamp 固有调用走本地外部交易验证；不得通过或广播。
+/// 在同一 best==finalized 块上得到 Runtime 拒绝，证明无需等新区块即可启动验证。
+#[test]
+#[ignore = "需要显式执行空闲实网验证，固有调用不得广播"]
+fn live_idle_chain_rejects_inherent_without_a_new_block() {
+    use citizen_sdk_contracts::{ExtrinsicWatchEvent, SignedExtrinsic};
+    use futures::StreamExt;
+    use std::time::Duration;
+
+    let mut spec: serde_json::Value = require_ok(serde_json::from_str(CHAIN_SPEC), "chainspec");
+    spec["lightSyncState"] = require_ok(
+        serde_json::from_str(include_str!(
+            "../../../../assets/citizenchain/light_sync_state.json"
+        )),
+        "light sync state",
+    );
+    let config = require_ok(
+        SmoldotProviderConfig::try_new(spec.to_string(), "CitizenSDK validation test", "2.4.0"),
+        "config",
+    )
+    .with_bootstrap();
+    let provider = require_ok(SmoldotVerifiedChainClient::new(config), "provider");
+    let started = require_ok(
+        provider
+            .drive(async { tokio::time::timeout(Duration::from_secs(60), provider.start()).await }),
+        "start executor",
+    );
+    require_ok(require_ok(started, "start timeout"), "start failed");
+    let observation = require_ok(
+        provider.drive(async {
+            tokio::time::timeout(Duration::from_secs(90), async {
+                let before = loop {
+                    // 启动过渡中的不可读快照不能提前结束实网验收，仍受外层90秒限制。
+                    if let Ok(Ok(status)) = tokio::time::timeout(
+                        Duration::from_secs(3), provider.get_sync_status()).await {
+                        if status.is_usable()
+                            && status.peer_count() > 0
+                            && status.best().hash() == status.finalized().hash()
+                        {
+                            println!("IDLE_VALIDATION stage=ready best={} finalized={} peers={}",
+                                status.best().number(), status.finalized().number(), status.peer_count());
+                            break status;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                };
+                // SCALE长度4、unsigned v4、Timestamp(1)::set(0)、compact时刻0。
+                // 格式合法，Executive 在外部验证中以 MandatoryValidation 拒绝，绝不执行调用。
+                let inherent = SignedExtrinsic::try_new(vec![16, 4, 1, 0, 0]).ok()?;
+                let mut watch = provider.watch_extrinsic(inherent);
+                let first = tokio::time::timeout(Duration::from_secs(45), watch.next())
+                    .await
+                    .ok()?;
+                let runtime_rejected = match first {
+                    Some(Ok(ExtrinsicWatchEvent::Invalid)) => true,
+                    Some(Err(error)) => {
+                        // 只输出固定枚举与分类布尔值，失败也不能回显原始错误。
+                        let execution = error.message().contains("Error during the execution of the runtime:");
+                        println!("IDLE_VALIDATION error_code={:?} execution={} api_requirement={} inaccessible={} rpc_rejected={}",
+                            error.code(), execution,
+                            error.message().contains("ApiVersionRequirementUnfulfilled"),
+                            error.message().contains("Error trying to access the storage"),
+                            error.message().contains("RPC"));
+                        false
+                    }
+                    Some(Ok(event)) => {
+                        println!("IDLE_VALIDATION ready={} broadcast={} dropped={}",
+                            matches!(event, ExtrinsicWatchEvent::Ready),
+                            matches!(event, ExtrinsicWatchEvent::Broadcast { .. }),
+                            matches!(event, ExtrinsicWatchEvent::Dropped));
+                        false
+                    }
+                    None => false,
+                };
+                drop(watch);
+                let after = match provider.get_sync_status().await {
+                    Ok(status) => status,
+                    Err(error) => {
+                        println!("IDLE_VALIDATION stage=after_unavailable code={:?}", error.code());
+                        return None;
+                    }
+                };
+                Some((
+                    runtime_rejected,
+                    before.best().hash() == after.best().hash()
+                        && after.best().hash() == after.finalized().hash(),
+                ))
+            })
+            .await
+        }),
+        "validation executor",
+    );
+    require_ok(
+        provider.drive(provider.drain_finalized_subscriptions()),
+        "drain executor",
+    )
+    .unwrap_or_else(|_| panic!("drain failed"));
+    require_ok(provider.stop(), "stop provider");
+    let (runtime_rejected, same_block) = require_ok(observation, "validation timeout")
+        .unwrap_or_else(|| panic!("实网验证状态不可读"));
+    println!(
+        "IDLE_VALIDATION runtime_rejected={runtime_rejected} same_finalized_block={same_block}"
+    );
+    assert!(runtime_rejected, "固有调用未得到真实Runtime无效结论");
+    assert!(same_block, "验收期间链头改变，不能证明空闲链验证");
 }
 
 #[test]

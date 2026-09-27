@@ -1,3 +1,5 @@
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
+
 import 'dart:async';
 
 import 'package:citizen_sdk/citizen_sdk.dart';
@@ -53,7 +55,8 @@ class SquareChainBalanceReader implements SquarePublishBalanceReader {
 
   @override
   Future<double> fetchFreshFinalizedBalanceYuan(String accountId) async {
-    final balance = await _chain.getAccountBalance(accountId);
+    final balance = await AccountBalanceSnapshotStore.forChain(_chain)
+        .getAccountBalance(accountId, forceRefresh: true);
     return balance.freeFen.toDouble() / 100;
   }
 

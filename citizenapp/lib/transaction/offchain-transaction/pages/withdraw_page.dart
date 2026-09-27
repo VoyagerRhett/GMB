@@ -1,11 +1,13 @@
+import 'dart:async';
+
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
+
 import 'dart:typed_data';
 
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:citizenapp/my/util/amount_format.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
-import 'package:citizenapp/transaction/offchain-transaction/rpc/offchain_clearing_rpc.dart';
 import 'package:citizenapp/transaction/offchain-transaction/services/onchain_clearing_bank_chain.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 
@@ -39,33 +41,34 @@ class WithdrawPage extends StatefulWidget {
 class _WithdrawPageState extends State<WithdrawPage> {
   final TextEditingController _amountCtrl = TextEditingController();
   bool _submitting = false;
-  int? _balanceFen;
-  String? _balanceErr;
+  WalletBalanceState<BigInt>? _balance;
 
   @override
   void initState() {
     super.initState();
-    if (widget.wssUrl != null && widget.wssUrl!.isNotEmpty) {
-      _loadBalance();
+    final wssUrl = widget.wssUrl;
+    if (wssUrl != null && wssUrl.isNotEmpty) {
+      _balance =
+          AccountBalanceSnapshotStore.forChain(context.read<CitizenSdk>().chain)
+              .clearingState(
+                accountId: widget.accountId,
+                ss58Address: widget.ss58Address,
+                wssUrl: wssUrl,
+              )
+            ..addListener(_changed);
+      unawaited(_balance!.load());
     }
+  }
+
+  void _changed() {
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
+    _balance?.removeListener(_changed);
     _amountCtrl.dispose();
     super.dispose();
-  }
-
-  Future<void> _loadBalance() async {
-    try {
-      final chain = OffchainClearingBankRpc(widget.wssUrl!);
-      final v = await chain.queryBalance(widget.ss58Address);
-      if (!mounted) return;
-      setState(() => _balanceFen = v);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _balanceErr = e.toString());
-    }
   }
 
   @override
@@ -121,18 +124,14 @@ class _WithdrawPageState extends State<WithdrawPage> {
         style: TextStyle(color: Colors.grey),
       );
     }
-    if (_balanceErr != null) {
-      return Text(
-        '查询余额失败:$_balanceErr',
-        style: const TextStyle(color: Colors.red),
-      );
+    if (_balance!.hasError && _balance!.value == null) {
+      return const Text('查询余额失败:节点不可达', style: TextStyle(color: Colors.red));
     }
-    if (_balanceFen == null) {
+    if (_balance!.value == null) {
       return const Text('正在查询清算行存款余额...', style: TextStyle(color: Colors.grey));
     }
-    final yuan = _balanceFen! / 100.0;
     return Text(
-      '当前清算行存款余额:¥${AmountFormat.formatThousands(yuan)}',
+      '当前清算行存款余额:¥${AccountBalanceSnapshotStore.formatFen(_balance!.value!)}',
       style: TextStyle(fontSize: AppLayout.scaledValue(14)),
     );
   }
@@ -158,6 +157,14 @@ class _WithdrawPageState extends State<WithdrawPage> {
         throw Exception('账户公钥必须是 32 字节');
       }
       final sdk = context.read<CitizenSdk>();
+      final balance = await AccountBalanceSnapshotStore.forChain(sdk.chain)
+          .getClearingBalance(
+            accountId: widget.accountId,
+            ss58Address: widget.ss58Address,
+            wssUrl: widget.wssUrl!,
+            forceRefresh: true,
+          );
+      if (amountFen > balance) throw StateError('零钱包余额不足');
       final chain = OnchainClearingBankChain(transactions: sdk.transactions);
       final result = await chain.withdraw(
         signerPublicKey: Uint8List.fromList(publicKeyBytes),

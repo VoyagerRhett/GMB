@@ -17,7 +17,7 @@ import 'package:citizenapp/my/util/amount_format.dart';
 import 'package:citizenapp/citizen/shared/institution_info.dart';
 import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_balance_guard.dart';
 import 'package:citizenapp/transaction/multisig-transfer/multisig_transfer_service.dart';
-import 'package:citizenapp/transaction/shared/account_balance_snapshot_store.dart';
+import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
 import 'package:citizenapp/qr/widgets/address_scan_button.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
 import 'package:citizenapp/security/account_security_service.dart';
@@ -58,7 +58,6 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
 
   /// 链上余额刷新失败、当前展示的是本地缓存旧值时置位，
   /// UI 必须明示"可能已过期"，防止用户拿过期余额提交转账。
-  bool _balanceStale = false;
   double _estimatedFee = 0.0;
   String? _addressError;
   String? _amountError;
@@ -94,50 +93,32 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
     return Keyring().encodeAddress(Uint8List.fromList(bytes), kGmbSs58Prefix);
   }
 
-  Future<void> _fetchBalance() async {
-    final sdk = context.read<CitizenSdk>();
-    final store = AccountBalanceSnapshotStore.instance;
-    final local = await store.read(widget.institution.mainAccountId);
-    if (local != null && mounted) {
-      setState(() {
-        _availableBalance = local.balanceYuan;
-        _loadingBalance = false;
-      });
-      if (local.isFresh(AccountBalanceSnapshotStore.displayTtl)) return;
-    }
+  /// 页面进入读取 wallet 持久余额，交易前校验由既有余额守卫强制刷新。
+  Future<bool> _fetchBalance({bool forceRefresh = false}) async {
+    if (forceRefresh && mounted) setState(() => _loadingBalance = true);
     try {
-      final service = MultisigTransferService(
-        chain: sdk.chain,
-        transactions: sdk.transactions,
-      );
-      final balance = await service.fetchInstitutionBalance(widget.institution);
-      try {
-        await store.put(
-          accountId: widget.institution.mainAccountId,
-          balanceYuan: balance,
-        );
-      } catch (e) {
-        // 余额快照写入失败不影响当前链上余额展示，但要留痕便于排查缓存问题。
-        AppLog.d('[MultisigTransfer] 余额快照写入失败: $e');
-      }
-      if (!mounted) return;
+      final snapshot =
+          await AccountBalanceSnapshotStore.forChain(
+            context.read<CitizenSdk>().chain,
+          ).getAccountBalance(
+            widget.institution.mainAccountId,
+            forceRefresh: forceRefresh,
+          );
+      if (!mounted) return false;
       setState(() {
-        _availableBalance = balance;
+        _availableBalance = snapshot.freeFen.toDouble() / 100;
         _loadingBalance = false;
-        _balanceStale = false;
       });
-    } catch (e) {
-      // 链上余额查询失败必须留痕；有缓存时继续展示旧值但要标记过期。
-      AppLog.d('[MultisigTransfer] 链上余额查询失败: $e');
-      if (!mounted) return;
-      if (local == null) {
-        setState(() {
-          _availableBalance = null;
-          _loadingBalance = false;
-        });
-      } else {
-        setState(() => _balanceStale = true);
+      return true;
+    } catch (_) {
+      if (mounted) {
+        setState(() => _loadingBalance = false);
+        if (forceRefresh) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(const SnackBar(content: Text('余额校验失败，请刷新后重试')));
+        }
       }
+      return false;
     }
   }
 
@@ -218,11 +199,13 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
   Future<void> _submit() async {
     final blockedReason = _submitBlockedReason;
     if (blockedReason != null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(blockedReason)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(blockedReason)));
       return;
     }
+
+    if (!await _fetchBalance(forceRefresh: true)) return;
+    if (!mounted) return;
 
     if (!_validateAddress() || !_validateAmount() || !_validateRemark()) {
       return;
@@ -230,9 +213,8 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
     final isPersonal = isPersonalAccountIdentity(widget.institution.cidNumber);
     final proposerRoleCode = _proposerRoleCodeController.text.trim();
     if (!isPersonal && proposerRoleCode.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('请输入当前任职且拥有转账提案权限的岗位码')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('请输入当前任职且拥有转账提案权限的岗位码')));
       return;
     }
 
@@ -258,9 +240,8 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
           );
     if (balanceBlockedReason != null) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(balanceBlockedReason)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(balanceBlockedReason)));
       return;
     }
 
@@ -297,25 +278,21 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
       );
 
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('提案创建成功')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('提案创建成功')));
       Navigator.of(context).pop(true);
     } on AccountSecurityException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(e.message)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.message)));
     } on FormatException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('提交失败：${e.message}')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('提交失败：${e.message}')));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('提交失败：$e')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('提交失败：$e')));
     } finally {
       if (mounted) {
         setState(() => _submitting = false);
@@ -569,7 +546,6 @@ class _MultisigTransferPageState extends State<MultisigTransferPage> {
                     ? '查询中...'
                     : _availableBalance != null
                     ? '${AmountFormat.format(_availableBalance!, symbol: '')} 元'
-                          '${_balanceStale ? '（链上刷新失败，金额可能已过期）' : ''}'
                     : '查询失败',
               ),
               SizedBox(height: AppLayout.scaled(context, 16)),
