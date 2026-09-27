@@ -2,8 +2,10 @@ package org.citizen.sdk
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.Context
 import android.graphics.ImageFormat
 import android.graphics.SurfaceTexture
+import android.hardware.display.DisplayManager
 import android.os.Handler
 import android.os.Looper
 import android.view.Surface
@@ -23,6 +25,25 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+
+/** 纹理已应用的相机变换只计算一次；尺寸表示宿主追加旋转之前的真实纵横比。 */
+internal data class CitizenQrPreview(val width: Int, val height: Int, val rotationDegrees: Int) {
+    companion object {
+        fun fromSurfaceTexture(width: Int, height: Int, rotationDegrees: Int,
+                               targetRotation: Int, hasCameraTransform: Boolean): CitizenQrPreview {
+            if (width <= 0 || height <= 0 || rotationDegrees !in listOf(0, 90, 180, 270) ||
+                targetRotation !in 0..3) {
+                throw CitizenSdkException(CitizenSdkErrorCode.INTEGRITY, "相机预览方向无效")
+            }
+            // CameraX PreviewTransformation：Surface已携带camera transform时，仅逆转目标显示方向。
+            // Flutter引擎已应用SurfaceTexture矩阵，不能再让App旋转完整传感器角度。
+            val remaining = if (hasCameraTransform) (360 - targetRotation * 90) % 360 else rotationDegrees
+            val applied = (rotationDegrees - remaining + 360) % 360
+            return if (applied % 180 == 90) CitizenQrPreview(height, width, remaining)
+                else CitizenQrPreview(width, height, remaining)
+        }
+    }
+}
 
 /** CameraX亮度平面只复制有界像素；长整型预检避免恶意行/像素跨度溢出。 */
 internal object CitizenSdkQrLuminance {
@@ -74,6 +95,16 @@ class CitizenSdkQrCapture internal constructor(
     private var framesReturned = false
     private var surfaces = 0
     private var lastFrame = 0L
+    private val displays = activity.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = Unit
+        override fun onDisplayRemoved(displayId: Int) = Unit
+        override fun onDisplayChanged(displayId: Int) {
+            if (revoked.get() || paused.get()) return
+            val display = activity.window.decorView.display ?: return
+            if (display.displayId == displayId) preview?.targetRotation = display.rotation
+        }
+    }
     var previewWidth: Int = 0
         private set
     var previewHeight: Int = 0
@@ -92,6 +123,7 @@ class CitizenSdkQrCapture internal constructor(
     internal fun open(): CompletableFuture<CitizenSdkQrCapture> {
         checkMain()
         activity.lifecycle.addObserver(this)
+        displays.registerDisplayListener(displayListener, main)
         if (ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) startCamera()
         else permission.launch(Manifest.permission.CAMERA)
         return opened
@@ -134,6 +166,7 @@ class CitizenSdkQrCapture internal constructor(
         if (revoked.compareAndSet(false, true)) {
             main.post {
                 permission.unregister()
+                displays.unregisterDisplayListener(displayListener)
                 activity.lifecycle.removeObserver(this)
                 opened.completeExceptionally(closedError())
                 analysis?.clearAnalyzer()
@@ -176,7 +209,9 @@ class CitizenSdkQrCapture internal constructor(
                     else -> throw CitizenSdkException(CitizenSdkErrorCode.UNAVAILABLE, "camera is unavailable")
                 }
                 val frameGeneration = generation.get()
-                val output = Preview.Builder().build()
+                val display = activity.window.decorView.display
+                    ?: throw CitizenSdkException(CitizenSdkErrorCode.UNAVAILABLE, "camera display is unavailable")
+                val output = Preview.Builder().setTargetRotation(display.rotation).build()
                 output.setSurfaceProvider(ContextCompat.getMainExecutor(activity)) { request ->
                     if (revoked.get() || paused.get() || generation.get() != frameGeneration || preview !== output) request.willNotProvideSurface()
                     else {
@@ -184,9 +219,13 @@ class CitizenSdkQrCapture internal constructor(
                         texture.setDefaultBufferSize(size.width, size.height)
                         request.setTransformationInfoListener(ContextCompat.getMainExecutor(activity)) { info ->
                             if (!revoked.get() && !paused.get() && generation.get() == frameGeneration && preview === output) {
-                                previewWidth = size.width; previewHeight = size.height; rotationDegrees = info.rotationDegrees
-                                listener.onPreview(size.width, size.height, info.rotationDegrees)
-                                opened.complete(this)
+                                try {
+                                    val value = CitizenQrPreview.fromSurfaceTexture(size.width, size.height,
+                                        info.rotationDegrees, output.targetRotation, info.hasCameraTransform())
+                                    previewWidth = value.width; previewHeight = value.height; rotationDegrees = value.rotationDegrees
+                                    listener.onPreview(previewWidth, previewHeight, rotationDegrees)
+                                    opened.complete(this)
+                                } catch (error: Throwable) { fail(cameraError(error)) }
                             }
                         }
                         val surface = Surface(texture)

@@ -12,6 +12,38 @@ import java.util.concurrent.CompletionException
 
 class CitizenSdkFlutterSessionsTest {
     @Test
+    fun surfaceTexturePreviewCompensatesOnlyRemainingRotationAndKeepsAspectRatio() {
+        // 后置传感器90度：已由纹理转正，竖屏不能再旋转；横屏仅补显示方向。
+        val expected = listOf(
+            CitizenQrPreview(480, 640, 0), CitizenQrPreview(480, 640, 270),
+            CitizenQrPreview(480, 640, 180), CitizenQrPreview(480, 640, 90),
+        )
+        for ((target, sensorToTarget) in listOf(90, 0, 270, 180).withIndex()) {
+            assertEquals(expected[target], CitizenQrPreview.fromSurfaceTexture(640, 480, sensorToTarget, target, true))
+        }
+        // 前置270度与自然横屏设备同样只扣除已有旋转；不额外加入镜像。
+        assertEquals(CitizenQrPreview(480, 640, 0), CitizenQrPreview.fromSurfaceTexture(640, 480, 270, 0, true))
+        assertEquals(CitizenQrPreview(640, 480, 0), CitizenQrPreview.fromSurfaceTexture(640, 480, 0, 0, true))
+        assertEquals(CitizenQrPreview(640, 480, 270), CitizenQrPreview.fromSurfaceTexture(640, 480, 270, 1, true))
+        // Surface不含camera transform时，完整角度由宿主应用，宽高不能提前互换。
+        for (rotation in listOf(0, 90, 180, 270)) {
+            assertEquals(CitizenQrPreview(640, 480, rotation), CitizenQrPreview.fromSurfaceTexture(640, 480, rotation, 0, false))
+        }
+    }
+
+    @Test
+    fun surfaceTexturePreviewRejectsInvalidDimensionsAndRotations() {
+        // 拒绝畸形元数据，不能取模吞掉错误后显示错误画面。
+        for (input in listOf(listOf(0, 480, 90, 0), listOf(640, -1, 90, 0),
+            listOf(640, 480, 45, 0), listOf(640, 480, 360, 0),
+            listOf(640, 480, -90, 0), listOf(640, 480, 90, -1), listOf(640, 480, 90, 4))) {
+            assertEquals(CitizenSdkErrorCode.INTEGRITY, assertThrows(CitizenSdkException::class.java) {
+                CitizenQrPreview.fromSurfaceTexture(input[0], input[1], input[2], input[3], true)
+            }.code)
+        }
+    }
+
+    @Test
     fun `open exposes only bounded single-line host invariant`() {
         assertEquals("Core returned reserved request ID 0", citizenSdkFlutterOpenInvalidState("Core returned reserved request ID 0"))
         for (value in listOf<String?>(null, "", "line\nbreak", "x".repeat(513))) {

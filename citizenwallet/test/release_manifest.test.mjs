@@ -13,6 +13,11 @@ const properties = readFileSync(new URL('../android/gradle.properties', import.m
 const wrapper = readFileSync(new URL('../android/gradle/wrapper/gradle-wrapper.properties', import.meta.url), 'utf8');
 const runner = readFileSync(new URL('../scripts/citizenwallet-run.sh', import.meta.url), 'utf8');
 const signerPodspec = readFileSync(new URL('../ios/signer/citizenwallet_signer.podspec', import.meta.url), 'utf8');
+const iosProject = readFileSync(new URL('../ios/Runner.xcodeproj/project.pbxproj', import.meta.url), 'utf8');
+const iosScheme = readFileSync(new URL('../ios/Runner.xcodeproj/xcshareddata/xcschemes/Runner.xcscheme', import.meta.url), 'utf8');
+const iosUiTestPlan = JSON.parse(readFileSync(new URL('../ios/RunnerUITests/RunnerUITests.xctestplan', import.meta.url), 'utf8'));
+const createUiTest = readFileSync(new URL('../ios/RunnerUITests/CreateWalletUITests.swift', import.meta.url), 'utf8');
+const importUiTest = readFileSync(new URL('../ios/RunnerUITests/ImportWalletUITests.swift', import.meta.url), 'utf8');
 
 test('钱包真实入口只在源码外工程执行Pub，缺参和链接逃逸必须在写入前失败', context => {
   const fixture = mkdtempSync(join(tmpdir(), 'wallet-project-boundary-'));
@@ -102,6 +107,11 @@ test('Android从真实产品源码根启动Gradle并把可写状态放入外部�
   assert.match(application, /System\.getenv\("CITIZENWALLET_PROJECT_ROOT"\) \?: "\.\.\/\.\."/u);
   assert.match(application, /System\.getenv\("CITIZENWALLET_NATIVE_ANDROID_DIR"\)/u);
   assert.match(runner, /cd "\$CITIZENWALLET_DIR\/android"/u);
+  assert.match(runner, /gradle_bin="\$\{CITIZENWALLET_GRADLE_BIN:\?Android Build必须提供绝对Gradle工具路径\}"/u);
+  assert.match(runner, /distributionUrl=\.\*gradle-/u);
+  assert.match(runner, /actual_gradle_version=.*"\$gradle_bin" --version/u);
+  assert.match(runner, /FLUTTER_ROOT="\$flutter_sdk" "\$gradle_bin" "\$\{GRADLE_ARGS\[@\]\}"/u);
+  assert.doesNotMatch(runner, /"\$CITIZENWALLET_DIR\/android\/gradlew"/u);
   assert.match(runner, /--init-script "\$CITIZENWALLET_GRADLE_INIT_SCRIPT"/u);
   assert.match(runner, /-Pkotlin\.project\.persistent\.dir="\$BUILD_WORK_DIR\/kotlin-project"/u);
   assert.match(runner, /CITIZENWALLET_FLUTTER_GRADLE_ROOT="\$flutter_sdk\/packages\/flutter_tools\/gradle"/u);
@@ -115,9 +125,41 @@ test('CitizenWallet依赖准备默认联网且离线模式必须显式选择', (
   assert.match(runner, /GRADLE_ARGS=\(--no-daemon\)/u);
   assert.match(runner, /project\.extensions\.extraProperties\.set\("kotlin\.project\.persistent\.dir", new File\(output, suffix \+ "\/kotlin-project"\)\.path\)/u);
   assert.match(runner, /true\) PUB_OFFLINE=true; GRADLE_ARGS\+=\(--offline\); export CARGO_NET_OFFLINE=true/u);
-  assert.match(runner, /gradlew" "\$\{GRADLE_ARGS\[@\]\}" --stacktrace/u);
+  assert.match(runner, /"\$gradle_bin" "\$\{GRADLE_ARGS\[@\]\}" --stacktrace/u);
   assert.match(runner, /if \[\[ "\$PUB_OFFLINE" == true \]\]; then PUB_GET_ARGS\+=\(--offline\); fi/u);
   assert.match(runner, /flutter pub get "\$\{PUB_GET_ARGS\[@\]\}"/u);
+});
+
+test('本机钱包Build在平台编译前先运行依赖宿主FFI的Flutter测试', () => {
+  const pub = runner.indexOf('flutter pub get "${PUB_GET_ARGS[@]}"');
+  const contract = runner.indexOf('"$node_bin" --test "$CITIZENWALLET_DIR/test/release_manifest.test.mjs"');
+  const host = runner.indexOf('"$SCRIPT_DIR/build-signer-native.sh" host');
+  const tests = runner.indexOf('flutter test --no-pub');
+  const platform = runner.indexOf('"$SCRIPT_DIR/build-signer-native.sh" "$PLATFORM"');
+  assert.ok(pub >= 0 && pub < contract && contract < host && host < tests && tests < platform);
+  assert.match(runner, /set -euo pipefail/u);
+});
+
+test('iOS真机只在Release配置运行钱包两页UI测试且不触发有效钱包操作', () => {
+  assert.match(iosProject, /RunnerUITests\.xctest.*com\.apple\.product-type\.bundle\.ui-testing/su);
+  assert.match(iosProject, /RunnerTests\.xctest.*DEVELOPMENT_TEAM = MHYMVRN6FC/su);
+  assert.match(iosScheme, /<TestAction\s+buildConfiguration = "Release"/u);
+  assert.match(iosProject, /RunnerUITests\.xctestplan.*path = RunnerUITests\.xctestplan/su);
+  assert.match(iosScheme, /reference = "container:RunnerUITests\/RunnerUITests\.xctestplan"/u);
+  assert.doesNotMatch(iosScheme, /<Testables>/u);
+  assert.equal(iosUiTestPlan.defaultOptions.uiTestingScreenshotsLifetime, 'keepNever');
+  assert.deepEqual(iosUiTestPlan.testTargets.map(({ target }) => target.name), ['RunnerTests', 'RunnerUITests']);
+  assert.match(runner, /-only-testing:RunnerUITests -parallel-testing-enabled NO/u);
+  assert.match(runner, /-collect-test-diagnostics never/u);
+  assert.match(runner, /-destination "platform=iOS,id=\$device_id"/u);
+  assert.match(runner, /-resultBundlePath "\$BUILD_WORK_DIR\/ios-ui-tests\.xcresult"/u);
+  assert.match(createUiTest, /192 位熵，词数与安全性平衡/u);
+  assert.match(createUiTest, /XCTAssertEqual\(password\.frame\.width, optionWidth/u);
+  assert.doesNotMatch(createUiTest, /app\.buttons\["创建钱包"\]\.tap\(\)/u);
+  assert.match(importUiTest, /count: 23/u);
+  assert.match(importUiTest, /label CONTAINS %@", "助记词必须为 12、18 或 24 个单词"/u);
+  assert.match(importUiTest, /input\.typeText\(" zzzz"\)/u);
+  assert.doesNotMatch(importUiTest, /typeText\("(?:abandon|ability|able)/u);
 });
 
 test('iOS签名库由外部构建路径强制链接且保留全部FFI符号', () => {

@@ -11,6 +11,31 @@ Widget _view(TestCitizenQr qr, {ValueChanged<String>? result, ValueChanged<Scann
     ));
 
 void main() {
+  testWidgets('预览只应用SDK剩余角度并保留纹理比例，方向事件更新同一资源', (tester) async {
+    final capture = TestCitizenQrCapture()
+      ..preview = const CitizenQrPreview(width: 480, height: 640, rotationDegrees: 0);
+    var opens = 0;
+    final qr = TestCitizenQr()..captureFactory = (_) async { opens++; return capture; };
+    await tester.pumpWidget(_view(qr));
+    await tester.pump();
+    // Android SurfaceTexture已转正时直接显示；不可根据平台再次猜传感器角度。
+    for (final rotation in [0, 270, 180, 90, 0]) {
+      capture.preview = CitizenQrPreview(width: 480, height: 640, rotationDegrees: rotation);
+      capture.previewEvents.add(capture.preview);
+      await tester.pump();
+      final rotated = tester.widget<RotatedBox>(find.byType(RotatedBox));
+      expect(rotated.quarterTurns, rotation ~/ 90);
+      final size = rotated.child! as SizedBox;
+      expect(size.width, 480);
+      expect(size.height, 640);
+      expect((size.child! as Texture).textureId, capture.textureId);
+    }
+    expect(opens, 1);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+    expect(capture.closeCalls, 1);
+  });
+
   testWidgets('SDK纹理原样交给预览，结果只转发SDK规范文本', (tester) async {
     final capture = TestCitizenQrCapture();
     final qr = TestCitizenQr()..captureFactory = (purpose) async {

@@ -1,0 +1,31 @@
+{
+  "configurations" : [
+    {
+      "id" : "C18E0000-0000-4000-8000-000000000001",
+      "name" : "Release 真机界面验收",
+      "options" : {}
+    }
+  ],
+  "defaultOptions" : {
+    "testTimeoutsEnabled" : true,
+    "uiTestingScreenshotsLifetime" : "keepNever"
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:Runner.xcodeproj",
+        "identifier" : "331C8080294A63A400263BE5",
+        "name" : "RunnerTests"
+      }
+    },
+    {
+      "parallelizable" : false,
+      "target" : {
+        "containerPath" : "container:Runner.xcodeproj",
+        "identifier" : "C18E00000000000000000008",
+        "name" : "RunnerUITests"
+      }
+    }
+  ],
+  "version" : 1
+}

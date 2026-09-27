@@ -769,7 +769,9 @@ final class RunnerUITests: XCTestCase {
     try assertLiveScannerPreview(in: app, title: "扫码填入收款地址")
 
     // 同一引擎第二次进入仍须可用，防止首个纹理释放遗漏。
-    let backButton = app.navigationBars["扫码填入收款地址"].buttons.firstMatch
+    // 扫码页为 Flutter 路由，返回控件属于语义树，不是 UIKit UINavigationBar。
+    let backButton = app.buttons.matching(
+      NSPredicate(format: "label IN %@", ["返回", "Back"])).firstMatch
     XCTAssertTrue(backButton.waitForExistence(timeout: 10))
     backButton.tap()
     XCTAssertTrue(scanButton.waitForExistence(timeout: 10))
@@ -785,11 +787,13 @@ final class RunnerUITests: XCTestCase {
     dismissPermissionGuideIfNeeded(in: app)
     try requireMainNavigation(in: app)
 
-    let myTab = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "我的")).firstMatch
+    let myTab = app.buttons.matching(NSPredicate(format:
+      "label CONTAINS %@ AND NOT (label CONTAINS %@)", "我的", "我的通讯录")).firstMatch
     XCTAssertTrue(myTab.waitForExistence(timeout: 20))
     myTab.tap()
     let walletEntry = app.descendants(matching: .any).matching(
-      NSPredicate(format: "label == %@", "钱包")
+      NSPredicate(format: "label == %@ OR (label CONTAINS %@ AND label CONTAINS %@)",
+        "钱包", "钱包", "管理账户")
     ).firstMatch
     XCTAssertTrue(walletEntry.waitForExistence(timeout: 10))
     walletEntry.tap()
@@ -799,10 +803,12 @@ final class RunnerUITests: XCTestCase {
     if addEntry.waitForExistence(timeout: 5) && addEntry.isEnabled {
       addEntry.tap()
     }
-    let coldImport = app.staticTexts["导入冷钱包"].firstMatch
+    // 底部 ListTile 将标题和副标题合并为一个可点击语义节点。
+    let coldImport = app.descendants(matching: .any).matching(
+      NSPredicate(format: "label BEGINSWITH %@", "导入冷钱包")).firstMatch
     XCTAssertTrue(coldImport.waitForExistence(timeout: 10))
     coldImport.tap()
-    XCTAssertTrue(app.navigationBars["导入冷钱包"].waitForExistence(timeout: 10))
+    XCTAssertTrue(app.staticTexts["导入冷钱包"].waitForExistence(timeout: 10))
     let scanButton = app.buttons["扫码填入地址"]
     XCTAssertTrue(scanButton.waitForExistence(timeout: 10))
     scanButton.tap()
@@ -817,11 +823,12 @@ final class RunnerUITests: XCTestCase {
     dismissPermissionGuideIfNeeded(in: app)
     try requireMainNavigation(in: app)
 
-    let myTab = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "我的")).firstMatch
+    let myTab = app.buttons.matching(NSPredicate(format:
+      "label CONTAINS %@ AND NOT (label CONTAINS %@)", "我的", "我的通讯录")).firstMatch
     XCTAssertTrue(myTab.waitForExistence(timeout: 20))
     myTab.tap()
     let contactsEntry = app.descendants(matching: .any).matching(
-      NSPredicate(format: "label == %@", "通讯录")
+      NSPredicate(format: "label == %@ OR label BEGINSWITH %@", "通讯录", "通讯录\n")
     ).firstMatch
     XCTAssertTrue(contactsEntry.waitForExistence(timeout: 10))
     contactsEntry.tap()
@@ -834,15 +841,39 @@ final class RunnerUITests: XCTestCase {
 
   /// 三个入口共用同一真机像素门禁；临时提示可能早于 XCTest 的点击回执消失。
   private func assertLiveScannerPreview(in app: XCUIApplication, title: String) throws {
-    XCTAssertTrue(app.staticTexts[title].firstMatch.waitForExistence(timeout: 10))
+    let page = app.descendants(matching: .any).matching(
+      NSPredicate(format: "label == %@", title)).firstMatch
+    guard page.waitForExistence(timeout: 10) else {
+      // 等待结束后再读取固定前置状态，避免在身份查询尚未返回时漏掉提示。
+      // 只报告源码固定文案；禁止操作身份注册或输出未知页面内容。
+      for phrase in ["暂时无法验证身份，请稍后重试", "注册身份", "我的通讯录",
+                     "导入冷钱包", "扫码添加好友", "扫描钱包二维码"] {
+        if app.descendants(matching: .any).matching(
+          NSPredicate(format: "label CONTAINS %@", phrase)).firstMatch.exists {
+          NSLog("SCANNER_GATE kind=%@", phrase)
+        }
+      }
+      XCTFail("预期扫码页未出现，不能进行相机验收")
+      return
+    }
 
     var previous: [UInt8]?
     var liveFrames = false
     var sawFailure = false
+    var samples = 0
+    var whiteSamples = 0
+    var darkSamples = 0
     let deadline = Date().addingTimeInterval(12)
     while Date() < deadline {
       sawFailure = sawFailure || app.staticTexts["扫码失败"].exists
       let current = try scanCenterPixels(in: app)
+      samples += 1
+      if scanCenterIsWhite(current) { whiteSamples += 1 }
+      // 只记录近黑/近白类别与帧数，不记录或导出任何可还原画面的像素。
+      let dark = stride(from: 0, to: current.count, by: 4).filter {
+        current[$0] < 10 && current[$0 + 1] < 10 && current[$0 + 2] < 10
+      }.count
+      if dark * 10 >= (current.count / 4) * 9 { darkSamples += 1 }
       if let previous, !scanCenterIsWhite(current), scanCenterChanged(previous, current) {
         liveFrames = true
         break
@@ -850,6 +881,8 @@ final class RunnerUITests: XCTestCase {
       previous = current
       Thread.sleep(forTimeInterval: 0.35)
     }
+    NSLog("SCANNER_PREVIEW samples=%d white=%d dark=%d changed=%d failure=%d",
+          samples, whiteSamples, darkSamples, liveFrames ? 1 : 0, sawFailure ? 1 : 0)
     XCTAssertFalse(sawFailure, "\(title)首次打开显示了设备失败提示")
     XCTAssertTrue(liveFrames, "\(title)首次打开未持续输出摄像头画面")
   }
@@ -903,8 +936,8 @@ final class RunnerUITests: XCTestCase {
     return difference > (current.count / 4) * 2
   }
 
-  /// 正式App钱包页只验收公开结构和CitizenSDK追加账户窗口的初始遮挡态。
-  /// 不输入助记词/密码，不执行创建、导入、追加或私钥显示，也不截图SDK敏感窗口。
+  /// 正式钱包页只读验收列表、菜单、重命名弹窗及取消；交互属于 App 原页面。
+  /// 不读取或改变钱包名称，不执行创建、导入、追加、删除、签名或私钥显示，不保留截图。
   func testWalletPagePreservesPublicSurfaceAndAvailableSdkEntry() throws {
     let app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
     app.launch()
@@ -913,42 +946,61 @@ final class RunnerUITests: XCTestCase {
     try requireMainNavigation(in: app)
 
     let myTab = app.buttons.matching(
-      NSPredicate(format: "label CONTAINS %@", "我的")
+      NSPredicate(format: "label CONTAINS %@ AND NOT (label CONTAINS %@)", "我的", "我的通讯录")
     ).firstMatch
     XCTAssertTrue(myTab.waitForExistence(timeout: 20), "找不到我的主导航入口")
     myTab.tap()
 
     let walletEntry = app.descendants(matching: .any).matching(
-      NSPredicate(format: "label == %@", "钱包")
+      NSPredicate(format: "label == %@ OR (label CONTAINS %@ AND label CONTAINS %@)",
+        "钱包", "钱包", "管理账户")
     ).firstMatch
     XCTAssertTrue(walletEntry.waitForExistence(timeout: 10), "我的页缺少钱包入口")
     walletEntry.tap()
     XCTAssertTrue(app.staticTexts["我的钱包"].waitForExistence(timeout: 15))
 
     let addEntry = app.buttons["添加账户 / 导入冷钱包"]
-    let emptyWallet = app.staticTexts["还没有可展示的钱包。热钱包在首启时创建，这里可导入只读的冷钱包。"]
-    XCTAssertTrue(
-      addEntry.waitForExistence(timeout: 10) || emptyWallet.waitForExistence(timeout: 1),
-      "钱包页既没有账户操作入口，也没有确定空态"
-    )
-    attachScreenshot(app, name: "CitizenApp-我的钱包公开页面")
+    XCTAssertTrue(addEntry.waitForExistence(timeout: 10), "钱包页缺少原添加入口")
 
-    guard addEntry.exists && addEntry.isEnabled else { return }
-    addEntry.tap()
-    XCTAssertTrue(app.staticTexts["导入冷钱包"].waitForExistence(timeout: 10))
-    let addNext = app.staticTexts["添加下一个账户"]
-    guard addNext.exists else { return }
-    addNext.tap()
-
-    XCTAssertTrue(app.navigationBars["添加账户"].waitForExistence(timeout: 10))
-    XCTAssertTrue(app.textViews["助记词"].exists)
-    XCTAssertTrue(app.secureTextFields["钱包密码（选填）"].exists)
-    XCTAssertTrue(app.textFields["账户编号 1—1989，逗号分隔"].exists)
-    XCTAssertTrue(app.buttons["确认添加"].exists)
-    let cancel = app.buttons["取消"].firstMatch
-    XCTAssertTrue(cancel.exists, "CitizenSDK追加账户窗口缺少安全取消入口")
-    cancel.tap()
+    // 热账户与冷钱包的菜单和弹窗分别验证；只取消，不读取输入框现值。
+    let hotMenu = app.buttons["账户操作"].firstMatch
+    XCTAssertTrue(hotMenu.waitForExistence(timeout: 10), "缺少热账户验收条件")
+    hotMenu.tap()
+    // Flutter 菜单项可能是 button，而不是 staticText；按固定文案查询全部语义类型。
+    XCTAssertTrue(app.descendants(matching: .any).matching(
+      NSPredicate(format: "label CONTAINS %@", "扫一扫")).firstMatch.waitForExistence(timeout: 5))
+    let rename = app.descendants(matching: .any).matching(
+      NSPredicate(format: "label CONTAINS %@", "重命名")).firstMatch
+    XCTAssertTrue(rename.waitForExistence(timeout: 5))
+    rename.tap()
+    XCTAssertTrue(app.staticTexts["重命名账户"].waitForExistence(timeout: 5))
+    app.buttons["取消"].tap()
     XCTAssertTrue(app.staticTexts["我的钱包"].waitForExistence(timeout: 10))
+    NSLog("WALLET_UI stage=hot_rename_cancel passed=1")
+
+    let coldRow = app.descendants(matching: .any).matching(identifier: "wallet-cold-row").firstMatch
+    XCTAssertTrue(coldRow.waitForExistence(timeout: 10), "缺少冷钱包验收条件")
+    let coldFrame = coldRow.frame
+    // 原冷钱包卡片右侧仅有一个小尺寸菜单按钮；按已呈现卡片边界定位，禁止按名称查询。
+    let coldMenus = app.buttons.allElementsBoundByIndex.filter {
+      coldFrame.contains($0.frame) && $0.frame.width < coldFrame.width / 2
+    }
+    XCTAssertEqual(coldMenus.count, 1, "冷钱包菜单定位不唯一")
+    coldMenus[0].tap()
+    XCTAssertTrue(rename.waitForExistence(timeout: 5))
+    XCTAssertTrue(app.descendants(matching: .any).matching(
+      NSPredicate(format: "label == %@", "删除钱包")).firstMatch.exists)
+    rename.tap()
+    XCTAssertTrue(app.staticTexts["重命名钱包"].waitForExistence(timeout: 5))
+    app.buttons["取消"].tap()
+    XCTAssertTrue(app.staticTexts["我的钱包"].waitForExistence(timeout: 10))
+    NSLog("WALLET_UI stage=cold_rename_cancel passed=1")
+
+    let back = app.buttons.matching(NSPredicate(format: "label IN %@", ["返回", "Back"])).firstMatch
+    XCTAssertTrue(back.waitForExistence(timeout: 5))
+    back.tap()
+    XCTAssertTrue(chatTab(in: app).waitForExistence(timeout: 10))
+    NSLog("WALLET_UI stage=return_main passed=1")
   }
 
   /// 创作者页必须使用「我的」已持有的本地身份/会员展示态立即出首帧，
