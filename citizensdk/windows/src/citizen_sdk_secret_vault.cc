@@ -296,7 +296,12 @@ Bytes SecretVault::wrap_dek(uint64_t host_operation_id, const WalletKey &key,
   std::lock_guard<std::recursive_mutex> guard(generation_lock_);
   require(plaintext_dek != nullptr, CITIZENSDK_ERROR_INVALID_ARGUMENT,
           "wallet DEK must be an exact Rust-owned 32-byte view");
-  ensure_wallet_kek(host_operation_id, key, operation_id);
+  // 初始化属于新钱包操作；追加只复用已存在且仍活动的硬件钥。
+  (void)host_operation_id;
+  validate_identity(key, operation_id);
+  if (!secure_store_.is_generation_active(key)) {
+    throw HostError(CITIZENSDK_ERROR_KEY_INVALIDATED, "wallet generation is not active");
+  }
   const auto object = secure_store_.load_vault_object(key);
   if (!object || !secure_store_.vault_object_is_active(key, *object)) {
     throw HostError(CITIZENSDK_ERROR_KEY_INVALIDATED, "wallet TPM object is no longer active");

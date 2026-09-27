@@ -68,12 +68,17 @@ LoginSignRequestEnvelope parseLoginSignRequest(String raw) {
   if (now >= (env.expiresAt ?? 0)) {
     throw const LoginQrException('登录二维码已过期');
   }
-  _loginSystem(QrEnvelope<SignRequestBody>(
-    kind: QrKind.signRequest,
-    id: env.id,
-    expiresAt: env.expiresAt,
-    body: body,
-  ));
+  if (!isQrRequestExpiryValid(env.expiresAt!, now)) {
+    throw const LoginQrException('登录二维码有效期过长');
+  }
+  _loginSystem(
+    QrEnvelope<SignRequestBody>(
+      kind: QrKind.signRequest,
+      id: env.id,
+      expiresAt: env.expiresAt,
+      body: body,
+    ),
+  );
 
   return QrEnvelope<SignRequestBody>(
     kind: QrKind.signRequest,
@@ -84,10 +89,7 @@ LoginSignRequestEnvelope parseLoginSignRequest(String raw) {
 }
 
 /// 构建用户签名消息(CitizenWallet 钱包用自己的私钥签这串)。
-String buildSignMessage(
-  LoginSignRequestEnvelope c,
-  String signerPublicKey,
-) {
+String buildSignMessage(LoginSignRequestEnvelope c, String signerPublicKey) {
   return buildSignatureMessage(
     kind: QrKind.signResponse,
     id: c.id!,

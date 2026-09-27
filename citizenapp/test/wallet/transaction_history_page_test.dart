@@ -4,13 +4,11 @@ import 'package:citizenapp/isar/wallet_isar.dart';
 import 'package:citizenapp/transaction/history/local_tx_store.dart';
 import 'package:citizenapp/transaction/history/presentation/transaction_history_page.dart';
 
-LocalTxEntity _record({
-  String status = LocalTxStore.statusFinalized,
-}) {
+LocalTxEntity _record({String status = LocalTxStore.statusFinalized}) {
   return LocalTxEntity()
-    ..recordKey = 'pub:0xblock:1'
+    ..recordKey = '0x${'aa' * 32}:0x${'bb' * 32}:1'
     ..ss58Address = 'wallet_addr'
-    ..accountId = 'pub'
+    ..accountId = '0x${'aa' * 32}'
     ..type = 'transfer'
     ..amountDeltaFen = '120'
     ..transferAmountFen = '120'
@@ -29,12 +27,34 @@ LocalTxEntity _record({
 }
 
 void main() {
-  testWidgets('交易记录条目显示 finalized 状态标签', (tester) async {
+  testWidgets('收到和发出记录共用条目，SDK业务事件显示中文来源', (tester) async {
+    final income = _record()..source = 'sdk_finalized_event';
+    final expense = _record()..amountDeltaFen = '-120';
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: LocalTxRecordTile(record: _record()),
+          body: Column(
+            children: [
+              LocalTxRecordTile(record: income),
+              LocalTxRecordTile(record: expense),
+            ],
+          ),
         ),
+      ),
+    );
+    expect(find.text('+1.20'), findsOneWidget);
+    expect(find.text('-1.20'), findsOneWidget);
+    await tester.pumpWidget(
+      MaterialApp(home: LocalTxRecordDetailPage(record: income)),
+    );
+    expect(find.text('链上事件'), findsOneWidget);
+    expect(find.text('sdk_finalized_event'), findsNothing);
+  });
+
+  testWidgets('交易记录条目显示 finalized 状态标签', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: LocalTxRecordTile(record: _record())),
       ),
     );
 
@@ -47,10 +67,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: LocalTxRecordTile(
-            record: _record(),
-            showChevron: true,
-          ),
+          body: LocalTxRecordTile(record: _record(), showChevron: true),
         ),
       ),
     );

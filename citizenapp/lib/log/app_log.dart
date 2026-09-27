@@ -4,8 +4,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
-/// 全端唯一日志门面。release 构建（kReleaseMode 为编译期常量）下所有日志为空操作
-/// 并被 tree-shake 剥离,不进设备日志、不泄任何字段。
+/// 全端唯一日志门面。Release 默认关闭日志，不写设备日志和诊断文件。
+/// 只有编译期显式诊断开关可启用既有调试出口。
 ///
 /// debug/profile 下:走 debugPrint,并**追加写文件** `files/citizenapp_diag.log`。
 /// 原因:本 app 独立启动(非 `flutter run`)时 debugPrint 不落 logcat,真机诊断
@@ -14,7 +14,7 @@ import 'package:path_provider/path_provider.dart';
 class AppLog {
   const AppLog._();
 
-  // 生产包默认仍为零日志；仅真机诊断构建显式传入 dart-define 时临时启用。
+  // 生产包默认关闭自由文本日志；仅显式传入 dart-define 时临时启用。
   // 该开关是编译期常量，不允许运行时远程开启，也不改变正式发布默认值。
   static const bool _explicitDiagnostics = bool.fromEnvironment(
     'CITIZENAPP_DIAGNOSTICS',

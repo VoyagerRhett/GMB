@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart';
 
 /// 截屏保护工具（进程级全局资源，引用计数管理）。
@@ -25,8 +26,17 @@ class ScreenshotGuard {
 
   static StreamSubscription<dynamic>? _eventSubscription;
 
+  // 原生 FLAG_SECURE 是全局开关；串行化跨页开关，避免先关闭后开启的异步乱序。
+  static Future<void>? _operation;
+
   /// 当前持有保护的页面数(引用计数)。
   static int _refCount = 0;
+  static bool _recordingActive = false;
+  static bool _eventStreamFailed = false;
+
+  /// 已启用保护的页面仍需在异步解密或签名结束前复查采集状态。
+  static bool get canDisplaySensitiveContent =>
+      !_recordingActive && !_eventStreamFailed;
 
   /// 截屏/录屏事件监听器集合(多页共存时每个在用页各注册一份)。
   ///
@@ -36,33 +46,66 @@ class ScreenshotGuard {
   /// - `screen_recording_stopped`：屏幕录制结束（iOS）
   static final Set<void Function(String event)> _listeners = {};
 
-  /// 启用截屏保护;可选传入本页的事件回调。幂等叠加(引用计数 +1)。
-  static Future<void> enable([void Function(String event)? onEvent]) async {
-    if (onEvent != null) _listeners.add(onEvent);
-    _refCount++;
-    if (_refCount == 1) {
-      try {
-        await _channel.invokeMethod('enableScreenshotProtection');
-      } on PlatformException {
-        // 平台不支持，忽略。
-      }
-      _startListening();
-    }
+  static Future<void> _enqueue(Future<void> Function() action) {
+    // 空闲时在当前调用区创建新 Future；已结束的旧区 Future 不跨页面或测试保留。
+    final pending = (_operation ?? Future<void>.value()).then((_) => action());
+    // 队列自身恢复到可用状态；调用者仍收到原始失败，不能把启用失败当作成功。
+    final recovered = pending.catchError((Object _) {});
+    _operation = recovered;
+    unawaited(
+      recovered.then((_) {
+        if (identical(_operation, recovered)) _operation = null;
+      }),
+    );
+    return pending;
   }
 
+  /// 组件测试卸载敏感页面后等待其异步原生关闭完成，避免跨测试遗留队列。
+  @visibleForTesting
+  static Future<void> waitForIdleForTest() =>
+      _operation ?? Future<void>.value();
+
+  /// 原生确认保护启用后才允许调用方展示秘密；失败不增加引用计数。
+  static Future<void> enable([void Function(String event)? onEvent]) =>
+      _enqueue(() async {
+        if (_recordingActive || _eventStreamFailed) {
+          throw StateError('屏幕采集或保护事件通道不可用');
+        }
+        if (_refCount == 0) {
+          final captured = await _channel.invokeMethod<bool>(
+            'enableScreenshotProtection',
+          );
+          if (captured == true) {
+            // iOS 已处于录屏时不等待状态变更事件；本次不交付任何保护租约。
+            try {
+              await _channel.invokeMethod('disableScreenshotProtection');
+            } catch (_) {}
+            throw StateError('屏幕录制正在进行');
+          }
+        }
+        _refCount++;
+        if (onEvent != null) _listeners.add(onEvent);
+        if (_refCount == 1) _startListening();
+      });
+
   /// 关闭截屏保护;传入的回调从集合移除。引用计数 -1,归零才真正关闭平台保护。
-  static Future<void> disable([void Function(String event)? onEvent]) async {
-    if (onEvent != null) _listeners.remove(onEvent);
-    if (_refCount > 0) _refCount--;
-    if (_refCount == 0) {
-      try {
-        await _channel.invokeMethod('disableScreenshotProtection');
-      } on PlatformException {
-        // 平台不支持，忽略。
-      }
-      _stopListening();
-    }
-  }
+  static Future<void> disable([void Function(String event)? onEvent]) =>
+      _enqueue(() async {
+        if (_refCount == 0) return;
+        if (onEvent != null) _listeners.remove(onEvent);
+        _refCount--;
+        if (_refCount == 0) {
+          // 进程级事件订阅只建立一次，避免页面切换时原生 cancel/listen 乱序。
+          // 无租约时 _broadcast 忽略事件；平台保护开关仍按引用计数关闭。
+          _recordingActive = false;
+          // 事件通道失效不能凭一次页面关闭恢复，进程重启前持续拒绝展示秘密。
+          try {
+            await _channel.invokeMethod('disableScreenshotProtection');
+          } catch (_) {
+            // 关闭失败只会保留更严格的平台保护；下次启用仍重新向原生确认。
+          }
+        }
+      });
 
   /// 检测设备是否已 root（Android）或越狱（iOS）。
   static Future<bool> isDeviceRooted() async {
@@ -76,18 +119,29 @@ class ScreenshotGuard {
 
   static void _startListening() {
     if (_eventSubscription != null) return;
-    _eventSubscription = _eventChannel.receiveBroadcastStream().listen((event) {
-      if (event is String) {
-        // 广播给所有在用页面(拷贝一份,避免回调内修改集合)。
-        for (final listener in List.of(_listeners)) {
-          listener(event);
+    _eventSubscription = _eventChannel.receiveBroadcastStream().listen(
+      (event) {
+        if (event is String) _broadcast(event);
+      },
+      onError: (_) {
+        // iOS 录屏事件通道失效时立即隐藏各页敏感内容。
+        if (_refCount == 0) {
+          _eventStreamFailed = true;
+          return;
         }
-      }
-    }, onError: (_) {});
+        _broadcast('protection_failed');
+      },
+    );
   }
 
-  static void _stopListening() {
-    _eventSubscription?.cancel();
-    _eventSubscription = null;
+  static void _broadcast(String event) {
+    // 无页面持有保护时忽略事件，不污染下一次保护租约。
+    if (_refCount == 0) return;
+    if (event == 'screen_recording_started') _recordingActive = true;
+    if (event == 'screen_recording_stopped') _recordingActive = false;
+    if (event == 'protection_failed') _eventStreamFailed = true;
+    for (final listener in List.of(_listeners)) {
+      listener(event);
+    }
   }
 }

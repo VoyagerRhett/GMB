@@ -79,28 +79,22 @@ class QrSigner {
         '扫码数据格式错误:内容为空或超出长度限制',
       );
     }
-    // 预检 kind:在完整 body 解析之前拦截非 sign_request,
-    // 避免 body 结构不匹配导致的 FormatException 掩盖真实错误。
-    try {
-      final preview = jsonDecode(raw);
-      if (preview is Map<String, dynamic>) {
-        final kindWire = preview['k'];
-        final kind = QrKind.fromWire(kindWire);
-        if (kind != QrKind.signRequest) {
-          throw const QrSignException(
-            QrSignErrorCode.invalidField,
-            '二维码类型不是签名请求',
-          );
-        }
-      }
-    } on QrSignException {
-      rethrow;
-    } catch (_) {
-      // JSON 解析失败等情况交给下面的 QrEnvelope.parse 统一报错
-    }
+    // JSON 只解码一次；仍先核对 kind，再解析完整 body，保留非签名码的明确错误。
     QrEnvelope<QrBody> env;
     try {
-      env = QrEnvelope.parse(raw);
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map<String, dynamic>) {
+        throw const FormatException('QR 内容不是 JSON 对象');
+      }
+      if (QrKind.fromWire(decoded['k']) != QrKind.signRequest) {
+        throw const QrSignException(
+          QrSignErrorCode.invalidField,
+          '二维码类型不是签名请求',
+        );
+      }
+      env = QrEnvelope.fromJson(decoded);
+    } on QrSignException {
+      rethrow;
     } on FormatException catch (e) {
       throw QrSignException(QrSignErrorCode.invalidFormat, e.message);
     }
@@ -257,6 +251,9 @@ class QrSigner {
     final now = _now();
     if (expiresAt <= now) {
       throw const QrSignException(QrSignErrorCode.expired, '交易签名请求已过期');
+    }
+    if (!isQrRequestExpiryValid(expiresAt, now)) {
+      throw const QrSignException(QrSignErrorCode.invalidField, '交易签名请求有效期过长');
     }
   }
 

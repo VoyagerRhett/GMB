@@ -17,15 +17,22 @@ class UserPublicProfileCacheEntity {
   late String profileJson;
 }
 
-/// 按永久 CID 保存的身份徽章展示快照。
+/// 身份展示唯一快照；CID 供徽章读取，账户用于恢复完整身份及已验证未注册状态。
 ///
 /// 本行只服务离线展示，不能作为发布、投票或其它授权判断依据。
 @collection
 class UserIdentityBadgeSnapshotEntity {
   Id id = Isar.autoIncrement;
 
-  @Index(unique: true, replace: true)
+  @Index()
   late String cidNumber;
+
+  /// 尚未完整验真的既有徽章没有账户归属，不能作为当前账户的完整身份。
+  @Index()
+  String? accountId;
+
+  /// null 表示仅有徽章；JSON null 表示该账户已经验真为未注册。
+  String? identitySnapshotJson;
 
   late String identityLevel;
   late int updatedAtMillis;
@@ -126,12 +133,12 @@ class UserIsar {
   /// User 域唯一 schema 清单。
   static const List<CollectionSchema<dynamic>> _schemas =
       <CollectionSchema<dynamic>>[
-    UserPublicProfileCacheEntitySchema,
-    UserIdentityBadgeSnapshotEntitySchema,
-    UserContactStateEntitySchema,
-    UserSettingsEntitySchema,
-    UserPublicInstitutionSubscriptionEntitySchema,
-  ];
+        UserPublicProfileCacheEntitySchema,
+        UserIdentityBadgeSnapshotEntitySchema,
+        UserContactStateEntitySchema,
+        UserSettingsEntitySchema,
+        UserPublicInstitutionSubscriptionEntitySchema,
+      ];
 
   bool get hasActiveOperation => _operationActive;
 
@@ -266,8 +273,8 @@ class UserIsar {
       return opened;
     }
     try {
-      final deleted =
-          await _deleteInstance(opened).timeout(_forcedDeleteTimeout);
+      final deleted = await _deleteInstance(opened)
+          .timeout(_forcedDeleteTimeout);
       if (!deleted) throw StateError('User 数据库仍被其它实例持有，未实际删除。');
       throw const _UserOpeningCancelled();
     } catch (error) {
@@ -386,8 +393,8 @@ class UserIsar {
       if (!candidate.isOpen) continue;
       deleteWasAttempted = true;
       try {
-        final deleted =
-            await _deleteInstance(candidate).timeout(_forcedDeleteTimeout);
+        final deleted = await _deleteInstance(candidate)
+            .timeout(_forcedDeleteTimeout);
         if (!deleted) failures.add('User 数据库仍被其它实例持有，未实际删除。');
       } catch (error) {
         failures.add('强制删除 User 数据库失败：$error');

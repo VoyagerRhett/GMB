@@ -86,7 +86,14 @@ Bytes SecretVault::wrap_dek(
   std::lock_guard<std::recursive_mutex> guard(generation_lock_);
   require(plaintext_dek != nullptr, CITIZENSDK_ERROR_INVALID_ARGUMENT,
           "wallet DEK must be an exact Rust-owned 32-byte view");
-  ensure_wallet_kek(host_operation_id, key, operation_id);
+  // 使用既有钥；缺失或退休时失败，不重新认证创建另一把钥。
+  (void)host_operation_id;
+  require(key.wallet_index == 0 &&
+              std::any_of(operation_id.begin(), operation_id.end(), [](uint8_t value) { return value != 0; }),
+          CITIZENSDK_ERROR_INVALID_ARGUMENT, "wallet vault identity is invalid");
+  if (!secure_store_.is_generation_active(key)) {
+    throw HostError(CITIZENSDK_ERROR_KEY_INVALIDATED, "wallet generation is not active");
+  }
   const auto object = secure_store_.load_vault_object(key);
   if (!object) {
     throw HostError(CITIZENSDK_ERROR_KEY_INVALIDATED,
@@ -96,7 +103,11 @@ Bytes SecretVault::wrap_dek(
     throw HostError(CITIZENSDK_ERROR_KEY_INVALIDATED,
                     "wallet TPM object is no longer active");
   }
-  return tpm_.encrypt_dek(*object, plaintext_dek);
+  require(tpm_.validate_key(*object), CITIZENSDK_ERROR_KEY_INVALIDATED, "wallet TPM key is unavailable");
+  Bytes wrapped = tpm_.encrypt_dek(*object, plaintext_dek);
+  require(secure_store_.vault_object_is_active(key, *object),
+          CITIZENSDK_ERROR_KEY_INVALIDATED, "wallet TPM object was retired while wrapping");
+  return wrapped;
 }
 
 void SecretVault::unwrap_dek(uint64_t host_operation_id, const WalletKey &key,

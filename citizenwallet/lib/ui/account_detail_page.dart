@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -32,6 +34,8 @@ class _AccountDetailPageState extends State<AccountDetailPage> {
   String? _privateKey;
   bool _privateKeyVisible = false;
   bool _screenshotGuardActive = false;
+  Future<void>? _screenshotGuardOpening;
+  int _securityEpoch = 0;
 
   @override
   void initState() {
@@ -42,21 +46,39 @@ class _AccountDetailPageState extends State<AccountDetailPage> {
   @override
   void dispose() {
     if (_screenshotGuardActive) {
-      ScreenshotGuard.disable(_onSecurityEvent);
+      unawaited(ScreenshotGuard.disable(_onSecurityEvent));
     }
     super.dispose();
   }
 
-  void _enableScreenshotGuard() {
-    if (!_screenshotGuardActive) {
+  Future<void> _enableScreenshotGuard() {
+    if (_screenshotGuardActive) return Future<void>.value();
+    return _screenshotGuardOpening ??= _openScreenshotGuard();
+  }
+
+  Future<void> _openScreenshotGuard() async {
+    try {
+      await ScreenshotGuard.enable(_onSecurityEvent);
+      if (!mounted) {
+        await ScreenshotGuard.disable(_onSecurityEvent);
+        return;
+      }
       _screenshotGuardActive = true;
-      ScreenshotGuard.enable(_onSecurityEvent);
+    } finally {
+      _screenshotGuardOpening = null;
     }
   }
 
   void _onSecurityEvent(String event) {
     if (!mounted) return;
-    if (event == 'screenshot_taken' || event == 'screen_recording_started') {
+    if (event == 'screenshot_taken' ||
+        event == 'screen_recording_started' ||
+        event == 'protection_failed') {
+      _securityEpoch++;
+      if (event == 'protection_failed' && _screenshotGuardActive) {
+        _screenshotGuardActive = false;
+        unawaited(ScreenshotGuard.disable(_onSecurityEvent));
+      }
       setState(() {
         _privateKeyVisible = false;
         _privateKey = null;
@@ -64,7 +86,9 @@ class _AccountDetailPageState extends State<AccountDetailPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            event == 'screenshot_taken'
+            event == 'protection_failed'
+                ? '屏幕保护不可用，私钥已隐藏'
+                : event == 'screenshot_taken'
                 ? '检测到截屏，私钥已隐藏。请勿截屏保存私钥。'
                 : '检测到屏幕录制，私钥已隐藏',
           ),
@@ -95,11 +119,23 @@ class _AccountDetailPageState extends State<AccountDetailPage> {
     );
     if (confirmed != true) return;
     try {
+      final epoch = _securityEpoch;
+      // 确认原生保护成功后才进行私钥派生和页面展示。
+      await _enableScreenshotGuard();
+      if (!mounted ||
+          !_screenshotGuardActive ||
+          !ScreenshotGuard.canDisplaySensitiveContent ||
+          epoch != _securityEpoch)
+        return;
       final key = await _walletManager.getAccountPrivateKey(
         widget.account.accountId,
       );
-      if (!mounted) return;
-      _enableScreenshotGuard();
+      // 派生期间若保护失效，丢弃这次结果而不是重新显示私钥。
+      if (!mounted ||
+          !_screenshotGuardActive ||
+          !ScreenshotGuard.canDisplaySensitiveContent ||
+          epoch != _securityEpoch)
+        return;
       setState(() {
         _privateKey = key;
         _privateKeyVisible = true;
@@ -108,9 +144,7 @@ class _AccountDetailPageState extends State<AccountDetailPage> {
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(
-        SnackBar(content: Text('验证失败：${walletErrorMessage(e)}')),
-      );
+      ).showSnackBar(SnackBar(content: Text('验证失败：${walletErrorMessage(e)}')));
     }
   }
 
@@ -148,9 +182,8 @@ class _AccountDetailPageState extends State<AccountDetailPage> {
       setState(() => _accountName = newName.trim());
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('重命名失败：$e')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('重命名失败：$e')));
     }
   }
 
@@ -183,9 +216,8 @@ class _AccountDetailPageState extends State<AccountDetailPage> {
       Navigator.of(context).pop(true);
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('删除失败：$e')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('删除失败：$e')));
     }
   }
 

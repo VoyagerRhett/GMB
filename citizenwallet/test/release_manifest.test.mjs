@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -70,11 +70,29 @@ test('钱包真实入口只在源码外工程执行Pub，缺参和链接逃逸�
     assert.equal(existsSync(trace), false);
   }
   unlinkSync(kotlinState);
+  const projectIos = join(project, 'ios');
+  const projectLock = join(projectIos, 'Podfile.lock');
+  const sourceLock = join(source, 'ios', 'Podfile.lock');
+  mkdirSync(projectIos);
+  const foreignLock = join(fixture, 'foreign-lock');
+  writeFileSync(foreignLock, 'unrelated');
+  symlinkSync(foreignLock, projectLock);
+  assert.match(run(project, 'ios').stderr, /锁文件链接目标不是本产品源码/u);
+  assert.equal(existsSync(trace), false);
+  unlinkSync(projectLock);
+  symlinkSync(sourceLock, projectLock);
+  const originalLock = readFileSync(sourceLock);
   for (const platform of ['ios', 'android']) {
     const accepted = run(project, platform);
     assert.equal(accepted.status, 73, accepted.stderr);
     assert.equal(readFileSync(trace, 'utf8'), project);
     assert.equal(existsSync(join(project, '.dart_tool')), true);
+    if (platform === 'ios') {
+      // 模拟源码外工程的链接锁文件；入口必须将其脱离并保持源码原字节。
+      assert.equal(lstatSync(projectLock).isSymbolicLink(), false);
+      assert.deepEqual(readFileSync(sourceLock), originalLock);
+      assert.deepEqual(readFileSync(projectLock), originalLock);
+    }
     rmSync(join(project, '.dart_tool'), { recursive: true });
   }
 });

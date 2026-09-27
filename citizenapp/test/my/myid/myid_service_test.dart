@@ -104,6 +104,7 @@ void main() {
     CidAccountDataHandover? dataHandover,
     CurrentUserContext? currentUserContext,
     int Function()? cidYearProvider,
+    IdentityBadgeSnapshotStore? badgeSnapshotStore,
   }) {
     final actualWallet = wallet ?? _FakeWalletManager(_aliceWallet);
     final actualChain = chain ?? _FakeChain();
@@ -119,12 +120,105 @@ void main() {
       chain: actualChain,
       transactions: TestCitizenTransactions(),
       divisionStore: _FakeDivisionStore(),
-      badgeSnapshotStore: _FakeBadgeStore(),
+      badgeSnapshotStore: badgeSnapshotStore ?? _FakeBadgeStore(),
       identityTransaction: identityTransaction,
       dataHandover: dataHandover,
       cidYearProvider: cidYearProvider,
     );
   }
+
+  test('本地公民号与完整快照重进复用且不调用验真', () async {
+    final store = IdentityBadgeSnapshotStore();
+    final reader = _FakeIdentityResolver(null);
+    final snapshot = CitizenIdentityChainSnapshot(
+      cidNumber: 'CID-DISPLAY-TEST',
+      accountId: Uint8List.fromList([
+        for (var i = 2; i < _validAccountId.length; i += 2)
+          int.parse(_validAccountId.substring(i, i + 2), radix: 16),
+      ]),
+      bindingRevision: 1,
+      votingIdentity: null,
+    );
+    await store.writeVerified(
+      accountId: _validAccountId,
+      identity: snapshot,
+      isCurrent: () => true,
+    );
+    for (var i = 0; i < 3; i++) {
+      final service = testService(
+        identityResolver: reader,
+        badgeSnapshotStore: IdentityBadgeSnapshotStore(),
+      );
+      final state = await service.getState();
+      expect(state.cidNumber, 'CID-DISPLAY-TEST');
+    }
+    expect(reader.reads, 0);
+  });
+
+  test('完整投票身份从持久快照恢复有效期和选区，重进不验真', () async {
+    final store = IdentityBadgeSnapshotStore();
+    final resolver = _FakeIdentityResolver(null);
+    await store.writeVerified(
+      accountId: _validAccountId,
+      identity: CitizenIdentityChainSnapshot(
+        cidNumber: 'CID-DISPLAY-TEST',
+        accountId: Uint8List.fromList([
+          for (var i = 2; i < _validAccountId.length; i += 2)
+            int.parse(_validAccountId.substring(i, i + 2), radix: 16),
+        ]),
+        bindingRevision: 1,
+        votingIdentity: _encodeVoting(
+          from: 20260101,
+          until: 20310101,
+          status: 0,
+          province: 'GD',
+          city: '0755',
+          town: '001',
+        ),
+      ),
+      isCurrent: () => true,
+    );
+    final service = testService(
+      identityResolver: resolver,
+      badgeSnapshotStore: IdentityBadgeSnapshotStore(),
+    );
+    final state = await service.getState();
+    expect(state.tier, MyIdTier.voting);
+    expect(state.passportValidUntil, '2031-01-01');
+    expect(state.residenceDistrict, contains('N(0755)'));
+    expect(resolver.reads, 0);
+  });
+
+  test('无本地身份为未知而非未注册，且不偷偷查链', () async {
+    final reader = _FakeIdentityResolver(null);
+    final service = testService(
+      identityResolver: reader,
+      badgeSnapshotStore: IdentityBadgeSnapshotStore(),
+      currentUserContext: _LocalCurrentUser(null),
+    );
+    expect((await service.getState()).status, MyIdStatus.unknown);
+    expect(reader.reads, 0);
+  });
+
+  test('仅有持久绑定时仍直接显示CID且不查链', () async {
+    final reader = _FakeIdentityResolver(null);
+    final current = CurrentUser(
+      account: _aliceWallet,
+      binding: const AccountDataBinding(
+        genesisHash: '0x0000000000000000000000000000000000000000000000000000000000000000',
+        cidNumber: 'CID-LOCAL-TEST',
+        bindingRevision: 1,
+        accountId: _validAccountId,
+      ),
+    );
+    final service = testService(
+      identityResolver: reader,
+      badgeSnapshotStore: IdentityBadgeSnapshotStore(),
+      currentUserContext: _LocalCurrentUser(current),
+    );
+    expect((await service.getState()).cidNumber, 'CID-LOCAL-TEST');
+    expect(reader.reads, 0);
+  });
 
   group('注册前余额闸 fetchRegistrationAffordability', () {
     test('门槛取自链上常量,余额旁路缓存读取', () async {
@@ -150,7 +244,7 @@ void main() {
   });
 
   test('无默认账户时为访客并提示创建钱包', () async {
-    final state = await buildService(noWallet: true).getState();
+    final state = await buildService(noWallet: true).refreshState();
     expect(state.tier, MyIdTier.visitor);
     expect(state.votingAccountId, isNull);
     expect(state.errorMessage, '请先创建钱包');
@@ -159,7 +253,7 @@ void main() {
   test('MyId 身份只读不构造 ChatSdk', () async {
     final liveChatRuntimeCount = ChatRuntimeCore.debugLiveInstanceCount;
     final service = buildService(noWallet: true);
-    await service.getState();
+    await service.refreshState();
     expect(
       ChatRuntimeCore.debugLiveInstanceCount,
       lessThanOrEqualTo(liveChatRuntimeCount),
@@ -168,7 +262,7 @@ void main() {
   });
 
   test('默认账户链上无投票身份时为访客轻节点', () async {
-    final state = await buildService(voting: null).getState();
+    final state = await buildService(voting: null).refreshState();
     expect(state.tier, MyIdTier.visitor);
     expect(state.votingAccountId, isNull);
     expect(state.status, isNull);
@@ -177,7 +271,7 @@ void main() {
   });
 
   test('有 CID、绑定闭环但无投票身份时为匿名已注册(访客卡显 CID)', () async {
-    final state = await buildService(voting: null, hasCid: true).getState();
+    final state = await buildService(voting: null, hasCid: true).refreshState();
     // 仍是访客档(不新增卡/色),但已占匿名 CID → isAnonymousRegistered。
     expect(state.tier, MyIdTier.visitor);
     expect(state.isAnonymousRegistered, isTrue);
@@ -196,7 +290,7 @@ void main() {
         city: '0755',
         town: '001',
       ),
-    ).getState();
+    ).refreshState();
 
     expect(state.tier, MyIdTier.voting);
     expect(state.status, MyIdStatus.normal);
@@ -231,7 +325,7 @@ void main() {
         givenName: '明',
         sex: 0,
       ),
-    ).getState();
+    ).refreshState();
 
     expect(state.tier, MyIdTier.candidate);
     expect(state.familyName, '陈');
@@ -254,21 +348,22 @@ void main() {
     final notYet = await buildService(
       voting: voting(status: 0),
       now: DateTime.utc(2025),
-    ).getState();
+    ).refreshState();
     expect(notYet.status, MyIdStatus.notYetValid);
 
     final expired = await buildService(
       voting: voting(status: 0),
       now: DateTime.utc(2032),
-    ).getState();
+    ).refreshState();
     expect(expired.status, MyIdStatus.expired);
 
-    final revoked = await buildService(voting: voting(status: 1)).getState();
+    final revoked = await buildService(voting: voting(status: 1))
+        .refreshState();
     expect(revoked.status, MyIdStatus.revoked);
   });
 
   test('链上读取失败时不静默降级访客,而是标记读取失败', () async {
-    final state = await buildService(chainThrows: true).getState();
+    final state = await buildService(chainThrows: true).refreshState();
     expect(state.status, MyIdStatus.queryFailed);
     expect(state.errorMessage, '链上身份读取失败');
   });
@@ -286,8 +381,11 @@ void main() {
     final mismatch = await buildService(
       voting: voting,
       mismatchWallet: true,
-    ).getState();
-    final revoked = await buildService(voting: voting, cidStatus: 1).getState();
+    ).refreshState();
+    final revoked = await buildService(
+      voting: voting,
+      cidStatus: 1,
+    ).refreshState();
 
     expect(mismatch.tier, MyIdTier.visitor);
     expect(revoked.tier, MyIdTier.visitor);
@@ -303,7 +401,7 @@ void main() {
         city: '0755',
         town: '', // 空镇码
       ),
-    ).getState();
+    ).refreshState();
     expect(state.tier, MyIdTier.voting);
     expect(state.cidNumber, 'GD-CTZN1-8F3A2B');
   });
@@ -923,8 +1021,12 @@ class _HandoverContactService implements UserContactService {
 class _FakeIdentityResolver implements FinalizedIdentityResolver {
   _FakeIdentityResolver(this._resolved);
   final FinalizedIdentity? _resolved;
+  int reads = 0;
   @override
-  Future<FinalizedIdentity?> resolve() async => _resolved;
+  Future<FinalizedIdentity?> resolve() async {
+    reads++;
+    return _resolved;
+  }
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -1220,10 +1322,26 @@ class _FakeDivisionStore implements AdminDivisionStore {
 
 class _FakeBadgeStore extends IdentityBadgeSnapshotStore {
   @override
+  Future<void> writeVerified({
+    required String accountId,
+    required CitizenIdentityChainSnapshot? identity,
+    required bool Function() isCurrent,
+  }) async {}
+
+  @override
   Future<void> write({
     required String cidNumber,
     required String identityLevel,
   }) async {}
   @override
   Future<IdentityBadgeSnapshot?> read(String cidNumber) async => null;
+}
+
+class _LocalCurrentUser implements CurrentUserContext {
+  _LocalCurrentUser(this.current);
+  final CurrentUser? current;
+  @override
+  Future<CurrentUser?> resolve() async => current;
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

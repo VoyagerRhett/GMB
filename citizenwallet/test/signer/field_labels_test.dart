@@ -122,10 +122,7 @@ void main() {
     test('未登记 key 不允许生成展示兜底', () {
       expect(fieldLabelTextOrNull('never_registered_key'), isNull);
       expect(hasFieldLabel('never_registered_key'), isFalse);
-      expect(
-        () => fieldLabelText('never_registered_key'),
-        throwsStateError,
-      );
+      expect(() => fieldLabelText('never_registered_key'), throwsStateError);
     });
   });
 
@@ -146,10 +143,12 @@ void main() {
       for (var i = 0; i < 32; i++) {
         bytes[i] = int.parse(hex.substring(2 + i * 2, 4 + i * 2), radix: 16);
       }
-      final expectedSs58 =
-          Keyring().encodeAddress(bytes, ChainConstants.ss58Prefix);
+      final expectedSs58 = Keyring().encodeAddress(
+        bytes,
+        ChainConstants.ss58Prefix,
+      );
 
-      // ADR-040:`account_id` / `*_account_id` 账户字段一律 SS58 展示。
+      // `account_id` / `*_account_id` 账户字段一律 SS58 展示。
       expect(fieldValueText('account_id', hex), expectedSs58);
       expect(fieldValueText('recipient_account_id', hex), expectedSs58);
       expect(fieldValueText('beneficiary_account_id', hex), expectedSs58);

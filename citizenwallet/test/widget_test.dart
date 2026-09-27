@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -7,16 +9,38 @@ import 'package:citizenwallet/ui/app_theme.dart';
 import 'package:citizenwallet/ui/create_wallet_page.dart';
 import 'package:citizenwallet/ui/home_page.dart';
 import 'package:citizenwallet/ui/import_wallet_page.dart';
+import 'package:citizenwallet/util/screenshot_guard.dart';
 
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
   const securityChannel = MethodChannel('citizenwallet/security');
+  const securityEvents = MethodChannel('citizenwallet/security_events');
+
+  Future<void> waitForImportProtection(WidgetTester tester) async {
+    for (var attempt = 0; attempt < 20; attempt++) {
+      await tester.runAsync(() async {
+        await Future<void>.delayed(const Duration(milliseconds: 25));
+      });
+      await tester.pump();
+      if (find.text('输入助记词').evaluate().isNotEmpty) return;
+    }
+  }
+
+  Future<void> releasePage(WidgetTester tester) async {
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    await ScreenshotGuard.waitForIdleForTest();
+  }
 
   setUp(() async {
     await WalletIsar.instance.resetForTest();
     binding.defaultBinaryMessenger.setMockMethodCallHandler(
       securityChannel,
       (call) async => false,
+    );
+    binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      securityEvents,
+      (call) async => null,
     );
   });
 
@@ -26,6 +50,10 @@ void main() {
       securityChannel,
       null,
     );
+    binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      securityEvents,
+      null,
+    );
   });
 
   testWidgets('App builds without error', (WidgetTester tester) async {
@@ -33,6 +61,7 @@ void main() {
     await tester.pump();
     // App 入口包含 _AppLockGate，测试环境下显示加载指示器即可视为正常构建
     expect(find.byType(CitizenWalletApp), findsOneWidget);
+    await releasePage(tester);
   });
 
   testWidgets('无钱包首屏上移、使用新文案与缩小后的公民 Logo', (tester) async {
@@ -67,6 +96,7 @@ void main() {
     final topBlank = tester.getTopLeft(emptyIcon).dy - bodyTop;
     final bottomBlank = 844 - tester.getBottomRight(importButton).dy;
     expect(topBlank, lessThan(bottomBlank));
+    await releasePage(tester);
   });
 
   testWidgets('创建页上移并只显示助记词数量标题', (tester) async {
@@ -78,11 +108,57 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(theme: AppTheme.darkTheme, home: const CreateWalletPage()),
     );
+    await tester.pumpAndSettle();
 
     expect(find.text('选择助记词数量'), findsOneWidget);
     expect(find.text('创建新钱包'), findsNothing);
     expect(find.text('将生成一组助记词，请务必安全保存'), findsNothing);
     expect(tester.getTopLeft(find.byIcon(Icons.add_rounded)).dy, lessThan(130));
+    await releasePage(tester);
+  });
+
+  testWidgets('原生保护仍在启用时，创建前词数选择界面照常显示', (tester) async {
+    final enabled = Completer<void>();
+    binding.defaultBinaryMessenger.setMockMethodCallHandler(securityChannel, (
+      call,
+    ) async {
+      if (call.method == 'enableScreenshotProtection') await enabled.future;
+      return false;
+    });
+    await tester.pumpWidget(
+      MaterialApp(theme: AppTheme.darkTheme, home: const CreateWalletPage()),
+    );
+    expect(find.text('选择助记词数量'), findsOneWidget);
+    expect(find.byType(SegmentedButton<int>), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, '创建钱包'), findsOneWidget);
+    enabled.complete();
+    await tester.pumpAndSettle();
+    await releasePage(tester);
+  });
+
+  testWidgets('保护启用失败时仍可选词数，但不生成钱包', (tester) async {
+    binding.defaultBinaryMessenger.setMockMethodCallHandler(securityChannel, (
+      call,
+    ) async {
+      if (call.method == 'enableScreenshotProtection') {
+        throw PlatformException(code: 'protectionUnavailable');
+      }
+      return false;
+    });
+    await tester.pumpWidget(
+      MaterialApp(theme: AppTheme.darkTheme, home: const CreateWalletPage()),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '创建钱包'));
+    await tester.pumpAndSettle();
+    expect(find.text('选择助记词数量'), findsOneWidget);
+    expect(find.text('已备份，完成'), findsNothing);
+    final count = await tester.runAsync(() async {
+      final db = await WalletIsar.instance.db();
+      return db.walletEntitys.count();
+    });
+    expect(count, 0);
+    await releasePage(tester);
   });
 
   testWidgets('创建页三种词数仅显示选中态、说明正确且密码框等宽', (tester) async {
@@ -94,6 +170,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(theme: AppTheme.darkTheme, home: const CreateWalletPage()),
     );
+    await tester.pumpAndSettle();
 
     final selector = find.byType(SegmentedButton<int>);
     expect(tester.widget<SegmentedButton<int>>(selector).selected, {12});
@@ -123,19 +200,22 @@ void main() {
     await tester.pump();
     expect(find.text('128 位熵，标准安全强度'), findsOneWidget);
     expect(tester.takeException(), isNull);
+    await releasePage(tester);
   });
 
   testWidgets('导入页顶部统一为输入助记词且没有重复标题', (tester) async {
     await tester.pumpWidget(
       MaterialApp(theme: AppTheme.darkTheme, home: const ImportWalletPage()),
     );
+    await waitForImportProtection(tester);
 
-    expect(find.text('输入助记词'), findsOneWidget);
     expect(
-      find.descendant(
-        of: find.byType(AppBar),
-        matching: find.text('输入助记词'),
-      ),
+      find.text('输入助记词'),
+      findsOneWidget,
+      reason: '保护失败=${find.text('请重试屏幕保护').evaluate().isNotEmpty}',
+    );
+    expect(
+      find.descendant(of: find.byType(AppBar), matching: find.text('输入助记词')),
       findsOneWidget,
     );
     final mnemonicInput = find.byType(TextField).first;
@@ -149,11 +229,18 @@ void main() {
       tester.widget<TextField>(mnemonicInput).decoration!.counterText,
       '18 / 12、18 或 24 个单词',
     );
+    await releasePage(tester);
   });
 
   testWidgets('导入输入允许24词与修改已有词，拒绝第25词及超长粘贴', (tester) async {
     await tester.pumpWidget(
       MaterialApp(theme: AppTheme.darkTheme, home: const ImportWalletPage()),
+    );
+    await waitForImportProtection(tester);
+    expect(
+      find.text('输入助记词'),
+      findsOneWidget,
+      reason: '保护失败=${find.text('请重试屏幕保护').evaluate().isNotEmpty}',
     );
     final input = find.byType(TextField).first;
     final twentyFour = List.filled(24, 'sample').join(' ');
@@ -175,11 +262,18 @@ void main() {
     await tester.enterText(input, '');
     await tester.enterText(input, List.filled(25, 'sample').join(' '));
     expect(tester.widget<TextField>(input).controller!.text, isEmpty);
+    await releasePage(tester);
   });
 
   testWidgets('导入候选词补全第24词，并在提交前拒绝非12/18/24词', (tester) async {
     await tester.pumpWidget(
       MaterialApp(theme: AppTheme.darkTheme, home: const ImportWalletPage()),
+    );
+    await waitForImportProtection(tester);
+    expect(
+      find.text('输入助记词'),
+      findsOneWidget,
+      reason: '保护失败=${find.text('请重试屏幕保护').evaluate().isNotEmpty}',
     );
     final input = find.byType(TextField).first;
     await tester.enterText(input, '${List.filled(23, 'abandon').join(' ')} ab');
@@ -197,5 +291,6 @@ void main() {
     await tester.tap(find.text('导入钱包'));
     await tester.pump();
     expect(find.text('助记词必须为 12、18 或 24 个单词'), findsOneWidget);
+    await releasePage(tester);
   });
 }

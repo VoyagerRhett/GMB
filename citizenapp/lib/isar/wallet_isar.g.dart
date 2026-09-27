@@ -1,6 +1,4 @@
 // GENERATED CODE - DO NOT MODIFY BY HAND
-// 本生成文件只提供 CitizenApp 业务实体的 Isar schema、序列化和查询扩展；
-// 钱包密钥、签名和链交易底层仍由 CitizenSDK 唯一承担。
 
 part of 'wallet_isar.dart';
 
@@ -18589,6 +18587,1441 @@ extension InstitutionEntityQueryProperty
   discoveredViaAdminProperty() {
     return QueryBuilder.apply(this, (query) {
       return query.addPropertyName(r'discoveredViaAdmin');
+    });
+  }
+}
+
+// coverage:ignore-file
+// ignore_for_file: duplicate_ignore, non_constant_identifier_names, constant_identifier_names, invalid_use_of_protected_member, unnecessary_cast, prefer_const_constructors, lines_longer_than_80_chars, require_trailing_commas, inference_failure_on_function_invocation, unnecessary_parenthesis, unnecessary_raw_strings, unnecessary_null_checks, join_return_with_assignment, prefer_final_locals, avoid_js_rounded_ints, avoid_positional_boolean_parameters, always_specify_types
+
+extension GetWalletTransactionHistoryCursorEntityCollection on Isar {
+  IsarCollection<WalletTransactionHistoryCursorEntity>
+  get walletTransactionHistoryCursorEntitys => this.collection();
+}
+
+const WalletTransactionHistoryCursorEntitySchema = CollectionSchema(
+  name: r'WalletTransactionHistoryCursorEntity',
+  id: 2356456325043863979,
+  properties: {
+    r'accountId': PropertySchema(
+      id: 0,
+      name: r'accountId',
+      type: IsarType.string,
+    ),
+    r'createdAtMillis': PropertySchema(
+      id: 1,
+      name: r'createdAtMillis',
+      type: IsarType.long,
+    ),
+    r'cursorBlockNumber': PropertySchema(
+      id: 2,
+      name: r'cursorBlockNumber',
+      type: IsarType.long,
+    ),
+    r'genesisHash': PropertySchema(
+      id: 3,
+      name: r'genesisHash',
+      type: IsarType.string,
+    ),
+    r'startBlockNumber': PropertySchema(
+      id: 4,
+      name: r'startBlockNumber',
+      type: IsarType.long,
+    ),
+  },
+
+  estimateSize: _walletTransactionHistoryCursorEntityEstimateSize,
+  serialize: _walletTransactionHistoryCursorEntitySerialize,
+  deserialize: _walletTransactionHistoryCursorEntityDeserialize,
+  deserializeProp: _walletTransactionHistoryCursorEntityDeserializeProp,
+  idName: r'id',
+  indexes: {
+    r'accountId': IndexSchema(
+      id: -1591555361937770434,
+      name: r'accountId',
+      unique: true,
+      replace: true,
+      properties: [
+        IndexPropertySchema(
+          name: r'accountId',
+          type: IndexType.hash,
+          caseSensitive: true,
+        ),
+      ],
+    ),
+  },
+  links: {},
+  embeddedSchemas: {},
+
+  getId: _walletTransactionHistoryCursorEntityGetId,
+  getLinks: _walletTransactionHistoryCursorEntityGetLinks,
+  attach: _walletTransactionHistoryCursorEntityAttach,
+  version: '3.3.2',
+);
+
+int _walletTransactionHistoryCursorEntityEstimateSize(
+  WalletTransactionHistoryCursorEntity object,
+  List<int> offsets,
+  Map<Type, List<int>> allOffsets,
+) {
+  var bytesCount = offsets.last;
+  bytesCount += 3 + object.accountId.length * 3;
+  bytesCount += 3 + object.genesisHash.length * 3;
+  return bytesCount;
+}
+
+void _walletTransactionHistoryCursorEntitySerialize(
+  WalletTransactionHistoryCursorEntity object,
+  IsarWriter writer,
+  List<int> offsets,
+  Map<Type, List<int>> allOffsets,
+) {
+  writer.writeString(offsets[0], object.accountId);
+  writer.writeLong(offsets[1], object.createdAtMillis);
+  writer.writeLong(offsets[2], object.cursorBlockNumber);
+  writer.writeString(offsets[3], object.genesisHash);
+  writer.writeLong(offsets[4], object.startBlockNumber);
+}
+
+WalletTransactionHistoryCursorEntity
+_walletTransactionHistoryCursorEntityDeserialize(
+  Id id,
+  IsarReader reader,
+  List<int> offsets,
+  Map<Type, List<int>> allOffsets,
+) {
+  final object = WalletTransactionHistoryCursorEntity();
+  object.accountId = reader.readString(offsets[0]);
+  object.createdAtMillis = reader.readLong(offsets[1]);
+  object.cursorBlockNumber = reader.readLong(offsets[2]);
+  object.genesisHash = reader.readString(offsets[3]);
+  object.id = id;
+  object.startBlockNumber = reader.readLong(offsets[4]);
+  return object;
+}
+
+P _walletTransactionHistoryCursorEntityDeserializeProp<P>(
+  IsarReader reader,
+  int propertyId,
+  int offset,
+  Map<Type, List<int>> allOffsets,
+) {
+  switch (propertyId) {
+    case 0:
+      return (reader.readString(offset)) as P;
+    case 1:
+      return (reader.readLong(offset)) as P;
+    case 2:
+      return (reader.readLong(offset)) as P;
+    case 3:
+      return (reader.readString(offset)) as P;
+    case 4:
+      return (reader.readLong(offset)) as P;
+    default:
+      throw IsarError('Unknown property with id $propertyId');
+  }
+}
+
+Id _walletTransactionHistoryCursorEntityGetId(
+  WalletTransactionHistoryCursorEntity object,
+) {
+  return object.id;
+}
+
+List<IsarLinkBase<dynamic>> _walletTransactionHistoryCursorEntityGetLinks(
+  WalletTransactionHistoryCursorEntity object,
+) {
+  return [];
+}
+
+void _walletTransactionHistoryCursorEntityAttach(
+  IsarCollection<dynamic> col,
+  Id id,
+  WalletTransactionHistoryCursorEntity object,
+) {
+  object.id = id;
+}
+
+extension WalletTransactionHistoryCursorEntityByIndex
+    on IsarCollection<WalletTransactionHistoryCursorEntity> {
+  Future<WalletTransactionHistoryCursorEntity?> getByAccountId(
+    String accountId,
+  ) {
+    return getByIndex(r'accountId', [accountId]);
+  }
+
+  WalletTransactionHistoryCursorEntity? getByAccountIdSync(String accountId) {
+    return getByIndexSync(r'accountId', [accountId]);
+  }
+
+  Future<bool> deleteByAccountId(String accountId) {
+    return deleteByIndex(r'accountId', [accountId]);
+  }
+
+  bool deleteByAccountIdSync(String accountId) {
+    return deleteByIndexSync(r'accountId', [accountId]);
+  }
+
+  Future<List<WalletTransactionHistoryCursorEntity?>> getAllByAccountId(
+    List<String> accountIdValues,
+  ) {
+    final values = accountIdValues.map((e) => [e]).toList();
+    return getAllByIndex(r'accountId', values);
+  }
+
+  List<WalletTransactionHistoryCursorEntity?> getAllByAccountIdSync(
+    List<String> accountIdValues,
+  ) {
+    final values = accountIdValues.map((e) => [e]).toList();
+    return getAllByIndexSync(r'accountId', values);
+  }
+
+  Future<int> deleteAllByAccountId(List<String> accountIdValues) {
+    final values = accountIdValues.map((e) => [e]).toList();
+    return deleteAllByIndex(r'accountId', values);
+  }
+
+  int deleteAllByAccountIdSync(List<String> accountIdValues) {
+    final values = accountIdValues.map((e) => [e]).toList();
+    return deleteAllByIndexSync(r'accountId', values);
+  }
+
+  Future<Id> putByAccountId(WalletTransactionHistoryCursorEntity object) {
+    return putByIndex(r'accountId', object);
+  }
+
+  Id putByAccountIdSync(
+    WalletTransactionHistoryCursorEntity object, {
+    bool saveLinks = true,
+  }) {
+    return putByIndexSync(r'accountId', object, saveLinks: saveLinks);
+  }
+
+  Future<List<Id>> putAllByAccountId(
+    List<WalletTransactionHistoryCursorEntity> objects,
+  ) {
+    return putAllByIndex(r'accountId', objects);
+  }
+
+  List<Id> putAllByAccountIdSync(
+    List<WalletTransactionHistoryCursorEntity> objects, {
+    bool saveLinks = true,
+  }) {
+    return putAllByIndexSync(r'accountId', objects, saveLinks: saveLinks);
+  }
+}
+
+extension WalletTransactionHistoryCursorEntityQueryWhereSort
+    on
+        QueryBuilder<
+          WalletTransactionHistoryCursorEntity,
+          WalletTransactionHistoryCursorEntity,
+          QWhere
+        > {
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterWhere
+  >
+  anyId() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addWhereClause(const IdWhereClause.any());
+    });
+  }
+}
+
+extension WalletTransactionHistoryCursorEntityQueryWhere
+    on
+        QueryBuilder<
+          WalletTransactionHistoryCursorEntity,
+          WalletTransactionHistoryCursorEntity,
+          QWhereClause
+        > {
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterWhereClause
+  >
+  idEqualTo(Id id) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addWhereClause(IdWhereClause.between(lower: id, upper: id));
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterWhereClause
+  >
+  idNotEqualTo(Id id) {
+    return QueryBuilder.apply(this, (query) {
+      if (query.whereSort == Sort.asc) {
+        return query
+            .addWhereClause(
+              IdWhereClause.lessThan(upper: id, includeUpper: false),
+            )
+            .addWhereClause(
+              IdWhereClause.greaterThan(lower: id, includeLower: false),
+            );
+      } else {
+        return query
+            .addWhereClause(
+              IdWhereClause.greaterThan(lower: id, includeLower: false),
+            )
+            .addWhereClause(
+              IdWhereClause.lessThan(upper: id, includeUpper: false),
+            );
+      }
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterWhereClause
+  >
+  idGreaterThan(Id id, {bool include = false}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addWhereClause(
+        IdWhereClause.greaterThan(lower: id, includeLower: include),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterWhereClause
+  >
+  idLessThan(Id id, {bool include = false}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addWhereClause(
+        IdWhereClause.lessThan(upper: id, includeUpper: include),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterWhereClause
+  >
+  idBetween(
+    Id lowerId,
+    Id upperId, {
+    bool includeLower = true,
+    bool includeUpper = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addWhereClause(
+        IdWhereClause.between(
+          lower: lowerId,
+          includeLower: includeLower,
+          upper: upperId,
+          includeUpper: includeUpper,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterWhereClause
+  >
+  accountIdEqualTo(String accountId) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addWhereClause(
+        IndexWhereClause.equalTo(indexName: r'accountId', value: [accountId]),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterWhereClause
+  >
+  accountIdNotEqualTo(String accountId) {
+    return QueryBuilder.apply(this, (query) {
+      if (query.whereSort == Sort.asc) {
+        return query
+            .addWhereClause(
+              IndexWhereClause.between(
+                indexName: r'accountId',
+                lower: [],
+                upper: [accountId],
+                includeUpper: false,
+              ),
+            )
+            .addWhereClause(
+              IndexWhereClause.between(
+                indexName: r'accountId',
+                lower: [accountId],
+                includeLower: false,
+                upper: [],
+              ),
+            );
+      } else {
+        return query
+            .addWhereClause(
+              IndexWhereClause.between(
+                indexName: r'accountId',
+                lower: [accountId],
+                includeLower: false,
+                upper: [],
+              ),
+            )
+            .addWhereClause(
+              IndexWhereClause.between(
+                indexName: r'accountId',
+                lower: [],
+                upper: [accountId],
+                includeUpper: false,
+              ),
+            );
+      }
+    });
+  }
+}
+
+extension WalletTransactionHistoryCursorEntityQueryFilter
+    on
+        QueryBuilder<
+          WalletTransactionHistoryCursorEntity,
+          WalletTransactionHistoryCursorEntity,
+          QFilterCondition
+        > {
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  accountIdEqualTo(String value, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.equalTo(
+          property: r'accountId',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  accountIdGreaterThan(
+    String value, {
+    bool include = false,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.greaterThan(
+          include: include,
+          property: r'accountId',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  accountIdLessThan(
+    String value, {
+    bool include = false,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.lessThan(
+          include: include,
+          property: r'accountId',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  accountIdBetween(
+    String lower,
+    String upper, {
+    bool includeLower = true,
+    bool includeUpper = true,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.between(
+          property: r'accountId',
+          lower: lower,
+          includeLower: includeLower,
+          upper: upper,
+          includeUpper: includeUpper,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  accountIdStartsWith(String value, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.startsWith(
+          property: r'accountId',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  accountIdEndsWith(String value, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.endsWith(
+          property: r'accountId',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  accountIdContains(String value, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.contains(
+          property: r'accountId',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  accountIdMatches(String pattern, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.matches(
+          property: r'accountId',
+          wildcard: pattern,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  accountIdIsEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.equalTo(property: r'accountId', value: ''),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  accountIdIsNotEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.greaterThan(property: r'accountId', value: ''),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  createdAtMillisEqualTo(int value) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.equalTo(property: r'createdAtMillis', value: value),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  createdAtMillisGreaterThan(int value, {bool include = false}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.greaterThan(
+          include: include,
+          property: r'createdAtMillis',
+          value: value,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  createdAtMillisLessThan(int value, {bool include = false}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.lessThan(
+          include: include,
+          property: r'createdAtMillis',
+          value: value,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  createdAtMillisBetween(
+    int lower,
+    int upper, {
+    bool includeLower = true,
+    bool includeUpper = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.between(
+          property: r'createdAtMillis',
+          lower: lower,
+          includeLower: includeLower,
+          upper: upper,
+          includeUpper: includeUpper,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  cursorBlockNumberEqualTo(int value) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.equalTo(property: r'cursorBlockNumber', value: value),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  cursorBlockNumberGreaterThan(int value, {bool include = false}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.greaterThan(
+          include: include,
+          property: r'cursorBlockNumber',
+          value: value,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  cursorBlockNumberLessThan(int value, {bool include = false}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.lessThan(
+          include: include,
+          property: r'cursorBlockNumber',
+          value: value,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  cursorBlockNumberBetween(
+    int lower,
+    int upper, {
+    bool includeLower = true,
+    bool includeUpper = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.between(
+          property: r'cursorBlockNumber',
+          lower: lower,
+          includeLower: includeLower,
+          upper: upper,
+          includeUpper: includeUpper,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  genesisHashEqualTo(String value, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.equalTo(
+          property: r'genesisHash',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  genesisHashGreaterThan(
+    String value, {
+    bool include = false,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.greaterThan(
+          include: include,
+          property: r'genesisHash',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  genesisHashLessThan(
+    String value, {
+    bool include = false,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.lessThan(
+          include: include,
+          property: r'genesisHash',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  genesisHashBetween(
+    String lower,
+    String upper, {
+    bool includeLower = true,
+    bool includeUpper = true,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.between(
+          property: r'genesisHash',
+          lower: lower,
+          includeLower: includeLower,
+          upper: upper,
+          includeUpper: includeUpper,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  genesisHashStartsWith(String value, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.startsWith(
+          property: r'genesisHash',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  genesisHashEndsWith(String value, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.endsWith(
+          property: r'genesisHash',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  genesisHashContains(String value, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.contains(
+          property: r'genesisHash',
+          value: value,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  genesisHashMatches(String pattern, {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.matches(
+          property: r'genesisHash',
+          wildcard: pattern,
+          caseSensitive: caseSensitive,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  genesisHashIsEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.equalTo(property: r'genesisHash', value: ''),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  genesisHashIsNotEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.greaterThan(property: r'genesisHash', value: ''),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  idEqualTo(Id value) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.equalTo(property: r'id', value: value),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  idGreaterThan(Id value, {bool include = false}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.greaterThan(
+          include: include,
+          property: r'id',
+          value: value,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  idLessThan(Id value, {bool include = false}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.lessThan(
+          include: include,
+          property: r'id',
+          value: value,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  idBetween(
+    Id lower,
+    Id upper, {
+    bool includeLower = true,
+    bool includeUpper = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.between(
+          property: r'id',
+          lower: lower,
+          includeLower: includeLower,
+          upper: upper,
+          includeUpper: includeUpper,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  startBlockNumberEqualTo(int value) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.equalTo(property: r'startBlockNumber', value: value),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  startBlockNumberGreaterThan(int value, {bool include = false}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.greaterThan(
+          include: include,
+          property: r'startBlockNumber',
+          value: value,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  startBlockNumberLessThan(int value, {bool include = false}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.lessThan(
+          include: include,
+          property: r'startBlockNumber',
+          value: value,
+        ),
+      );
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterFilterCondition
+  >
+  startBlockNumberBetween(
+    int lower,
+    int upper, {
+    bool includeLower = true,
+    bool includeUpper = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(
+        FilterCondition.between(
+          property: r'startBlockNumber',
+          lower: lower,
+          includeLower: includeLower,
+          upper: upper,
+          includeUpper: includeUpper,
+        ),
+      );
+    });
+  }
+}
+
+extension WalletTransactionHistoryCursorEntityQueryObject
+    on
+        QueryBuilder<
+          WalletTransactionHistoryCursorEntity,
+          WalletTransactionHistoryCursorEntity,
+          QFilterCondition
+        > {}
+
+extension WalletTransactionHistoryCursorEntityQueryLinks
+    on
+        QueryBuilder<
+          WalletTransactionHistoryCursorEntity,
+          WalletTransactionHistoryCursorEntity,
+          QFilterCondition
+        > {}
+
+extension WalletTransactionHistoryCursorEntityQuerySortBy
+    on
+        QueryBuilder<
+          WalletTransactionHistoryCursorEntity,
+          WalletTransactionHistoryCursorEntity,
+          QSortBy
+        > {
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  sortByAccountId() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'accountId', Sort.asc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  sortByAccountIdDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'accountId', Sort.desc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  sortByCreatedAtMillis() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'createdAtMillis', Sort.asc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  sortByCreatedAtMillisDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'createdAtMillis', Sort.desc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  sortByCursorBlockNumber() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'cursorBlockNumber', Sort.asc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  sortByCursorBlockNumberDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'cursorBlockNumber', Sort.desc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  sortByGenesisHash() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'genesisHash', Sort.asc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  sortByGenesisHashDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'genesisHash', Sort.desc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  sortByStartBlockNumber() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'startBlockNumber', Sort.asc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  sortByStartBlockNumberDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'startBlockNumber', Sort.desc);
+    });
+  }
+}
+
+extension WalletTransactionHistoryCursorEntityQuerySortThenBy
+    on
+        QueryBuilder<
+          WalletTransactionHistoryCursorEntity,
+          WalletTransactionHistoryCursorEntity,
+          QSortThenBy
+        > {
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  thenByAccountId() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'accountId', Sort.asc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  thenByAccountIdDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'accountId', Sort.desc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  thenByCreatedAtMillis() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'createdAtMillis', Sort.asc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  thenByCreatedAtMillisDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'createdAtMillis', Sort.desc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  thenByCursorBlockNumber() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'cursorBlockNumber', Sort.asc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  thenByCursorBlockNumberDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'cursorBlockNumber', Sort.desc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  thenByGenesisHash() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'genesisHash', Sort.asc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  thenByGenesisHashDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'genesisHash', Sort.desc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  thenById() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'id', Sort.asc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  thenByIdDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'id', Sort.desc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  thenByStartBlockNumber() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'startBlockNumber', Sort.asc);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QAfterSortBy
+  >
+  thenByStartBlockNumberDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'startBlockNumber', Sort.desc);
+    });
+  }
+}
+
+extension WalletTransactionHistoryCursorEntityQueryWhereDistinct
+    on
+        QueryBuilder<
+          WalletTransactionHistoryCursorEntity,
+          WalletTransactionHistoryCursorEntity,
+          QDistinct
+        > {
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QDistinct
+  >
+  distinctByAccountId({bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addDistinctBy(r'accountId', caseSensitive: caseSensitive);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QDistinct
+  >
+  distinctByCreatedAtMillis() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addDistinctBy(r'createdAtMillis');
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QDistinct
+  >
+  distinctByCursorBlockNumber() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addDistinctBy(r'cursorBlockNumber');
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QDistinct
+  >
+  distinctByGenesisHash({bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addDistinctBy(r'genesisHash', caseSensitive: caseSensitive);
+    });
+  }
+
+  QueryBuilder<
+    WalletTransactionHistoryCursorEntity,
+    WalletTransactionHistoryCursorEntity,
+    QDistinct
+  >
+  distinctByStartBlockNumber() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addDistinctBy(r'startBlockNumber');
+    });
+  }
+}
+
+extension WalletTransactionHistoryCursorEntityQueryProperty
+    on
+        QueryBuilder<
+          WalletTransactionHistoryCursorEntity,
+          WalletTransactionHistoryCursorEntity,
+          QQueryProperty
+        > {
+  QueryBuilder<WalletTransactionHistoryCursorEntity, int, QQueryOperations>
+  idProperty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addPropertyName(r'id');
+    });
+  }
+
+  QueryBuilder<WalletTransactionHistoryCursorEntity, String, QQueryOperations>
+  accountIdProperty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addPropertyName(r'accountId');
+    });
+  }
+
+  QueryBuilder<WalletTransactionHistoryCursorEntity, int, QQueryOperations>
+  createdAtMillisProperty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addPropertyName(r'createdAtMillis');
+    });
+  }
+
+  QueryBuilder<WalletTransactionHistoryCursorEntity, int, QQueryOperations>
+  cursorBlockNumberProperty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addPropertyName(r'cursorBlockNumber');
+    });
+  }
+
+  QueryBuilder<WalletTransactionHistoryCursorEntity, String, QQueryOperations>
+  genesisHashProperty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addPropertyName(r'genesisHash');
+    });
+  }
+
+  QueryBuilder<WalletTransactionHistoryCursorEntity, int, QQueryOperations>
+  startBlockNumberProperty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addPropertyName(r'startBlockNumber');
     });
   }
 }

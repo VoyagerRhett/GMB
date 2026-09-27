@@ -1,3 +1,6 @@
+import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
+import 'package:citizenapp/my/myid/citizen_identity_chain_reader.dart';
+
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -21,6 +24,86 @@ void main() {
   useIsolatedIsar();
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('实际发布只验真一次，后续只作本机版本检查', () async {
+    final order = <String>[];
+    final resolver = _PublishIdentityResolver();
+    final service = SquarePublishService(
+      identityResolver: resolver,
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
+      uploadService: _FakeUploader(order),
+      chainService: _FakeChainPublisher(order),
+      publicationConfirmer: _FakePublicationConfirmer(order),
+      balanceReader: _FakeBalanceReader(order),
+      localPostWriter: _FakeLocalPostWriter(),
+    );
+    await service.publish(
+      identity: _identity(cidNumber: 'CN001-CTZN-000000001-2026'),
+      postType: SquarePostType.document,
+      text: '测试内容',
+      mediaDrafts: [],
+      signLoginPayload: (_, _) async => '0x11',
+      externalSigning: (_) async => 'QR_V1',
+    );
+    expect(resolver.reads, 1);
+    expect(resolver.checks, 2);
+  });
+
+  test('已有展示身份也不能绕过发布验真，验证失败不上传不签名', () async {
+    final order = <String>[];
+    final resolver = _PublishIdentityResolver(fail: true);
+    final service = SquarePublishService(
+      identityResolver: resolver,
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
+      uploadService: _FakeUploader(order),
+      chainService: _FakeChainPublisher(order),
+      publicationConfirmer: _FakePublicationConfirmer(order),
+      balanceReader: _FakeBalanceReader(order),
+      localPostWriter: _FakeLocalPostWriter(),
+    );
+    await expectLater(
+      service.publish(
+        identity: _identity(cidNumber: 'CN001-CTZN-000000001-2026'),
+        postType: SquarePostType.document,
+        text: '测试内容',
+        mediaDrafts: [],
+        signLoginPayload: (_, _) async => '0x11',
+        externalSigning: (_) async => 'QR_V1',
+      ),
+      throwsStateError,
+    );
+    expect(resolver.reads, 1);
+    expect(order, isEmpty);
+  });
+
+  test('验真后本机账户发生变化必须停止发布', () async {
+    final order = <String>[];
+    final resolver = _PublishIdentityResolver()..changed = true;
+    final service = SquarePublishService(
+      identityResolver: resolver,
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
+      uploadService: _FakeUploader(order),
+      chainService: _FakeChainPublisher(order),
+      publicationConfirmer: _FakePublicationConfirmer(order),
+      balanceReader: _FakeBalanceReader(order),
+      localPostWriter: _FakeLocalPostWriter(),
+    );
+    await expectLater(
+      service.publish(
+        identity: _identity(cidNumber: 'CN001-CTZN-000000001-2026'),
+        postType: SquarePostType.document,
+        text: '测试内容',
+        mediaDrafts: [],
+        signLoginPayload: (_, _) async => '0x11',
+        externalSigning: (_) async => 'QR_V1',
+      ),
+      throwsStateError,
+    );
+    expect(order, isEmpty);
+  });
+
   test('广场发布余额门槛由链上动态读取且 App 不保留费用常量副本', () async {
     final reader = _FakeBalanceReader(<String>[]);
     expect(await reader.fetchMinSelfPayBalanceFen(), BigInt.from(121));
@@ -31,6 +114,7 @@ void main() {
     final upload = _FakeUploader(order);
     final chain = _FakeChainPublisher(order);
     final service = SquarePublishService(
+      identityResolver: _PublishIdentityResolver(registered: false),
       chain: TestCitizenChain(),
       transactions: TestCitizenTransactions(),
       uploadService: upload,
@@ -63,6 +147,7 @@ void main() {
     final localWriter = _FakeLocalPostWriter();
     final stages = <SquarePublishStage>[];
     final service = SquarePublishService(
+      identityResolver: _PublishIdentityResolver(),
       chain: TestCitizenChain(),
       transactions: TestCitizenTransactions(),
       uploadService: upload,
@@ -88,7 +173,7 @@ void main() {
     expect(chain.storageReceiptId, 'sqr_test');
     expect(result.post.contentHash, '11' * 32);
     expect(localWriter.saved?.postId, 'sqp_test');
-    expect(localWriter.saved?.cidNumber, 'CN220-CTZN2-198805200-2026');
+    expect(localWriter.saved?.cidNumber, 'CN001-CTZN-000000001-2026');
     expect(localWriter.saved?.createdAt, 1800000000000);
     expect(order, ['prepare', 'upload', 'balance', 'chain', 'confirm']);
     expect(
@@ -110,6 +195,7 @@ void main() {
     final order = <String>[];
     final oldPostDeleter = _FakePostDeleteCoordinator(order);
     final service = SquarePublishService(
+      identityResolver: _PublishIdentityResolver(),
       chain: TestCitizenChain(),
       transactions: TestCitizenTransactions(),
       uploadService: _FakeUploader(order),
@@ -147,6 +233,7 @@ void main() {
     final upload = _FakeUploader(order);
     final chain = _FakeChainPublisher(order);
     final service = SquarePublishService(
+      identityResolver: _PublishIdentityResolver(),
       chain: TestCitizenChain(),
       transactions: TestCitizenTransactions(),
       uploadService: upload,
@@ -179,6 +266,7 @@ void main() {
     final upload = _FakeUploader(order);
     final chain = _FakeChainPublisher(order)..throwOnPublish = true;
     final service = SquarePublishService(
+      identityResolver: _PublishIdentityResolver(),
       chain: TestCitizenChain(),
       transactions: TestCitizenTransactions(),
       uploadService: upload,
@@ -208,6 +296,7 @@ void main() {
     final order = <String>[];
     final chain = _FakeChainPublisher(order)..throwAfterSign = true;
     final service = SquarePublishService(
+      identityResolver: _PublishIdentityResolver(),
       chain: TestCitizenChain(),
       transactions: TestCitizenTransactions(),
       uploadService: _FakeUploader(order),
@@ -243,6 +332,7 @@ void main() {
     final localWriter = _FakeLocalPostWriter()..throwOnSave = true;
     SquareSession? scheduledSession;
     final service = SquarePublishService(
+      identityResolver: _PublishIdentityResolver(),
       chain: TestCitizenChain(),
       transactions: TestCitizenTransactions(),
       uploadService: _FakeUploader(order),
@@ -264,7 +354,7 @@ void main() {
 
     expect(result.post.postId, 'sqp_test');
     expect(result.completionWarning, contains('本地副本将在后台重新同步'));
-    expect(scheduledSession?.cidNumber, 'CN220-CTZN2-198805200-2026');
+    expect(scheduledSession?.cidNumber, 'CN001-CTZN-000000001-2026');
   });
 
   test('远端确认成功后把同一份规范 manifest 原始字节写入真实 Isar', () async {
@@ -273,7 +363,7 @@ void main() {
       utf8.encode(
         jsonEncode({
           'schema': SquarePostStore.manifestSchema,
-          'cid_number': 'CN220-CTZN2-198805200-2026',
+          'cid_number': 'CN001-CTZN-000000001-2026',
           'post_type': 'document',
           'text': '真实本地副本',
           'media_items': const <Object>[],
@@ -282,6 +372,7 @@ void main() {
     );
     final contentHash = sha256.convert(manifestBytes).toString();
     final service = SquarePublishService(
+      identityResolver: _PublishIdentityResolver(),
       chain: TestCitizenChain(),
       transactions: TestCitizenTransactions(),
       uploadService: _FakeUploader(order, manifestBytes: manifestBytes),
@@ -294,7 +385,7 @@ void main() {
     );
 
     await service.publish(
-      identity: _identity(cidNumber: 'CN220-CTZN2-198805200-2026'),
+      identity: _identity(cidNumber: 'CN001-CTZN-000000001-2026'),
       postType: SquarePostType.document,
       text: '真实本地副本',
       mediaDrafts: [_media()],
@@ -303,7 +394,7 @@ void main() {
     );
 
     final saved = await const SquarePostStore().read(
-      cidNumber: 'CN220-CTZN2-198805200-2026',
+      cidNumber: 'CN001-CTZN-000000001-2026',
       postId: 'sqp_test',
     );
     expect(saved?.manifestBytes, orderedEquals(manifestBytes));
@@ -363,10 +454,9 @@ class _FakeUploader implements SquareContentUploader {
     return SquarePreparedContent(
       session: const SquareSession(
         sessionToken: 'sqs_test',
-        cidNumber: "CN220-CTZN2-198805200-2026",
+        cidNumber: "CN001-CTZN-000000001-2026",
         bindingRevision: 1,
-        accountId:
-            '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        accountId: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
         expiresAt: 1800000000000,
       ),
       preparedUpload: const SquarePreparedUpload(
@@ -565,4 +655,41 @@ class _FakeBalanceReader implements SquarePublishBalanceReader {
     order.add('balance');
     return balanceYuan;
   }
+}
+
+class _PublishIdentityResolver implements FinalizedIdentityResolver {
+  _PublishIdentityResolver({this.registered = true, this.fail = false});
+  final bool registered;
+  final bool fail;
+  int reads = 0;
+  int checks = 0;
+  bool changed = false;
+
+  @override
+  Future<FinalizedIdentity?> resolve() async {
+    reads++;
+    if (fail) throw StateError('身份验证失败');
+    return FinalizedIdentity(
+      accountId:
+          '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      ss58Address: 'citizen_test_signer_ss58_address',
+      snapshot: registered
+          ? CitizenIdentityChainSnapshot(
+              cidNumber: 'CN001-CTZN-000000001-2026',
+              accountId: Uint8List.fromList(List.filled(32, 0xaa)),
+              bindingRevision: 1,
+              votingIdentity: null,
+            )
+          : null,
+    );
+  }
+
+  @override
+  Future<void> assertCurrent(FinalizedIdentity identity) async {
+    checks++;
+    if (changed) throw StateError('身份上下文已变化');
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

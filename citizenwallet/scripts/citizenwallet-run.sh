@@ -46,6 +46,30 @@ for value in sys.argv[2:]:
     if not raw.is_absolute() or target == source or source in target.parents:
         raise SystemExit(f'CitizenWallet可写目录必须是源码外绝对路径：{value}')
 CHECK_OUTPUTS
+# CocoaPods 会改写工程锁文件；先确认工程与工作目录均在源码外，再把
+# 指向源码的锁文件链接原子替换为工程普通文件，禁止本机 Build 回写源码。
+if [[ "$PLATFORM" == ios ]]; then
+  python3 - "$CITIZENWALLET_DIR/ios/Podfile.lock" "$CITIZENWALLET_PROJECT_ROOT/ios/Podfile.lock" <<'DETACH_IOS_LOCK'
+from pathlib import Path
+import os
+import tempfile
+import sys
+
+source = Path(sys.argv[1]).resolve(strict=True)
+project_lock = Path(sys.argv[2])
+if project_lock.is_symlink():
+    if project_lock.resolve(strict=True) != source:
+        raise SystemExit('CitizenWallet iOS工程锁文件链接目标不是本产品源码')
+    fd, temporary = tempfile.mkstemp(prefix='Podfile.lock.', dir=project_lock.parent)
+    try:
+        with os.fdopen(fd, 'wb') as output:
+            output.write(source.read_bytes())
+        os.replace(temporary, project_lock)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+DETACH_IOS_LOCK
+fi
 cd "$CITIZENWALLET_PROJECT_ROOT"
 export CITIZENWALLET_BUILD_DIR="$BUILD_DIR"
 export CITIZENWALLET_NATIVE_ANDROID_DIR="${CITIZENWALLET_NATIVE_ANDROID_DIR:-$BUILD_WORK_DIR/native/android}"

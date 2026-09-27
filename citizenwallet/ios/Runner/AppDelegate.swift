@@ -80,7 +80,8 @@ import UIKit
       switch call.method {
       case "enableScreenshotProtection":
         self?.screenshotProtectionEnabled = true
-        result(nil)
+        // 已在录屏时不会再次收到“开始录屏”事件；立即回传状态供 Flutter 隐藏秘密。
+        result(UIScreen.main.isCaptured)
       case "disableScreenshotProtection":
         self?.screenshotProtectionEnabled = false
         self?.removeBlur()

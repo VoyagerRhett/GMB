@@ -17,6 +17,9 @@ dependencies:
   http: ^1.2.2
   shared_preferences: ^2.5.5
   polkadart: ^0.7.0
+  # 业务事件按原始 metadata 的字段名、类型和显式索引解码；沿用锁定原件版本。
+  substrate_metadata: 1.6.0
+  polkadart_scale_codec: 1.6.0
   # 0.7.1 与本产品使用的 polkadart 0.7.x 共同依赖 ss58 1.x；0.7.2 已切到
   # ss58 2.x，会造成解依赖冲突。两款移动产品统一锁定同一兼容版本。
   polkadart_keyring: 0.7.1

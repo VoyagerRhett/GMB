@@ -68,22 +68,30 @@ void main() {
     expect(find.text('公民 · 竞选身份'), findsNothing);
     expect(find.text('没有公民身份信息'), findsNothing);
     // 访客卡改用“匿名”小标签替代整段空态
-    expect(find.byKey(const ValueKey<String>('passport-anonymous-tag')),
-        findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('passport-anonymous-tag')),
+      findsOneWidget,
+    );
     expect(find.text('匿名'), findsOneWidget);
   });
 
   testWidgets('访客当前卡排第一且公民卡只显示字段名称', (tester) async {
     await pumpPage(tester, const MyIdState(tier: MyIdTier.visitor));
 
-    expect(cardTop(tester, MyIdTier.visitor),
-        lessThan(cardTop(tester, MyIdTier.voting)));
-    expect(cardTop(tester, MyIdTier.voting),
-        lessThan(cardTop(tester, MyIdTier.candidate)));
+    expect(
+      cardTop(tester, MyIdTier.visitor),
+      lessThan(cardTop(tester, MyIdTier.voting)),
+    );
+    expect(
+      cardTop(tester, MyIdTier.voting),
+      lessThan(cardTop(tester, MyIdTier.candidate)),
+    );
     // 纯访客(无 CID)当前卡置顶但不挂「当前身份」徽章。
     expect(find.text('当前身份'), findsNothing);
-    expect(find.byKey(const ValueKey<String>('current-identity-visitor')),
-        findsNothing);
+    expect(
+      find.byKey(const ValueKey<String>('current-identity-visitor')),
+      findsNothing,
+    );
     expect(find.text('投票账户'), findsNWidgets(2));
     expect(find.text('公民姓名'), findsOneWidget);
     expect(find.text('—'), findsNothing);
@@ -92,12 +100,18 @@ void main() {
   testWidgets('投票身份卡置顶并且只有该卡显示真实值', (tester) async {
     await pumpPage(tester, _votingState);
 
-    expect(cardTop(tester, MyIdTier.voting),
-        lessThan(cardTop(tester, MyIdTier.visitor)));
-    expect(cardTop(tester, MyIdTier.visitor),
-        lessThan(cardTop(tester, MyIdTier.candidate)));
-    expect(find.byKey(const ValueKey<String>('current-identity-voting')),
-        findsOneWidget);
+    expect(
+      cardTop(tester, MyIdTier.voting),
+      lessThan(cardTop(tester, MyIdTier.visitor)),
+    );
+    expect(
+      cardTop(tester, MyIdTier.visitor),
+      lessThan(cardTop(tester, MyIdTier.candidate)),
+    );
+    expect(
+      find.byKey(const ValueKey<String>('current-identity-voting')),
+      findsOneWidget,
+    );
     expect(find.text('当前身份'), findsOneWidget);
     expect(find.text('w5BekTim…vMgf7o8E'), findsOneWidget);
     expect(find.text('CID-2026-0715'), findsOneWidget);
@@ -119,12 +133,18 @@ void main() {
   testWidgets('竞选身份卡置顶并显示九项真实字段，投票卡不重复数据', (tester) async {
     await pumpPage(tester, _candidateState);
 
-    expect(cardTop(tester, MyIdTier.candidate),
-        lessThan(cardTop(tester, MyIdTier.visitor)));
-    expect(cardTop(tester, MyIdTier.visitor),
-        lessThan(cardTop(tester, MyIdTier.voting)));
-    expect(find.byKey(const ValueKey<String>('current-identity-candidate')),
-        findsOneWidget);
+    expect(
+      cardTop(tester, MyIdTier.candidate),
+      lessThan(cardTop(tester, MyIdTier.visitor)),
+    );
+    expect(
+      cardTop(tester, MyIdTier.visitor),
+      lessThan(cardTop(tester, MyIdTier.voting)),
+    );
+    expect(
+      find.byKey(const ValueKey<String>('current-identity-candidate')),
+      findsOneWidget,
+    );
     expect(find.text('当前身份'), findsOneWidget);
     expect(find.text('w5BekTim…vMgf7o8E'), findsOneWidget);
     expect(find.text('CID-2026-0715'), findsOneWidget);
@@ -170,21 +190,22 @@ void main() {
   testWidgets('没有默认热钱包的纯访客不挂徽章但显示引导', (tester) async {
     await pumpPage(
       tester,
-      const MyIdState(
-        tier: MyIdTier.visitor,
-        errorMessage: '请先创建钱包',
-      ),
+      const MyIdState(tier: MyIdTier.visitor, errorMessage: '请先创建钱包'),
     );
 
     expect(find.text('请先创建钱包'), findsOneWidget);
     // 纯访客(无 CID)不挂「当前身份」徽章。
-    expect(find.byKey(const ValueKey<String>('current-identity-visitor')),
-        findsNothing);
+    expect(
+      find.byKey(const ValueKey<String>('current-identity-visitor')),
+      findsNothing,
+    );
     expect(find.text('当前身份'), findsNothing);
     // 空态文案已删，访客卡改以“匿名”小标签呈现
     expect(find.text('没有公民身份信息'), findsNothing);
-    expect(find.byKey(const ValueKey<String>('passport-anonymous-tag')),
-        findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('passport-anonymous-tag')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('过期和吊销只改变当前卡状态，不改变身份排序', (tester) async {
@@ -201,8 +222,10 @@ void main() {
       ),
     );
 
-    expect(cardTop(tester, MyIdTier.voting),
-        lessThan(cardTop(tester, MyIdTier.visitor)));
+    expect(
+      cardTop(tester, MyIdTier.voting),
+      lessThan(cardTop(tester, MyIdTier.visitor)),
+    );
     expect(find.text('已过期'), findsOneWidget);
   });
 
@@ -293,10 +316,7 @@ void main() {
     expect(find.widgetWithText(TextButton, '更换'), findsNothing);
     // 访客卡内不含 CID 行(其余卡的字段名不算)。
     expect(
-      find.descendant(
-        of: card(MyIdTier.visitor),
-        matching: find.text('公民号'),
-      ),
+      find.descendant(of: card(MyIdTier.visitor), matching: find.text('公民号')),
       findsNothing,
     );
   });
@@ -314,8 +334,10 @@ void main() {
     expect(find.widgetWithText(TextButton, '注册'), findsNothing);
     // 匿名已注册(有 CID)访客卡挂「当前身份」徽章。
     expect(find.text('当前身份'), findsOneWidget);
-    expect(find.byKey(const ValueKey<String>('current-identity-visitor')),
-        findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('current-identity-visitor')),
+      findsOneWidget,
+    );
     final visitorCard = card(MyIdTier.visitor);
     expect(
       find.descendant(of: visitorCard, matching: find.text('公民号')),
@@ -329,8 +351,10 @@ void main() {
       findsOneWidget,
     );
     // 决策:不新增卡/色,访客卡仍是「身份·访客」+匿名标签。
-    expect(find.byKey(const ValueKey<String>('passport-anonymous-tag')),
-        findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('passport-anonymous-tag')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('投票公民右上是「更换」按钮', (tester) async {
@@ -355,10 +379,7 @@ void main() {
   testWidgets('身份卡 CID 字段统一显示「公民号」且完整保持单行', (tester) async {
     await pumpPage(tester, _votingState);
     final votingCard = card(MyIdTier.voting);
-    final label = find.descendant(
-      of: votingCard,
-      matching: find.text('公民号'),
-    );
+    final label = find.descendant(of: votingCard, matching: find.text('公民号'));
     final value = find.descendant(
       of: votingCard,
       matching: find.text('CID-2026-0715'),
@@ -368,7 +389,9 @@ void main() {
     expect(valueText.maxLines, 1);
     expect(valueText.softWrap, isFalse);
     expect(
-        tester.getTopLeft(value).dy, closeTo(tester.getTopLeft(label).dy, 1));
+      tester.getTopLeft(value).dy,
+      closeTo(tester.getTopLeft(label).dy, 1),
+    );
     expect(
       tester.getTopLeft(value).dx - tester.getTopRight(label).dx,
       lessThanOrEqualTo(8),
@@ -388,7 +411,8 @@ void main() {
         matching: find.text(value),
       );
       expect(tester.widget<Text>(valueFinder).textAlign, TextAlign.left);
-      final actualGap = tester.getTopLeft(valueFinder).dx -
+      final actualGap =
+          tester.getTopLeft(valueFinder).dx -
           tester.getTopRight(labelFinder).dx;
       final expectedGap = AppLayout.scaled(tester.element(identityCard), 6);
       expect(actualGap, closeTo(expectedGap, 0.1));
@@ -411,20 +435,33 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
     await pumpPage(tester, _votingState);
-    expectCompactField(
-      card(MyIdTier.voting),
-      '公民号',
-      'CID-2026-0715',
-    );
+    expectCompactField(card(MyIdTier.voting), '公民号', 'CID-2026-0715');
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
     await pumpPage(tester, _candidateState);
-    expectCompactField(
-      card(MyIdTier.candidate),
-      '公民姓名',
-      '张三',
+    expectCompactField(card(MyIdTier.candidate), '公民姓名', '张三');
+  });
+
+  testWidgets('进入只读本地，刷新一次且失败保留已显示公民号', (tester) async {
+    final service = _FakeMyIdService(_votingState);
+    await tester.pumpWidget(MaterialApp(home: MyIdPage(myIdService: service)));
+    await tester.pumpAndSettle();
+    expect(service.localReads, 1);
+    expect(service.refreshes, 0);
+    final refresh = tester.widget<RefreshIndicator>(
+      find.byType(RefreshIndicator),
     );
+    await refresh.onRefresh();
+    await tester.pumpAndSettle();
+    expect(service.refreshes, 1);
+    expect(find.text('CID-2026-0715'), findsOneWidget);
+    service.refreshFails = true;
+    await refresh.onRefresh();
+    await tester.pumpAndSettle();
+    expect(service.refreshes, 2);
+    expect(find.text('CID-2026-0715'), findsOneWidget);
+    expect(find.text('身份验证失败，请重试'), findsOneWidget);
   });
 
   testWidgets('身份页支持下拉刷新', (tester) async {
@@ -435,10 +472,7 @@ void main() {
 
 /// 驱动注册前余额闸三分支的假 service：可配门槛、余额与链读失败。
 class _RegisterFlowService implements MyIdService {
-  _RegisterFlowService({
-    this.balanceFen = 0,
-    this.affordabilityThrows = false,
-  });
+  _RegisterFlowService({this.balanceFen = 0, this.affordabilityThrows = false});
 
   /// 门槛固定 121 分(链上最低费 10 + ED 111);本用例只驱动余额侧三分支。
   static const int requiredFen = 121;
@@ -456,7 +490,7 @@ class _RegisterFlowService implements MyIdService {
 
   @override
   Future<({BigInt balanceFen, BigInt requiredFen})>
-      fetchRegistrationAffordability(String bindAccountId) async {
+  fetchRegistrationAffordability(String bindAccountId) async {
     if (affordabilityThrows) throw StateError('CitizenSDK 链状态未就绪');
     return (
       requiredFen: BigInt.from(requiredFen),
@@ -484,7 +518,21 @@ class _FakeMyIdService implements MyIdService {
   final MyIdState state;
 
   @override
-  Future<MyIdState> getState() async => state;
+  Future<MyIdState> getState() async {
+    localReads++;
+    return state;
+  }
+
+  int localReads = 0;
+  int refreshes = 0;
+  bool refreshFails = false;
+
+  @override
+  Future<MyIdState> refreshState() async {
+    refreshes++;
+    if (refreshFails) throw StateError('测试断网');
+    return state;
+  }
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

@@ -39,10 +39,10 @@ class RoleBusinessPermission {
 /// 机构岗位或个人多签授权主体。
 class AuthorizationSubject {
   const AuthorizationSubject.institution(this.roleSubject)
-      : personalAccountHex = null;
+    : personalAccountHex = null;
 
   const AuthorizationSubject.personalMultisig(this.personalAccountHex)
-      : roleSubject = null;
+    : roleSubject = null;
 
   final RoleSubject? roleSubject;
   final String? personalAccountHex;
@@ -69,7 +69,7 @@ class VotePlan {
   final String businessObjectHash;
 }
 
-/// ADR-039 岗位权限与 VotePlan 严格 SCALE 解码器。
+/// 岗位权限与 VotePlan 的严格 SCALE 解码器。
 ///
 /// 任一未知枚举、畸形 UTF-8、重复主体、机构/个人混用或尾随字节都返回 `null`，
 /// 公民钱包不得猜测或忽略未知载荷。
@@ -155,18 +155,12 @@ class RolePermissionCodec {
     );
   }
 
-  static (RoleSubject, int)? _decodeRoleSubjectAt(
-    Uint8List data,
-    int offset,
-  ) {
+  static (RoleSubject, int)? _decodeRoleSubjectAt(Uint8List data, int offset) {
     final cid = _readUtf8(data, offset, minLength: 1, maxLength: 32);
     if (cid == null) return null;
     final roleCode = _readUtf8(data, cid.$2, minLength: 1, maxLength: 64);
     if (roleCode == null) return null;
-    return (
-      RoleSubject(cidNumber: cid.$1, roleCode: roleCode.$1),
-      roleCode.$2,
-    );
+    return (RoleSubject(cidNumber: cid.$1, roleCode: roleCode.$1), roleCode.$2);
   }
 
   static (BusinessActionId, int)? _decodeBusinessActionIdAt(
@@ -175,8 +169,8 @@ class RolePermissionCodec {
   ) {
     final moduleTag = _readUtf8(data, offset, minLength: 1, maxLength: 32);
     if (moduleTag == null || moduleTag.$2 + 4 > data.length) return null;
-    final actionCode =
-        ByteData.sublistView(data).getUint32(moduleTag.$2, Endian.little);
+    final actionCode = ByteData.sublistView(data)
+        .getUint32(moduleTag.$2, Endian.little);
     return (
       BusinessActionId(moduleTag: moduleTag.$1, actionCode: actionCode),
       moduleTag.$2 + 4,

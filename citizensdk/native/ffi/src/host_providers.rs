@@ -3174,6 +3174,42 @@ impl SecretVault for HostSecretVault {
         })
     }
 
+    // 密钥初始化只供新钱包调用；封装复用既有钥，不能把追加操作误认成创建所有者。
+    fn ensure_wallet_key(
+        &self,
+        provisioning_operation_id: [u8; 16],
+        wallet_index: u32,
+        generation: VaultGeneration,
+    ) -> ContractFuture<'_, ()> {
+        let bridge = Arc::clone(&self.bridge);
+        Box::pin(async move {
+            let vault = bridge.vault.ok_or_else(|| {
+                ContractError::new(ContractErrorCode::Unsupported, "host vault is unavailable")
+            })?;
+            let ensure = vault.0.ensure_wallet_kek.ok_or_else(|| {
+                ContractError::new(ContractErrorCode::Internal, "vault KEK ensure missing")
+            })?;
+            let host_context = vault.0.context as usize;
+            let code = bridge
+                .call_status(|operation_id, sdk_context, complete| {
+                    // SAFETY: copied callback/context contract.
+                    unsafe {
+                        ensure(
+                            host_context as *mut c_void,
+                            operation_id,
+                            host_wallet_key(wallet_index, generation),
+                            host_id(provisioning_operation_id),
+                            sdk_context,
+                            complete,
+                        )
+                    }
+                })
+                .await?;
+            require_host_ok(code, "host vault failed to ensure wallet KEK")
+
+        })
+    }
+
     fn seal(
         &self,
         provisioning_operation_id: [u8; 16],
@@ -3226,27 +3262,6 @@ impl SecretVault for HostSecretVault {
                         )
                     })
             })?;
-
-            let ensure = vault.0.ensure_wallet_kek.ok_or_else(|| {
-                ContractError::new(ContractErrorCode::Internal, "vault KEK ensure missing")
-            })?;
-            let host_context = vault.0.context as usize;
-            let code = bridge
-                .call_status(|operation_id, sdk_context, complete| {
-                    // SAFETY: copied callback/context contract.
-                    unsafe {
-                        ensure(
-                            host_context as *mut c_void,
-                            operation_id,
-                            host_wallet_key(secret_ref.wallet_index(), secret_ref.generation()),
-                            host_id(provisioning_operation_id),
-                            sdk_context,
-                            complete,
-                        )
-                    }
-                })
-                .await?;
-            require_host_ok(code, "host vault failed to ensure wallet KEK")?;
 
             let wrap = vault.0.wrap_dek.ok_or_else(|| {
                 ContractError::new(ContractErrorCode::Internal, "vault DEK wrap missing")

@@ -10,6 +10,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:polkadart_keyring/polkadart_keyring.dart';
 import 'package:citizenwallet/isar/wallet_isar.dart';
+import 'package:citizenwallet/qr/envelope.dart';
 import 'package:citizenwallet/qr/qr_protocols.dart';
 import 'package:citizenwallet/qr/signature_message.dart';
 import 'package:citizenwallet/wallet/wallet_manager.dart';
@@ -308,6 +309,49 @@ void main() {
     expect((await manager.getWallets()).length, 2);
   });
 
+  test('建钱包入口在 Release 语义下也拒绝非法词数且不写入钱包', () async {
+    for (final count in [0, 11, 13, 15, 21, 23, 25]) {
+      await expectLater(
+        manager.createWallet(wordCount: count),
+        throwsA(isA<ArgumentError>()),
+      );
+    }
+    expect(await manager.getWallets(), isEmpty);
+  });
+
+  test('防重放占用拒绝远未来期限，并批量清理过期记录且保留其他键', () async {
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final db = await WalletIsar.instance.db();
+    await db.writeTxn(() async {
+      await db.appKvEntitys.put(
+        AppKvEntity()
+          ..key = 'qr.signed_request.expired'
+          ..intValue = now - 1,
+      );
+      await db.appKvEntitys.put(
+        AppKvEntity()
+          ..key = 'other.record'
+          ..intValue = now - 1,
+      );
+    });
+    expect(
+      await SignedQrRequestStore.claim(
+        requestId: 'future-record',
+        expiresAt: now + maxQrRequestLifetimeSeconds + 60,
+      ),
+      isFalse,
+    );
+    expect(
+      await SignedQrRequestStore.claim(
+        requestId: 'valid-record',
+        expiresAt: now + 90,
+      ),
+      isTrue,
+    );
+    expect(await db.appKvEntitys.getByKey('qr.signed_request.expired'), isNull);
+    expect(await db.appKvEntitys.getByKey('other.record'), isNotNull);
+  });
+
   test('导入入口仅接受12、18、24词，其他词数不建立钱包', () async {
     for (final count in [0, 11, 13, 15, 21, 23, 25]) {
       final phrase = List.filled(count, 'abandon').join(' ');
@@ -369,10 +413,7 @@ void main() {
   test('钱包错误文案保留业务消息并隐藏内部运行时细节', () {
     expect(walletErrorMessage(const WalletAuthException('账户已存在')), '账户已存在');
     expect(walletErrorMessage(Exception('助记词无效')), '助记词无效');
-    expect(
-      walletErrorMessage(UnsupportedError('只读缓冲区')),
-      '钱包操作失败，请重试',
-    );
+    expect(walletErrorMessage(UnsupportedError('只读缓冲区')), '钱包操作失败，请重试');
   });
 
   test('signForAccount 产出可被该账户公钥验证的签名', () async {
@@ -573,15 +614,6 @@ void main() {
     );
   });
 
-  test('getWalletByMasterId 命中/未知', () async {
-    final created = await manager.importWallet(kDevPhrase);
-    expect(
-      (await manager.getWalletByMasterId(created.wallet.masterId))?.masterId,
-      created.wallet.masterId,
-    );
-    expect(await manager.getWalletByMasterId(kAccount1Id), isNull);
-  });
-
   test('deleteAccount 删非末位账户,账户0与钱包保留', () async {
     final created = await manager.importWallet(kDevPhrase);
     final a1 = await manager.addAccount(created.wallet.masterId);
@@ -630,8 +662,10 @@ void main() {
     final w2 = await manager.importWallet(kOtherPhrase);
 
     await manager.renameWallet(w1.wallet.masterId, '主号');
-    final renamed = await manager.getWalletByMasterId(w1.wallet.masterId);
-    expect(renamed?.walletName, '主号');
+    final renamed = (await manager.getWallets())
+        .where((wallet) => wallet.masterId == w1.wallet.masterId)
+        .single;
+    expect(renamed.walletName, '主号');
 
     await manager.reorderWallets([w2.wallet.masterId, w1.wallet.masterId]);
     final ordered = await manager.getWallets();

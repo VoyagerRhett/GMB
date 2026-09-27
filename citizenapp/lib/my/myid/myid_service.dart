@@ -46,8 +46,8 @@ enum MyIdTier {
   candidate,
 }
 
-/// 护照有效期/生命周期状态(仅公民档有意义;`queryFailed` 为链读失败兜底)。
-enum MyIdStatus { normal, notYetValid, expired, revoked, queryFailed }
+/// 身份展示状态；unknown 表示没有已保存事实，queryFailed 表示本次读取失败。
+enum MyIdStatus { normal, notYetValid, expired, revoked, unknown, queryFailed }
 
 /// CID 钱包换绑的私有数据交接编排；只调用客户端端到端加密边界。
 class CidAccountDataHandover {
@@ -266,7 +266,7 @@ class CidAccountDataHandover {
   }
 }
 
-/// 身份页只读链上状态(身份账户维度)。
+/// 身份页展示状态；来自本地持久化或本次主动验真，不作为操作授权。
 class MyIdState {
   const MyIdState({
     required this.tier,
@@ -286,7 +286,7 @@ class MyIdState {
 
   final MyIdTier tier;
 
-  /// 公民档的护照状态;访客为 null,链读失败为 [MyIdStatus.queryFailed]。
+  /// 公民档护照状态；已知访客为 null，缺快照为 unknown，读取失败为 queryFailed。
   final MyIdStatus? status;
 
   /// 链上投票绑定账户 = CID 绑定账户地址(SS58)。访客不显示,为 null。
@@ -408,17 +408,50 @@ class MyIdService {
   /// 自助占号的 CID 年份取 **UTC 当前年**(与 CID 生成金标口径一致,不随本机时区漂移)。
   static int _utcYear() => DateTime.now().toUtc().year;
 
-  /// 读取当前默认账户对应用户的身份状态。
+  /// 只读取当前默认账户的持久展示状态，不启动链查询。
   ///
-  /// 身份主键 = CID 号；[FinalizedIdentityResolver] 只读取账户顺序第一项。该账户没有
-  /// CID 时就是访客，禁止扫描其它账户；命中后再取 finalized 身份闭环：CID Active、
-  /// CID↔账户双向绑定、`VotingIdentityByCid`（有 `Candidate` 才是竞选身份）。
+  /// 身份主键 = CID 号；展示始终跟随账户顺序第一项。
+  /// 不扫描其它账户。完整快照缺失时仅显示已保存的CID，未知状态由主动刷新补齐。
   Future<MyIdState> getState() async {
+    final account = (await _wallet.getState().result).defaultAccount;
+    if (account == null) {
+      return const MyIdState(tier: MyIdTier.visitor, errorMessage: '请先创建钱包');
+    }
+    final saved = await _badgeSnapshotStore.readForAccountId(account.accountId);
+    if (saved?.verified == true) {
+      return _stateForSnapshot(account.accountId, saved!.identity);
+    }
+    // 既有本地绑定本身已持久保存CID；缺少完整卡片时仍能显示公民号，绝不自动联网。
+    final current = await _currentUserContext.resolve();
+    final cid = current?.accountId == account.accountId
+        ? current?.cidNumber
+        : null;
+    if (cid == null || cid.isEmpty) {
+      return const MyIdState(
+        tier: MyIdTier.visitor,
+        status: MyIdStatus.unknown,
+        errorMessage: '身份尚未获取，请下拉刷新',
+      );
+    }
+    final badge = await _badgeSnapshotStore.read(cid);
+    return MyIdState(
+      tier: switch (badge?.identityLevel) {
+        'candidate' => MyIdTier.candidate,
+        'voting' => MyIdTier.voting,
+        _ => MyIdTier.visitor,
+      },
+      votingAccountId: account.accountId,
+      cidNumber: cid,
+    );
+  }
+
+  /// 只有主动刷新调用；业务授权直接持有解析器返回的本次验真结果。
+  Future<MyIdState> refreshState() async {
     FinalizedIdentity? resolved;
     try {
       resolved = await _identityResolver.resolve();
     } catch (e) {
-      AppLog.d('myid identity resolve failed: $e');
+      AppLog.d('myid identity resolve failed');
       // 链读失败不静默降级访客、不覆盖徽章快照,交由 UI 提示重试。
       return const MyIdState(
         tier: MyIdTier.visitor,
@@ -431,16 +464,19 @@ class MyIdService {
       return const MyIdState(tier: MyIdTier.visitor, errorMessage: '请先创建钱包');
     }
 
-    final identityAccountId = resolved.accountId;
-    final chainIdentity = resolved.snapshot;
+    return _stateForSnapshot(resolved.accountId, resolved.snapshot);
+  }
 
+  Future<MyIdState> _stateForSnapshot(
+    String identityAccountId,
+    CitizenIdentityChainSnapshot? chainIdentity,
+  ) async {
     if (chainIdentity == null) {
       return const MyIdState(tier: MyIdTier.visitor);
     }
 
     if (chainIdentity.isAnonymous) {
       // 匿名已注册:访客卡 + 展示 CID;徽章仍访客色(决策:不新增卡/色)。
-      await _persistBadgeSnapshot(chainIdentity.cidNumber, 'visitor');
       return MyIdState(
         tier: MyIdTier.visitor,
         votingAccountId: identityAccountId,
@@ -470,10 +506,6 @@ class MyIdService {
         ? null
         : _decodeCandidateIdentity(candidateRaw);
     final tier = candidate != null ? MyIdTier.candidate : MyIdTier.voting;
-    await _persistBadgeSnapshot(
-      chainIdentity.cidNumber,
-      tier == MyIdTier.candidate ? 'candidate' : 'voting',
-    );
 
     final birth = candidate == null
         ? null
@@ -710,6 +742,20 @@ class MyIdService {
   /// 前者仅在真实数据访问缺钥时生成，后者仅在 Worker 明确报告未登记时登记。
   Future<void> _finishFinalizedBinding(AccountDataBinding current) async {
     try {
+      // 自助占号/换绑已经按交易finalized块验证匿名CID绑定；直接保存该事实，页面不再查链。
+      await _badgeSnapshotStore.writeVerified(
+        accountId: current.accountId,
+        identity: CitizenIdentityChainSnapshot(
+          cidNumber: current.cidNumber,
+          accountId: Uint8List.fromList([
+            for (var i = 2; i < current.accountId.length; i += 2)
+              int.parse(current.accountId.substring(i, i + 2), radix: 16),
+          ]),
+          bindingRevision: current.bindingRevision,
+          votingIdentity: null,
+        ),
+        isCurrent: () => true,
+      );
       final previous = await _accountSecurity.readAccountDataBindingForCid(
         current.cidNumber,
       );
@@ -763,9 +809,8 @@ class MyIdService {
     final state = await _wallet.getState().result;
     final defaultAccount = state.defaultAccount;
     if (defaultAccount == null) return const <CitizenWalletStateAccount>[];
-    final resolved = await _identityResolver.resolve();
-    final currentIdentityAccountId =
-        resolved?.accountId ?? defaultAccount.accountId;
+    // 打开目标列表只读本机账户；实际提交换绑时才执行身份验真。
+    final currentIdentityAccountId = defaultAccount.accountId;
     return state.accounts
         .where((account) => account.accountId != currentIdentityAccountId)
         .toList(growable: false);
@@ -811,19 +856,6 @@ class MyIdService {
         city,
         town,
       ].where((s) => s.isNotEmpty).join(' · ');
-    }
-  }
-
-  /// 写永久 CID 的身份徽章快照，供非链页面（个人页/广场）展示，不作权限依据。
-  Future<void> _persistBadgeSnapshot(String cidNumber, String level) async {
-    try {
-      await _badgeSnapshotStore.write(
-        cidNumber: cidNumber,
-        identityLevel: level,
-      );
-    } catch (e) {
-      // 快照只服务展示,写失败不改变本次真实链查询结果。
-      AppLog.d('myid badge snapshot save failed: $e');
     }
   }
 

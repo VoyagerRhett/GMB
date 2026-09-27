@@ -12,8 +12,16 @@ final class ImportWalletUITests: XCTestCase {
             XCTFail("钱包首页未就绪；请由设备所有者解锁应用")
             return
         }
-        if homeAction.label == "添加钱包" { homeAction.tap() }
-        let importWallet = app.buttons["导入钱包"].firstMatch
+        // 真机底部菜单把标题、副标题合并为 StaticText；空钱包首页仍是直接按钮。
+        let importWallet: XCUIElement
+        if homeAction.label == "添加钱包" {
+            homeAction.tap()
+            importWallet = app.staticTexts.matching(
+                NSPredicate(format: "label BEGINSWITH %@", "导入钱包")
+            ).firstMatch
+        } else {
+            importWallet = homeAction
+        }
         guard importWallet.waitForExistence(timeout: 10) else { XCTFail("导入入口不可用"); return }
         importWallet.tap()
 

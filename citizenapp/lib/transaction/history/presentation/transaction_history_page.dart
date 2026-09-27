@@ -81,7 +81,7 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage>
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = e.toString();
+        _error = '暂时无法读取交易记录';
         _loading = false;
       });
     }
@@ -103,7 +103,7 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage>
         _loadingMore = false;
       });
     } catch (e) {
-      AppLog.d('[TxHistory] 分页加载失败: $e');
+      AppLog.d('[TxHistory] 分页加载失败');
       if (!mounted) return;
       setState(() => _loadingMore = false);
     }
@@ -126,17 +126,14 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage>
       if (!mounted) return;
       setState(() => _records = refreshed);
     } catch (e) {
-      AppLog.d('[TxHistory] 响应式刷新失败: $e');
+      AppLog.d('[TxHistory] 响应式刷新失败');
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('交易记录'),
-        centerTitle: true,
-      ),
+      appBar: AppBar(title: const Text('交易记录'), centerTitle: true),
       body: _buildBody(),
     );
   }
@@ -164,23 +161,42 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage>
       );
     }
     if (_records.isEmpty) {
-      return const Center(
-        child: Text('暂无交易记录', style: TextStyle(color: AppTheme.textTertiary)),
+      return RefreshIndicator(
+        onRefresh: refreshTxHistory,
+        child: LayoutBuilder(
+          builder: (context, constraints) => ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            children: [
+              SizedBox(
+                height: constraints.maxHeight,
+                child: const Center(
+                  child: Text(
+                    '暂无交易记录',
+                    style: TextStyle(color: AppTheme.textTertiary),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       );
     }
     return RefreshIndicator(
-      onRefresh: _loadFirstPage,
+      onRefresh: refreshTxHistory,
       child: ListView.separated(
+        physics: const AlwaysScrollableScrollPhysics(),
         controller: _scrollController,
         itemCount: _records.length + (_hasMore ? 1 : 0),
         separatorBuilder: (_, _) => const Divider(height: 1),
         itemBuilder: (context, index) {
           if (index >= _records.length) {
             return Padding(
-              padding:
-                  EdgeInsets.symmetric(vertical: AppLayout.scaled(context, 16)),
+              padding: EdgeInsets.symmetric(
+                vertical: AppLayout.scaled(context, 16),
+              ),
               child: const Center(
-                  child: CircularProgressIndicator(strokeWidth: 2)),
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
             );
           }
           final record = _records[index];
@@ -226,6 +242,7 @@ String _sourceLabel(String source) {
     case 'local_submit':
       return '本机发起';
     case 'chain_event':
+    case 'sdk_finalized_event':
       return '链上事件';
     case 'resync':
       return '后台补同步';
@@ -339,29 +356,36 @@ class LocalTxRecordTile extends StatelessWidget {
     final label = _businessTypeLabel(record.type);
     final counterpartyPrefix = _isExpense ? '去向' : '来自';
     final counterparty = _shortAddress(record.counterpartySs58Address);
-    final timeStr =
-        _formatMillis(record.confirmedAtMillis ?? record.createdAtMillis);
+    final timeStr = _formatMillis(
+      record.confirmedAtMillis ?? record.createdAtMillis,
+    );
 
     return ListTile(
       onTap: onTap,
       leading: CircleAvatar(
         radius: AppLayout.scaled(context, 18),
         backgroundColor: _iconBgColor,
-        child:
-            Icon(_icon, size: AppLayout.scaled(context, 18), color: _iconColor),
+        child: Icon(
+          _icon,
+          size: AppLayout.scaled(context, 18),
+          color: _iconColor,
+        ),
       ),
       title: Row(
         children: [
           Text(
             label,
             style: TextStyle(
-                fontSize: AppLayout.scaled(context, 15),
-                fontWeight: FontWeight.w600),
+              fontSize: AppLayout.scaled(context, 15),
+              fontWeight: FontWeight.w600,
+            ),
           ),
           SizedBox(width: AppLayout.scaled(context, 6)),
           Container(
             padding: EdgeInsets.symmetric(
-                horizontal: AppLayout.scaled(context, 4), vertical: 1),
+              horizontal: AppLayout.scaled(context, 4),
+              vertical: 1,
+            ),
             decoration: BoxDecoration(
               color: _statusColor(record.status).withAlpha(30),
               borderRadius: BorderRadius.circular(AppLayout.scaledValue(4)),
@@ -410,10 +434,7 @@ class LocalTxRecordTile extends StatelessWidget {
 // ─── 交易详情页 ──────────────────────────────────────────────
 
 class LocalTxRecordDetailPage extends StatelessWidget {
-  const LocalTxRecordDetailPage({
-    super.key,
-    required this.record,
-  });
+  const LocalTxRecordDetailPage({super.key, required this.record});
 
   final LocalTxEntity record;
 
@@ -423,9 +444,8 @@ class LocalTxRecordDetailPage extends StatelessWidget {
 
   void _copy(BuildContext context, String text) {
     Clipboard.setData(ClipboardData(text: text));
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('已复制')),
-    );
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('已复制')));
   }
 
   Widget _buildRow(
@@ -450,17 +470,21 @@ class LocalTxRecordDetailPage extends StatelessWidget {
             ),
           ),
           Expanded(
-            child: Text(value,
-                style: TextStyle(fontSize: AppLayout.scaled(context, 14))),
+            child: Text(
+              value,
+              style: TextStyle(fontSize: AppLayout.scaled(context, 14)),
+            ),
           ),
           if (copyable)
             GestureDetector(
               onTap: () => _copy(context, value),
               child: Padding(
                 padding: EdgeInsets.only(left: AppLayout.scaled(context, 8)),
-                child: Icon(Icons.copy,
-                    size: AppLayout.scaled(context, 16),
-                    color: AppTheme.textTertiary),
+                child: Icon(
+                  Icons.copy,
+                  size: AppLayout.scaled(context, 16),
+                  color: AppTheme.textTertiary,
+                ),
               ),
             ),
         ],
@@ -473,15 +497,12 @@ class LocalTxRecordDetailPage extends StatelessWidget {
     final amountColor = _isExpense
         ? AppTheme.danger
         : _isIncome
-            ? AppTheme.primaryDark
-            : AppTheme.textSecondary;
+        ? AppTheme.primaryDark
+        : AppTheme.textSecondary;
     final label = _businessTypeLabel(record.type);
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('交易详情'),
-        centerTitle: true,
-      ),
+      appBar: AppBar(title: const Text('交易详情'), centerTitle: true),
       body: ListView(
         padding: EdgeInsets.all(AppLayout.scaled(context, 16)),
         children: [
@@ -499,8 +520,9 @@ class LocalTxRecordDetailPage extends StatelessWidget {
           Center(
             child: Container(
               padding: EdgeInsets.symmetric(
-                  horizontal: AppLayout.scaled(context, 8),
-                  vertical: AppLayout.scaled(context, 2)),
+                horizontal: AppLayout.scaled(context, 8),
+                vertical: AppLayout.scaled(context, 2),
+              ),
               decoration: BoxDecoration(
                 color: _statusColor(record.status).withAlpha(20),
                 borderRadius: BorderRadius.circular(AppLayout.scaledValue(4)),
@@ -531,11 +553,7 @@ class LocalTxRecordDetailPage extends StatelessWidget {
               value: _formatFen(record.transferAmountFen!),
             ),
           if (record.feeFen != null)
-            _buildRow(
-              context,
-              label: '手续费',
-              value: _formatFen(record.feeFen!),
-            ),
+            _buildRow(context, label: '手续费', value: _formatFen(record.feeFen!)),
           if (record.fromSs58Address != null)
             _buildRow(
               context,

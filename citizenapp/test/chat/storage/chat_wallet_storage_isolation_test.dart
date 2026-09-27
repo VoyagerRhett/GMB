@@ -437,7 +437,7 @@ void main() {
       );
     });
     await UserIsar.instance.writeTxn<void>((isar) async {
-      await isar.userIdentityBadgeSnapshotEntitys.putByCidNumber(
+      await isar.userIdentityBadgeSnapshotEntitys.put(
         UserIdentityBadgeSnapshotEntity()
           ..cidNumber = userCidNumber
           ..identityLevel = 'candidate'
@@ -503,9 +503,10 @@ void main() {
       );
     });
     final userBadge = await UserIsar.instance.read((isar) async {
-      return isar.userIdentityBadgeSnapshotEntitys.getByCidNumber(
-        userCidNumber,
-      );
+      return isar.userIdentityBadgeSnapshotEntitys
+          .filter()
+          .cidNumberEqualTo(userCidNumber)
+          .findFirst();
     });
     final appMarker = await AppIsar.instance.read((isar) async {
       return isar.appDataVersionEntitys.getByNamespace(appNamespace);
@@ -556,7 +557,7 @@ void main() {
       );
     });
     await user.writeTxn(() async {
-      await user.userIdentityBadgeSnapshotEntitys.putByCidNumber(
+      await user.userIdentityBadgeSnapshotEntitys.put(
         UserIdentityBadgeSnapshotEntity()
           ..cidNumber = userCidNumber
           ..identityLevel = 'voting'
@@ -622,9 +623,10 @@ void main() {
       );
     });
     final userBadge = await UserIsar.instance.read((isar) async {
-      return isar.userIdentityBadgeSnapshotEntitys.getByCidNumber(
-        userCidNumber,
-      );
+      return isar.userIdentityBadgeSnapshotEntitys
+          .filter()
+          .cidNumberEqualTo(userCidNumber)
+          .findFirst();
     });
     final appMarker = await AppIsar.instance.read((isar) async {
       return isar.appDataVersionEntitys.getByNamespace(appNamespace);
@@ -1421,8 +1423,7 @@ void main() {
         oldChat.then<void>((_) {}, onError: (_, _) {}),
         oldWallet.then<void>((_) {}, onError: (_, _) {}),
         if (newChat != null) newChat.then<void>((_) {}, onError: (_, _) {}),
-        if (newWallet != null)
-          newWallet.then<void>((_) {}, onError: (_, _) {}),
+        if (newWallet != null) newWallet.then<void>((_) {}, onError: (_, _) {}),
       ]);
     }
   });

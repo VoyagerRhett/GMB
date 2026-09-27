@@ -1,11 +1,12 @@
 import 'dart:async';
+
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../support/fake_citizen_sdk.dart';
 
-import 'package:citizenapp/8964/chain/square_chain_service.dart';
+import 'package:citizenapp/my/myid/identity_badge_snapshot_store.dart';
 import 'package:citizenapp/8964/compose/compose_page.dart';
 import 'package:citizenapp/8964/compose/document/document_compose_body.dart';
 import 'package:citizenapp/8964/compose/drafts/compose_draft.dart';
@@ -47,13 +48,17 @@ class _FakeWallet implements CitizenSdkWallet {
   final CitizenWalletStateAccount? wallet;
 
   @override
-  CitizenSdkOperation<CitizenWalletState> getState() => testCitizenOperation(() async => CitizenWalletState(
-        initializationState: wallet == null ? CitizenWalletInitializationState.empty : CitizenWalletInitializationState.ready,
-        cleanupPending: false,
-        revision: BigInt.one,
-        hotProfile: null,
-        accounts: wallet == null ? const [] : [wallet!],
-      ));
+  CitizenSdkOperation<CitizenWalletState> getState() => testCitizenOperation(
+    () async => CitizenWalletState(
+      initializationState: wallet == null
+          ? CitizenWalletInitializationState.empty
+          : CitizenWalletInitializationState.ready,
+      cleanupPending: false,
+      revision: BigInt.one,
+      hotProfile: null,
+      accounts: wallet == null ? const [] : [wallet!],
+    ),
+  );
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -77,50 +82,37 @@ final _registeredWallet = CitizenWalletStateAccount(
   isDefault: true,
 );
 
-SquareIdentityService _registeredIdentityService({
-  _FakeSquareChainService? chainService,
-}) => SquareIdentityService(
-  wallet: _FakeWallet(_registeredWallet),
-  currentUserContext: _NullIdentityCache(),
-  chainService:
-      chainService ?? _FakeSquareChainService('CN220-CTZN2-100000001-2026'),
-);
+SquareIdentityService _walletIdentityService({_LocalSnapshots? snapshots}) =>
+    SquareIdentityService(
+      wallet: _FakeWallet(_registeredWallet),
+      currentUserContext: _NullIdentityCache(),
+      badgeSnapshotStore: snapshots ?? _LocalSnapshots(),
+    );
 
 SquareIdentityService _emptyIdentityService() => SquareIdentityService(
-      wallet: _FakeWallet(null),
-      currentUserContext: _NullIdentityCache(),
-      chainService: _FakeSquareChainService(null),
-    );
+  wallet: _FakeWallet(null),
+  currentUserContext: _NullIdentityCache(),
+  badgeSnapshotStore: _LocalSnapshots(),
+);
 
 SquareIdentityService _unregisteredIdentityService() => SquareIdentityService(
-      wallet: _FakeWallet(_registeredWallet),
-      currentUserContext: _UnregisteredIdentityCache(),
-      chainService: _FakeSquareChainService(null),
-    );
+  wallet: _FakeWallet(_registeredWallet),
+  currentUserContext: _UnregisteredIdentityCache(),
+  badgeSnapshotStore: _LocalSnapshots(),
+);
 
-class _FakeSquareChainService extends SquareChainService {
-  _FakeSquareChainService(this.cidNumber)
-      : super(
-          chain: TestCitizenChain(),
-          transactions: TestCitizenTransactions(),
-        );
-
-  final String? cidNumber;
-  int fetchIdentityCount = 0;
-
+/// 显示服务只依赖本地事实；测试记录本地读取，不提供链服务。
+class _LocalSnapshots extends IdentityBadgeSnapshotStore {
+  int reads = 0;
   @override
-  Future<String?> fetchNormalCitizenCidNumber(String accountId) async {
-    return cidNumber;
-  }
-
-  @override
-  Future<({String? cidNumber, String identityLevel})> fetchIdentity(
-    String accountId,
-  ) async {
-    fetchIdentityCount += 1;
-    return (
-      cidNumber: cidNumber,
-      identityLevel: cidNumber == null ? 'visitor' : 'voting',
+  Future<IdentityBadgeSnapshot?> readForAccountId(String accountId) async {
+    reads++;
+    return IdentityBadgeSnapshot(
+      cidNumber: '',
+      identityLevel: 'visitor',
+      updatedAtMillis: 1,
+      accountId: accountId,
+      verified: true,
     );
   }
 }
@@ -129,7 +121,7 @@ class _StaticComposeIdentityService implements SquareIdentityService {
   const _StaticComposeIdentityService();
 
   @override
-  Future<SquareIdentityState> loadCurrent({bool readLiveChain = true}) async {
+  Future<SquareIdentityState> loadCurrent() async {
     return const SquareIdentityState(
       accountId:
           '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
@@ -149,8 +141,7 @@ class _DelayedComposeIdentityService implements SquareIdentityService {
       Completer<SquareIdentityState>();
 
   @override
-  Future<SquareIdentityState> loadCurrent({bool readLiveChain = true}) =>
-      completer.future;
+  Future<SquareIdentityState> loadCurrent() => completer.future;
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -516,10 +507,8 @@ void main() {
   });
 
   testWidgets('发布按钮展开公文、文章、视频，打开编辑页不读链', (tester) async {
-    final chainService = _FakeSquareChainService('CN220-CTZN2-100000001-2026');
-    final identityService = _registeredIdentityService(
-      chainService: chainService,
-    );
+    final snapshots = _LocalSnapshots();
+    final identityService = _walletIdentityService(snapshots: snapshots);
 
     await tester.pumpWidget(
       _wrap(
@@ -531,14 +520,14 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(chainService.fetchIdentityCount, 0);
+    expect(snapshots.reads, greaterThan(0));
 
     await tester.tap(find.byTooltip('发布'));
     await tester.pumpAndSettle();
     expect(find.text('公文'), findsOneWidget);
     expect(find.text('文章'), findsWidgets);
     expect(find.text('视频'), findsWidgets);
-    expect(chainService.fetchIdentityCount, 0);
+    expect(snapshots.reads, greaterThan(0));
 
     final itemFinders = [
       find.byKey(const ValueKey('square-publish-document')),
@@ -586,7 +575,7 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('square-publish-document')));
     await tester.pumpAndSettle();
     expect(find.text('发公文'), findsOneWidget);
-    expect(chainService.fetchIdentityCount, 0);
+    expect(snapshots.reads, greaterThan(0));
   });
 
   testWidgets('三类发布页标题真正居中、按钮紧凑且只显示同步头像', (tester) async {
@@ -761,8 +750,7 @@ void main() {
 
     identityService.completer.complete(
       const SquareIdentityState(
-        accountId:
-            '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        accountId: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
         cidNumber: 'CN220-CTZN2-100000001-2026',
         signMode: CitizenWalletSignMode.hot,
       ),
@@ -945,5 +933,4 @@ void main() {
     expect(find.text('注册'), findsOneWidget);
     expect(find.text('广场内容加载失败'), findsNothing);
   });
-
 }

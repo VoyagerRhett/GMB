@@ -1,6 +1,6 @@
 import 'package:provider/provider.dart';
-import 'package:citizenapp/8964/chain/square_chain_service.dart';
 import 'package:citizen_sdk/citizen_sdk.dart';
+import 'package:citizenapp/my/myid/identity_badge_snapshot_store.dart';
 
 import 'dart:async';
 import 'dart:math' as math;
@@ -93,6 +93,7 @@ class _SquareHomePageState extends State<SquareHomePage> {
     super.initState();
     _feedSource = widget.feedSource ?? SquareApiClient();
     MembershipRevision.instance.listenable.addListener(_onMembershipChanged);
+    IdentityBadgeSnapshotStore.revision.addListener(_onIdentitySnapshotChanged);
   }
 
   @override
@@ -110,15 +111,11 @@ class _SquareHomePageState extends State<SquareHomePage> {
       _identityService = SquareIdentityService(
         wallet: sdk.wallet,
         currentUserContext: context.read<CurrentUserContext>(),
-        chainService: SquareChainService(
-          chain: sdk.chain,
-          transactions: sdk.transactions,
-        ),
       );
       _accountSecurity = accountSecurity;
       accountSecurity.revision.addListener(_onWalletsChanged);
     }
-    _identityFuture = _loadIdentity(readLiveChain: false);
+    _identityFuture = _loadIdentity();
     // 浏览态首帧直接挂载页面并并行加载 feed；身份与会员只在发布等写操作前严格校验，
     // 避免链读取或会话握手把整个广场长期挡在转圈页后面。
     _feedFuture = _beginFeedLoad();
@@ -141,9 +138,19 @@ class _SquareHomePageState extends State<SquareHomePage> {
   void dispose() {
     _accountSecurity?.revision.removeListener(_onWalletsChanged);
     MembershipRevision.instance.listenable.removeListener(_onMembershipChanged);
+    IdentityBadgeSnapshotStore.revision.removeListener(
+      _onIdentitySnapshotChanged,
+    );
     _notifyTimer?.cancel();
     widget.selectedTab?.removeListener(_onSelectedTabChanged);
     super.dispose();
+  }
+
+  /// 身份验真成功只刷新本地身份展示，不因此重复加载动态或网络会话。
+  void _onIdentitySnapshotChanged() {
+    if (_dependenciesReady && mounted) {
+      setState(() => _identityFuture = _loadIdentity());
+    }
   }
 
   /// 会员确认事件只负责让当前 feed 重新读取 Worker 作者信号；事件本身不携带权益。
@@ -226,12 +233,8 @@ class _SquareHomePageState extends State<SquareHomePage> {
     }
   }
 
-  Future<SquareIdentityState> _loadIdentity({
-    required bool readLiveChain,
-  }) async {
-    final identity = await _identityService.loadCurrent(
-      readLiveChain: readLiveChain,
-    );
+  Future<SquareIdentityState> _loadIdentity() async {
+    final identity = await _identityService.loadCurrent();
     _identityAddress = identity.accountId;
     _identityCidNumber = identity.cidNumber;
     return identity;
@@ -249,7 +252,7 @@ class _SquareHomePageState extends State<SquareHomePage> {
       return;
     }
     setState(() {
-      _identityFuture = _loadIdentity(readLiveChain: false);
+      _identityFuture = _loadIdentity();
       _feedFuture = _beginFeedLoad();
     });
   }
@@ -525,7 +528,7 @@ class _SquareHomePageState extends State<SquareHomePage> {
   void _onRegisteredFromGuide() {
     if (!mounted) return;
     setState(() {
-      _identityFuture = _loadIdentity(readLiveChain: false);
+      _identityFuture = _loadIdentity();
       _feedFuture = _beginFeedLoad();
     });
   }

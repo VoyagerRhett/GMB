@@ -44,20 +44,53 @@ class _OfflineSignPageState extends State<OfflineSignPage> {
   OfflineSignVerification? _verification;
   String? _parseError;
   int _remainingSeconds = 0;
+  bool _screenshotGuardActive = false;
+  int _securityEpoch = 0;
 
   @override
   void initState() {
     super.initState();
-    ScreenshotGuard.enable();
-    WidgetsBinding.instance.addPostFrameCallback(
-      (_) => _parseRequest(widget.raw),
-    );
+    unawaited(_prepareRequest());
+  }
+
+  Future<void> _prepareRequest() async {
+    try {
+      // 签名请求及响应二维码仅在平台保护就绪后才进入页面状态。
+      await ScreenshotGuard.enable(_onSecurityEvent);
+      if (!mounted) {
+        await ScreenshotGuard.disable(_onSecurityEvent);
+        return;
+      }
+      _screenshotGuardActive = true;
+      _parseRequest(widget.raw);
+    } catch (_) {
+      if (mounted) setState(() => _parseError = '屏幕保护不可用，签名内容已隐藏');
+    }
+  }
+
+  void _onSecurityEvent(String event) {
+    if (!mounted ||
+        (event != 'screenshot_taken' &&
+            event != 'screen_recording_started' &&
+            event != 'protection_failed')) {
+      return;
+    }
+    _securityEpoch++;
+    _timer?.cancel();
+    setState(() {
+      _request = null;
+      _response = null;
+      _verification = null;
+      _parseError = '检测到屏幕采集或保护失效，签名内容已隐藏';
+    });
   }
 
   @override
   void dispose() {
     _timer?.cancel();
-    ScreenshotGuard.disable();
+    if (_screenshotGuardActive) {
+      unawaited(ScreenshotGuard.disable(_onSecurityEvent));
+    }
     super.dispose();
   }
 
@@ -98,11 +131,16 @@ class _OfflineSignPageState extends State<OfflineSignPage> {
     final request = _request;
     // 同一个已扫描请求只允许进入一次密钥签名：签名进行中或
     // 已生成响应二维码时直接返回，不叠加任何确认签名。
-    if (request == null || _signing || _response != null) return;
+    if (request == null ||
+        _signing ||
+        _response != null ||
+        !_screenshotGuardActive ||
+        !ScreenshotGuard.canDisplaySensitiveContent)
+      return;
+    final epoch = _securityEpoch;
     if (_remainingSeconds <= 0) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('签名请求已过期，请重新扫描')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('签名请求已过期，请重新扫描')));
       return;
     }
 
@@ -122,7 +160,10 @@ class _OfflineSignPageState extends State<OfflineSignPage> {
           request: request,
         );
       }
-      if (!mounted) return;
+      if (!mounted ||
+          epoch != _securityEpoch ||
+          !ScreenshotGuard.canDisplaySensitiveContent)
+        return;
       setState(() {
         _response = response;
       });
@@ -384,8 +425,9 @@ class _OfflineSignPageState extends State<OfflineSignPage> {
             const SizedBox(width: 12),
             Expanded(
               child: FilledButton(
-                onPressed:
-                    (_signing || expired || isRejected) ? null : _signRequest,
+                onPressed: (_signing || expired || isRejected)
+                    ? null
+                    : _signRequest,
                 child: _signing
                     ? const SizedBox(
                         width: 20,
@@ -486,10 +528,10 @@ class _OfflineSignPageState extends State<OfflineSignPage> {
       body: parseError != null
           ? _buildParseError(parseError)
           : response != null
-              ? _buildResponseView(response)
-              : request != null
-                  ? _buildRequestSummary(request)
-                  : const Center(child: CircularProgressIndicator()),
+          ? _buildResponseView(response)
+          : request != null
+          ? _buildRequestSummary(request)
+          : const Center(child: CircularProgressIndicator()),
     );
   }
 

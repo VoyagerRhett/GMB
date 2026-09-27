@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
@@ -31,6 +33,8 @@ class _WalletDetailPageState extends State<WalletDetailPage> {
   String? _mnemonic;
   bool _mnemonicVisible = false;
   bool _screenshotGuardActive = false;
+  Future<void>? _screenshotGuardOpening;
+  int _securityEpoch = 0;
 
   @override
   void initState() {
@@ -41,7 +45,7 @@ class _WalletDetailPageState extends State<WalletDetailPage> {
   @override
   void dispose() {
     if (_screenshotGuardActive) {
-      ScreenshotGuard.disable(_onSecurityEvent);
+      unawaited(ScreenshotGuard.disable(_onSecurityEvent));
     }
     super.dispose();
   }
@@ -55,16 +59,34 @@ class _WalletDetailPageState extends State<WalletDetailPage> {
     });
   }
 
-  void _enableScreenshotGuard() {
-    if (!_screenshotGuardActive) {
+  Future<void> _enableScreenshotGuard() {
+    if (_screenshotGuardActive) return Future<void>.value();
+    return _screenshotGuardOpening ??= _openScreenshotGuard();
+  }
+
+  Future<void> _openScreenshotGuard() async {
+    try {
+      await ScreenshotGuard.enable(_onSecurityEvent);
+      if (!mounted) {
+        await ScreenshotGuard.disable(_onSecurityEvent);
+        return;
+      }
       _screenshotGuardActive = true;
-      ScreenshotGuard.enable(_onSecurityEvent);
+    } finally {
+      _screenshotGuardOpening = null;
     }
   }
 
   void _onSecurityEvent(String event) {
     if (!mounted) return;
-    if (event == 'screenshot_taken' || event == 'screen_recording_started') {
+    if (event == 'screenshot_taken' ||
+        event == 'screen_recording_started' ||
+        event == 'protection_failed') {
+      _securityEpoch++;
+      if (event == 'protection_failed' && _screenshotGuardActive) {
+        _screenshotGuardActive = false;
+        unawaited(ScreenshotGuard.disable(_onSecurityEvent));
+      }
       setState(() {
         _mnemonicVisible = false;
         _mnemonic = null;
@@ -72,7 +94,9 @@ class _WalletDetailPageState extends State<WalletDetailPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            event == 'screenshot_taken'
+            event == 'protection_failed'
+                ? '屏幕保护不可用，助记词已隐藏'
+                : event == 'screenshot_taken'
                 ? '检测到截屏，助记词已隐藏。请勿截屏保存助记词。'
                 : '检测到屏幕录制，助记词已隐藏',
           ),
@@ -103,11 +127,23 @@ class _WalletDetailPageState extends State<WalletDetailPage> {
     );
     if (confirmed != true) return;
     try {
+      final epoch = _securityEpoch;
+      // 在解封钱包助记词之前，等待原生保护确实启用。
+      await _enableScreenshotGuard();
+      if (!mounted ||
+          !_screenshotGuardActive ||
+          !ScreenshotGuard.canDisplaySensitiveContent ||
+          epoch != _securityEpoch)
+        return;
       final mnemonic = await _walletManager.getMasterMnemonic(
         widget.wallet.masterId,
       );
-      if (!mounted) return;
-      _enableScreenshotGuard();
+      // 解密期间若发生截屏、录屏或保护故障，不能把旧操作的结果重新展示。
+      if (!mounted ||
+          !_screenshotGuardActive ||
+          !ScreenshotGuard.canDisplaySensitiveContent ||
+          epoch != _securityEpoch)
+        return;
       setState(() {
         _mnemonic = mnemonic;
         _mnemonicVisible = true;
@@ -116,9 +152,7 @@ class _WalletDetailPageState extends State<WalletDetailPage> {
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(
-        SnackBar(content: Text('验证失败：${walletErrorMessage(e)}')),
-      );
+      ).showSnackBar(SnackBar(content: Text('验证失败：${walletErrorMessage(e)}')));
     }
   }
 
@@ -265,9 +299,8 @@ class _WalletDetailPageState extends State<WalletDetailPage> {
     final index = int.tryParse(raw.trim());
     if (index == null) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('请输入有效序号')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('请输入有效序号')));
       return;
     }
     await _doAdd(index: index);
@@ -281,9 +314,7 @@ class _WalletDetailPageState extends State<WalletDetailPage> {
       await _load();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(
+      ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('添加账户失败：${walletErrorMessage(e)}')),
       );
     } finally {

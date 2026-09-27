@@ -2,6 +2,8 @@ import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
 
 import 'dart:async';
 
+import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
+
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizenapp/log/app_log.dart';
 
@@ -70,6 +72,7 @@ class SquareChainBalanceReader implements SquarePublishBalanceReader {
 class SquarePublishService {
   SquarePublishService({
     required SquareContentUploader uploadService,
+    required FinalizedIdentityResolver identityResolver,
     required CitizenChain chain,
     required CitizenTransactions transactions,
     SquarePostChainPublisher? chainService,
@@ -78,7 +81,8 @@ class SquarePublishService {
     SquarePublishBalanceReader? balanceReader,
     SquareLocalPostWriter? localPostWriter,
     SquarePostRecoveryScheduler? recoveryScheduler,
-  }) : _uploadService = uploadService,
+  }) : _identityResolver = identityResolver,
+       _uploadService = uploadService,
        _chainService =
            chainService ??
            SquareChainService(chain: chain, transactions: transactions),
@@ -89,6 +93,7 @@ class SquarePublishService {
        _localPostWriter = localPostWriter ?? const SquarePostStore(),
        _recoveryScheduler = recoveryScheduler ?? _scheduleDefaultLocalRecovery;
 
+  final FinalizedIdentityResolver _identityResolver;
   final SquareContentUploader _uploadService;
   final SquarePostChainPublisher _chainService;
   final SquarePublicationConfirmer _publicationConfirmer;
@@ -125,12 +130,35 @@ class SquarePublishService {
     if (!identity.hasWallet || identity.ss58Address == null) {
       throw const SquarePublishException('请先创建或选择钱包');
     }
-    if (identity.cidNumber?.trim().isEmpty ?? true) {
-      throw const SquarePublishException('请先注册公民号');
-    }
     if (trimmedText.isEmpty && mediaDrafts.isEmpty) {
       throw const SquarePublishException('发布内容不能为空');
     }
+
+    // 点击发布才验真一次；后续上传与签名只复用此结果和本机版本校验。
+    final verified = await _identityResolver.resolve();
+    if (verified == null || verified.snapshot == null) {
+      throw const SquarePublishException('请先注册公民号');
+    }
+    if (verified.accountId != identity.accountId ||
+        (identity.cidNumber?.isNotEmpty == true &&
+            identity.cidNumber != verified.snapshot!.cidNumber)) {
+      throw const SquarePublishException('身份已变化，请重新进入发布');
+    }
+    final snapshot = verified.snapshot!;
+    identity = SquareIdentityState(
+      accountId: verified.accountId,
+      cidNumber: snapshot.cidNumber,
+      ss58Address: verified.ss58Address,
+      displayName: identity.displayName,
+      walletIndex: identity.walletIndex,
+      signMode: identity.signMode,
+      identityLevel: snapshot.votingIdentity == null
+          ? 'visitor'
+          : snapshot.candidateIdentity == null
+          ? 'voting'
+          : 'candidate',
+    );
+    await _identityResolver.assertCurrent(verified);
 
     SquarePreparedContent? prepared;
     SquareUploadedContent? uploaded;
@@ -148,6 +176,11 @@ class SquarePublishService {
         onStage: onStage,
       );
 
+      if (prepared.session.accountId != verified.accountId ||
+          prepared.session.cidNumber != snapshot.cidNumber ||
+          prepared.session.bindingRevision != snapshot.bindingRevision) {
+        throw const SquarePublishException('发布会话与已验证身份不一致，请重新操作');
+      }
       uploaded = await _uploadService.uploadPreparedContent(
         prepared,
         onStage: onStage,
@@ -158,6 +191,7 @@ class SquarePublishService {
       onStage?.call(SquarePublishStage.checkingBalance);
       await _ensurePublishBalance(identity.accountId);
       onStage?.call(SquarePublishStage.submittingChain);
+      await _identityResolver.assertCurrent(verified);
       chainExecutionStarted = true;
       final chainFuture = _chainService.publishPost(
         signerPublicKey: SquareChainService.hexDecode(identity.accountId),

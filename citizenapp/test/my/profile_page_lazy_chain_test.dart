@@ -1,6 +1,9 @@
 import 'dart:typed_data';
+
 import 'package:provider/provider.dart';
+
 import '../support/fake_citizen_sdk.dart';
+
 import 'dart:async';
 import 'dart:io';
 
@@ -80,13 +83,15 @@ class _FakeWallet implements CitizenSdkWallet {
   final CitizenWalletStateAccount wallet;
 
   @override
-  CitizenSdkOperation<CitizenWalletState> getState() => testCitizenOperation(() async => CitizenWalletState(
-    initializationState: CitizenWalletInitializationState.ready,
-    cleanupPending: false,
-    revision: BigInt.one,
-    hotProfile: null,
-    accounts: [wallet],
-  ));
+  CitizenSdkOperation<CitizenWalletState> getState() => testCitizenOperation(
+    () async => CitizenWalletState(
+      initializationState: CitizenWalletInitializationState.ready,
+      cleanupPending: false,
+      revision: BigInt.one,
+      hotProfile: null,
+      accounts: [wallet],
+    ),
+  );
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -94,6 +99,10 @@ class _FakeWallet implements CitizenSdkWallet {
 
 class _FakeIdentityBadgeSnapshotStore extends IdentityBadgeSnapshotStore {
   int readCalls = 0;
+
+  @override
+  Future<IdentityBadgeSnapshot?> readForAccountId(String accountId) async =>
+      null;
 
   @override
   Future<IdentityBadgeSnapshot?> read(String cidNumber) async {
@@ -241,10 +250,16 @@ class _PendingCreatorService implements CreatorService {
 }
 
 void main() {
-  _sdkHarness = TestCitizenSdkHarness(handlers: {
-    // UI导航只需要合成像素；用户码协议编码仍调用当前真实Core。
-    'qrEncode': (_) => [1, 1, Uint8List.fromList([0])],
-  });
+  _sdkHarness = TestCitizenSdkHarness(
+    handlers: {
+      // UI导航只需要合成像素；用户码协议编码仍调用当前真实Core。
+      'qrEncode': (_) => [
+        1,
+        1,
+        Uint8List.fromList([0]),
+      ],
+    },
+  );
   testWidgets('我的页面只读徽章快照且不启动轻节点', (tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(411, 914);
@@ -253,16 +268,19 @@ void main() {
     final snapshotStore = _FakeIdentityBadgeSnapshotStore();
     final wallet = _testWallet;
     await tester.pumpWidget(
-      Provider<CitizenSdk>.value(value: _sdkHarness.sdk, child: MaterialApp(
-        theme: AppTheme.lightTheme,
-        home: MyTab(
-          wallet: _FakeWallet(wallet),
-          currentUserContext: _CachedIdentityCache(),
-          badgeSnapshotStore: snapshotStore,
-          sessionProvider: FakeSessionProvider(fakeSession()),
-          subscriptionService: _ConfirmedMembershipSnapshotService(),
+      Provider<CitizenSdk>.value(
+        value: _sdkHarness.sdk,
+        child: MaterialApp(
+          theme: AppTheme.lightTheme,
+          home: MyTab(
+            wallet: _FakeWallet(wallet),
+            currentUserContext: _CachedIdentityCache(),
+            badgeSnapshotStore: snapshotStore,
+            sessionProvider: FakeSessionProvider(fakeSession()),
+            subscriptionService: _ConfirmedMembershipSnapshotService(),
+          ),
         ),
-      )),
+      ),
     );
     await tester.pump(const Duration(milliseconds: 300));
 
@@ -338,18 +356,21 @@ void main() {
     final membershipService = _ConfirmedMembershipSnapshotService();
     final snapshotStore = _FakeIdentityBadgeSnapshotStore();
     await tester.pumpWidget(
-      Provider<CitizenSdk>.value(value: _sdkHarness.sdk, child: MaterialApp(
-        home: MyTab(
-          wallet: _FakeWallet(wallet),
-          currentUserContext: _CachedIdentityCache(),
-          badgeSnapshotStore: snapshotStore,
-          profileApi: profileApi,
-          profileCache: profileCache,
-          sessionProvider: FakeSessionProvider(fakeSession()),
-          squareApi: squareApi,
-          subscriptionService: membershipService,
+      Provider<CitizenSdk>.value(
+        value: _sdkHarness.sdk,
+        child: MaterialApp(
+          home: MyTab(
+            wallet: _FakeWallet(wallet),
+            currentUserContext: _CachedIdentityCache(),
+            badgeSnapshotStore: snapshotStore,
+            profileApi: profileApi,
+            profileCache: profileCache,
+            sessionProvider: FakeSessionProvider(fakeSession()),
+            squareApi: squareApi,
+            subscriptionService: membershipService,
+          ),
         ),
-      )),
+      ),
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
@@ -389,22 +410,25 @@ void main() {
     );
     final remoteMembership = _ActiveMembershipSquareApi();
     await tester.pumpWidget(
-      Provider<CitizenSdk>.value(value: _sdkHarness.sdk, child: MaterialApp(
-        home: MyTab(
-          wallet: _FakeWallet(wallet),
-          currentUserContext: _CachedIdentityCache(),
-          badgeSnapshotStore: _FakeIdentityBadgeSnapshotStore(),
-          profileApi: FakeProfileApi(profile),
-          profileCache: FakeProfileCache(profile),
-          profileMediaCache: _StaticProfileMediaCache(
-            avatarPath: avatar.path,
-            bannerPath: banner.path,
+      Provider<CitizenSdk>.value(
+        value: _sdkHarness.sdk,
+        child: MaterialApp(
+          home: MyTab(
+            wallet: _FakeWallet(wallet),
+            currentUserContext: _CachedIdentityCache(),
+            badgeSnapshotStore: _FakeIdentityBadgeSnapshotStore(),
+            profileApi: FakeProfileApi(profile),
+            profileCache: FakeProfileCache(profile),
+            profileMediaCache: _StaticProfileMediaCache(
+              avatarPath: avatar.path,
+              bannerPath: banner.path,
+            ),
+            sessionProvider: FakeSessionProvider(fakeSession()),
+            squareApi: remoteMembership,
+            subscriptionService: _ConfirmedMembershipSnapshotService(),
           ),
-          sessionProvider: FakeSessionProvider(fakeSession()),
-          squareApi: remoteMembership,
-          subscriptionService: _ConfirmedMembershipSnapshotService(),
         ),
-      )),
+      ),
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
@@ -440,19 +464,22 @@ void main() {
     final squareApi = _PendingMembershipSquareApi();
     final creatorService = _PendingCreatorService();
     await tester.pumpWidget(
-      Provider<CitizenSdk>.value(value: _sdkHarness.sdk, child: MaterialApp(
-        home: MyTab(
-          wallet: _FakeWallet(wallet),
-          currentUserContext: _CachedIdentityCache(),
-          badgeSnapshotStore: _FakeIdentityBadgeSnapshotStore(),
-          profileApi: FakeProfileApi(sampleProfile(displayName: '公开昵称')),
-          profileCache: FakeProfileCache(sampleProfile(displayName: '缓存昵称')),
-          sessionProvider: FakeSessionProvider(fakeSession()),
-          squareApi: squareApi,
-          subscriptionService: membershipSnapshots,
-          creatorService: creatorService,
+      Provider<CitizenSdk>.value(
+        value: _sdkHarness.sdk,
+        child: MaterialApp(
+          home: MyTab(
+            wallet: _FakeWallet(wallet),
+            currentUserContext: _CachedIdentityCache(),
+            badgeSnapshotStore: _FakeIdentityBadgeSnapshotStore(),
+            profileApi: FakeProfileApi(sampleProfile(displayName: '公开昵称')),
+            profileCache: FakeProfileCache(sampleProfile(displayName: '缓存昵称')),
+            sessionProvider: FakeSessionProvider(fakeSession()),
+            squareApi: squareApi,
+            subscriptionService: membershipSnapshots,
+            creatorService: creatorService,
+          ),
         ),
-      )),
+      ),
     );
     await tester.pump();
 

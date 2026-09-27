@@ -16,6 +16,121 @@ import UIKit
 final class RunnerUITests: XCTestCase {
   private let targetBundleIdentifier = "ios.citizenapp"
 
+  /// 身份展示验收只比较本机内存中的公民号文本，日志仅记录固定步骤和布尔结果。
+  func testIdentityLocalDisplayAndRefresh() throws {
+    let app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
+    func exact(_ label: String) -> XCUIElement {
+      app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).firstMatch
+    }
+    func openIdentity() throws {
+      dismissPermissionGuideIfNeeded(in: app)
+      try requireMainNavigation(in: app)
+      let my = app.buttons.matching(NSPredicate(format:
+        "label CONTAINS %@ AND NOT (label CONTAINS %@)", "我的", "我的通讯录")).firstMatch
+      XCTAssertTrue(my.waitForExistence(timeout: 10))
+      my.tap()
+      let entry = app.descendants(matching: .any).matching(NSPredicate(format:
+        "label == %@ OR (label CONTAINS %@ AND label CONTAINS %@)", "身份", "身份", "注册与查看")).firstMatch
+      XCTAssertTrue(entry.waitForExistence(timeout: 10))
+      entry.tap()
+      XCTAssertTrue(exact("身份").waitForExistence(timeout: 10))
+    }
+    func cidLabel() -> String? {
+      let field = app.descendants(matching: .any).matching(
+        NSPredicate(format: "label CONTAINS %@", "公民号")).firstMatch
+      return field.waitForExistence(timeout: 5) ? field.label : nil
+    }
+    app.launch()
+    try openIdentity()
+    let before = cidLabel()
+    XCTAssertNotNil(before, "本机已有身份的公民号应可直接展示")
+    NSLog("IDENTITY_UI stage=local cid_visible=%d", before == nil ? 0 : 1)
+    let back = app.buttons.matching(NSPredicate(format: "label IN %@", ["返回", "Back"])).firstMatch
+    XCTAssertTrue(back.exists)
+    back.tap()
+    // 返回“我的”后重新打开；不进入注册、换绑或发布动作。
+    let entry = app.descendants(matching: .any).matching(NSPredicate(format:
+      "label == %@ OR (label CONTAINS %@ AND label CONTAINS %@)", "身份", "身份", "注册与查看")).firstMatch
+    XCTAssertTrue(entry.waitForExistence(timeout: 5))
+    entry.tap()
+    XCTAssertTrue(cidLabel() == before, "重进应复用已保存身份")
+    NSLog("IDENTITY_UI stage=reenter unchanged=1")
+    app.terminate()
+    app.launch()
+    try openIdentity()
+    XCTAssertTrue(cidLabel() == before, "重启后应恢复已保存身份")
+    NSLog("IDENTITY_UI stage=relaunch unchanged=1")
+    // 只主动刷新公开身份，不触发交易或发布。
+    let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
+    let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
+    start.press(forDuration: 0.1, thenDragTo: end)
+    XCTAssertTrue(cidLabel() != nil, "刷新期间仍应保留公民号")
+    NSLog("IDENTITY_UI stage=refresh retained=1")
+  }
+
+  /// 收款回归只读取方向是否存在；不输出金额、地址、备注或交易身份，不附加画面。
+  func testWalletAndTransactionHistoryContainIncomingRecords() throws {
+    let app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
+    app.launch()
+    XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20))
+    dismissPermissionGuideIfNeeded(in: app)
+    try requireMainNavigation(in: app)
+    func exact(_ label: String) -> XCUIElement {
+      app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).firstMatch
+    }
+    func back() {
+      let button = app.buttons.matching(NSPredicate(format: "label IN %@", ["返回", "Back"])).firstMatch
+      XCTAssertTrue(button.waitForExistence(timeout: 5))
+      button.tap()
+    }
+    func hasIncome(_ stage: String) -> Bool {
+      XCTAssertTrue(exact("交易记录").waitForExistence(timeout: 10))
+      let income = app.descendants(matching: .any).matching(
+        NSPredicate(format: "label MATCHES %@", #"(?s).*\+[0-9][0-9,]*\.[0-9]{2}.*"#)).firstMatch
+      // 补齐是后台任务；以真实列表收到记录为条件，不把固定等待当成成功。
+      let present = income.waitForExistence(timeout: 60)
+      NSLog("HISTORY_UI stage=%@ incoming=%d", stage, present ? 1 : 0)
+      return present
+    }
+    let transaction = app.buttons.matching(NSPredicate(format:
+      "label CONTAINS %@ AND NOT (label CONTAINS %@)", "交易", "选择交易钱包")).firstMatch
+    XCTAssertTrue(transaction.waitForExistence(timeout: 20))
+    transaction.tap()
+    // Flutter 把三个状态与表单合并为同一个语义节点，不存在独立“失败”节点。
+    let status = app.descendants(matching: .any).matching(NSPredicate(format:
+      "label CONTAINS %@ AND label CONTAINS %@ AND label CONTAINS %@",
+      "待确认", "已确认", "失败")).firstMatch
+    XCTAssertTrue(status.waitForExistence(timeout: 15))
+    let frame = status.frame
+    app.coordinate(withNormalizedOffset: .zero).withOffset(
+      CGVector(dx: app.frame.maxX - app.frame.width * 0.122,
+        dy: frame.maxY - app.frame.width * 0.074)).tap()
+    let transactionHasIncome = hasIncome("transaction")
+    back()
+    let my = app.buttons.matching(NSPredicate(format:
+      "label CONTAINS %@ AND NOT (label CONTAINS %@)", "我的", "我的通讯录")).firstMatch
+    XCTAssertTrue(my.waitForExistence(timeout: 10))
+    my.tap()
+    let wallet = app.descendants(matching: .any).matching(NSPredicate(format:
+      "label == %@ OR (label CONTAINS %@ AND label CONTAINS %@)", "钱包", "钱包", "管理账户")).firstMatch
+    XCTAssertTrue(wallet.waitForExistence(timeout: 10))
+    wallet.tap()
+    XCTAssertTrue(exact("我的钱包").waitForExistence(timeout: 10))
+    // “我的钱包”热账户卡由账户操作按钮定位；钱包选择页才有 wallet-hot-row。
+    let accountMenu = app.buttons["账户操作"].firstMatch
+    XCTAssertTrue(accountMenu.waitForExistence(timeout: 10))
+    app.coordinate(withNormalizedOffset: .zero).withOffset(
+      CGVector(dx: app.frame.width * 0.4, dy: accountMenu.frame.midY)).tap()
+    let history = exact("交易记录")
+    if !history.isHittable { app.swipeUp() }
+    XCTAssertTrue(history.waitForExistence(timeout: 10))
+    history.tap()
+    let walletHasIncome = hasIncome("wallet")
+    back()
+    XCTAssertTrue(transactionHasIncome, "交易入口未显示收入，需核对恢复进度或账户前置条件")
+    XCTAssertTrue(walletHasIncome, "钱包入口未显示收入，需核对恢复进度或账户前置条件")
+  }
+
   override func setUpWithError() throws {
     continueAfterFailure = false
   }

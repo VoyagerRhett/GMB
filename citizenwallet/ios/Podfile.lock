@@ -47,8 +47,8 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/shared_preferences_foundation/darwin"
 
 SPEC CHECKSUMS:
-  citizenwallet_signer: c9d03755d23cde9f08cdabc395298a9433b51866
-  Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
+  citizenwallet_signer: 0c48d414fe4ff783ec348c34f68edc3acde550a7
+  Flutter: 71a624a5bc0c04062bf19101d501e466baf2fb47
   flutter_secure_storage_darwin: acdb3f316ed05a3e68f856e0353b133eec373a23
   image_picker_ios: e0ece4aa2a75771a7de3fa735d26d90817041326
   isar_community_flutter_libs: bede843185a61a05ff364a05c9b23209523f7e0d
@@ -56,6 +56,6 @@ SPEC CHECKSUMS:
   mobile_scanner: 9157936403f5a0644ca3779a38ff8404c5434a93
   shared_preferences_foundation: 7036424c3d8ec98dfe75ff1667cb0cd531ec82bb
 
-PODFILE CHECKSUM: f1528da5d3f0cbab86d6ea410d741c6af2994527
+PODFILE CHECKSUM: 596e55f02f4e5ff35f9fc78398e8a1733474b058
 
 COCOAPODS: 1.17.0

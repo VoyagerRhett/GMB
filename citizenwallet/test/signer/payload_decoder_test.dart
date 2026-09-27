@@ -79,9 +79,7 @@ void main() {
   }
 
   Map<String, dynamic> readRolePermissionFixture() {
-    final candidates = [
-      File('test/signer/fixtures/role_permission.json'),
-    ];
+    final candidates = [File('test/signer/fixtures/role_permission.json')];
     final file = candidates.firstWhere((candidate) => candidate.existsSync());
     return jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
   }
@@ -1272,48 +1270,43 @@ void main() {
       expect(decoded.reviewFields['cid_number'], 'CTZN-430100-0001');
     });
 
-    test(
-      'decodes admin_rebind_cid_account_id (call 7) and rejects self_occupy call 5',
-      () {
-        // 链上 call 7 = admin_rebind_cid_account_id；已删除的旧批量绑定调用不得恢复。
-        // 布局:actor_cid actor_role cid new_account_id[32] revision:u64 expires:u64 signature:Vec。
-        final accountId = List<int>.filled(32, 0x11);
-        final signature = List<int>.filled(64, 0xdd);
-        final rebindCall = [
-          0x0a,
-          0x07,
-          ...compactVec(registryActorCid),
-          ...compactVec('REGISTRAR'),
-          ...compactVec('CTZN-430100-0001'),
-          ...accountId,
-          ...u64Le(7),
-          ...u64Le(1800000000),
-          ...compactU32(64),
-          ...signature,
-        ];
-        final decoded = PayloadDecoder.decode(
-          hexOf(withSigningTail(rebindCall)),
-        );
-        expect(decoded?.action, 'admin_rebind_cid_account_id');
-        expect(decoded?.fields['actor_cid_number'], registryActorCid);
-        expect(decoded?.fields['cid_number'], 'CTZN-430100-0001');
-        expect(decoded?.fields['new_account_id'], '0x${hexLower(accountId)}');
-        expect(decoded?.fields['expected_binding_revision'], '7');
-        expect(decoded?.fields['expires_at'], '1800000000');
+    test('decodes admin_rebind_cid_account_id (call 7) and rejects self_occupy call 5', () {
+      // 链上 call 7 = admin_rebind_cid_account_id；已删除的旧批量绑定调用不得恢复。
+      // 布局:actor_cid actor_role cid new_account_id[32] revision:u64 expires:u64 signature:Vec。
+      final accountId = List<int>.filled(32, 0x11);
+      final signature = List<int>.filled(64, 0xdd);
+      final rebindCall = [
+        0x0a,
+        0x07,
+        ...compactVec(registryActorCid),
+        ...compactVec('REGISTRAR'),
+        ...compactVec('CTZN-430100-0001'),
+        ...accountId,
+        ...u64Le(7),
+        ...u64Le(1800000000),
+        ...compactU32(64),
+        ...signature,
+      ];
+      final decoded = PayloadDecoder.decode(hexOf(withSigningTail(rebindCall)));
+      expect(decoded?.action, 'admin_rebind_cid_account_id');
+      expect(decoded?.fields['actor_cid_number'], registryActorCid);
+      expect(decoded?.fields['cid_number'], 'CTZN-430100-0001');
+      expect(decoded?.fields['new_account_id'], '0x${hexLower(accountId)}');
+      expect(decoded?.fields['expected_binding_revision'], '7');
+      expect(decoded?.fields['expires_at'], '1800000000');
 
-        // CitizenIdentity call 5 = self_occupy_cid(自助路径),不在注册局冷签 decoder 覆盖内,须拒。
-        final snapshotCall = [
-          0x0a,
-          0x05,
-          1, // Province
-          ...compactVec('GZ'),
-        ];
-        expect(
-          PayloadDecoder.decode(hexOf(withSigningTail(snapshotCall))),
-          isNull,
-        );
-      },
-    );
+      // CitizenIdentity call 5 = self_occupy_cid(自助路径),不在注册局冷签 decoder 覆盖内,须拒。
+      final snapshotCall = [
+        0x0a,
+        0x05,
+        1, // Province
+        ...compactVec('GZ'),
+      ];
+      expect(
+        PayloadDecoder.decode(hexOf(withSigningTail(snapshotCall))),
+        isNull,
+      );
+    });
 
     test('cast_referendum 夹带旧凭证字段时拒绝解码', () {
       // 当前投票只携带 proposal_id + approve，旧凭证尾必须拒绝。
@@ -1586,7 +1579,7 @@ void main() {
         idBytes[i] = rawId[i];
       }
       final payload = Uint8List.fromList([
-        // ADR-026 Phase 2 二进制前缀 GMB || 0x19。
+        // 二进制前缀 GMB || 0x19。
         0x47, 0x4D, 0x42, 0x19,
         ...idBytes,
         ...List<int>.filled(32, 0xAA),
@@ -2121,7 +2114,7 @@ void main() {
       ];
       final signerPublicKey = List<int>.filled(32, 0xaa);
       final payload = Uint8List.fromList([
-        // ADR-026 Phase 2 二进制前缀 GMB || 0x18。
+        // 二进制前缀 GMB || 0x18。
         0x47, 0x4D, 0x42, 0x18,
         ...cidSlot,
         ...InstitutionCode.codeBytes('CGOV'),
@@ -2833,9 +2826,7 @@ void main() {
     // 三处必须产出同一序列。
     // 任何一端编码漂移 → 这里直接断言失败。
     Map<String, dynamic> readFixture() {
-      final candidates = [
-        File('test/signer/fixtures/call_data.json'),
-      ];
+      final candidates = [File('test/signer/fixtures/call_data.json')];
       final file = candidates.firstWhere(
         (candidate) => candidate.existsSync(),
         orElse: () => candidates.first,
@@ -3184,30 +3175,27 @@ void main() {
       expect(decoded.fields['approve'], 'false');
     });
 
-    test(
-      'decodes executive_sign (26.3) / override_sign (26.4) / guard_vote (26.5)',
-      () {
-        final exec = PayloadDecoder.decode(
-          hexOf(withSigningTail([26, 3, ...u64Le(1), 0x01])),
-        );
-        expect(exec?.action, 'executive_sign');
-        final override = PayloadDecoder.decode(
-          hexOf(withSigningTail([26, 4, ...u64Le(2), 0x00])),
-        );
-        expect(override?.action, 'override_sign');
-        final guard = PayloadDecoder.decode(
-          hexOf(withSigningTail([26, 5, ...u64Le(3), 0x01])),
-        );
-        expect(guard?.action, 'guard_vote');
-      },
-    );
+    test('decodes executive_sign (26.3) / override_sign (26.4) / guard_vote (26.5)', () {
+      final exec = PayloadDecoder.decode(
+        hexOf(withSigningTail([26, 3, ...u64Le(1), 0x01])),
+      );
+      expect(exec?.action, 'executive_sign');
+      final override = PayloadDecoder.decode(
+        hexOf(withSigningTail([26, 4, ...u64Le(2), 0x00])),
+      );
+      expect(override?.action, 'override_sign');
+      final guard = PayloadDecoder.decode(
+        hexOf(withSigningTail([26, 5, ...u64Le(3), 0x01])),
+      );
+      expect(guard?.action, 'guard_vote');
+    });
 
     test('rejects 裸 call_data 无签名尾(立法投票)', () {
       expect(PayloadDecoder.decode(hexOf([26, 1, ...u64Le(1), 0x01])), isNull);
     });
   });
 
-  // ADR-026 Phase 2 二进制前缀域金标:冷钱包 decode() 必须能解析 node/citizenapp
+  // 二进制前缀域金标：冷钱包 decode() 必须能解析对应的链上构造结果。
   // 用相同 4B 前缀(GMB||0x18 / GMB||0x19)构造的 payload。fixture 是 Rust 切片
   // 导出的副本(canonical 真源 primitives/tests/fixtures),四方逐字节锁步。
   group('二进制前缀域金标(node/citizenapp 构造 ↔ 冷钱包 decode 锁步)', () {

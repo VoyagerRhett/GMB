@@ -4,7 +4,6 @@ import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import 'package:citizenapp/8964/chain/square_chain_service.dart';
 import 'package:citizenapp/8964/compose/article/article_compose_body.dart';
 import 'package:citizenapp/8964/compose/compose_payload.dart';
 import 'package:citizenapp/8964/compose/document/document_compose_body.dart';
@@ -113,15 +112,11 @@ class _SquareComposePageState extends State<SquareComposePage>
       _identityService = SquareIdentityService(
         wallet: sdk.wallet,
         currentUserContext: context.read<CurrentUserContext>(),
-        chainService: SquareChainService(
-          chain: sdk.chain,
-          transactions: sdk.transactions,
-        ),
       );
     }
     _publishService = widget.publishService;
     // 编辑页只读取默认账户的本地用户上下文，禁止为了展示或保存草稿启动轻节点。
-    _identityFuture = _identityService.loadCurrent(readLiveChain: false)
+    _identityFuture = _identityService.loadCurrent()
       ..then((identity) {
         _identity = identity;
         unawaited(_loadAvatar(identity));
@@ -448,6 +443,7 @@ class _SquareComposePageState extends State<SquareComposePage>
     if (existing != null) return existing;
     final sdk = context.read<CitizenSdk>();
     final created = SquarePublishService(
+      identityResolver: context.read<FinalizedIdentityResolver>(),
       chain: sdk.chain,
       transactions: sdk.transactions,
       uploadService: SquareUploadService(

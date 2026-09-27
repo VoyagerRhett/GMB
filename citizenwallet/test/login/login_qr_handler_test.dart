@@ -5,12 +5,12 @@ import 'package:citizenwallet/qr/envelope.dart';
 import 'package:citizenwallet/qr/bodies/sign_request_body.dart';
 import 'package:citizenwallet/login/login_qr_handler.dart';
 
-String _loginRaw(String id) {
+String _loginRaw(String id, {int? expiresAt}) {
   final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
   return QrEnvelope<SignRequestBody>(
     kind: QrKind.signRequest,
     id: id,
-    expiresAt: now + 60,
+    expiresAt: expiresAt ?? now + 60,
     body: SignRequestBody.fromHex(
       action: QrActions.login,
       signerPublicKeyHex: '0x${'ab' * 32}',
@@ -37,6 +37,19 @@ void main() {
     test('id 过短被拒(< 16)', () {
       expect(
         () => parseLoginSignRequest(_loginRaw('short')),
+        throwsA(isA<LoginQrException>()),
+      );
+    });
+
+    test('拒绝远未来期限，避免永久保留已签请求', () {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      expect(
+        () => parseLoginSignRequest(
+          _loginRaw(
+            'offline-req-test-0002',
+            expiresAt: now + maxQrRequestLifetimeSeconds + 1,
+          ),
+        ),
         throwsA(isA<LoginQrException>()),
       );
     });

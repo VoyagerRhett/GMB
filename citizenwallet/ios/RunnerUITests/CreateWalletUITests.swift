@@ -13,8 +13,16 @@ final class CreateWalletUITests: XCTestCase {
             XCTFail("钱包首页未就绪；请由设备所有者解锁应用")
             return
         }
-        if homeAction.label == "添加钱包" { homeAction.tap() }
-        let create = app.buttons["创建钱包"].firstMatch
+        // 真机底部菜单把标题、副标题合并为 StaticText；空钱包首页仍是直接按钮。
+        let create: XCUIElement
+        if homeAction.label == "添加钱包" {
+            homeAction.tap()
+            create = app.staticTexts.matching(
+                NSPredicate(format: "label BEGINSWITH %@", "创建钱包")
+            ).firstMatch
+        } else {
+            create = homeAction
+        }
         guard create.waitForExistence(timeout: 10) else { XCTFail("创建入口不可用"); return }
         create.tap()
 
@@ -44,5 +52,6 @@ final class CreateWalletUITests: XCTestCase {
         guard hasCaption("256 位熵，安全性更高") else { XCTFail("24 词说明不可见"); return }
         twelve.tap()
         XCTAssertTrue(hasCaption("128 位熵，标准安全强度"))
+
     }
 }

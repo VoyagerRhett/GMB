@@ -183,8 +183,15 @@ internal class CitizenSdkHardwareVault(
             "DEK must be an exact direct 32-byte Rust view"
         }
         return secureStore.withVaultLock {
-            ensureWalletKekLocked(walletIndex, generation, provisioningOperationId)
+            // 追加复用原活动钥；封装不能创建密钥、改写创建所有者或复活退休代际。
+            require(walletIndex == 0 && generation.size == 16 && provisioningOperationId.size == 16) {
+                "wallet KEK identity is malformed"
+            }
+            if (!secureStore.isGenerationActive(walletIndex, generation)) {
+                throw VaultFailure(CitizenSdkErrorCode.KEY_INVALIDATED, "wallet generation is not active")
+            }
             val alias = CitizenSdkRecordKey.hardwareAlias(walletIndex, generation)
+            requireHardwareKey(alias)
             val publicKey = keyStore().getCertificate(alias)?.publicKey
                 ?: throw VaultFailure(CitizenSdkErrorCode.KEY_INVALIDATED, "wallet KEK is unavailable")
             // Rebuild the public key without AndroidKeyStore restrictions. Only the

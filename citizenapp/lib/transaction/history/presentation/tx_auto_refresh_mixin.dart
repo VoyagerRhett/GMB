@@ -1,9 +1,11 @@
 import 'dart:async';
 
 import 'package:flutter/widgets.dart';
+import 'package:provider/provider.dart';
 
 import 'package:citizenapp/log/app_log.dart';
 import 'package:citizenapp/transaction/history/local_tx_store.dart';
+import 'package:citizenapp/transaction/history/wallet_transaction_history_service.dart';
 
 /// 交易记录展示页共用:订阅某账户在 Isar 里的交易记录变更,后台
 /// SDK history 或 finalized 业务投影更新记录后，列表自动重刷——
@@ -35,6 +37,16 @@ mixin TxAutoRefreshMixin<T extends StatefulWidget> on State<T> {
 
   /// 库变更时执行的重载(通常是页面现成的 `_loadXxx`)。
   Future<void> onTxRecordsChanged();
+
+  /// 两处列表与钱包摘要的主动刷新共用后台同步；离线保留已有记录并继续重试。
+  Future<void> refreshTxHistory() async {
+    try {
+      await context.read<WalletTransactionHistoryService>().sync();
+    } catch (_) {
+      AppLog.d('[TransactionHistory] refresh_failed');
+    }
+    if (mounted) await onTxRecordsChanged();
+  }
 
   /// 开始/切换监听指定账户的交易记录变更;账户为空则停止监听。
   /// 重复传同一账户是幂等空操作(不重复订阅)。
@@ -80,7 +92,7 @@ mixin TxAutoRefreshMixin<T extends StatefulWidget> on State<T> {
   void _observeTxAutoFuture(Future<void> future, String action) {
     unawaited(
       future.catchError((Object error, StackTrace stackTrace) {
-        AppLog.d('[TxAutoRefresh] $action 失败: $error\n$stackTrace');
+        AppLog.d('[TxAutoRefresh] $action 失败');
       }),
     );
   }

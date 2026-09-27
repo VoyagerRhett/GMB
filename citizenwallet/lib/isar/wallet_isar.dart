@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:isolate';
@@ -5,6 +6,8 @@ import 'dart:isolate';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:isar_community/isar.dart';
 import 'package:path_provider/path_provider.dart';
+
+import '../qr/envelope.dart';
 
 part 'wallet_isar.g.dart';
 
@@ -38,10 +41,7 @@ class AccountEntity {
   Id id = Isar.autoIncrement;
 
   /// 所属钱包（master）指纹。按此过滤取某钱包下全部账户。
-  @Index(
-    composite: [CompositeIndex('accountIndex')],
-    unique: true,
-  )
+  @Index(composite: [CompositeIndex('accountIndex')], unique: true)
   late String masterId;
 
   /// 派生序号：N → `//N`（含账户0 = `//0`）。
@@ -139,10 +139,7 @@ class WalletIsar {
   }
 
   @visibleForTesting
-  Future<void> cleanupLegacyLockFileForTest(
-    String directory,
-    String name,
-  ) =>
+  Future<void> cleanupLegacyLockFileForTest(String directory, String name) =>
       _deleteLegacyLockFile(directory, name);
 
   Future<void> ensureTestCoreInitialized() async {
@@ -168,7 +165,7 @@ class WalletIsar {
     final localPath = _resolveLocalIsarCorePath();
     if (localPath == null) {
       throw StateError(
-        'Flutter test 模式未找到 Isar Core 动态库，请先执行 flutter pub get。',
+        'Flutter test 模式未找到锁定版本的 Isar Core 动态库，请先在当前工程执行 flutter pub get。',
       );
     }
     await Isar.initializeIsarCore(
@@ -180,6 +177,9 @@ class WalletIsar {
     if (!_isFlutterTest()) {
       return;
     }
+    // 上一页面可能仍在异步打开数据库；先等打开完成，再关闭并删除测试库。
+    final opening = _opening;
+    if (opening != null) await opening;
     final current = _isar;
     if (current != null && current.isOpen) {
       await current.close(deleteFromDisk: true);
@@ -230,27 +230,8 @@ class WalletIsar {
       if (file.existsSync()) {
         return file.path;
       }
-    }
-
-    final home = Platform.environment['HOME'];
-    if (home == null || home.isEmpty) {
       return null;
     }
-
-    final hosted = Directory('$home/.pub-cache/hosted/pub.dev');
-    if (!hosted.existsSync()) {
-      return null;
-    }
-
-    final candidates = hosted
-        .listSync(followLinks: false)
-        .whereType<Directory>()
-        .where((dir) => dir.path
-            .split(Platform.pathSeparator)
-            .last
-            .startsWith('isar_community_flutter_libs-'))
-        .toList(growable: false)
-      ..sort((a, b) => b.path.compareTo(a.path));
 
     final relative = switch (Abi.current()) {
       Abi.macosArm64 || Abi.macosX64 => 'macos/libisar.dylib',
@@ -262,13 +243,26 @@ class WalletIsar {
       return null;
     }
 
-    for (final dir in candidates) {
-      final path = '${dir.path}/$relative';
-      if (File(path).existsSync()) {
-        return path;
-      }
+    // 只读当前工程的 Pub 解析结果，不扫描 HOME 中任意版本的依赖原件。
+    final config = File(
+      '${Directory.current.path}/.dart_tool/package_config.json',
+    );
+    if (!config.existsSync()) return null;
+    try {
+      final data =
+          jsonDecode(config.readAsStringSync()) as Map<String, dynamic>;
+      final packages = data['packages'] as List<dynamic>;
+      final library = packages.cast<Map<String, dynamic>>().singleWhere(
+        (entry) => entry['name'] == 'isar_community_flutter_libs',
+      );
+      final rootUri = config.uri.resolve(library['rootUri'] as String);
+      if (rootUri.scheme != 'file') return null;
+      // package_config 的 rootUri 可不带尾部斜杠；按目录拼接，避免把包名当文件名替换。
+      final file = File('${Directory.fromUri(rootUri).path}/$relative');
+      return file.existsSync() ? file.path : null;
+    } catch (_) {
+      return null;
     }
-    return null;
   }
 }
 
@@ -285,22 +279,25 @@ class SignedQrRequestStore {
     required int expiresAt,
   }) async {
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    if (expiresAt <= now) return false;
+    if (!isQrRequestExpiryValid(expiresAt, now)) return false;
 
     final isar = await WalletIsar.instance.db();
     late bool claimed;
     await isar.writeTxn(() async {
-      final records =
-          await isar.appKvEntitys.filter().keyStartsWith(_keyPrefix).findAll();
-      for (final record in records) {
-        if ((record.intValue ?? 0) <= now) {
-          await isar.appKvEntitys.delete(record.id);
-        }
-      }
+      // 一次数据库批删代替把全部记录搬到 Dart 再逐行删除；保留其他 AppKv 数据。
+      await isar.appKvEntitys
+          .filter()
+          .keyStartsWith(_keyPrefix)
+          .group(
+            (q) => q.intValueIsNull().or().intValueLessThan(now, include: true),
+          )
+          .deleteAll();
 
       final key = '$_keyPrefix$requestId';
-      final existing =
-          await isar.appKvEntitys.filter().keyEqualTo(key).findFirst();
+      final existing = await isar.appKvEntitys
+          .filter()
+          .keyEqualTo(key)
+          .findFirst();
       if (existing != null) {
         claimed = false;
         return;

@@ -14,7 +14,7 @@ import 'package:citizenwallet/qr/generated/qr_action_registry.g.dart';
 /// fields value 转换。
 ///
 /// - `approve` 布尔 → 赞成/反对。
-/// - 账户字段(ADR-040 命名约定:`account_id` 或 `*_account_id`)的 32 字节
+/// - 账户字段（`account_id` 或 `*_account_id`）的 32 字节
 ///   公钥 hex 一律转成 SS58 地址展示 —— 人看的地方统一 SS58,hex 公钥只给系统用。
 ///   公钥字段(`*_public_key`)、哈希字段(`*_hash`)按明确标注保持 0x hex 不转。
 String fieldValueText(String key, String value) {
@@ -26,7 +26,7 @@ String fieldValueText(String key, String value) {
   return value;
 }
 
-/// ADR-040:单账户 `account_id`,多账户 `<角色>_account_id`。
+/// 单账户使用 `account_id`，多账户使用 `<角色>_account_id`。
 bool _isAccountIdKey(String key) =>
     key == 'account_id' || key.endsWith('_account_id');
 

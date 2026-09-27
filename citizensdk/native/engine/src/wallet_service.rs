@@ -1697,10 +1697,17 @@ impl WalletService {
         claimed: &WalletState,
         pending: Vec<PendingSecret>,
     ) -> Result<(), EngineError> {
-        let operation_id = *claimed
-            .provisioning()
-            .ok_or_else(|| error(ContractErrorCode::Integrity, "provisioning 计划缺失"))?
-            .operation_id();
+        let plan = claimed.provisioning()
+            .ok_or_else(|| error(ContractErrorCode::Integrity, "provisioning 计划缺失"))?;
+        let operation_id = *plan.operation_id();
+        // 新钱包只初始化一次；追加计划保留 previous_profile，必须复用原硬件密钥。
+        if plan.previous_profile().is_none() {
+            let latest = self.profiles.load().await?;
+            if latest.provisioning() != Some(plan) || latest.profile() != claimed.profile() {
+                return Err(conflict("密钥初始化前 provisioning 所有权已变化"));
+            }
+            self.vault.ensure_wallet_key(operation_id, plan.wallet_index(), plan.generation()).await?;
+        }
         for pending_secret in pending {
             self.persist_secret(operation_id, pending_secret).await?;
         }
@@ -1728,6 +1735,8 @@ impl WalletService {
         operation_id: [u8; 16],
         pending: PendingSecret,
     ) -> Result<(), EngineError> {
+        // 封装前后都核对持久所有权；追加不能因复用硬件钥而绕过账户级操作隔离。
+        self.require_secret_write_ownership(operation_id, pending.secret_ref).await?;
         let envelope = self
             .vault
             .seal(operation_id, pending.secret_ref, pending.secret)
@@ -1800,7 +1809,7 @@ impl WalletService {
             Ok(())
         } else {
             Err(conflict(
-                "seal 返回后 provisioning/profile 已不再拥有该秘密引用",
+                "provisioning/profile 已不再拥有该秘密引用",
             ))
         }
     }

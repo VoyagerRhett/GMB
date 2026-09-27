@@ -194,11 +194,18 @@ pub enum VaultAvailability {
 pub trait SecretVault: Send + Sync {
     fn availability(&self) -> ContractFuture<'_, VaultAvailability>;
 
-    /// 以 SecretRef 的完整身份作为 AAD 保护秘密；成功后输入缓冲区立即结束生命周期。
-    ///
-    /// 平台实现必须把 `provisioning_operation_id` 与 generation 的持久状态一起检查，
-    /// 并在 generation 已被 [`Self::delete_wallet_key`] 退休后永久拒绝 late writer
-    /// 重新创建硬件密钥。仅靠进程内互斥不满足本合同。
+    /// 仅新建/导入钱包在取得 provisioning 后调用；同一 generation 只允许原创建操作初始化。
+    /// 永久退休的 generation 不能复活；追加账户不得调用本方法。
+    fn ensure_wallet_key(
+        &self,
+        provisioning_operation_id: [u8; 16],
+        wallet_index: u32,
+        generation: VaultGeneration,
+    ) -> ContractFuture<'_, ()>;
+
+    /// 使用既有活动密钥，以完整 SecretRef 作为 AAD 保护秘密；成功后输入缓冲区结束生命周期。
+    /// Core 在封装前后核对本次 provisioning 对账户秘密的所有权；平台在持久锁内核对
+    /// generation 与物理钥仍有效。缺钥或已退休必须失败，本方法不得初始化或重建密钥。
     fn seal(
         &self,
         provisioning_operation_id: [u8; 16],

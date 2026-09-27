@@ -1,4 +1,5 @@
 platform :ios, '16.0'
+require 'fileutils'
 
 # CocoaPods analytics sends network stats synchronously affecting flutter build latency.
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
@@ -34,7 +35,8 @@ target 'Runner' do
   # citizenwallet/rust/src/sr25519.rs，由公民钱包独立维护。
   pod 'citizenwallet_signer', :path => 'signer'
 
-  flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+  # 源码外工程的 Podfile 可能是链接；插件清单必须从当前工程而非源码根读取。
+  flutter_install_all_ios_pods File.dirname(__FILE__)
   target 'RunnerTests' do
     inherit! :search_paths
   end
@@ -62,6 +64,8 @@ post_install do |installer|
     isar_support_dir,
     'isar_community_flutter_libs-xcframeworks-output-files.xcfilelist',
   )
+  # 首次安装时 CocoaPods 尚未生成 Isar 的目标支持目录，先建立它再写输出清单。
+  FileUtils.mkdir_p(isar_support_dir)
   File.write(
     isar_output_list,
     "${PODS_XCFRAMEWORKS_BUILD_DIR}/isar_community_flutter_libs/libisar.a\n",

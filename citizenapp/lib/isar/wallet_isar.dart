@@ -487,6 +487,23 @@ class InstitutionEntity {
   bool discoveredViaAdmin = false;
 }
 
+/// 钱包业务流水进度；与该块的流水在同一事务内提交。
+/// 账户导入时间和链身份共同隔离重导入、换链，不能复用另一代账户的进度。
+@collection
+class WalletTransactionHistoryCursorEntity {
+  Id id = Isar.autoIncrement;
+
+  @Index(unique: true, replace: true)
+  late String accountId;
+
+  late int createdAtMillis;
+  late String genesisHash;
+  late int startBlockNumber;
+
+  /// 已完整处理的高度；初始化为 startBlockNumber - 1。
+  late int cursorBlockNumber;
+}
+
 /// 本地钱包余额变化流水（持久化存储，去中心化设计，不依赖 CID 服务器）。
 @collection
 class LocalTxEntity {
@@ -730,6 +747,7 @@ class WalletIsar {
         PersonalAccountEntitySchema,
         PersonalAccountProposalEntitySchema,
         LocalTxEntitySchema,
+        WalletTransactionHistoryCursorEntitySchema,
       ];
 
   /// 给低优先级后台任务判断是否让路；前台读写仍应直接排队执行。

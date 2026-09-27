@@ -66,6 +66,7 @@ class LocalTxStore {
   }
 
   /// 查询某个钱包的交易流水（按本机记录时间倒序）。
+  /// 记录来源只描述写入路径，不能作为展示门禁；SDK execution 校验仅用于状态更新。
   static Future<List<LocalTxEntity>> queryByAccountId(
     String accountId, {
     int limit = 20,
@@ -73,16 +74,13 @@ class LocalTxStore {
   }) async {
     final normalizedAccountId = requireAccountId(accountId);
     return WalletIsar.instance.read((isar) async {
-      final rows = await isar.localTxEntitys
+      return isar.localTxEntitys
           .where()
           .accountIdEqualTo(normalizedAccountId)
           .sortByCreatedAtMillisDesc()
+          .offset(offset)
+          .limit(limit)
           .findAll();
-      return rows
-          .where(_belongsToCurrentSdkIntegration)
-          .skip(offset)
-          .take(limit)
-          .toList(growable: false);
     });
   }
 
@@ -97,18 +95,17 @@ class LocalTxStore {
   /// 按 recordKey 查询单条记录（防重复用）。
   static Future<LocalTxEntity?> queryByRecordKey(String recordKey) async {
     return WalletIsar.instance.read((isar) async {
-      final row = await isar.localTxEntitys
+      return isar.localTxEntitys
           .where()
           .recordKeyEqualTo(recordKey)
           .findFirst();
-      return row != null && _belongsToCurrentSdkIntegration(row) ? row : null;
     });
   }
 
   /// 写入本机发起的普通转账记录。
   ///
   /// SDK execution/history 和 finalized 业务事件可能先于页面本地写入返回。这里先查是否
-  /// 已有同钱包、同发送方、同接收方、同本金的区块事件记录；若有，直接
+  /// 已有同账户、同准确交易哈希的区块事件记录；若有，直接
   /// 合并手续费、txHash 和 nonce，避免“本金事件 + 本机扣费记录”显示两条。
   static Future<void> upsertLocalSubmitTransfer({
     required String ss58Address,
@@ -130,9 +127,6 @@ class LocalTxStore {
     final normalizedAccountId = requireAccountId(accountId);
     final normalizedTxHash = txHash.toLowerCase();
     final pendingKey = submitRecordKey(normalizedAccountId, normalizedTxHash);
-    final normalizedBlockHash = blockHash == null || blockHash.isEmpty
-        ? null
-        : normalizeBlockHash(blockHash);
     await WalletIsar.instance.writeTxn((isar) async {
       final existingPending = await isar.localTxEntitys
           .where()
@@ -162,19 +156,24 @@ class LocalTxStore {
         return;
       }
 
-      final existingEvent = normalizedBlockHash == null
-          ? null
-          : await _findSemanticBlockTransferInTxn(
-              isar,
-              accountId: normalizedAccountId,
-              blockNumber: null,
-              blockHash: normalizedBlockHash,
-              fromSs58Address: fromSs58Address,
-              toSs58Address: toSs58Address,
-              transferAmountFen: transferAmountFen,
-              extrinsicIndex: null,
-              eventIndex: null,
-            );
+      final candidates = await isar.localTxEntitys
+          .filter()
+          .accountIdEqualTo(normalizedAccountId)
+          .txHashEqualTo(normalizedTxHash)
+          .findAll();
+      final events = candidates
+          .where(
+            (row) =>
+                row.executionId == null &&
+                row.fromSs58Address == fromSs58Address &&
+                row.toSs58Address == toSs58Address &&
+                row.transferAmountFen == transferAmountFen,
+          )
+          .toList();
+      if (events.length > 1) {
+        throw StateError('同一提交交易匹配多个业务事件，拒绝猜测合并');
+      }
+      final existingEvent = events.singleOrNull;
       final entity = existingEvent ?? LocalTxEntity();
       entity
         // 一旦补入 SDK execution 事实，就改用且永久保持 submit key；
@@ -200,17 +199,15 @@ class LocalTxStore {
         ..createdAtMillis = existingEvent?.createdAtMillis ?? createdAtMillis
         ..confirmedAtMillis = null
         ..failureReason = null;
+      if (blockHash != null && blockHash.isNotEmpty) {
+        entity.blockHash = normalizeBlockHash(blockHash);
+      }
       await isar.localTxEntitys.put(entity);
     });
   }
 
-  /// 写入链上区块转账事件；如能匹配本机发起记录，则更新原记录。
-  ///
-  /// (ADR-017 全端 finalized 单一口径)：本方法由只扫 finalized 链的
-  /// SDK finalized block 业务投影调用，写入状态恒为 finalized。收入
-  /// (别人转入)没有本机 pending，只在对应区块 finalized 后用同一个区块事件
-  /// 唯一键写入，避免“余额到账但无收入记录”。本机提交记录的 execution
-  /// 状态只由 CitizenSDK history 推进，本业务事件路径不得覆盖。
+  /// 写入一个经过验证的 finalized 业务事件；精确交易哈希用于关联本机提交。
+  /// SDK execution 状态只由 SDK history 推进，业务事件仅补全展示字段。
   static Future<void> upsertBlockTransferEvent({
     required String ss58Address,
     required String accountId,
@@ -227,124 +224,146 @@ class LocalTxStore {
     int? extrinsicIndex,
     int? confirmedAtMillis,
     String? remark,
+    String? txHash,
   }) async {
-    final normalizedAccountId = requireAccountId(accountId);
-    final normalizedBlockHash = normalizeBlockHash(blockHash);
-    final now = DateTime.now().millisecondsSinceEpoch;
-    await WalletIsar.instance.writeTxn((isar) async {
-      final existing = await isar.localTxEntitys
-          .where()
-          .recordKeyEqualTo(recordKey)
-          .findFirst();
-      if (existing != null) {
-        existing
-          ..status = _mergeStatus(existing.status, status)
-          ..ss58Address = ss58Address
-          ..accountId = normalizedAccountId
-          ..transferAmountFen = existing.transferAmountFen ?? transferAmountFen
-          ..fromSs58Address = existing.fromSs58Address ?? fromSs58Address
-          ..toSs58Address = existing.toSs58Address ?? toSs58Address
-          ..counterpartySs58Address =
-              existing.counterpartySs58Address ?? counterpartySs58Address
-          ..remark = _mergeRemark(remark, existing.remark)
-          ..blockNumber = blockNumber
-          ..blockHash = normalizedBlockHash
-          ..eventIndex = eventIndex
-          ..extrinsicIndex = extrinsicIndex ?? existing.extrinsicIndex
-          ..confirmedAtMillis = status == statusFinalized
-              ? (confirmedAtMillis ?? now)
-              : existing.confirmedAtMillis
-          ..source = 'sdk_finalized_event'
-          ..failureReason = null;
-        await isar.localTxEntitys.put(existing);
-        return;
-      }
-
-      final semanticExisting = await _findSemanticBlockTransferInTxn(
-        isar,
-        accountId: normalizedAccountId,
-        blockNumber: blockNumber,
-        blockHash: normalizedBlockHash,
-        fromSs58Address: fromSs58Address,
-        toSs58Address: toSs58Address,
-        transferAmountFen: transferAmountFen,
-        extrinsicIndex: extrinsicIndex,
-        eventIndex: eventIndex,
-      );
-      if (semanticExisting != null) {
-        final hasSdkExecution =
-            semanticExisting.executionId?.isNotEmpty == true;
-        semanticExisting
-          ..ss58Address = ss58Address
-          ..accountId = normalizedAccountId
-          ..amountDeltaFen = semanticExisting.feeFen != null
-              ? semanticExisting.amountDeltaFen
-              : amountDeltaFen
-          ..transferAmountFen =
-              semanticExisting.transferAmountFen ?? transferAmountFen
-          ..fromSs58Address =
-              semanticExisting.fromSs58Address ?? fromSs58Address
-          ..toSs58Address = semanticExisting.toSs58Address ?? toSs58Address
-          ..counterpartySs58Address =
-              semanticExisting.counterpartySs58Address ??
-                  counterpartySs58Address
-          ..remark = _mergeRemark(remark, semanticExisting.remark)
-          ..status = hasSdkExecution
-              ? semanticExisting.status
-              : _mergeStatus(semanticExisting.status, status)
-          ..blockNumber = blockNumber
-          ..blockHash = normalizedBlockHash
-          ..eventIndex = semanticExisting.eventIndex ?? eventIndex
-          ..extrinsicIndex = semanticExisting.extrinsicIndex ?? extrinsicIndex
-          ..confirmedAtMillis = !hasSdkExecution && status == statusFinalized
-              ? (confirmedAtMillis ?? now)
-              : semanticExisting.confirmedAtMillis
-          ..source = hasSdkExecution
-              ? 'local_submit'
-              : 'sdk_finalized_event'
-          ..failureReason = null;
-        await isar.localTxEntitys.put(semanticExisting);
-        return;
-      }
-
-      // 本机发起转账会先写 pending，SDK history 可能先把它标成 inBlock。
-      // finalized Transfer 事件回来后，用同钱包、同收款人、同本金匹配，
-      // 但永久保留 submit key，避免重复流水且不切断后续 SDK history 关联。
-      final localSubmit = await _findMatchingLocalSubmitTransferInTxn(
-        isar,
-        accountId: normalizedAccountId,
-        fromSs58Address: fromSs58Address,
-        toSs58Address: toSs58Address,
-        transferAmountFen: transferAmountFen,
-      );
-      final entity = localSubmit ?? LocalTxEntity();
-      entity
-        ..recordKey = localSubmit?.recordKey ?? recordKey
-        ..ss58Address = ss58Address
-        ..accountId = normalizedAccountId
-        ..type = 'transfer'
-        ..amountDeltaFen = localSubmit?.amountDeltaFen ?? amountDeltaFen
-        ..transferAmountFen = transferAmountFen
-        ..counterpartySs58Address = counterpartySs58Address
-        ..fromSs58Address = fromSs58Address
-        ..toSs58Address = toSs58Address
-        ..remark = _mergeRemark(remark, localSubmit?.remark)
-        ..status = localSubmit?.status ?? status
-        ..source = localSubmit?.source ?? 'sdk_finalized_event'
-        ..blockNumber = blockNumber
-        ..blockHash = normalizedBlockHash
-        ..eventIndex = eventIndex
-        ..extrinsicIndex = extrinsicIndex
-        ..createdAtMillis = localSubmit?.createdAtMillis ?? now
-        ..confirmedAtMillis = localSubmit != null
-            ? localSubmit.confirmedAtMillis
-            : status == statusFinalized
-                ? (confirmedAtMillis ?? now)
-                : null
-        ..failureReason = null;
-      await isar.localTxEntitys.put(entity);
-    });
+    if (status != statusFinalized) {
+      throw ArgumentError('业务事件必须来自 finalized 区块');
+    }
+    final time = confirmedAtMillis ?? DateTime.now().millisecondsSinceEpoch;
+    final row = LocalTxEntity()
+      ..accountId = requireAccountId(accountId)
+      ..ss58Address = ss58Address
+      ..recordKey = recordKey
+      ..type = 'transfer'
+      ..amountDeltaFen = amountDeltaFen
+      ..transferAmountFen = transferAmountFen
+      ..fromSs58Address = fromSs58Address
+      ..toSs58Address = toSs58Address
+      ..counterpartySs58Address = counterpartySs58Address
+      ..blockNumber = blockNumber
+      ..blockHash = normalizeBlockHash(blockHash)
+      ..eventIndex = eventIndex
+      ..extrinsicIndex = extrinsicIndex
+      ..remark = remark
+      ..txHash = txHash?.toLowerCase()
+      ..status = statusFinalized
+      ..source = 'sdk_finalized_event'
+      ..createdAtMillis = time
+      ..confirmedAtMillis = time;
+    await WalletIsar.instance.writeTxn((isar) => _upsertEventInTxn(isar, row));
   }
+
+  static Future<void> _upsertEventInTxn(
+    Isar isar,
+    LocalTxEntity incoming,
+  ) async {
+    final existing = await isar.localTxEntitys
+        .where()
+        .recordKeyEqualTo(incoming.recordKey)
+        .findFirst();
+    final hash = incoming.txHash;
+    final submitted = hash == null
+        ? null
+        : await isar.localTxEntitys
+              .where()
+              .recordKeyEqualTo(submitRecordKey(incoming.accountId, hash))
+              .findFirst();
+    // 交易哈希之外还核对业务内容；同金额从来不是关联依据。
+    final matchesSubmit =
+        submitted != null &&
+        submitted.source == 'local_submit' &&
+        submitted.executionId?.isNotEmpty == true &&
+        submitted.callDataHash?.isNotEmpty == true &&
+        submitted.fromSs58Address == incoming.fromSs58Address &&
+        submitted.toSs58Address == incoming.toSs58Address &&
+        submitted.transferAmountFen == incoming.transferAmountFen &&
+        (submitted.eventIndex == null ||
+            (submitted.eventIndex == incoming.eventIndex &&
+                submitted.blockHash == incoming.blockHash));
+    if (matchesSubmit) {
+      submitted
+        ..blockNumber = incoming.blockNumber
+        ..blockHash = incoming.blockHash
+        ..eventIndex = incoming.eventIndex
+        ..extrinsicIndex = incoming.extrinsicIndex
+        ..remark = _mergeRemark(incoming.remark, submitted.remark);
+      await isar.localTxEntitys.put(submitted);
+      if (existing != null && existing.id != submitted.id) {
+        // 同一个事件与同一个提交的两种到达顺序收敛到永久 submit key。
+        await isar.localTxEntitys.delete(existing.id);
+      }
+    } else {
+      if (existing != null) {
+        incoming.id = existing.id;
+        incoming.createdAtMillis = existing.createdAtMillis;
+      }
+      await isar.localTxEntitys.put(incoming);
+    }
+  }
+
+  /// 读取账户进度；调用方必须再核对导入时间与链身份。
+  static Future<WalletTransactionHistoryCursorEntity?> historyCursor(
+    String accountId,
+  ) => WalletIsar.instance.read(
+    (isar) => isar.walletTransactionHistoryCursorEntitys
+        .where()
+        .accountIdEqualTo(requireAccountId(accountId))
+        .findFirst(),
+  );
+
+  /// 初始起点必须已由账户导入时间和 verified Timestamp.Now 确定。
+  static Future<void> insertHistoryCursor(
+    WalletTransactionHistoryCursorEntity cursor,
+  ) => WalletIsar.instance.writeTxn((isar) async {
+    final existing = await isar.walletTransactionHistoryCursorEntitys
+        .where()
+        .accountIdEqualTo(requireAccountId(cursor.accountId))
+        .findFirst();
+    if (existing != null) throw StateError('账户进度已存在，拒绝覆盖');
+    if (cursor.startBlockNumber < 1 ||
+        cursor.cursorBlockNumber != cursor.startBlockNumber - 1) {
+      throw StateError('账户进度起点无效');
+    }
+    await isar.walletTransactionHistoryCursorEntitys.put(cursor);
+  });
+
+  /// 全块记录和所有参与账户的进度在同一事务内提交；任一步失败整体回滚。
+  static Future<void> commitHistoryBlock({
+    required int blockNumber,
+    required List<WalletTransactionHistoryCursorEntity> cursors,
+    required List<LocalTxEntity> records,
+  }) => WalletIsar.instance.writeTxn((isar) async {
+    final owners = <String>{};
+    for (final cursor in cursors) {
+      final current = await isar.walletTransactionHistoryCursorEntitys.get(
+        cursor.id,
+      );
+      if (current == null ||
+          current.accountId != cursor.accountId ||
+          current.createdAtMillis != cursor.createdAtMillis ||
+          current.genesisHash != cursor.genesisHash ||
+          current.cursorBlockNumber != blockNumber - 1) {
+        throw StateError('账户进度已变化，拒绝过期投影');
+      }
+      owners.add(current.accountId);
+    }
+    for (final record in records) {
+      if (!owners.contains(record.accountId) ||
+          record.blockNumber != blockNumber ||
+          record.status != statusFinalized) {
+        throw StateError('业务事件与提交范围不一致');
+      }
+      await _upsertEventInTxn(isar, record);
+    }
+    for (final cursor in cursors) {
+      // 只修改从事务中读取的新对象，回滚不能污染调用方内存中的游标。
+      final current = (await isar.walletTransactionHistoryCursorEntitys.get(
+        cursor.id,
+      ))!;
+      current.cursorBlockNumber = blockNumber;
+      await isar.walletTransactionHistoryCursorEntitys.put(current);
+    }
+  });
 
   /// CitizenSDK history 显示交易已进入区块时，把本机 pending 记录升级为 inBlock。
   ///
@@ -519,16 +538,6 @@ class LocalTxStore {
     }
   }
 
-  /// 旧 App 扫块/交易池记录不转换、不兼容、不进入新列表。
-  /// 新本机提交必须有 SDK execution/call hash；被动收入只接受 SDK
-  /// finalized event 投影的明确来源。
-  static bool _belongsToCurrentSdkIntegration(LocalTxEntity entity) {
-    if (entity.source == 'sdk_finalized_event') return true;
-    return entity.source == 'local_submit' &&
-        (entity.executionId?.isNotEmpty ?? false) &&
-        (entity.callDataHash?.isNotEmpty ?? false);
-  }
-
   /// SDK executionId 与 opaque callData hash 必须同时匹配本地业务记录；
   /// 仅碰巧相同的账户/交易哈希不得推进另一条业务记录的展示状态。
   static bool _matchesSdkExecution(
@@ -536,83 +545,11 @@ class LocalTxStore {
     String executionId,
     String callDataHash,
   ) {
-    return _belongsToCurrentSdkIntegration(entity) &&
+    return entity.source == 'local_submit' &&
+        executionId.isNotEmpty &&
+        callDataHash.isNotEmpty &&
         entity.executionId == executionId &&
         entity.callDataHash?.toLowerCase() == callDataHash.toLowerCase();
-  }
-
-  static Future<LocalTxEntity?> _findMatchingLocalSubmitTransferInTxn(
-    Isar isar, {
-    required String accountId,
-    required String fromSs58Address,
-    required String toSs58Address,
-    required String transferAmountFen,
-  }) async {
-    final pending = await isar.localTxEntitys
-        .filter()
-        .accountIdEqualTo(accountId)
-        .typeEqualTo('transfer')
-        .findAll();
-    for (final record in pending) {
-      if (_belongsToCurrentSdkIntegration(record) &&
-          record.fromSs58Address == fromSs58Address &&
-          record.toSs58Address == toSs58Address &&
-          record.transferAmountFen == transferAmountFen &&
-          record.source == 'local_submit' &&
-          (record.status == statusPending || record.status == statusInBlock)) {
-        return record;
-      }
-    }
-    return null;
-  }
-
-  static Future<LocalTxEntity?> _findSemanticBlockTransferInTxn(
-    Isar isar, {
-    required String accountId,
-    required int? blockNumber,
-    required String? blockHash,
-    required String fromSs58Address,
-    required String toSs58Address,
-    required String transferAmountFen,
-    required int? extrinsicIndex,
-    required int? eventIndex,
-  }) async {
-    final records = await isar.localTxEntitys
-        .filter()
-        .accountIdEqualTo(accountId)
-        .typeEqualTo('transfer')
-        .findAll();
-    for (final record in records) {
-      if (!_belongsToCurrentSdkIntegration(record) ||
-          record.fromSs58Address != fromSs58Address ||
-          record.toSs58Address != toSs58Address ||
-          record.transferAmountFen != transferAmountFen) {
-        continue;
-      }
-      if (blockHash != null && record.blockHash != null) {
-        if (normalizeBlockHash(record.blockHash!) != blockHash) continue;
-      }
-      if (blockNumber != null &&
-          record.blockNumber != null &&
-          record.blockNumber != blockNumber) {
-        continue;
-      }
-      if (extrinsicIndex != null &&
-          record.extrinsicIndex != null &&
-          record.extrinsicIndex != extrinsicIndex) {
-        continue;
-      }
-      if (eventIndex != null &&
-          record.eventIndex != null &&
-          record.eventIndex != eventIndex) {
-        continue;
-      }
-      if (record.status == statusPending && record.source != 'local_submit') {
-        continue;
-      }
-      return record;
-    }
-    return null;
   }
 
   /// 删除某个账户的 CitizenApp 业务交易记录。
@@ -624,6 +561,10 @@ class LocalTxStore {
           .filter()
           .accountIdEqualTo(normalizedAccountId)
           .deleteAll();
+      await isar.walletTransactionHistoryCursorEntitys
+          .where()
+          .accountIdEqualTo(normalizedAccountId)
+          .deleteAll();
     });
   }
 
@@ -631,6 +572,7 @@ class LocalTxStore {
   static Future<void> clearAllWalletLocalHistory() async {
     await WalletIsar.instance.writeTxn((isar) async {
       await isar.localTxEntitys.clear();
+      await isar.walletTransactionHistoryCursorEntitys.clear();
     });
   }
 
@@ -638,11 +580,10 @@ class LocalTxStore {
   static Future<int> countByAccountId(String accountId) async {
     final normalizedAccountId = requireAccountId(accountId);
     return WalletIsar.instance.read((isar) async {
-      final rows = await isar.localTxEntitys
+      return isar.localTxEntitys
           .where()
           .accountIdEqualTo(normalizedAccountId)
-          .findAll();
-      return rows.where(_belongsToCurrentSdkIntegration).length;
+          .count();
     });
   }
 }
@@ -664,7 +605,7 @@ class LocalTxAccountChangeSubscription {
 
   @visibleForTesting
   static Future<void> Function(StreamSubscription<void> subscription)?
-      debugCancelSubscription;
+  debugCancelSubscription;
 
   static LocalTxAccountChangeSubscription _listen({
     required String accountId,
@@ -748,12 +689,7 @@ class LocalTxAccountChangeSubscription {
         // 清理失败时故意保留 subscription 与 lease，让 WalletIsar 擦除可见失败并可重试。
         await _cancelSubscriptionAfterStartupFailure();
       } catch (cleanupError, cleanupStackTrace) {
-        _reportError(
-          cleanupError,
-          cleanupStackTrace,
-          onError,
-          callbackZone,
-        );
+        _reportError(cleanupError, cleanupStackTrace, onError, callbackZone);
       }
 
       if (!_cancelRequested) {
@@ -779,9 +715,11 @@ class LocalTxAccountChangeSubscription {
       _cancelInFlight = created;
       task = created;
       // created 永不以 error 完成，因此 root Zone 没有可泄漏的未观察异常。
-      unawaited(created.then<void>((_) {
-        if (identical(_cancelInFlight, created)) _cancelInFlight = null;
-      }));
+      unawaited(
+        created.then<void>((_) {
+          if (identical(_cancelInFlight, created)) _cancelInFlight = null;
+        }),
+      );
     }
     // 每个调用者在自己的 Zone 解包同一 outcome，保留原始堆栈并让失败可见。
     return task.then<void>((outcome) {
@@ -819,9 +757,7 @@ class LocalTxAccountChangeSubscription {
 }
 
 class _LocalTxCancellationOutcome {
-  const _LocalTxCancellationOutcome.success()
-      : error = null,
-        stackTrace = null;
+  const _LocalTxCancellationOutcome.success() : error = null, stackTrace = null;
 
   const _LocalTxCancellationOutcome.failure(this.error, this.stackTrace);
 

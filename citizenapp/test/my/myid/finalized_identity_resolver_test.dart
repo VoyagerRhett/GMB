@@ -1,10 +1,14 @@
 import 'dart:typed_data';
+import 'dart:async';
+
+import 'package:flutter/foundation.dart' show ValueNotifier;
 
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:citizenapp/my/myid/citizen_identity_chain_reader.dart';
 import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
+
 import '../../support/fake_citizen_sdk.dart';
 
 const _account0 =
@@ -60,12 +64,12 @@ final _default5 = CitizenWalletStateAccount(
 );
 
 CitizenIdentityChainSnapshot _anonSnapshot() => CitizenIdentityChainSnapshot(
-      cidNumber: 'CID-TEST-0001',
-      accountId: Uint8List(32),
-      bindingRevision: 1,
-      votingIdentity: null,
-      candidateIdentity: null,
-    );
+  cidNumber: 'CID-TEST-0001',
+  accountId: Uint8List(32),
+  bindingRevision: 1,
+  votingIdentity: null,
+  candidateIdentity: null,
+);
 
 void main() {
   ({FinalizedIdentityResolver resolver, _FakeReader reader}) resolver({
@@ -85,10 +89,62 @@ void main() {
     );
   }
 
-  test('默认账户绑 CID → 当前用户命中且只读取该账户一次', () async {
-    final fixture = resolver(
-      chain: {_account0: _anonSnapshot()},
+  test('同账户同版本并发验真合并，完成后的新操作重新验真', () async {
+    final reader = _DelayedReader();
+    final subject = FinalizedIdentityResolver(
+      wallet: _FakeWallet(_default0),
+      chain: TestCitizenChain(),
+      chainReader: reader,
     );
+    final first = subject.resolve();
+    final second = subject.resolve();
+    await reader.started.future;
+    expect(reader.calls, 1);
+    reader.answer.complete(null);
+    await Future.wait([first, second]);
+    await subject.resolve();
+    expect(reader.calls, 2);
+  });
+
+  test('查询期间切换账户或身份版本，旧结果必须拒绝', () async {
+    final reader = _DelayedReader();
+    final wallet = _FakeWallet(_default0);
+    final revision = ValueNotifier(0);
+    final subject = FinalizedIdentityResolver(
+      wallet: wallet,
+      chain: TestCitizenChain(),
+      chainReader: reader,
+      identityRevision: revision,
+    );
+    final first = subject.resolve();
+    final rejected = expectLater(first, throwsStateError);
+    await reader.started.future;
+    wallet.account = _default5;
+    wallet.walletRevision += BigInt.one;
+    revision.value++;
+    reader.answer.complete(null);
+    await rejected;
+    revision.dispose();
+  });
+
+  test('身份验证失败不留下可复用的完成授权', () async {
+    final reader = _DelayedReader();
+    final subject = FinalizedIdentityResolver(
+      wallet: _FakeWallet(_default0),
+      chain: TestCitizenChain(),
+      chainReader: reader,
+    );
+    final first = subject.resolve();
+    final rejected = expectLater(first, throwsStateError);
+    await reader.started.future;
+    reader.answer.completeError(StateError('测试断网'));
+    await rejected;
+    await expectLater(subject.resolve(), throwsStateError);
+    expect(reader.calls, 2);
+  });
+
+  test('默认账户绑 CID → 当前用户命中且只读取该账户一次', () async {
+    final fixture = resolver(chain: {_account0: _anonSnapshot()});
     final r = await fixture.resolver.resolve();
     expect(r, isNotNull);
     expect(r!.accountId, _account0);
@@ -97,9 +153,7 @@ void main() {
   });
 
   test('默认账户无 CID 时保持访客，禁止扫描另一个有 CID 的账户', () async {
-    final fixture = resolver(
-      chain: {_account5: _anonSnapshot()},
-    );
+    final fixture = resolver(chain: {_account5: _anonSnapshot()});
     final r = await fixture.resolver.resolve();
     expect(r!.accountId, _account0);
     expect(r.isRegistered, isFalse);
@@ -147,8 +201,16 @@ void main() {
     final chainRpc = _BindingChain(<String, Uint8List>{
       key('AccountIdByCid', cidScale): accountId,
       key('CidRegistry', cidScale): _activeCidRecord(),
-      key('BindingRevisionByCid', cidScale):
-          Uint8List.fromList([2, 0, 0, 0, 0, 0, 0, 0]),
+      key('BindingRevisionByCid', cidScale): Uint8List.fromList([
+        2,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+      ]),
       key('CidByAccountId', accountId):
           CitizenIdentityChainReader.encodeBoundedBytes(cidNumber.codeUnits),
     });
@@ -159,10 +221,9 @@ void main() {
     expect(result, isNotNull);
     expect(result!.accountIdText, _accountIdText(accountId));
     expect(result.bindingRevision, 2);
-    expect(
-      chainRpc.blockHashes.toSet(),
-      {'0x${List<String>.filled(32, '00').join()}'},
-    );
+    expect(chainRpc.blockHashes.toSet(), {
+      '0x${List<String>.filled(32, '00').join()}',
+    });
   });
 
   test('按 CID 读取时反向账户映射不一致必须失败关闭', () async {
@@ -182,8 +243,16 @@ void main() {
     final chainRpc = _BindingChain(<String, Uint8List>{
       key('AccountIdByCid', cidScale): accountId,
       key('CidRegistry', cidScale): _activeCidRecord(),
-      key('BindingRevisionByCid', cidScale):
-          Uint8List.fromList([1, 0, 0, 0, 0, 0, 0, 0]),
+      key('BindingRevisionByCid', cidScale): Uint8List.fromList([
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+      ]),
       key('CidByAccountId', accountId):
           CitizenIdentityChainReader.encodeBoundedBytes('OTHER-CID'.codeUnits),
     });
@@ -270,20 +339,31 @@ void main() {
           );
       // VotingIdentityByCid / CandidateIdentityByCid 故意缺席 = 匿名已注册。
       return <String, Uint8List>{
-        key('CidByAccountId', accountId):
-            CitizenIdentityChainReader.encodeBoundedBytes(
-                _genesisCid.codeUnits),
+        key(
+          'CidByAccountId',
+          accountId,
+        ): CitizenIdentityChainReader.encodeBoundedBytes(
+          _genesisCid.codeUnits,
+        ),
         key('AccountIdByCid', cidScale): accountId,
         key('CidRegistry', cidScale): _bytes(_genesisCidRecordHex),
-        key('BindingRevisionByCid', cidScale):
-            Uint8List.fromList([1, 0, 0, 0, 0, 0, 0, 0]),
+        key('BindingRevisionByCid', cidScale): Uint8List.fromList([
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+        ]),
       };
     }
 
     test('readByAccountId 命中匿名快照', () async {
       final snapshot = await CitizenIdentityChainReader(
-              chain: _BindingChain(genesisStorage()))
-          .readByAccountId(_genesisAccountId);
+        chain: _BindingChain(genesisStorage()),
+      ).readByAccountId(_genesisAccountId);
 
       expect(snapshot, isNotNull);
       expect(snapshot!.cidNumber, _genesisCid);
@@ -316,50 +396,55 @@ List<int> _bounded(String value) =>
 /// 注册局占号都写 `AreaCodeBound::default()`。夹具必须照此，写非空省市码会让
 /// 「空 BoundedVec 解析」这条真实路径永远测不到。
 Uint8List _activeCidRecord() => Uint8List.fromList([
-      ..._bounded('FEDERAL_REGISTRY-CID'),
-      ...List<int>.filled(32, 7), // commitment
-      0, // residence_province_code 空
-      0, // residence_city_code 空
-      0, // status = Active
-      1, 0, 0, 0, // registered_at
-      0, // revoked_at = None
-    ]);
+  ..._bounded('FEDERAL_REGISTRY-CID'),
+  ...List<int>.filled(32, 7), // commitment
+  0, // residence_province_code 空
+  0, // residence_city_code 空
+  0, // status = Active
+  1, 0, 0, 0, // registered_at
+  0, // revoked_at = None
+]);
 
 Uint8List _bytes(String hex) => Uint8List.fromList([
-      for (var i = 0; i < hex.length; i += 2)
-        int.parse(hex.substring(i, i + 2), radix: 16),
-    ]);
+  for (var i = 0; i < hex.length; i += 2)
+    int.parse(hex.substring(i, i + 2), radix: 16),
+]);
 
 String _accountIdText(Uint8List bytes) =>
     CitizenIdentityChainReader.hexEncode(bytes);
 
 class _FakeWallet implements CitizenSdkWallet {
   _FakeWallet(this.account);
-  final CitizenWalletStateAccount? account;
+  CitizenWalletStateAccount? account;
+  BigInt walletRevision = BigInt.one;
 
   @override
-  CitizenSdkOperation<CitizenWalletState> getState() => testCitizenOperation(() async => CitizenWalletState(
-        initializationState: account == null ? CitizenWalletInitializationState.empty : CitizenWalletInitializationState.ready,
-        cleanupPending: false,
-        revision: BigInt.one,
-        hotProfile: null,
-        accounts: account == null ? const [] : [account!],
-      ));
+  CitizenSdkOperation<CitizenWalletState> getState() => testCitizenOperation(
+    () async => CitizenWalletState(
+      initializationState: account == null
+          ? CitizenWalletInitializationState.empty
+          : CitizenWalletInitializationState.ready,
+      cleanupPending: false,
+      revision: walletRevision,
+      hotProfile: null,
+      accounts: account == null ? const [] : [account!],
+    ),
+  );
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _FakeReader extends CitizenIdentityChainReader {
-  _FakeReader(this._chain, {this.throwFor})
-      : super(chain: TestCitizenChain());
+  _FakeReader(this._chain, {this.throwFor}) : super(chain: TestCitizenChain());
   final Map<String, CitizenIdentityChainSnapshot> _chain;
   final String? throwFor;
   final List<String> calls = <String>[];
 
   @override
   Future<CitizenIdentityChainSnapshot?> readByAccountId(
-      String accountId) async {
+    String accountId,
+  ) async {
     calls.add(accountId);
     if (accountId == throwFor) throw StateError('chain down');
     return _chain[accountId];
@@ -374,16 +459,13 @@ class _BindingChain extends TestCitizenChain {
 
   @override
   Future<CitizenBlockRef> getFinalizedHead() async => CitizenBlockRef(
-        hash: '0x${'00' * 32}',
-        number: BigInt.from(7),
-        finality: CitizenBlockFinality.finalized,
-      );
+    hash: '0x${'00' * 32}',
+    number: BigInt.from(7),
+    finality: CitizenBlockFinality.finalized,
+  );
 
   @override
-  Future<Uint8List?> getStorage(
-    CitizenBlockRef block,
-    Uint8List key,
-  ) async {
+  Future<Uint8List?> getStorage(CitizenBlockRef block, Uint8List key) async {
     blockHashes.add(block.hash);
     return storage[_hex(key)];
   }
@@ -399,4 +481,17 @@ class _BindingChain extends TestCitizenChain {
 
   String _hex(List<int> bytes) =>
       '0x${bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join()}';
+}
+
+class _DelayedReader extends CitizenIdentityChainReader {
+  _DelayedReader() : super(chain: TestCitizenChain());
+  final started = Completer<void>();
+  final answer = Completer<CitizenIdentityChainSnapshot?>();
+  int calls = 0;
+  @override
+  Future<CitizenIdentityChainSnapshot?> readByAccountId(String accountId) {
+    calls++;
+    if (!started.isCompleted) started.complete();
+    return answer.future;
+  }
 }

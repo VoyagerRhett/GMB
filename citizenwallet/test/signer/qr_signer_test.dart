@@ -17,23 +17,23 @@ List<int> _u64Le(int value) =>
     List<int>.generate(8, (index) => (value >> (index * 8)) & 0xff);
 
 List<int> _occupyAuthorizationTemplate(String cid, int expiresAt) => [
-      ...List<int>.filled(32, 0x44),
-      cid.length << 2,
-      ...cid.codeUnits,
-      ...List<int>.filled(32, 0),
-      ..._u64Le(0),
-      ..._u64Le(expiresAt),
-    ];
+  ...List<int>.filled(32, 0x44),
+  cid.length << 2,
+  ...cid.codeUnits,
+  ...List<int>.filled(32, 0),
+  ..._u64Le(0),
+  ..._u64Le(expiresAt),
+];
 
 List<int> _rebindAuthorizationTemplate(String cid, int expiresAt) => [
-      ...List<int>.filled(32, 0x44),
-      cid.length << 2,
-      ...cid.codeUnits,
-      ...List<int>.filled(32, 0x55),
-      ...List<int>.filled(32, 0),
-      ..._u64Le(7),
-      ..._u64Le(expiresAt),
-    ];
+  ...List<int>.filled(32, 0x44),
+  cid.length << 2,
+  ...cid.codeUnits,
+  ...List<int>.filled(32, 0x55),
+  ...List<int>.filled(32, 0),
+  ..._u64Le(7),
+  ..._u64Le(expiresAt),
+];
 
 void main() {
   late QrSigner signer;
@@ -97,11 +97,13 @@ void main() {
     test('拒绝非 JSON', () {
       expect(
         () => signer.parseRequest('not json'),
-        throwsA(isA<QrSignException>().having(
-          (e) => e.code,
-          'code',
-          QrSignErrorCode.invalidFormat,
-        )),
+        throwsA(
+          isA<QrSignException>().having(
+            (e) => e.code,
+            'code',
+            QrSignErrorCode.invalidFormat,
+          ),
+        ),
       );
     });
 
@@ -117,11 +119,13 @@ void main() {
       final json = validEnvelope()..['k'] = QrKind.signResponse.code;
       expect(
         () => signer.parseRequest(jsonEncode(json)),
-        throwsA(isA<QrSignException>().having(
-          (e) => e.code,
-          'code',
-          QrSignErrorCode.invalidField,
-        )),
+        throwsA(
+          isA<QrSignException>().having(
+            (e) => e.code,
+            'code',
+            QrSignErrorCode.invalidField,
+          ),
+        ),
       );
     });
 
@@ -170,11 +174,13 @@ void main() {
       final json = validEnvelope()..['e'] = now - 100;
       expect(
         () => signer.parseRequest(jsonEncode(json)),
-        throwsA(isA<QrSignException>().having(
-          (e) => e.code,
-          'code',
-          QrSignErrorCode.expired,
-        )),
+        throwsA(
+          isA<QrSignException>().having(
+            (e) => e.code,
+            'code',
+            QrSignErrorCode.expired,
+          ),
+        ),
       );
     });
 
@@ -183,12 +189,31 @@ void main() {
       final json = validEnvelope()..['e'] = now;
       expect(
         () => signer.parseRequest(jsonEncode(json)),
-        throwsA(isA<QrSignException>().having(
-          (e) => e.code,
-          'code',
-          QrSignErrorCode.expired,
-        )),
+        throwsA(
+          isA<QrSignException>().having(
+            (e) => e.code,
+            'code',
+            QrSignErrorCode.expired,
+          ),
+        ),
       );
+    });
+
+    test('拒绝远未来期限，正常短期请求保持可解析', () {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final distant = validEnvelope()
+        ..['e'] = now + maxQrRequestLifetimeSeconds + 1;
+      expect(
+        () => signer.parseRequest(jsonEncode(distant)),
+        throwsA(
+          isA<QrSignException>().having(
+            (e) => e.code,
+            'code',
+            QrSignErrorCode.invalidField,
+          ),
+        ),
+      );
+      expect(signer.parseRequest(jsonEncode(validEnvelope())).id, isNotNull);
     });
 
     test('拒绝空 payload', () {
@@ -270,10 +295,7 @@ void main() {
         loginRequestTargetsAccountId(request, testSignerPublicKeyHex),
         isTrue,
       );
-      expect(
-        loginRequestTargetsAccountId(request, '0x${'22' * 32}'),
-        isFalse,
-      );
+      expect(loginRequestTargetsAccountId(request, '0x${'22' * 32}'), isFalse);
       expect(
         loginRequestTargetsAccountId(
           request,
@@ -357,15 +379,22 @@ void main() {
       );
       final exactAuthorization = List<int>.from(template)
         ..setRange(32 + 1 + cid.length, 32 + 1 + cid.length + 32, account);
-      final input =
-          Uint8List.fromList([0x47, 0x4d, 0x42, 0x12, ...exactAuthorization]);
+      final input = Uint8List.fromList([
+        0x47,
+        0x4d,
+        0x42,
+        0x12,
+        ...exactAuthorization,
+      ]);
       final digest = Blake2bDigest(digestSize: 32)
         ..update(input, 0, input.length);
       final expected = Uint8List(32);
       digest.doFinal(expected, 0);
 
-      final actual = QrSigner.signingBytesFor(body,
-          selfAccountId: Uint8List.fromList(account));
+      final actual = QrSigner.signingBytesFor(
+        body,
+        selfAccountId: Uint8List.fromList(account),
+      );
       expect(actual.toList(), expected.toList());
     });
 
@@ -382,17 +411,23 @@ void main() {
       const accountOffset = 32 + 1 + cid.length + 32;
       final exactAuthorization = List<int>.from(template)
         ..setRange(accountOffset, accountOffset + 32, account);
-      final input =
-          Uint8List.fromList([0x47, 0x4d, 0x42, 0x1f, ...exactAuthorization]);
+      final input = Uint8List.fromList([
+        0x47,
+        0x4d,
+        0x42,
+        0x1f,
+        ...exactAuthorization,
+      ]);
       final digest = Blake2bDigest(digestSize: 32)
         ..update(input, 0, input.length);
       final expected = Uint8List(32);
       digest.doFinal(expected, 0);
 
       expect(
-        QrSigner.signingBytesFor(body,
-                selfAccountId: Uint8List.fromList(account))
-            .toList(),
+        QrSigner.signingBytesFor(
+          body,
+          selfAccountId: Uint8List.fromList(account),
+        ).toList(),
         expected.toList(),
       );
     });
@@ -506,8 +541,7 @@ void _onchinaAdminSigningDomain() {
     );
 
     final bytes = QrSigner.signingBytesFor(body);
-    final hex =
-        bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
     expect(
       hex,

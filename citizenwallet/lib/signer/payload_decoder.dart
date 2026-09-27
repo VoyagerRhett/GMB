@@ -1241,16 +1241,14 @@ class PayloadDecoder {
 
   /// 只镜像 CID 的固定分段/字符布局；完整校验和仍由链端唯一实现裁决。
   static bool _isStructuredInstitutionCid(String cidNumber) {
-    return RegExp(
-      r'^[A-Z0-9]{5}-[A-Z0-9]{5}-[0-9]{9}-[0-9]{4}$',
-    ).hasMatch(cidNumber);
+    return RegExp(r'^[A-Z0-9]{5}-[A-Z0-9]{5}-[0-9]{9}-[0-9]{4}$')
+        .hasMatch(cidNumber);
   }
 
   /// 公权管理员非空公民 CID 只接受 CTZN 机构码段；完整校验和由 runtime 裁决。
   static bool _isStructuredCitizenCid(String cidNumber) {
-    return RegExp(
-      r'^[A-Z0-9]{5}-CTZN[A-Z0-9]-[0-9]{9}-[0-9]{4}$',
-    ).hasMatch(cidNumber);
+    return RegExp(r'^[A-Z0-9]{5}-CTZN[A-Z0-9]-[0-9]{9}-[0-9]{4}$')
+        .hasMatch(cidNumber);
   }
 
   // 清算行管理员解密（非链上交易，二进制前缀域）。
@@ -2242,7 +2240,7 @@ class PayloadDecoder {
 
   // LegislationYuan(25) 立法全文章节(章>节>条>款)SCALE 跳读 + 摘要统计。
   //
-  // 布局逐字段对齐 legislation-yuan(ADR-027):
+  // 布局逐字段对齐 legislation-yuan 的链上编码：
   //   ChaptersOf = Compact(count) + 每个 Chapter
   //   Chapter  = number:u32_le + title:BoundedVec<u8> + title_en:Option<BoundedVec<u8>>
   //            + sections:Compact(count)+Section[]

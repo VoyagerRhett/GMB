@@ -201,13 +201,18 @@ internal final class CitizenSDKSecretVault: @unchecked Sendable {
         try CitizenSDKChecks.require(plaintext.count == Self.dekBytes && plaintext.baseAddress != nil,
                                      "DEK must be an exact Rust-owned 32-byte view")
         return try secureStore.withVaultLock {
-            try ensureWalletKEKLocked(walletIndex: walletIndex, generation: generation,
-                                      provisioningOperationID: provisioningOperationID)
+            // 追加只使用原钥；创建所有权由独立初始化步骤验证，封装绝不重新创建钥。
+            try CitizenSDKChecks.require(walletIndex == 0 && generation.count == 16 &&
+                                         provisioningOperationID.count == 16, "wallet KEK identity is malformed")
+            guard try secureStore.isGenerationActive(walletIndex: walletIndex, generation: generation) else {
+                throw CitizenSDKError(.keyInvalidated, "wallet generation is not active")
+            }
             guard let privateKey = try copyPrivateKey(walletIndex: walletIndex, generation: generation,
                                                       context: nil, allowInteraction: false),
                   let publicKey = SecKeyCopyPublicKey(privateKey) else {
                 throw CitizenSDKError(.keyInvalidated, "wallet KEK is unavailable")
             }
+            try requireSecureEnclaveKey(privateKey)
             let algorithm = SecKeyAlgorithm.eciesEncryptionCofactorX963SHA256AESGCM
             guard SecKeyIsAlgorithmSupported(publicKey, .encrypt, algorithm) else {
                 throw CitizenSDKError(.unsupported, "Secure Enclave ECIES wrapping is unavailable")

@@ -104,7 +104,7 @@ class _AccountDetailPageState extends State<AccountDetailPage>
           // 清算行节点可能暂不可达,动作卡内部会展示节点不可达。
         }
       }),
-      _loadRecentRecords(),
+      refreshTxHistory(),
     ]);
   }
 

@@ -23,6 +23,7 @@ import 'package:citizenapp/my/util/screenshot_guard.dart';
 import 'package:citizenapp/my/user/user.dart';
 import 'package:citizenapp/my/myid/current_user_context.dart';
 import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
+import 'package:citizenapp/my/myid/identity_badge_snapshot_store.dart';
 import 'package:citizenapp/isar/user_isar.dart';
 import 'package:citizenapp/security/app_permission_gate.dart';
 import 'package:citizenapp/update/app_update.dart';
@@ -97,6 +98,8 @@ Future<void> main() async {
   final finalizedIdentityResolver = FinalizedIdentityResolver(
     wallet: citizenSdk.wallet,
     chain: citizenSdk.chain,
+    snapshotStore: IdentityBadgeSnapshotStore(),
+    identityRevision: accountSecurity.revision,
   );
   final squareApiClient = SquareApiClient();
   final appPushService = AppPushService();
@@ -493,9 +496,27 @@ class CitizenApp extends StatefulWidget {
   State<CitizenApp> createState() => _CitizenAppState();
 }
 
-class _CitizenAppState extends State<CitizenApp> {
+class _CitizenAppState extends State<CitizenApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 系统授权造成的短暂 inactive 不终止同步；真正退后台才使迟到读取失效。
+    if (state == AppLifecycleState.resumed) {
+      widget.transactionHistory.setForeground(true);
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      widget.transactionHistory.setForeground(false);
+    }
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     widget.accountSecurity.dispose();
     unawaited(_closeCitizenSdk(widget.sdk, widget.transactionHistory));
     super.dispose();

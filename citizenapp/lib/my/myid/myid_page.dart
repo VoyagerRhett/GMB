@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'package:tatachat_sdk/tatachat_sdk.dart';
 
 import 'package:citizenapp/my/myid/current_user_context.dart';
+import 'package:citizenapp/my/myid/identity_badge_snapshot_store.dart';
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
 import 'package:citizenapp/my/myid/myid_service.dart';
@@ -17,7 +18,7 @@ import 'package:citizenapp/ui/app_layout.dart';
 /// 身份页(原电子护照)。
 ///
 /// 页面始终展示访客、投票身份、竞选身份三张卡。只有当前身份对应的卡片排在
-/// 首位、标记"当前身份"并展示真实链上值;非当前公民卡只展示该身份涉及的字段名称,
+/// 首位、标记"当前身份"并展示持久快照;非当前公民卡只展示该身份涉及的字段名称,
 /// 不能重复泄露当前用户数据。链读取失败时不静默降级成访客。
 ///
 /// 右上角按钮随状态切换:纯访客→「注册」(自助占一个匿名 CID);匿名已注册→「更换」
@@ -45,13 +46,15 @@ class _MyIdPageState extends State<MyIdPage> {
   MyIdState _state = const MyIdState(tier: MyIdTier.visitor);
   bool _loading = true;
   bool _submitting = false;
+  int _loadGeneration = 0;
+  String? _refreshError;
 
   bool get _isQueryFailed => _state.status == MyIdStatus.queryFailed;
 
   /// 右上主操作按钮文案:状态未知(链读失败)不给操作;纯访客「注册」;其余(匿名已
   /// 注册 / 投票 / 竞选)「更换」。civic 的「更换」点击后只提示走注册局。
   String? get _actionLabel {
-    if (_isQueryFailed) return null;
+    if (_isQueryFailed || _state.status == MyIdStatus.unknown) return null;
     if (_state.tier == MyIdTier.visitor && !_state.isAnonymousRegistered) {
       return '注册';
     }
@@ -61,6 +64,7 @@ class _MyIdPageState extends State<MyIdPage> {
   @override
   void initState() {
     super.initState();
+    IdentityBadgeSnapshotStore.revision.addListener(_onSnapshotChanged);
     if (widget.myIdService != null) {
       _myIdService = widget.myIdService;
       _loadState();
@@ -92,26 +96,64 @@ class _MyIdPageState extends State<MyIdPage> {
 
   @override
   void dispose() {
+    IdentityBadgeSnapshotStore.revision.removeListener(_onSnapshotChanged);
     _accountSecurity?.revision.removeListener(_loadState);
     super.dispose();
   }
 
+  void _onSnapshotChanged() {
+    if (_myIdService != null && !_refreshing) _loadState();
+  }
+
+  bool _refreshing = false;
+
+  Future<void> _refreshState() async {
+    if (_refreshing) return;
+    _refreshing = true;
+    final generation = ++_loadGeneration;
+    setState(() {
+      _loading = true;
+      _refreshError = null;
+    });
+    try {
+      final result = await _myIdService!.refreshState();
+      if (!mounted || generation != _loadGeneration) return;
+      setState(() {
+        if (result.status == MyIdStatus.queryFailed) {
+          _refreshError = '身份验证失败，请重试';
+        } else {
+          _state = result;
+        }
+      });
+    } catch (_) {
+      if (mounted && generation == _loadGeneration) {
+        setState(() => _refreshError = '身份验证失败，请重试');
+      }
+    } finally {
+      _refreshing = false;
+      if (mounted && generation == _loadGeneration) {
+        setState(() => _loading = false);
+      }
+    }
+  }
+
   Future<void> _loadState() async {
+    final generation = ++_loadGeneration;
     if (mounted) setState(() => _loading = true);
     MyIdState nextState;
     try {
       nextState = await _myIdService!.getState();
-    } on Exception catch (error) {
-      // Service 正常会把链错误收口为 queryFailed；这里兜住依赖异常，仍不能把
-      // 未知错误误认成访客。
-      nextState = MyIdState(
+    } on Exception {
+      // 本地展示读取失败时保留错误状态，不能把未知误认成访客。
+      nextState = const MyIdState(
         tier: MyIdTier.visitor,
         status: MyIdStatus.queryFailed,
-        errorMessage: '身份读取失败:$error',
+        errorMessage: '本地身份读取失败',
       );
     }
-    if (!mounted) return;
+    if (!mounted || generation != _loadGeneration) return;
     setState(() {
+      _refreshError = null;
       _state = nextState;
       _loading = false;
     });
@@ -152,8 +194,10 @@ class _MyIdPageState extends State<MyIdPage> {
     if (cid == null || cid.trim().isEmpty) return;
     final targets = await _myIdService!.listRebindTargets();
     if (!mounted) return;
-    final newAccountId =
-        await showRebindAccountSheet(context, targets: targets);
+    final newAccountId = await showRebindAccountSheet(
+      context,
+      targets: targets,
+    );
     if (newAccountId == null || !mounted) return;
     await _runSubmit(() async {
       await _myIdService!.rebindCidTo(
@@ -206,7 +250,10 @@ class _MyIdPageState extends State<MyIdPage> {
     ];
   }
 
-  bool _isCurrent(MyIdTier tier) => !_isQueryFailed && tier == _state.tier;
+  bool _isCurrent(MyIdTier tier) =>
+      !_isQueryFailed &&
+      _state.status != MyIdStatus.unknown &&
+      tier == _state.tier;
 
   bool _showActualValues(MyIdTier tier) =>
       _isCurrent(tier) && tier != MyIdTier.visitor;
@@ -223,7 +270,8 @@ class _MyIdPageState extends State<MyIdPage> {
             _submitting
                 ? Padding(
                     padding: EdgeInsets.symmetric(
-                        horizontal: AppLayout.scaled(context, 18)),
+                      horizontal: AppLayout.scaled(context, 18),
+                    ),
                     child: Center(
                       child: SizedBox(
                         width: AppLayout.scaled(context, 18),
@@ -233,8 +281,9 @@ class _MyIdPageState extends State<MyIdPage> {
                     ),
                   )
                 : Padding(
-                    padding:
-                        EdgeInsets.only(right: AppLayout.scaled(context, 4)),
+                    padding: EdgeInsets.only(
+                      right: AppLayout.scaled(context, 4),
+                    ),
                     child: TextButton(
                       onPressed: _loading ? null : _onPrimaryAction,
                       child: Text(_actionLabel!),
@@ -243,23 +292,24 @@ class _MyIdPageState extends State<MyIdPage> {
         ],
       ),
       body: RefreshIndicator(
-        onRefresh: _loadState,
+        onRefresh: _refreshState,
         child: ListView(
           padding: EdgeInsets.symmetric(
-              horizontal: AppLayout.scaled(context, 12),
-              vertical: AppLayout.scaled(context, 14)),
+            horizontal: AppLayout.scaled(context, 12),
+            vertical: AppLayout.scaled(context, 14),
+          ),
           physics: const AlwaysScrollableScrollPhysics(),
           children: [
             if (_loading)
               LinearProgressIndicator(minHeight: AppLayout.scaled(context, 2))
             else
               SizedBox(height: AppLayout.scaled(context, 2)),
-            if (_isQueryFailed) ...[
+            if (_isQueryFailed || _refreshError != null) ...[
               SizedBox(height: AppLayout.scaled(context, 12)),
               _PassportMessageBanner(
-                message: _state.errorMessage ?? '链上身份读取失败',
+                message: _refreshError ?? _state.errorMessage ?? '身份读取失败',
                 isError: true,
-                onRetry: _loading ? null : _loadState,
+                onRetry: _loading ? null : _refreshState,
               ),
             ] else if ((_state.errorMessage ?? '').trim().isNotEmpty) ...[
               SizedBox(height: AppLayout.scaled(context, 12)),
@@ -268,19 +318,22 @@ class _MyIdPageState extends State<MyIdPage> {
             SizedBox(height: AppLayout.scaled(context, 14)),
             Center(
               child: ConstrainedBox(
-                constraints:
-                    BoxConstraints(maxWidth: AppLayout.scaled(context, 560)),
+                constraints: BoxConstraints(
+                  maxWidth: AppLayout.scaled(context, 560),
+                ),
                 child: Column(
                   children: [
                     for (var index = 0; index < tiers.length; index++) ...[
                       _PassportIdentityCard(
                         key: ValueKey<String>(
-                            'passport-card-${tiers[index].name}'),
+                          'passport-card-${tiers[index].name}',
+                        ),
                         tier: tiers[index],
                         current: _isCurrent(tiers[index]),
                         showActualValues: _showActualValues(tiers[index]),
                         fields: _fieldsFor(tiers[index]),
-                        registeredCid: tiers[index] == MyIdTier.visitor &&
+                        registeredCid:
+                            tiers[index] == MyIdTier.visitor &&
                                 _state.isAnonymousRegistered
                             ? _state.cidNumber
                             : null,
@@ -332,7 +385,8 @@ class _MyIdPageState extends State<MyIdPage> {
           label: '公民姓名',
           value: showValues
               ? _displayValue(
-                  '${_state.familyName ?? ''}${_state.givenName ?? ''}')
+                  '${_state.familyName ?? ''}${_state.givenName ?? ''}',
+                )
               : null,
         ),
         _PassportField(
@@ -341,8 +395,9 @@ class _MyIdPageState extends State<MyIdPage> {
         ),
         _PassportField(
           label: '出生日期',
-          value:
-              showValues ? (_formatDate(_state.citizenBirthDate) ?? '—') : null,
+          value: showValues
+              ? (_formatDate(_state.citizenBirthDate) ?? '—')
+              : null,
         ),
         _PassportField(
           label: '出生地',
@@ -373,12 +428,12 @@ class _MyIdPageState extends State<MyIdPage> {
   }
 
   static String _statusText(MyIdStatus? status) => switch (status) {
-        MyIdStatus.normal => '正常',
-        MyIdStatus.notYetValid => '未生效',
-        MyIdStatus.expired => '已过期',
-        MyIdStatus.revoked => '已吊销',
-        _ => '—',
-      };
+    MyIdStatus.normal => '正常',
+    MyIdStatus.notYetValid => '未生效',
+    MyIdStatus.expired => '已过期',
+    MyIdStatus.revoked => '已吊销',
+    _ => '—',
+  };
 
   static String? _formatDate(String? raw) {
     final value = raw?.trim();
@@ -414,22 +469,22 @@ class _PassportIdentityCard extends StatelessWidget {
   final String? registeredCid;
 
   String get _title => switch (tier) {
-        MyIdTier.visitor => '身份·访客',
-        MyIdTier.voting => '公民身份 · 投票',
-        MyIdTier.candidate => '公民身份 · 竞选',
-      };
+    MyIdTier.visitor => '身份·访客',
+    MyIdTier.voting => '公民身份 · 投票',
+    MyIdTier.candidate => '公民身份 · 竞选',
+  };
 
   Color get _color => switch (tier) {
-        MyIdTier.visitor => AppTheme.identityVisitor,
-        MyIdTier.voting => AppTheme.identityVoting,
-        MyIdTier.candidate => AppTheme.identityCandidate,
-      };
+    MyIdTier.visitor => AppTheme.identityVisitor,
+    MyIdTier.voting => AppTheme.identityVoting,
+    MyIdTier.candidate => AppTheme.identityCandidate,
+  };
 
   String get _identityLevel => switch (tier) {
-        MyIdTier.visitor => 'visitor',
-        MyIdTier.voting => 'voting',
-        MyIdTier.candidate => 'candidate',
-      };
+    MyIdTier.visitor => 'visitor',
+    MyIdTier.voting => 'voting',
+    MyIdTier.candidate => 'candidate',
+  };
 
   /// 是否在右上角挂「当前身份」徽章。
   ///
@@ -461,10 +516,7 @@ class _PassportIdentityCard extends StatelessWidget {
           BoxShadow(
             color: _color.withAlpha(current ? 38 : 13),
             blurRadius: AppLayout.scaledValue(current ? 18 : 8),
-            offset: Offset(
-              0,
-              AppLayout.scaledValue(current ? 8 : 3),
-            ),
+            offset: Offset(0, AppLayout.scaledValue(current ? 8 : 3)),
           ),
         ],
       ),
@@ -547,8 +599,9 @@ class _PassportIdentityCard extends StatelessWidget {
               child: Container(
                 key: ValueKey<String>('current-identity-${tier.name}'),
                 padding: EdgeInsets.symmetric(
-                    horizontal: AppLayout.scaled(context, 9),
-                    vertical: AppLayout.scaled(context, 5)),
+                  horizontal: AppLayout.scaled(context, 9),
+                  vertical: AppLayout.scaled(context, 5),
+                ),
                 decoration: BoxDecoration(
                   color: _color,
                   borderRadius: BorderRadius.circular(AppLayout.scaledValue(7)),
@@ -580,8 +633,9 @@ class _AnonymousTag extends StatelessWidget {
     return Container(
       key: const ValueKey<String>('passport-anonymous-tag'),
       padding: EdgeInsets.symmetric(
-          horizontal: AppLayout.scaled(context, 8),
-          vertical: AppLayout.scaled(context, 3)),
+        horizontal: AppLayout.scaled(context, 8),
+        vertical: AppLayout.scaled(context, 3),
+      ),
       decoration: BoxDecoration(
         color: color.withAlpha(20),
         borderRadius: BorderRadius.circular(AppLayout.scaledValue(999)),
@@ -590,8 +644,11 @@ class _AnonymousTag extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.visibility_off_outlined,
-              size: AppLayout.scaled(context, 12), color: color),
+          Icon(
+            Icons.visibility_off_outlined,
+            size: AppLayout.scaled(context, 12),
+            color: color,
+          ),
           SizedBox(width: AppLayout.scaled(context, 3)),
           Text(
             '匿名',
@@ -638,8 +695,9 @@ class _PassportFieldRow extends StatelessWidget {
     return Container(
       width: double.infinity,
       padding: EdgeInsets.symmetric(
-          horizontal: AppLayout.scaled(context, 10),
-          vertical: AppLayout.scaled(context, 7)),
+        horizontal: AppLayout.scaled(context, 10),
+        vertical: AppLayout.scaled(context, 7),
+      ),
       decoration: BoxDecoration(
         color: color.withAlpha(showValue ? 10 : 7),
         borderRadius: BorderRadius.circular(AppLayout.scaledValue(8)),
@@ -660,9 +718,7 @@ class _PassportFieldRow extends StatelessWidget {
                   ),
                 ),
                 SizedBox(width: AppLayout.scaled(context, 6)),
-                Expanded(
-                  child: _PassportFieldValue(field: field),
-                ),
+                Expanded(child: _PassportFieldValue(field: field)),
               ],
             )
           : Text(

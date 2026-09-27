@@ -160,6 +160,7 @@ class _ProfilePageState extends State<MyTab> {
     _profileMediaCache = widget.profileMediaCache ?? CitizenProfileMediaCache();
     MembershipRevision.instance.listenable.addListener(_onMembershipChanged);
     CitizenProfileCache.revision.addListener(_onPublicProfileChanged);
+    IdentityBadgeSnapshotStore.revision.addListener(_onIdentitySnapshotChanged);
   }
 
   @override
@@ -189,7 +190,8 @@ class _ProfilePageState extends State<MyTab> {
         widget.currentUserContext ?? context.read<CurrentUserContext>();
     _sessionProvider =
         widget.sessionProvider ?? context.read<SquareSessionProvider>();
-    _subscriptionService = widget.subscriptionService ??
+    _subscriptionService =
+        widget.subscriptionService ??
         SubscriptionService(
           wallet: _wallet,
           chain: sdk.chain,
@@ -210,6 +212,9 @@ class _ProfilePageState extends State<MyTab> {
     _accountSecurity?.revision.removeListener(_onWalletsChanged);
     MembershipRevision.instance.listenable.removeListener(_onMembershipChanged);
     CitizenProfileCache.revision.removeListener(_onPublicProfileChanged);
+    IdentityBadgeSnapshotStore.revision.removeListener(
+      _onIdentitySnapshotChanged,
+    );
     super.dispose();
   }
 
@@ -249,14 +254,23 @@ class _ProfilePageState extends State<MyTab> {
     await _loadState();
   }
 
-  Future<void> _loadState() async {
+  void _onIdentitySnapshotChanged() {
+    if (_dependenciesReady) _loadState(refreshRemote: false);
+  }
+
+  Future<void> _loadState({bool refreshRemote = true}) async {
     final generation = ++_loadGeneration;
     final defaultWallet = (await _wallet.getState().result).defaultAccount;
     // CID 是快照归属主键；当前绑定账户只负责链读和签名。
     final identity = await _currentUserContext.resolve();
     final identityAccountId =
         identity?.accountId ?? defaultWallet?.accountId ?? '';
-    final identityCidNumber = identity?.cidNumber ?? '';
+    final saved = identityAccountId.isEmpty
+        ? null
+        : await _badgeSnapshotStore.readForAccountId(identityAccountId);
+    final identityCidNumber = saved?.verified == true
+        ? saved!.identity?.cidNumber ?? ''
+        : identity?.cidNumber ?? '';
     String? identityLevel;
     try {
       final snapshot = identityCidNumber.isEmpty
@@ -295,7 +309,11 @@ class _ProfilePageState extends State<MyTab> {
       unawaited(_loadMembershipSnapshot(identityCidNumber, generation));
     }
     // 公开资料与会员态均非阻塞加载：昵称/头像先用缓存或稳定占位渲染。
-    unawaited(_refreshRemoteState(generation));
+    if (refreshRemote) {
+      unawaited(_refreshRemoteState(generation));
+    } else if (identityCidNumber.isNotEmpty) {
+      unawaited(_reloadCachedPublicProfile(identityCidNumber, generation));
+    }
   }
 
   Future<void> _loadMembershipSnapshot(String cidNumber, int generation) async {
@@ -462,9 +480,8 @@ class _ProfilePageState extends State<MyTab> {
   }
 
   Future<void> _openContacts() async {
-    await Navigator.of(
-      context,
-    ).push<void>(MaterialPageRoute(builder: (_) => const ContactBookPage()));
+    await Navigator.of(context)
+        .push<void>(MaterialPageRoute(builder: (_) => const ContactBookPage()));
     await _loadState();
   }
 
@@ -472,9 +489,8 @@ class _ProfilePageState extends State<MyTab> {
   Future<CurrentUser?> _resolveOwnedIdentity() async {
     final address = _communicationAccountId;
     if (address.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('请先在「我的 → 我的钱包」添加钱包账户')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('请先在「我的 → 我的钱包」添加钱包账户')));
       return null;
     }
     CurrentUser? identity;
@@ -486,9 +502,8 @@ class _ProfilePageState extends State<MyTab> {
       }
     } on Exception {
       if (!mounted) return null;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('暂时无法验证身份，请稍后重试')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('暂时无法验证身份，请稍后重试')));
       return null;
     }
     if (!mounted) return null;
@@ -529,7 +544,10 @@ class _ProfilePageState extends State<MyTab> {
     final identity = await _resolveOwnedIdentity();
     if (!mounted || identity == null) return;
     final document = await context.read<CitizenSdk>().qr.encodeDocument(
-      CitizenQrContent.userContact(cidNumber: identity.cidNumber.trim(), accountId: identity.accountId),
+      CitizenQrContent.userContact(
+        cidNumber: identity.cidNumber.trim(),
+        accountId: identity.accountId,
+      ),
     );
     if (!mounted) return;
     await Navigator.of(context).push<void>(
@@ -546,9 +564,8 @@ class _ProfilePageState extends State<MyTab> {
   }
 
   Future<void> _openMembership() async {
-    await Navigator.of(
-      context,
-    ).push<void>(MaterialPageRoute(builder: (_) => const MembershipPage()));
+    await Navigator.of(context)
+        .push<void>(MaterialPageRoute(builder: (_) => const MembershipPage()));
     await _loadState();
   }
 
@@ -1221,9 +1238,8 @@ class _SettingsPageState extends State<SettingsPage> {
       setState(() => _openChatOnLaunch = value);
     } catch (_) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('首页设置保存失败，请重试')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('首页设置保存失败，请重试')));
     } finally {
       if (mounted) setState(() => _savingHomeTab = false);
     }
@@ -1255,9 +1271,8 @@ class _SettingsPageState extends State<SettingsPage> {
         if (!authenticated) return;
       } catch (e) {
         if (!mounted) return;
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('身份验证失败：$e')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('身份验证失败：$e')));
         return;
       }
     }
@@ -1313,15 +1328,13 @@ class _SettingsPageState extends State<SettingsPage> {
 
     final error = _updateController.state.errorMessage;
     if (!started && error != null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(error)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(error)));
       return;
     }
 
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('已打开系统安装器，请按系统提示完成更新')));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('已打开系统安装器，请按系统提示完成更新')));
   }
 
   @override

@@ -156,13 +156,6 @@ class WalletManager {
     return rows.map(_toWallet).toList();
   }
 
-  Future<Wallet?> getWalletByMasterId(String masterId) async {
-    final isar = await WalletIsar.instance.db();
-    final row =
-        await isar.walletEntitys.filter().masterIdEqualTo(masterId).findFirst();
-    return row == null ? null : _toWallet(row);
-  }
-
   /// 某钱包下全部账户，按 accountIndex 升序。
   Future<List<Account>> getAccounts(String masterId) async {
     final isar = await WalletIsar.instance.db();
@@ -191,7 +184,10 @@ class WalletManager {
     int wordCount = 12,
     String password = '',
   }) async {
-    assert(wordCount == 12 || wordCount == 18 || wordCount == 24);
+    // Release 会移除 assert，必须在生成熵前执行真实闭集校验。
+    if (wordCount != 12 && wordCount != 18 && wordCount != 24) {
+      throw ArgumentError.value(wordCount, 'wordCount', '助记词数量只能为 12、18 或 24');
+    }
     final mnemonic = bip39m.Mnemonic.generate(
       bip39m.Language.english,
       // 18 词使用现有依赖的 192 位熵长度；12/24 词仍走原有映射。
@@ -277,8 +273,10 @@ class WalletManager {
   /// 用于恢复非连续账户 / 加别处已注资的特定账户)。序号可非连续。校验先于读种子。
   Future<Account> addAccount(String masterId, {int? index}) async {
     final isar = await WalletIsar.instance.db();
-    final wallet =
-        await isar.walletEntitys.filter().masterIdEqualTo(masterId).findFirst();
+    final wallet = await isar.walletEntitys
+        .filter()
+        .masterIdEqualTo(masterId)
+        .findFirst();
     if (wallet == null) {
       throw const WalletAuthException('未找到钱包');
     }
@@ -416,8 +414,10 @@ class WalletManager {
         throw Exception('未找到账户');
       }
       masterId = acct.masterId;
-      final accountCount =
-          await isar.accountEntitys.filter().masterIdEqualTo(masterId).count();
+      final accountCount = await isar.accountEntitys
+          .filter()
+          .masterIdEqualTo(masterId)
+          .count();
       if (acct.accountIndex == 0 && accountCount > 1) {
         throw Exception('账户0是钱包锚点,请删除整个钱包');
       }
@@ -446,8 +446,10 @@ class WalletManager {
       throw Exception('钱包名称最多$maxWalletNameLength个字');
     }
     final isar = await WalletIsar.instance.db();
-    final row =
-        await isar.walletEntitys.filter().masterIdEqualTo(masterId).findFirst();
+    final row = await isar.walletEntitys
+        .filter()
+        .masterIdEqualTo(masterId)
+        .findFirst();
     if (row == null) {
       throw Exception('未找到钱包');
     }
@@ -506,7 +508,7 @@ class WalletManager {
   /// 一次生物识别内完成冷账户用途钥派生、X25519/AES-GCM 封装和 `0x22` 授权签名。
   /// 账户 child、用途钥和一次性发送私钥都只在内存短暂存在，用后立即清零。
   Future<({AccountDataKeyProvisionMaterial material, Uint8List signature})>
-      provisionAccountDataKeys({
+  provisionAccountDataKeys({
     required String accountId,
     required AccountDataKeyProvisionRequest request,
   }) async {
@@ -654,7 +656,8 @@ class WalletManager {
     }
     final parts = message.split('|');
     final expiresAt = parts.length == 6 ? int.tryParse(parts[4]) : null;
-    final valid = parts.length == 6 &&
+    final valid =
+        parts.length == 6 &&
         parts[0] == QrProtocols.qrV1 &&
         parts[1] == QrKind.signResponse.code.toString() &&
         QrSigner.isValidRequestId(parts[2]) &&
@@ -911,8 +914,10 @@ class WalletManager {
       if (duplicate != null) {
         throw Exception('该钱包已存在（${duplicate.walletName}），无需重复导入');
       }
-      final wallets =
-          await isar.walletEntitys.where().sortByWalletIndex().findAll();
+      final wallets = await isar.walletEntitys
+          .where()
+          .sortByWalletIndex()
+          .findAll();
       final used = wallets.map((e) => e.walletIndex).toSet();
       walletIndex = 1;
       while (used.contains(walletIndex)) {
@@ -1014,22 +1019,22 @@ class WalletManager {
   }
 
   Wallet _toWallet(WalletEntity row) => Wallet(
-        walletIndex: row.walletIndex,
-        walletName: row.walletName,
-        masterId: row.masterId,
-        createdAtMillis: row.createdAtMillis,
-        source: row.source,
-        sortOrder: row.sortOrder,
-      );
+    walletIndex: row.walletIndex,
+    walletName: row.walletName,
+    masterId: row.masterId,
+    createdAtMillis: row.createdAtMillis,
+    source: row.source,
+    sortOrder: row.sortOrder,
+  );
 
   Account _toAccount(AccountEntity row) => Account(
-        masterId: row.masterId,
-        accountIndex: row.accountIndex,
-        accountId: row.accountId,
-        ss58Address: row.ss58Address,
-        accountName: row.accountName,
-        createdAtMillis: row.createdAtMillis,
-      );
+    masterId: row.masterId,
+    accountIndex: row.accountIndex,
+    accountId: row.accountId,
+    ss58Address: row.ss58Address,
+    accountName: row.accountName,
+    createdAtMillis: row.createdAtMillis,
+  );
 }
 
 class _DerivedAccount {

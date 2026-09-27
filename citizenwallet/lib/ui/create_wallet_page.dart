@@ -7,7 +7,8 @@ import 'app_theme.dart';
 
 /// 创建新钱包页面。
 ///
-/// 创建成功后展示助记词，要求用户确认已备份。
+/// 选择助记词阶段保留正常返回；生成助记词进入备份展示后，
+/// 禁止系统返回与边缘返回手势，仅允许“已备份，完成”退出。
 class CreateWalletPage extends StatefulWidget {
   const CreateWalletPage({super.key});
 
@@ -38,6 +39,13 @@ class _CreateWalletPageState extends State<CreateWalletPage>
       return;
     }
     if (!await confirmWalletPasswordUse(context, password) || !mounted) return;
+    if (!await ensureScreenshotProtection()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('屏幕保护不可用，无法创建钱包')));
+      }
+      return;
+    }
     // password 只参与本次派生，确认后立即清空输入框且绝不持久化。
     _passwordController.clear();
     setState(() => _creating = true);
@@ -50,30 +58,71 @@ class _CreateWalletPageState extends State<CreateWalletPage>
       setState(() => _result = result);
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('创建失败：$e')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('创建失败：$e')));
     } finally {
       if (mounted) setState(() => _creating = false);
     }
   }
 
   void _confirmBackup() {
+    if (_result == null) return;
     Navigator.of(context).pop(true);
   }
 
   @override
   Widget build(BuildContext context) {
-    // 截屏/录屏时隐藏助记词展示
-    if (sensitiveContentHidden && _result != null) {
-      return buildHiddenPlaceholder(message: '助记词已隐藏');
-    }
+    final page = _result != null && sensitiveContentHidden
+        ? _buildProtectedPlaceholder()
+        : Scaffold(
+            appBar: AppBar(
+              title: const Text('创建钱包'),
+              centerTitle: true,
+              automaticallyImplyLeading: _result == null,
+            ),
+            body: _result != null ? _buildMnemonicView() : _buildCreateView(),
+          );
+    // 生成前不注册返回拦截，保留原有按钮、系统返回和 iOS 左缘手势。
+    if (_result == null) return page;
+    // 仅已生成助记词的备份展示阶段拦截所有用户返回。
+    return PopScope<bool>(canPop: false, child: page);
+  }
+
+  Widget _buildProtectedPlaceholder() {
     return Scaffold(
       appBar: AppBar(
         title: const Text('创建钱包'),
         centerTitle: true,
+        automaticallyImplyLeading: _result == null,
       ),
-      body: _result != null ? _buildMnemonicView() : _buildCreateView(),
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.shield, size: 56),
+            const SizedBox(height: 16),
+            Text(
+              sensitiveProtectionFailed
+                  ? '屏幕保护不可用，助记词已隐藏'
+                  : '助记词已隐藏；如尚未备份，请稍后在钱包详情中验证查看',
+            ),
+            if (sensitiveProtectionFailed) ...[
+              const SizedBox(height: 20),
+              FilledButton(
+                onPressed: retryScreenshotProtection,
+                child: const Text('重试屏幕保护'),
+              ),
+            ],
+            if (_result != null) ...[
+              const SizedBox(height: 20),
+              FilledButton(
+                onPressed: _confirmBackup,
+                child: const Text('已备份，完成'),
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 
@@ -181,8 +230,11 @@ class _CreateWalletPageState extends State<CreateWalletPage>
           decoration: AppTheme.bannerDecoration(AppTheme.warning),
           child: const Row(
             children: [
-              Icon(Icons.warning_amber_rounded,
-                  color: AppTheme.warning, size: 20),
+              Icon(
+                Icons.warning_amber_rounded,
+                color: AppTheme.warning,
+                size: 20,
+              ),
               SizedBox(width: 10),
               Expanded(
                 child: Text(
@@ -207,8 +259,11 @@ class _CreateWalletPageState extends State<CreateWalletPage>
             children: [
               const Row(
                 children: [
-                  Icon(Icons.key_rounded,
-                      color: AppTheme.primaryLight, size: 18),
+                  Icon(
+                    Icons.key_rounded,
+                    color: AppTheme.primaryLight,
+                    size: 18,
+                  ),
                   SizedBox(width: 8),
                   Text(
                     '助记词（请手抄备份，不支持复制）',
@@ -236,25 +291,27 @@ class _CreateWalletPageState extends State<CreateWalletPage>
                       border: Border.all(color: AppTheme.border),
                     ),
                     child: Text.rich(
-                      TextSpan(children: [
-                        TextSpan(
-                          text: '${i + 1}. ',
-                          style: const TextStyle(
-                            color: AppTheme.textTertiary,
-                            fontFamily: 'monospace',
-                            fontSize: 13,
+                      TextSpan(
+                        children: [
+                          TextSpan(
+                            text: '${i + 1}. ',
+                            style: const TextStyle(
+                              color: AppTheme.textTertiary,
+                              fontFamily: 'monospace',
+                              fontSize: 13,
+                            ),
                           ),
-                        ),
-                        TextSpan(
-                          text: words[i],
-                          style: const TextStyle(
-                            color: AppTheme.textPrimary,
-                            fontFamily: 'monospace',
-                            fontWeight: FontWeight.w600,
-                            fontSize: 14,
+                          TextSpan(
+                            text: words[i],
+                            style: const TextStyle(
+                              color: AppTheme.textPrimary,
+                              fontFamily: 'monospace',
+                              fontWeight: FontWeight.w600,
+                              fontSize: 14,
+                            ),
                           ),
-                        ),
-                      ]),
+                        ],
+                      ),
                     ),
                   );
                 }),
@@ -279,8 +336,11 @@ class _CreateWalletPageState extends State<CreateWalletPage>
                       gradient: AppTheme.primaryGradient,
                       borderRadius: BorderRadius.circular(8),
                     ),
-                    child: const Icon(Icons.account_balance_wallet_rounded,
-                        color: Colors.white, size: 18),
+                    child: const Icon(
+                      Icons.account_balance_wallet_rounded,
+                      color: Colors.white,
+                      size: 18,
+                    ),
                   ),
                   const SizedBox(width: 12),
                   Text(
@@ -307,10 +367,7 @@ class _CreateWalletPageState extends State<CreateWalletPage>
           ),
         ),
         const SizedBox(height: 28),
-        FilledButton(
-          onPressed: _confirmBackup,
-          child: const Text('已备份，完成'),
-        ),
+        FilledButton(onPressed: _confirmBackup, child: const Text('已备份，完成')),
       ],
     );
   }

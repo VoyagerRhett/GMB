@@ -11,6 +11,7 @@ import 'package:citizenwallet/qr/envelope.dart';
 import 'package:citizenwallet/qr/bodies/sign_request_body.dart';
 import 'package:citizenwallet/signer/qr_signer.dart';
 import 'package:citizenwallet/ui/offline_sign_page.dart';
+import 'package:citizenwallet/util/screenshot_guard.dart';
 import 'package:citizenwallet/wallet/wallet_manager.dart';
 
 void main() {
@@ -18,6 +19,12 @@ void main() {
 
   const securityChannel = MethodChannel('citizenwallet/security');
   const securityEvents = MethodChannel('citizenwallet/security_events');
+
+  Future<void> releasePage(WidgetTester tester) async {
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    await ScreenshotGuard.waitForIdleForTest();
+  }
 
   setUp(() {
     // ScreenshotGuard 走平台通道:mock 成 no-op,避免 MissingPluginException。
@@ -77,8 +84,8 @@ void main() {
         home: OfflineSignPage(account: account, walletName: '钱包1', raw: raw),
       ),
     );
-    // initState 用 addPostFrameCallback 解析请求 → 需额外 pump 落地 setState。
-    await tester.pump();
+    // 原生保护确认后才解析请求；直接等保护队列，避免墙钟轮询与假时钟交错。
+    await ScreenshotGuard.waitForIdleForTest();
     await tester.pump();
 
     // 绿 banner(hash-only 变体)在场。
@@ -89,7 +96,7 @@ void main() {
     expect(find.text('32 字节升级摘要（哈希）'), findsOneWidget);
 
     // 强制释放页面,取消倒计时 Timer,避免 pending timer 报错。
-    await tester.pumpWidget(const SizedBox());
+    await releasePage(tester);
   });
 
   testWidgets('占号请求(空 b.u)渲染签名页不崩溃,展示自选绑定账户', (tester) async {
@@ -130,14 +137,20 @@ void main() {
         home: OfflineSignPage(account: account, walletName: '钱包1', raw: raw),
       ),
     );
-    await tester.pump();
+    await ScreenshotGuard.waitForIdleForTest();
     await tester.pump();
 
     // 核心断言:渲染过程不抛异常(修复前此处 FormatException 使整页红屏)。
     expect(tester.takeException(), isNull);
     // 展示「签名账户」行 + 自选绑定账户(account.accountId 截断),不是空 u。
-    expect(find.text('签名账户'), findsOneWidget);
+    expect(
+      find.text('签名账户'),
+      findsOneWidget,
+      reason:
+          '保护失败=${find.textContaining('屏幕保护不可用').evaluate().isNotEmpty}，'
+          '解析错误=${find.byIcon(Icons.error_outline).evaluate().isNotEmpty}',
+    );
 
-    await tester.pumpWidget(const SizedBox());
+    await releasePage(tester);
   });
 }

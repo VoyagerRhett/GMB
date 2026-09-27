@@ -1830,7 +1830,7 @@ class _WalletDetailPageState extends State<WalletDetailPage>
 
   /// 整页下拉刷新:
   /// - 链上余额卡:通过 GlobalKey 调 refresh()
-  /// - 交易记录:复用 _loadRecentRecords()
+  /// - 交易记录：复用唯一历史同步及本地列表重载。
   /// - 清算行余额:通过 WalletActionCard 读取当前绑定清算行节点余额。
   Future<void> _onPullRefresh() async {
     await Future.wait<void>([
@@ -1848,7 +1848,7 @@ class _WalletDetailPageState extends State<WalletDetailPage>
           // 清算行节点可能暂不可达,动作卡内部会展示节点不可达。
         }
       }),
-      _loadRecentRecords(),
+      refreshTxHistory(),
     ]);
   }
 
