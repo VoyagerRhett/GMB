@@ -481,7 +481,7 @@ impl WalletService {
 
     fn require_add_active(&self) -> Result<(), EngineError> {
         if self.add_cancelled.load(Ordering::Acquire) {
-            return Err(error(ContractErrorCode::Cancelled, "账户追加已取消"));
+            return Err(error(ContractErrorCode::AuthenticationCancelled, "账户追加已取消"));
         }
         Ok(())
     }
@@ -1750,6 +1750,7 @@ impl WalletService {
         {
             return Err(conflict("provisioning 完成前公开事实已改变"));
         }
+        if adding { self.require_add_active()?; }
         self.commit_state(
             &latest,
             latest.profile().cloned(),

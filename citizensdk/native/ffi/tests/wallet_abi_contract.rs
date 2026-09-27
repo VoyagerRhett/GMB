@@ -326,7 +326,7 @@ fn host_v1_layout_matches_the_c_header_contract() {
     assert_eq!(size_of::<CitizenSdkHostBytesResultV1>(), 40);
     assert_eq!(size_of::<CitizenSdkHostPublicStoreV1>(), 72);
     assert_eq!(size_of::<CitizenSdkHostSecureStoreV1>(), 48);
-    assert_eq!(size_of::<CitizenSdkHostSecretVaultV1>(), 64);
+    assert_eq!(size_of::<CitizenSdkHostSecretVaultV1>(), 72);
     assert_eq!(size_of::<CitizenSdkHostServicesV1>(), 32);
 }
 

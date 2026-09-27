@@ -650,6 +650,9 @@ fn prepared_execution_reads_nonce_once_and_keeps_single_use_and_source_isolation
     // 冷签只读取公开目录；任何秘密、金库或密文操作都会使本测试失败。
     struct NoSecrets;
     impl SecretVault for NoSecrets {
+    fn authorize_add_accounts(&self, _: [u8; 16], _: u32, _: VaultGeneration) -> ContractFuture<'_, ()> {
+        panic!("此夹具不得执行追加认证")
+    }
         fn ensure_wallet_key(&self, _: [u8; 16], _: u32, _: VaultGeneration) -> ContractFuture<'_, ()> {
             panic!("冷签不能初始化金库")
         }

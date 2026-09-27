@@ -210,7 +210,10 @@ class _AddAccountSheetState extends State<AddAccountSheet> {
               else
                 TextField(
                   controller: _indexController,
-                  keyboardType: TextInputType.number,
+                  // 多个编号用空格分隔；纯数字键盘没有空格键，必须使用文本键盘。
+                  keyboardType: TextInputType.text,
+                  autocorrect: false,
+                  enableSuggestions: false,
                   inputFormatters: [
                     FilteringTextInputFormatter.allow(RegExp(r'[0-9 ]')),
                   ],

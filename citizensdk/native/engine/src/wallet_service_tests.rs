@@ -8,7 +8,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -124,6 +124,7 @@ struct MemoryEncryptedSecretStore {
     entries: Mutex<HashMap<SecretRef, EncryptedSecretBlobSnapshot>>,
     next_fault: Mutex<WriteFault>,
     deletion_order: Mutex<Vec<SecretRef>>,
+    corrupt_next_write: AtomicBool,
 }
 
 impl MemoryEncryptedSecretStore {
@@ -209,6 +210,13 @@ impl EncryptedSecretBlobStore for MemoryEncryptedSecretStore {
             let deleted_existing = current.envelope().is_some() && next_state.is_tombstone();
             let next = current.try_advance(next_state)?;
             entries.insert(secret_ref, next.clone());
+            if self.corrupt_next_write.swap(false, Ordering::SeqCst) && next.envelope().is_some() {
+                let EncryptedSecretBlobState::Sealed { provisioning_operation_id, .. } = next.state() else { unreachable!() };
+                let corrupted = EncryptedSecretBlobSnapshot::empty().try_advance(EncryptedSecretBlobState::Sealed {
+                    provisioning_operation_id: *provisioning_operation_id, envelope: test_envelope(secret_ref),
+                }).unwrap();
+                entries.insert(secret_ref, corrupted);
+            }
             if deleted_existing {
                 self.deletion_order.lock().unwrap().push(secret_ref);
             }
@@ -229,6 +237,10 @@ struct MemorySecretVault {
     wallet_keys: Mutex<HashSet<(u32, VaultGeneration)>>,
     key_owners: Mutex<std::collections::HashMap<(u32, VaultGeneration), [u8; 16]>>,
     ensure_calls: AtomicUsize,
+    authorize_calls: AtomicUsize,
+    authorize_error: Mutex<Option<ContractErrorCode>>,
+    authorize_gate: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
+    authorize_entered: Mutex<Option<futures::channel::oneshot::Sender<()>>>,
     retired_wallets: Mutex<HashSet<(u32, VaultGeneration)>>,
     delete_wallet_calls: AtomicUsize,
     open_calls: AtomicUsize,
@@ -247,6 +259,10 @@ impl Default for MemorySecretVault {
             wallet_keys: Mutex::new(HashSet::new()),
             key_owners: Mutex::new(std::collections::HashMap::new()),
             ensure_calls: AtomicUsize::new(0),
+            authorize_calls: AtomicUsize::new(0),
+            authorize_error: Mutex::new(None),
+            authorize_gate: Mutex::new(None),
+            authorize_entered: Mutex::new(None),
             retired_wallets: Mutex::new(HashSet::new()),
             delete_wallet_calls: AtomicUsize::new(0),
             open_calls: AtomicUsize::new(0),
@@ -267,6 +283,24 @@ impl MemorySecretVault {
 }
 
 impl SecretVault for MemorySecretVault {
+    fn authorize_add_accounts(&self, operation: [u8; 16], wallet_index: u32,
+        generation: VaultGeneration) -> ContractFuture<'_, ()> {
+        Box::pin(async move {
+            assert_ne!(operation, [0; 16]);
+            self.authorize_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(entered) = self.authorize_entered.lock().unwrap().take() { let _ = entered.send(()); }
+            let gate = self.authorize_gate.lock().unwrap().take();
+            if let Some(gate) = gate { let _ = gate.await; }
+            if let Some(code) = *self.authorize_error.lock().unwrap() {
+                return Err(ContractError::new(code, "合成追加认证失败"));
+            }
+            if !self.has_key(wallet_index, generation) {
+                return Err(ContractError::new(ContractErrorCode::KeyInvalidated, "合成钱包钥失效"));
+            }
+            Ok(())
+        })
+    }
+
     // 模拟真实平台：创建代际绑定唯一操作；seal只复用，不再隐式造钥。
     fn ensure_wallet_key(&self, operation: [u8; 16], wallet_index: u32,
         generation: VaultGeneration) -> ContractFuture<'_, ()> {
@@ -2771,10 +2805,115 @@ fn append_cannot_recreate_a_missing_original_wallet_key() {
         let before = harness.profiles.snapshot();
         assert_contract_code(
             harness.service.add_next_account(&known_mnemonic(), "").await.unwrap_err(),
-            // 追加先经过既有钱包认证，缺钥在封装前即被拒绝。
+            // 追加先检查原钥是否存在，缺钥在认证和封装前即被拒绝。
             ContractErrorCode::AuthenticationRequired);
         assert_eq!(harness.profiles.snapshot(), before);
         assert_eq!(harness.vault.ensure_calls.load(Ordering::SeqCst), 1);
         assert!(!harness.vault.has_key(profile.wallet_index(), profile.generation()));
+    });
+}
+
+/// 明确验证每次请求次数；不能只断言初始化钥次数而漏掉交互解封。
+#[test]
+fn append_authenticates_once_for_next_single_and_batch_without_opening_accounts() {
+    block_on(async {
+        let h = Harness::new();
+        let mnemonic = known_mnemonic();
+        let base = h.service.import(&mnemonic, "").await.unwrap();
+        let original = h.secrets.load(base.accounts()[0].secret_ref()).await.unwrap();
+        let opens = h.vault.open_calls.load(Ordering::SeqCst);
+        h.service.add_next_account(&mnemonic, "").await.unwrap();
+        assert_eq!(h.vault.authorize_calls.load(Ordering::SeqCst), 1);
+        h.service.add_accounts(&mnemonic, "", &[7]).await.unwrap();
+        assert_eq!(h.vault.authorize_calls.load(Ordering::SeqCst), 2);
+        let profile = h.service.add_accounts(&mnemonic, "", &[1989, 12, 4]).await.unwrap();
+        assert_eq!(h.vault.authorize_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(h.vault.open_calls.load(Ordering::SeqCst), opens);
+        assert_eq!(h.secrets.load(base.accounts()[0].secret_ref()).await.unwrap(), original);
+        // 新账户实际可签名；验收读取不作为追加流程的一部分。
+        for index in [1, 7, 1989, 12, 4] {
+            h.signing_service().sign(profile.account_by_index(index).unwrap().account_id(),
+                b"synthetic-append".to_vec()).await.unwrap();
+        }
+    });
+}
+
+#[test]
+fn invalid_append_and_cancelled_authentication_leave_no_new_facts() {
+    block_on(async {
+        let h = Harness::new(); let mnemonic = known_mnemonic();
+        h.service.import(&mnemonic, "").await.unwrap();
+        let before = h.profiles.snapshot();
+        for indices in [&[][..], &[0], &[1, 1], &[1990]] {
+            assert!(h.service.add_accounts(&mnemonic, "", indices).await.is_err());
+        }
+        assert!(h.service.add_accounts(&mnemonic, "wrong!", &[1]).await.is_err());
+        assert_eq!(h.vault.authorize_calls.load(Ordering::SeqCst), 0);
+        *h.vault.authorize_error.lock().unwrap() = Some(ContractErrorCode::AuthenticationCancelled);
+        assert_contract_code(h.service.add_accounts(&mnemonic, "", &[1, 2]).await.unwrap_err(),
+            ContractErrorCode::AuthenticationCancelled);
+        assert_eq!(h.vault.authorize_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(h.profiles.snapshot(), before);
+        assert_eq!(h.secrets.envelope_count(), 1);
+    });
+}
+
+#[test]
+fn append_rejects_late_authorization_after_cancellation_or_state_replacement() {
+    block_on(async {
+        for replace in [false, true] {
+            let h = Harness::new(); let mnemonic = known_mnemonic();
+            h.service.import(&mnemonic, "").await.unwrap();
+            let before = h.profiles.snapshot();
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let service = WalletService::new(h.signer.clone(), h.vault.clone(), h.profiles.clone(),
+                h.secrets.clone(), h.entropy.clone(), h.clock.clone()).with_add_cancellation(cancelled.clone());
+            let (send, gate) = futures::channel::oneshot::channel();
+            let (entered, waiting) = futures::channel::oneshot::channel();
+            *h.vault.authorize_gate.lock().unwrap() = Some(gate);
+            *h.vault.authorize_entered.lock().unwrap() = Some(entered);
+            let work = Box::pin(service.add_accounts(&mnemonic, "", &[1, 2]));
+            let work = match futures::future::select(work, waiting).await {
+                futures::future::Either::Right((Ok(()), work)) => work,
+                _ => panic!("必须进入追加认证"),
+            };
+            if replace { *h.profiles.state.lock().unwrap() = WalletState::empty(); }
+            else { cancelled.store(true, Ordering::Release); }
+            send.send(()).unwrap();
+            assert_contract_code(work.await.unwrap_err(), if replace { ContractErrorCode::Conflict } else { ContractErrorCode::AuthenticationCancelled });
+            assert_eq!(h.secrets.envelope_count(), 1);
+            assert_eq!(h.vault.authorize_calls.load(Ordering::SeqCst), 1);
+            if !replace { assert_eq!(h.profiles.snapshot(), before); }
+        }
+    });
+}
+
+#[test]
+fn append_storage_failure_rolls_back_without_another_authentication() {
+    block_on(async {
+        let h = Harness::new(); let mnemonic = known_mnemonic();
+        let base = h.service.import(&mnemonic, "").await.unwrap();
+        *h.secrets.next_fault.lock().unwrap() = WriteFault::BeforeWrite;
+        let opens = h.vault.open_calls.load(Ordering::SeqCst);
+        assert!(h.service.add_accounts(&mnemonic, "", &[1, 2]).await.is_err());
+        assert_eq!(h.service.profile().await.unwrap(), Some(base));
+        assert_eq!(h.secrets.envelope_count(), 1);
+        assert_eq!(h.vault.authorize_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(h.vault.open_calls.load(Ordering::SeqCst), opens);
+        h.service.add_accounts(&mnemonic, "", &[1, 2]).await.unwrap();
+        assert_eq!(h.vault.authorize_calls.load(Ordering::SeqCst), 2, "重试必须重新认证");
+    });
+}
+
+#[test]
+fn append_checks_fresh_persistent_envelope_instead_of_trusting_cas_response() {
+    block_on(async {
+        let h = Harness::new(); let mnemonic = known_mnemonic();
+        let base = h.service.import(&mnemonic, "").await.unwrap();
+        h.secrets.corrupt_next_write.store(true, Ordering::SeqCst);
+        assert!(h.service.add_accounts(&mnemonic, "", &[1]).await.is_err());
+        // 返回成功的CAS没有证明持久字节正确；损坏的新账户必须回滚。
+        assert_eq!(h.service.profile().await.unwrap(), Some(base));
+        assert_eq!(h.vault.authorize_calls.load(Ordering::SeqCst), 1);
     });
 }

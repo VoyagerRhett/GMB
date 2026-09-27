@@ -1,6 +1,10 @@
 #include "citizen_sdk_user_auth.hpp"
 
 #include <utility>
+#include <chrono>
+#include <thread>
+#include <cstring>
+#include <gio/gio.h>
 #include "citizen_sdk_input_limits.hpp"
 
 namespace citizen_sdk::linux {
@@ -68,6 +72,83 @@ bool UserAuth::idle() const noexcept {
     // 而关闭线程正持Host锁查询idle；反向取锁会相互等待。
     return !provider || provider->value.idle(provider->value.context) == 1;
   } catch (...) { return false; }
+}
+
+// fprintd只验证当前登录用户的已登记指纹；不登记、不读取模板，也不使用密码代替。
+citizensdk_error_code_t UserAuth::authorize_add_accounts(uint64_t host_operation_id) {
+  if (host_operation_id == 0) return CITIZENSDK_ERROR_INVALID_ARGUMENT;
+  auto cancelled = std::make_shared<std::atomic_bool>(false);
+  {
+    std::lock_guard<std::mutex> guard(lock_);
+    if (!biometric_.emplace(host_operation_id, cancelled).second) return CITIZENSDK_ERROR_CONFLICT;
+  }
+  struct Registration {
+    UserAuth *owner; uint64_t id;
+    ~Registration() { std::lock_guard<std::mutex> guard(owner->lock_); owner->biometric_.erase(id); }
+  } registration{this, host_operation_id};
+  GError *error = nullptr;
+  gchar *address = g_dbus_address_get_for_bus_sync(G_BUS_TYPE_SYSTEM, nullptr, &error);
+  if (error) g_error_free(error);
+  if (!address) return CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED;
+  error = nullptr;
+  // 独占连接确保异常退出后Claim随连接释放，不影响其他SDK请求或宿主总线。
+  auto *connection = g_dbus_connection_new_for_address_sync(address,
+      static_cast<GDBusConnectionFlags>(G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT |
+                                       G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION),
+      nullptr, nullptr, &error);
+  g_free(address);
+  if (error) g_error_free(error);
+  if (!connection) return CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED;
+  struct Connection {
+    GDBusConnection *value;
+    ~Connection() { g_dbus_connection_close_sync(value, nullptr, nullptr); g_object_unref(value); }
+  } connection_owner{connection};
+  auto call = [&](const char *path, const char *interface, const char *method, GVariant *arguments) {
+    return g_dbus_connection_call_sync(connection, "net.reactivated.Fprint", path, interface,
+        method, arguments, nullptr, G_DBUS_CALL_FLAGS_NONE, 5000, nullptr, nullptr);
+  };
+  GVariant *device = call("/net/reactivated/Fprint/Manager", "net.reactivated.Fprint.Manager", "GetDefaultDevice", nullptr);
+  if (!device) return CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED;
+  const gchar *raw_path = nullptr;
+  g_variant_get(device, "(&o)", &raw_path);
+  const std::string path(raw_path);
+  g_variant_unref(device);
+  constexpr const char *interface = "net.reactivated.Fprint.Device";
+  GVariant *claimed = call(path.c_str(), interface, "Claim", g_variant_new("(s)", ""));
+  if (!claimed) return CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED;
+  g_variant_unref(claimed);
+  auto *context = g_main_context_new();
+  g_main_context_push_thread_default(context);
+  struct Result { bool done{false}; bool matched{false}; } result;
+  const guint subscription = g_dbus_connection_signal_subscribe(connection,
+      "net.reactivated.Fprint", interface, "VerifyStatus", path.c_str(), nullptr,
+      G_DBUS_SIGNAL_FLAGS_NONE,
+      [](GDBusConnection *, const gchar *, const gchar *, const gchar *, const gchar *, GVariant *parameters, gpointer data) {
+        auto &state = *static_cast<Result *>(data);
+        if (state.done || !g_variant_is_of_type(parameters, G_VARIANT_TYPE("(sb)"))) return;
+        const gchar *status = nullptr; gboolean done = FALSE;
+        g_variant_get(parameters, "(&sb)", &status, &done);
+        if (done) { state.matched = std::strcmp(status, "verify-match") == 0; state.done = true; }
+      }, &result, nullptr);
+  GVariant *started = cancelled->load() ? nullptr :
+      call(path.c_str(), interface, "VerifyStart", g_variant_new("(s)", "any"));
+  const bool accepted = started != nullptr;
+  if (started) g_variant_unref(started);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+  while (accepted && !result.done && !cancelled->load() && !g_dbus_connection_is_closed(connection) &&
+         std::chrono::steady_clock::now() < deadline) {
+    while (g_main_context_iteration(context, FALSE)) {}
+    if (!result.done) std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  g_dbus_connection_signal_unsubscribe(connection, subscription);
+  // 停止及Release都要执行；认证成功从来不作为下一次请求的缓存。
+  if (accepted) { if (auto *stopped = call(path.c_str(), interface, "VerifyStop", nullptr)) g_variant_unref(stopped); }
+  if (auto *released = call(path.c_str(), interface, "Release", nullptr)) g_variant_unref(released);
+  while (g_main_context_iteration(context, FALSE)) {}
+  g_main_context_pop_thread_default(context);
+  g_main_context_unref(context);
+  if (cancelled->load() || (accepted && !result.done)) return CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED;
+  return accepted && result.done && result.matched ? CITIZENSDK_OK : CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED;
 }
 
 AuthenticationResult UserAuth::create_vault_password(uint64_t host_operation_id) {

@@ -31,6 +31,27 @@ final class CitizenSDKSecretVaultTests: XCTestCase {
         XCTAssertFalse(try store.isGenerationActive(walletIndex: 0, generation: generation))
     }
 
+    /// 追加认证在缺钥时直接失败，不弹认证、不造钥；空输出完成器也只结算一次。
+    func testAddAuthorizationRequiresExistingKeyAndCompletionIsSingle() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try CitizenSDKSecureStore(directory: directory)
+        defer { store.close() }
+        let vault = try CitizenSDKSecretVault(secureStore: store, applicationID: "org.example.vault")
+        XCTAssertThrowsError(try vault.authorizeAddAccounts(operationID: 1, walletIndex: 0,
+            generation: Data(repeating: 41, count: 16), provisioningOperationID: Data(repeating: 42, count: 16)) {
+                _ in XCTFail("拒绝前不得受理完成回调")
+            }) { XCTAssertEqual(($0 as? CitizenSDKError)?.code, .keyInvalidated) }
+        var completions = 0
+        let accepted = CitizenSDKAcceptedVaultOperation(output: UnsafeMutableRawBufferPointer(start: nil, count: 0),
+            releasePending: {}, completion: { code in
+                XCTAssertEqual(code, .authenticationCancelled); completions += 1
+            })
+        accepted.finish(.authenticationCancelled)
+        accepted.finish(.ok)
+        XCTAssertEqual(completions, 1)
+    }
+
     func testPhysicalPresenceDoesNotGuessUnknownAliasesOrOtherWallets() throws {
         // 调用生产归属判断；这里只提供系统属性的合成返回，不接触Keychain。
         let first = Data("citizensdk_wallet_first".utf8), second = Data("citizensdk_wallet_second".utf8)

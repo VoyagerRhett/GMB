@@ -59,7 +59,7 @@ internal final class CitizenSDKSecretVault: @unchecked Sendable {
     private let applicationID: String
     private let queue = DispatchQueue(label: "org.citizen.sdk.apple-vault", qos: .userInitiated)
     private let operationLock = NSLock()
-    private var pendingUnwraps: Set<UInt64> = []
+    private var pendingAuthentications: Set<UInt64> = []
     private var authenticationContexts: [UInt64: LAContext] = [:]
     private var cancelledAuthentications: Set<UInt64> = []
 
@@ -241,7 +241,7 @@ internal final class CitizenSDKSecretVault: @unchecked Sendable {
         context.touchIDAuthenticationAllowableReuseDuration = 0
         context.localizedFallbackTitle = ""
         operationLock.lock()
-        guard pendingUnwraps.insert(operationID).inserted else {
+        guard pendingAuthentications.insert(operationID).inserted else {
             operationLock.unlock()
             throw CitizenSDKError(.conflict, "duplicate vault operation identity")
         }
@@ -250,7 +250,7 @@ internal final class CitizenSDKSecretVault: @unchecked Sendable {
             output: UnsafeMutableRawBufferPointer(start: nil, count: 0),
             releasePending: { [self] in
                 self.operationLock.lock()
-                self.pendingUnwraps.remove(operationID)
+                self.pendingAuthentications.remove(operationID)
                 self.operationLock.unlock()
                 context.invalidate()
             }, completion: completion)
@@ -281,7 +281,7 @@ internal final class CitizenSDKSecretVault: @unchecked Sendable {
         try CitizenSDKChecks.require(output.count == Self.dekBytes && output.baseAddress != nil,
                                      "DEK output must be an exact Rust-owned 32-byte view")
         operationLock.lock()
-        guard pendingUnwraps.insert(operationID).inserted else {
+        guard pendingAuthentications.insert(operationID).inserted else {
             operationLock.unlock()
             throw CitizenSDKError(.conflict, "duplicate vault operation identity")
         }
@@ -291,7 +291,7 @@ internal final class CitizenSDKSecretVault: @unchecked Sendable {
             output: output,
             releasePending: { [self] in
             self.operationLock.lock()
-            _ = self.pendingUnwraps.remove(operationID)
+            _ = self.pendingAuthentications.remove(operationID)
             self.authenticationContexts.removeValue(forKey: operationID)
             self.operationLock.unlock()
             },

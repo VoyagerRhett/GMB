@@ -1693,9 +1693,9 @@ pub unsafe extern "C" fn citizensdk_add_wallet_accounts(
                 secret_buffer(mnemonic, "wallet mnemonic", MAX_WALLET_SECRET_INPUT_BYTES)?;
             let password = secret_utf8(password, "wallet password", MAX_WALLET_SECRET_INPUT_BYTES)?;
             let indices = copy_indices(indices, index_count)?;
-            accept_wallet_change_and_write(runtime, out_request_id, true, move |runtime, _, cancellation| {
+            accept_wallet_change_and_write(runtime, out_request_id, true, move |runtime, request_id, cancellation| {
                 runtime.refresh_provider_capabilities()?;
-                let cancelled = Arc::new(AtomicBool::new(false));
+                let cancelled = runtime.request_cancellation_flag(request_id)?;
                 let profile = runtime.drive(add_accounts_or_cancellation(
                     runtime
                         .engine()
@@ -1730,9 +1730,9 @@ pub unsafe extern "C" fn citizensdk_add_next_wallet_account(
             let runtime = handles::get(handle)?;
             let mnemonic = secret_buffer(mnemonic, "wallet mnemonic", MAX_WALLET_SECRET_INPUT_BYTES)?;
             let password = secret_utf8(password, "wallet password", MAX_WALLET_SECRET_INPUT_BYTES)?;
-            accept_wallet_change_and_write(runtime, out_request_id, true, move |runtime, _, cancellation| {
+            accept_wallet_change_and_write(runtime, out_request_id, true, move |runtime, request_id, cancellation| {
                 runtime.refresh_provider_capabilities()?;
-                let cancelled = Arc::new(AtomicBool::new(false));
+                let cancelled = runtime.request_cancellation_flag(request_id)?;
                 let profile = runtime.drive(add_accounts_or_cancellation(runtime.engine().add_next_wallet_account(mnemonic, password, Arc::clone(&cancelled)), cancellation, cancelled))??;
                 Ok(ResultPayload::WalletProfile(Some(profile)))
             })

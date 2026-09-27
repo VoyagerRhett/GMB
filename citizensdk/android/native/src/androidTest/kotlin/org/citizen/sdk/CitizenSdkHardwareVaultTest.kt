@@ -43,6 +43,27 @@ class CitizenSdkHardwareVaultTest {
         } finally { directory.deleteRecursively() }
     }
 
+    /** 缺钥追加认证拒绝受理，不触发生物识别、不产生新代际。 */
+    @Test
+    fun addAuthorizationFailsBeforePromptWhenKeyIsMissing() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val directory = File(context.noBackupFilesDir, "citizensdk-test/add-" + System.nanoTime())
+        try {
+            CitizenSdkSecureStore(directory).use { store ->
+                val vault = CitizenSdkHardwareVault(context, store)
+                val generation = ByteArray(16) { 41 }
+                val failure = runCatching {
+                    vault.authorizeAddAccounts(1, 0, generation, ByteArray(16) { 42 }) {
+                        throw AssertionError("拒绝前不得受理完成回调")
+                    }
+                }.exceptionOrNull()
+                assertTrue(failure is CitizenSdkHardwareVault.VaultFailure)
+                assertEquals(CitizenSdkErrorCode.KEY_INVALIDATED, (failure as CitizenSdkHardwareVault.VaultFailure).code)
+                assertTrue(!store.isGenerationActive(0, generation))
+            }
+        } finally { directory.deleteRecursively() }
+    }
+
     @Test
     fun physicalKeyPresenceRejectsUnknownSdkAliases() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()

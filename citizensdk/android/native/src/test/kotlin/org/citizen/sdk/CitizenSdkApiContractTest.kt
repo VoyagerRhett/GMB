@@ -62,7 +62,7 @@ class CitizenSdkApiContractTest {
     @Test
     fun `static JNI entries keep the exact single registration names`() {
         val type = CitizenSdkNative::class.java
-        val expected = listOf("validateModules", "verifySignature", "completeVaultUnwrap")
+        val expected = listOf("validateModules", "verifySignature", "completeVaultStatus")
         val names = type.declaredMethods.map { it.name }
         for (name in expected) {
             assertEquals(1, names.count { it == name })
@@ -75,7 +75,7 @@ class CitizenSdkApiContractTest {
             "verifySignature", ByteArray::class.java, ByteArray::class.java, ByteArray::class.java,
         ).modifiers))
         assertTrue(Modifier.isStatic(type.getDeclaredMethod(
-            "completeVaultUnwrap", Long::class.javaPrimitiveType, Long::class.javaPrimitiveType,
+            "completeVaultStatus", Long::class.javaPrimitiveType, Long::class.javaPrimitiveType,
             Int::class.javaPrimitiveType,
         ).modifiers))
     }

@@ -4124,6 +4124,20 @@ mod production_tests {
         CitizenSdkErrorCode::Ok.as_i32()
     }
 
+    unsafe extern "C" fn fake_vault_authorize_add_accounts(
+        host_context: *mut c_void, operation_id: u64, _key: CitizenSdkHostWalletKeyRefV1,
+        _provisioning: CitizenSdkHostId128, sdk_context: *mut c_void,
+        completion: CitizenSdkHostStatusCompletionV1,
+    ) -> i32 {
+        let fake = unsafe { fake_vault(host_context) };
+        if *fake.retired.lock().unwrap() || fake.key_owner.lock().unwrap().is_none() {
+            return CitizenSdkErrorCode::KeyInvalidated.as_i32();
+        }
+        // 合成认证仅回报状态，绝不能调用创建或解封来制造成功。
+        unsafe { complete_status_ok(operation_id, sdk_context, completion) };
+        CitizenSdkErrorCode::Ok.as_i32()
+    }
+
     unsafe extern "C" fn fake_vault_retire(
         host_context: *mut c_void,
         operation_id: u64,
@@ -4150,6 +4164,7 @@ mod production_tests {
             wrap_dek: Some(fake_vault_wrap),
             unwrap_dek: Some(fake_vault_unwrap),
             retire_wallet_kek: Some(fake_vault_retire),
+            authorize_add_accounts: Some(fake_vault_authorize_add_accounts),
             ..CitizenSdkHostSecretVaultV1::default()
         };
         let bridge = test_bridge(CitizenSdkHostPublicStoreV1::default(), None, Some(vtable));
@@ -4160,6 +4175,20 @@ mod production_tests {
         (fake, vault, bridge)
     }
 
+
+    #[test]
+    fn add_authorization_never_initializes_or_unwraps_a_key() {
+        let (fake, vault, _bridge) = vault_harness();
+        let generation = VaultGeneration::from_bytes([81; 16]);
+        assert!(block_on(vault.authorize_add_accounts([82; 16], 0, generation)).is_err());
+        block_on(vault.ensure_wallet_key([83; 16], 0, generation)).unwrap();
+        block_on(vault.authorize_add_accounts([82; 16], 0, generation)).unwrap();
+        assert_eq!(*fake.ensure_calls.lock().unwrap(), 1);
+        assert!(fake.unwrap_operations.lock().unwrap().is_empty());
+        assert!(fake.seen_plaintext_deks.lock().unwrap().is_empty());
+        *fake.retired.lock().unwrap() = true;
+        assert!(block_on(vault.authorize_add_accounts([84; 16], 0, generation)).is_err());
+    }
 
     #[test]
     fn wrapping_reuses_initialized_key_without_rebinding_and_retirement_stays_final() {

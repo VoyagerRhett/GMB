@@ -1025,3 +1025,20 @@ fn wallet_metadata_result_projection_is_atomic_and_rejects_wrong_or_released_han
         ownership::release(empty).unwrap();
     }
 }
+
+#[test]
+fn add_cancellation_drains_operation_and_preserves_already_committed_success() {
+    futures_executor::block_on(async {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let flag = Arc::new(AtomicBool::new(false));
+        let (cancel, cancellation) = futures_channel::oneshot::channel();
+        cancel.send(()).unwrap();
+        let observed = flag.clone();
+        let operation = async move {
+            assert!(observed.load(Ordering::Acquire));
+            // 模拟已经在持久提交边界内完成：必须排空并返回实际成功。
+            Ok::<_, citizen_sdk_engine::EngineError>(7)
+        };
+        assert_eq!(super::add_accounts_or_cancellation(operation, Some(cancellation), flag).await.unwrap(), 7);
+    });
+}

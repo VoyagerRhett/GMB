@@ -29,6 +29,7 @@ void headless_credential_contract() {
   using namespace citizen_sdk::linux;
   UserAuth auth;
   assert(!auth.available());
+  assert(auth.authorize_add_accounts(0) == CITIZENSDK_ERROR_INVALID_ARGUMENT);
   assert(auth.create_vault_password(41).code == CITIZENSDK_ERROR_AUTHENTICATION_REQUIRED);
   assert(auth.unlock_vault_password(0).code == CITIZENSDK_ERROR_INVALID_ARGUMENT);
   struct Provider final {
@@ -175,6 +176,10 @@ int main() {
       assert(rejected);
     };
     reject_wrap();
+    bool add_rejected = false;
+    try { vault.authorize_add_accounts(10, missing, operation); }
+    catch (const HostError &error) { add_rejected = error.code() == CITIZENSDK_ERROR_KEY_INVALIDATED; }
+    assert(add_rejected && vault.idle());
     assert(!store.is_generation_active(missing));
     bool missing_rejected = false;
     try {

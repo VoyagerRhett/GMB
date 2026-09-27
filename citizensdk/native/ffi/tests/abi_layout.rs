@@ -290,7 +290,7 @@ fn host_v1_layout_and_constants_are_exact() {
         encrypted_secret_blob_load: 32,
         encrypted_secret_blob_compare_and_swap: 40,
     });
-    assert_layout!(CitizenSdkHostSecretVaultV1, 64, 8, {
+    assert_layout!(CitizenSdkHostSecretVaultV1, 72, 8, {
         struct_size: 0,
         abi_version: 4,
         context: 8,
@@ -300,6 +300,7 @@ fn host_v1_layout_and_constants_are_exact() {
         wrap_dek: 40,
         unwrap_dek: 48,
         retire_wallet_kek: 56,
+        authorize_add_accounts: 64,
     });
     assert_layout!(CitizenSdkHostSecretPresenceV1, 32, 8, {
         struct_size: 0, abi_version: 4, context: 8, has_account_secret: 16, has_any_wallet_key: 24,

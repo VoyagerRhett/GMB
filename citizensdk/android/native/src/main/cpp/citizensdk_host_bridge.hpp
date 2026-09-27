@@ -1,6 +1,7 @@
 #ifndef CITIZENSDK_HOST_BRIDGE_HPP
 #define CITIZENSDK_HOST_BRIDGE_HPP
 
+// 管理 Android JNI 宿主与 Core 实例的生命周期、准备资源和异步回调登记。
 #include <jni.h>
 
 #include <atomic>

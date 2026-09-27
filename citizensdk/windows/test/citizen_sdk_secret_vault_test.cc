@@ -76,6 +76,11 @@ struct FakeSystem final {
         return names;
       },
       [this] { return authentication_available; },
+      [this](uint64_t id) {
+        assert(id != 0); ++prompted;
+        if (on_unlock) on_unlock();
+        return cancel ? CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED : CITIZENSDK_OK;
+      },
       [this](uint64_t host_operation_id) {
         assert(host_operation_id != 0);
         ++prompted;
@@ -386,6 +391,15 @@ int wmain(int count, wchar_t **arguments) {
   vault.ensure_wallet_kek(101, wallet, operation);
   assert(vault.has_wallet_kek(wallet) && system.created == 1);
   assert(vault.has_any_wallet_key(0) && !vault.has_any_wallet_key(UINT32_MAX));
+  // 独立认证一次，不读取旧DEK；取消和重试各自拥有独立认证结果。
+  const unsigned before_add = system.prompted;
+  vault.authorize_add_accounts(111, wallet, competing);
+  assert(system.prompted == before_add + 1 && system.decrypted == 0 && vault.idle());
+  system.cancel = true;
+  fails(CITIZENSDK_ERROR_AUTHENTICATION_CANCELLED, [&] { vault.authorize_add_accounts(112, wallet, competing); });
+  system.cancel = false;
+  vault.authorize_add_accounts(113, wallet, competing);
+  assert(system.prompted == before_add + 3 && system.decrypted == 0 && vault.idle());
   const unsigned prompts = system.prompted;
   fails(CITIZENSDK_ERROR_KEY_INVALIDATED, [&] { other.ensure_wallet_kek(101, wallet, competing); });
   assert(system.created == 1 && system.deleted == 0 && system.prompted == prompts);

@@ -21,6 +21,53 @@ final class RunnerUITests: XCTestCase {
   func testOpenAddNextAccount() throws { try openAddAccount("添加下一个账户", stage: "next") }
   func testOpenAddSpecifiedAccount() throws { try openAddAccount("添加指定账户", stage: "specified") }
 
+  /// 编号取自SDK已展示的下一个序号；测试只填写公开编号，不读写助记词或密码。
+  func testOpenAddSpecifiedSingleAccount() throws { try openSpecifiedAccounts(count: 1) }
+  func testOpenAddSpecifiedMultipleAccounts() throws { try openSpecifiedAccounts(count: 2) }
+
+  private func nextAccountIndex(in app: XCUIApplication) throws -> Int {
+    let hint = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "将派生 //")).firstMatch
+    guard hint.waitForExistence(timeout: 10),
+          let index = Int(hint.label.replacingOccurrences(of: "将派生 //", with: "")),
+          (1...1989).contains(index) else {
+      throw NSError(domain: "WalletAppendUITest", code: 1,
+          userInfo: [NSLocalizedDescriptionKey: "未取得有效的下一个账户序号"])
+    }
+    return index
+  }
+
+  private func openSpecifiedAccounts(count: Int) throws {
+    try openAddAccount("添加下一个账户", stage: "index_read")
+    let app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
+    let first = try nextAccountIndex(in: app)
+    guard first + count - 1 <= 1989 else { throw XCTSkip("剩余编号不足本批验收") }
+    // 重新启动清空刚打开的空表单；尚未交给用户输入，不能在用户填写后执行本方法。
+    try openAddAccount("添加指定账户", stage: "specified_prepare")
+    let field = app.textFields.matching(NSPredicate(format: "label CONTAINS %@", "账户序号")).firstMatch
+    XCTAssertTrue(field.waitForExistence(timeout: 10), "未找到公开账户序号输入框")
+    // Flutter的字段语义框包含底部帮助文字；点击上部输入区并确认键盘出现后才输入公开编号。
+    field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25)).tap()
+    guard app.keyboards.firstMatch.waitForExistence(timeout: 10) else {
+      throw NSError(domain: "WalletAppendUITest", code: 2,
+          userInfo: [NSLocalizedDescriptionKey: "账户序号输入框未获得键盘焦点"])
+    }
+    field.typeText(String(first))
+    if count > 1 {
+      // 必须实际点系统键盘空格键，不能靠整串注入掩盖数字键盘缺少分隔键的问题。
+      let space = app.keyboards.keys.matching(NSPredicate(format:
+        "label IN %@ OR identifier IN %@", ["space", "空格"], ["space", "空格"])).firstMatch
+      XCTAssertTrue(space.waitForExistence(timeout: 5), "编号键盘必须提供空格键")
+      for index in (first + 1)..<(first + count) {
+        space.tap()
+        field.typeText(String(index))
+      }
+    }
+    XCTAssertEqual(field.value as? String,
+        (first..<(first + count)).map(String.init).joined(separator: " "), "公开账户编号应保留分隔空格")
+    NSLog("WALLET_APPEND_UI stage=specified_ready count=%d next_index=%d", count, first)
+  }
+
+
   private func openAddAccount(_ mode: String, stage: String) throws {
     let app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
     app.launch()
@@ -42,7 +89,9 @@ final class RunnerUITests: XCTestCase {
     choice.tap()
     let confirm = app.buttons.matching(NSPredicate(format: "label == %@", "确认添加")).firstMatch
     XCTAssertTrue(confirm.waitForExistence(timeout: 10))
-    NSLog("WALLET_APPEND_UI stage=%@ form_ready=1", stage)
+    if mode == "添加下一个账户" {
+      NSLog("WALLET_APPEND_UI stage=%@ form_ready=1 next_index=%d", stage, try nextAccountIndex(in: app))
+    } else { NSLog("WALLET_APPEND_UI stage=%@ form_ready=1", stage) }
   }
 
   /// 身份展示验收只比较本机内存中的公民号文本，日志仅记录固定步骤和布尔结果。

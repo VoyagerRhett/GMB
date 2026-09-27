@@ -18,7 +18,7 @@ pub use crate::host_providers::{
     CitizenSdkHostVaultAvailability, CitizenSdkHostVaultAvailabilityCompletionV1,
     CitizenSdkHostVaultAvailabilityResultV1, CitizenSdkHostVaultAvailabilityV1,
     CitizenSdkHostVaultEnsureWalletKekV1, CitizenSdkHostVaultHasWalletKekV1,
-    CitizenSdkHostVaultRetireWalletKekV1, CitizenSdkHostVaultUnwrapDekV1,
+    CitizenSdkHostVaultAuthorizeAddAccountsV1, CitizenSdkHostVaultRetireWalletKekV1, CitizenSdkHostVaultUnwrapDekV1,
     CitizenSdkHostVaultWrapDekV1, CitizenSdkHostWalletKeyRefV1,
     CitizenSdkHostWalletProfileCompareAndSwapV1, CitizenSdkHostWalletProfileLoadV1,
     CitizenSdkMutableBytesView, CITIZENSDK_HOST_DEK_BYTES,

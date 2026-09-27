@@ -324,7 +324,7 @@ ABI_OFFSET(citizensdk_host_secure_store_v1_t, encrypted_secret_blob_load, 32);
 ABI_OFFSET(citizensdk_host_secure_store_v1_t,
            encrypted_secret_blob_compare_and_swap, 40);
 
-ABI_SIZE(citizensdk_host_secret_vault_v1_t, 64);
+ABI_SIZE(citizensdk_host_secret_vault_v1_t, 72);
 ABI_ALIGN(citizensdk_host_secret_vault_v1_t, 8);
 ABI_OFFSET(citizensdk_host_secret_vault_v1_t, struct_size, 0);
 ABI_OFFSET(citizensdk_host_secret_vault_v1_t, abi_version, 4);
@@ -335,6 +335,7 @@ ABI_OFFSET(citizensdk_host_secret_vault_v1_t, has_wallet_kek, 32);
 ABI_OFFSET(citizensdk_host_secret_vault_v1_t, wrap_dek, 40);
 ABI_OFFSET(citizensdk_host_secret_vault_v1_t, unwrap_dek, 48);
 ABI_OFFSET(citizensdk_host_secret_vault_v1_t, retire_wallet_kek, 56);
+ABI_OFFSET(citizensdk_host_secret_vault_v1_t, authorize_add_accounts, 64);
 
 /* 新增独立存在性结构，不扩长上方原Host v1结构。 */
 ABI_SIZE(citizensdk_host_secret_presence_v1_t, 32);

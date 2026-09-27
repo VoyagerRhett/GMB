@@ -1,7 +1,7 @@
 use std::{
     collections::{hash_map::Entry, HashMap},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Condvar, Mutex, Weak,
     },
     thread::{self, JoinHandle},
@@ -51,6 +51,7 @@ enum CancellationState {
 }
 
 struct PendingRequest {
+    cancelled: Arc<AtomicBool>,
     cancellation: CancellationState,
     completion_event: CompletionEventReservation,
     result: ResultReservation,
@@ -393,6 +394,7 @@ impl NativeRuntime {
             Entry::Vacant(entry) => {
                 entry.insert(PendingRequest {
                     cancellation: cancel_state,
+                    cancelled: Arc::new(AtomicBool::new(false)),
                     completion_event,
                     result,
                     exclusive,
@@ -423,6 +425,13 @@ impl NativeRuntime {
         }
     }
 
+    /// 取消线程直接置位；即使宿主同步等待认证，Core也能在回调返回后立即拒绝迟到成功。
+    pub fn request_cancellation_flag(&self, request_id: CitizenSdkRequestId) -> FfiResult<Arc<AtomicBool>> {
+        self.cancellations.lock().map_err(|_| FfiError::internal("request cancellation state is poisoned"))?
+            .get(&request_id).map(|request| Arc::clone(&request.cancelled))
+            .ok_or_else(|| FfiError::new(CitizenSdkErrorCode::NotFound, "request id is not pending"))
+    }
+
     pub fn request_cancel(&self, request_id: CitizenSdkRequestId) -> FfiResult<()> {
         let mut cancellations = self
             .cancellations
@@ -433,6 +442,7 @@ impl NativeRuntime {
         })?;
         match std::mem::replace(&mut request.cancellation, CancellationState::Requested) {
             CancellationState::Cancellable(sender) => {
+                request.cancelled.store(true, Ordering::Release);
                 let _ = sender.send(());
                 Ok(())
             }
@@ -464,6 +474,7 @@ impl NativeRuntime {
             .ok()
             .and_then(|mut cancellations| cancellations.remove(&request_id));
         let Some(PendingRequest {
+            cancelled: _,
             cancellation,
             completion_event,
             result: result_reservation,
@@ -1186,19 +1197,24 @@ mod tests {
             .begin_request(false)
             .unwrap_or_else(|error| panic!("atomic request failed: {error:?}"));
         assert!(atomic_receiver.is_none());
+        let atomic_flag = runtime.request_cancellation_flag(atomic_id).unwrap();
         let error = runtime
             .request_cancel(atomic_id)
             .err()
             .unwrap_or_else(|| panic!("atomic request cancellation must fail"));
         assert_eq!(error.code, CitizenSdkErrorCode::Unsupported);
+        assert!(!atomic_flag.load(Ordering::Acquire));
         runtime.reject_request(atomic_id);
 
         let (watch_id, watch_receiver) = runtime
             .begin_request(true)
             .unwrap_or_else(|error| panic!("watch request failed: {error:?}"));
+        let watch_flag = runtime.request_cancellation_flag(watch_id).unwrap();
+        assert!(!watch_flag.load(Ordering::Acquire));
         runtime
             .request_cancel(watch_id)
             .unwrap_or_else(|error| panic!("watch cancellation failed: {error:?}"));
+        assert!(watch_flag.load(Ordering::Acquire), "取消不依赖接收方轮询");
         let receiver = watch_receiver.unwrap_or_else(|| panic!("watch receiver is missing"));
         futures_executor::block_on(receiver)
             .unwrap_or_else(|error| panic!("watch cancellation signal failed: {error}"));

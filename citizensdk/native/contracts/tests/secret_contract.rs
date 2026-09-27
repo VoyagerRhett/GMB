@@ -92,6 +92,9 @@ struct FakeVault {
 }
 
 impl SecretVault for FakeVault {
+    fn authorize_add_accounts(&self, _: [u8; 16], _: u32, _: VaultGeneration) -> ContractFuture<'_, ()> {
+        panic!("此夹具不得执行追加认证")
+    }
     fn ensure_wallet_key(&self, _: [u8; 16], wallet_index: u32,
         generation: VaultGeneration) -> ContractFuture<'_, ()> {
         Box::pin(async move {

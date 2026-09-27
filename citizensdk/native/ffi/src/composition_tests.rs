@@ -71,6 +71,9 @@ struct FakeVault {
 }
 
 impl SecretVault for FakeVault {
+    fn authorize_add_accounts(&self, _: [u8; 16], _: u32, _: VaultGeneration) -> ContractFuture<'_, ()> {
+        panic!("此夹具不得执行追加认证")
+    }
     fn ensure_wallet_key(&self, _: [u8; 16], _: u32, _: VaultGeneration) -> ContractFuture<'_, ()> {
         Box::pin(async { Err(ContractError::new(ContractErrorCode::Unsupported, "装配夹具不创建金库钥")) })
     }

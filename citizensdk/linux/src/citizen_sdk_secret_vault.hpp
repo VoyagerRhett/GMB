@@ -1,6 +1,7 @@
 #ifndef CITIZENSDK_LINUX_SECRET_VAULT_HPP
 #define CITIZENSDK_LINUX_SECRET_VAULT_HPP
 
+// 协调 Linux 安全存储、TPM 密钥与用户授权，按宿主操作管理密钥封装、解封和取消。
 #include <array>
 #include <mutex>
 #include "citizen_sdk_operation.hpp"

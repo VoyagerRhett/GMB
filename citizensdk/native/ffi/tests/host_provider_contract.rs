@@ -212,6 +212,7 @@ fn complete_vault() -> CitizenSdkHostSecretVaultV1 {
         wrap_dek: Some(vault_wrap),
         unwrap_dek: Some(vault_unwrap),
         retire_wallet_kek: Some(vault_retire),
+        authorize_add_accounts: Some(vault_ensure),
         ..CitizenSdkHostSecretVaultV1::default()
     }
 }
@@ -237,6 +238,12 @@ fn stores_are_complete_only_with_every_explicit_typed_callback() {
     assert!(validate_public_store_v1(&public).is_ok());
     assert!(validate_secure_store_v1(&secure).is_ok());
     assert!(validate_secret_vault_v1(&vault).is_ok());
+    let mut without_add_authorization = vault;
+    without_add_authorization.authorize_add_accounts = None;
+    assert!(validate_secret_vault_v1(&without_add_authorization).is_err());
+    let mut old_layout = vault;
+    old_layout.struct_size = 64;
+    assert!(validate_secret_vault_v1(&old_layout).is_err());
 
     let mut incomplete = public;
     incomplete.runtime_cache_delete = None;
