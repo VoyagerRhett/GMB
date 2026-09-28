@@ -45,7 +45,7 @@ jobs:
     timeout-minutes: 120
     permissions:
       actions: write
-      contents: read
+      contents: write
     env:
       CI: true
       WRANGLER_SEND_METRICS: false
@@ -126,3 +126,15 @@ jobs:
       run: node "$GITHUB_WORKSPACE/citizenserve/scripts/release/cloudflare/check/execute.mjs" workflow-step 7
     - shell: bash
       run: node "$GITHUB_WORKSPACE/citizenserve/scripts/release/cloudflare/check/execute.mjs" workflow-step 8
+    - name: 固化正式 Release
+      shell: bash
+      run: |-
+        node "$GITHUB_WORKSPACE/citizenserve/scripts/release/cloudflare/index.mjs" github-release \
+          --tag "$GMB_VERSION_TAG" \
+          --source-sha "$GMB_SOURCE_SHA" \
+          --title "公民服务端 · Cloudflare · Release" \
+          --notes "公民服务端 Cloudflare 版本 $GMB_SOFTWARE_VERSION。" \
+          --latest false \
+          --assets "$RUNNER_TEMP/citizenserve-cloudflare-release.tgz" \
+            "$RUNNER_TEMP/citizenserve-cloudflare-candidate/release-manifest.json" \
+            "$RUNNER_TEMP/citizenserve-cloudflare-candidate/SHA256SUMS"
