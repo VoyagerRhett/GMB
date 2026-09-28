@@ -105,7 +105,10 @@ fn github_entry_only_runs_product_ci_and_release() -> Result<(), Box<dyn Error>>
         let workflow = fs::read_to_string(workflow_root.join(&entry))
             .map_err(|error| format!("读取GMB Workflow失败：{error}"))?;
         for value in &forbidden {
-            assert!(!workflow.contains(value.as_str()), "Workflow包含禁止边界：{value}");
+            assert!(
+                !workflow.contains(value.as_str()),
+                "Workflow包含禁止边界：{value}"
+            );
         }
         assert!(workflow.contains("  flow:"));
         assert!(workflow.contains("workflow_dispatch:"));
