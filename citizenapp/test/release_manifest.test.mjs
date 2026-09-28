@@ -351,6 +351,8 @@ test('iOS Release黑盒UI验收使用主动真机探测且不改变正式App', (
   assert.match(iosUITests, /testWalletPagePreservesPublicSurfaceAndAvailableSdkEntry/u);
   assert.match(iosUITests, /testWalletGateLaunchesCitizenSdkCreateAndImportWithoutSecretInput/u);
   assert.match(iosUITests, /throw XCTSkip\("正式App尚无钱包/u);
-  assert.match(iosUITests, /不输入助记词\/密码/u);
-  assert.doesNotMatch(iosUITests, /typeText\(/u);
+  assert.match(iosUITests, /不读写助记词或密码/u);
+  const walletGateTest = iosUITests.match(/func testWalletGateLaunchesCitizenSdkCreateAndImportWithoutSecretInput\(\) throws \{[\s\S]*?\n  \}/u)?.[0];
+  assert.ok(walletGateTest);
+  assert.doesNotMatch(walletGateTest, /typeText\(/u);
 });

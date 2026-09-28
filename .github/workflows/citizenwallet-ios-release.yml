@@ -1,0 +1,147 @@
+# gmb.citizenwallet.ios.release 的独立 GitHub 工作流。
+name: gmb.citizenwallet.ios.release
+# 远端标题只展示产品、平台、流程；内部 pipeline 仍承担唯一机器身份。
+run-name: "${{ inputs.run_title }}"
+'on':
+  workflow_dispatch:
+    inputs:
+      pipeline:
+        required: true
+        type: string
+      run_title:
+        required: true
+        type: string
+      source_sha:
+        required: false
+        type: string
+      ci_run_id:
+        required: false
+        type: string
+      version_tag:
+        required: false
+        type: string
+      software_version:
+        required: false
+        type: string
+      spec_version:
+        required: false
+        type: string
+      chain_spec_version:
+        required: false
+        type: string
+      genesis_hash:
+        required: false
+        type: string
+      finalized_head:
+        required: false
+        type: string
+concurrency:
+  group: gmb.citizenwallet.ios.release
+  cancel-in-progress: false
+jobs:
+  flow:
+    name: 签名并固化公民钱包 iOS Release
+    runs-on: macos-15
+    timeout-minutes: 120
+    permissions:
+      actions: write
+      attestations: write
+      contents: write
+      id-token: write
+    env:
+      CI: true
+      WRANGLER_SEND_METRICS: false
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: '1'
+      CARGO_INCREMENTAL: '0'
+      GH_TOKEN: "${{ github.token }}"
+      GMB_SOURCE_SHA: "${{ inputs.source_sha }}"
+      GMB_CI_RUN_ID: "${{ inputs.ci_run_id }}"
+      GMB_VERSION_TAG: "${{ inputs.version_tag }}"
+      GMB_SOFTWARE_VERSION: "${{ inputs.software_version }}"
+      GMB_SPEC_VERSION: "${{ inputs.spec_version }}"
+      GMB_CHAIN_SPEC_VERSION: "${{ inputs.chain_spec_version }}"
+      GMB_CHAIN_GENESIS_HASH: "${{ inputs.genesis_hash }}"
+      GMB_CHAIN_FINALIZED_HEAD: "${{ inputs.finalized_head }}"
+      SOURCE_SHA: "${{ inputs.source_sha }}"
+      CI_RUN_ID: "${{ inputs.ci_run_id }}"
+      VERSION_TAG: "${{ inputs.version_tag }}"
+      SOFTWARE_VERSION: "${{ inputs.software_version }}"
+      SPEC_VERSION: "${{ inputs.spec_version }}"
+      CHAIN_SPEC_VERSION: "${{ inputs.chain_spec_version }}"
+      GENESIS_HASH: "${{ inputs.genesis_hash }}"
+      FINALIZED_HEAD: "${{ inputs.finalized_head }}"
+    steps:
+    - shell: bash
+      env:
+        PIPELINE: "${{ inputs.pipeline }}"
+        RUN_TITLE: "${{ inputs.run_title }}"
+        SOURCE_SHA: "${{ inputs.source_sha }}"
+        CI_RUN_ID: "${{ inputs.ci_run_id }}"
+        VERSION_TAG: "${{ inputs.version_tag }}"
+        SOFTWARE_VERSION: "${{ inputs.software_version }}"
+        SPEC_VERSION: "${{ inputs.spec_version }}"
+        CHAIN_SPEC_VERSION: "${{ inputs.chain_spec_version }}"
+        GENESIS_HASH: "${{ inputs.genesis_hash }}"
+        FINALIZED_HEAD: "${{ inputs.finalized_head }}"
+      run: |-
+        node --input-type=module <<'NODE'
+        const e=process.env,allowed=new Set(["gmb.citizenwallet.ios.release"]);
+        if(!allowed.has(e.PIPELINE||''))throw Error('产品流程身份无效');
+        if(e.RUN_TITLE!=="公民钱包 · iOS · Release")throw Error('产品平台流程展示标题无效');
+        if(!/^[0-9a-f]{40}$/.test(e.SOURCE_SHA||'')||!/^[1-9][0-9]*$/.test(e.CI_RUN_ID||'')||!e.VERSION_TAG)throw Error('Release来源输入无效');
+        if(!e.SOFTWARE_VERSION||[e.SPEC_VERSION,e.CHAIN_SPEC_VERSION,e.GENESIS_HASH,e.FINALIZED_HEAD].some(Boolean))throw Error('软件Release输入无效');
+        NODE
+    - name: 检出准确产品源码
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        ref: "${{ inputs.source_sha }}"
+        fetch-depth: 0
+        persist-credentials: false
+    - shell: bash
+      run: node "$GITHUB_WORKSPACE/citizenwallet/scripts/release/ios/ios/execute.mjs" workflow-step 0
+    - name: 装载准确Rust
+      uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5
+      with:
+        toolchain: 1.97.1
+        targets: aarch64-apple-ios
+    - env:
+        GH_TOKEN: "${{ github.token }}"
+      shell: bash
+      run: node "$GITHUB_WORKSPACE/citizenwallet/scripts/release/ios/ios/execute.mjs" workflow-step 1
+    - shell: bash
+      run: node "$GITHUB_WORKSPACE/citizenwallet/scripts/release/ios/ios/execute.mjs" workflow-step 2
+    - id: citizenwallet_release_ios__ios__flutter-version
+      shell: bash
+      run: node "$GITHUB_WORKSPACE/citizenwallet/scripts/release/ios/ios/execute.mjs" workflow-step 3
+    - name: 安装 Flutter
+      uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+      with:
+        flutter-version: "${{ steps.citizenwallet_release_ios__ios__flutter-version.outputs.version }}"
+    - shell: bash
+      run: node "$GITHUB_WORKSPACE/citizenwallet/scripts/release/ios/ios/execute.mjs" workflow-step 4
+    - shell: bash
+      run: node "$GITHUB_WORKSPACE/citizenwallet/scripts/release/ios/ios/execute.mjs" workflow-step 5
+    - working-directory: citizenwallet
+      shell: bash
+      run: node "$GITHUB_WORKSPACE/citizenwallet/scripts/release/ios/ios/execute.mjs" workflow-step 6
+    - working-directory: citizenwallet
+      shell: bash
+      run: node "$GITHUB_WORKSPACE/citizenwallet/scripts/release/ios/ios/execute.mjs" workflow-step 7
+    - working-directory: citizenwallet
+      shell: bash
+      run: node "$GITHUB_WORKSPACE/citizenwallet/scripts/release/ios/ios/execute.mjs" workflow-step 8
+    - working-directory: citizenwallet
+      shell: bash
+      run: node "$GITHUB_WORKSPACE/citizenwallet/scripts/release/ios/ios/execute.mjs" workflow-step 9
+    - env:
+        IOS_KEY: "${{ secrets.IOS_KEY }}"
+        IOS_PROVISIONING_PROFILE: "${{ secrets.WALLET_PROFILE }}"
+      shell: bash
+      run: node "$GITHUB_WORKSPACE/citizenwallet/scripts/release/ios/ios/execute.mjs" workflow-step 10
+    - shell: bash
+      run: node "$GITHUB_WORKSPACE/citizenwallet/scripts/release/ios/ios/execute.mjs" workflow-step 11
+    - name: 签署 iOS 正式资产构建来源
+      uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+      with:
+        subject-path: citizenwallet/build/release/*

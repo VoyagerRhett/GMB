@@ -29,7 +29,7 @@ function withReleaseSource(run: (execute: (options?: {
       writeFileSync(calls, '');
       const ci = { status: 'completed', conclusion: 'success', event: 'workflow_dispatch',
         head_branch: 'main', head_sha: sha, display_title: '公民服务端 · Cloudflare · CI',
-        path: '.github/workflows/repository.yml', ...options.ci };
+        path: '.github/workflows/citizenserve-cloudflare-ci.yml', ...options.ci };
       const releases = options.releases ?? [{ tag_name: 'citizenserve-cloudflare-v1.0.16', draft: false, prerelease: false }];
       // 替身只接受实际需要的只读命令；任何新增调用、错误路径或越界参数都会失败。
       writeFileSync(join(bin, 'gh'), `#!${process.execPath}\nimport fs from 'node:fs';\nconst args=process.argv.slice(2);fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify(['gh',...args])+'\\n');\nif(${options.apiFailure === true})process.exit(29);\nif(${options.invalidJSON === true}){process.stdout.write('invalid JSON');process.exit(0);}\nif(args.length!==2||args[0]!=='api')process.exit(31);\nconst response=args[1]==='repos/{owner}/{repo}/actions/runs/123'?${JSON.stringify(ci)}:args[1]==='repos/{owner}/{repo}/releases?per_page=100&page=1'?${JSON.stringify(releases)}:null;\nif(response===null)process.exit(32);process.stdout.write(JSON.stringify(response));\n`, { mode: 0o755 });

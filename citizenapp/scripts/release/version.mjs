@@ -131,7 +131,7 @@ function verifySuccessfulCIRun(values) {
     || run.event !== 'workflow_dispatch' || run.head_branch !== 'main'
     || run.head_sha !== values['source-sha']
     || String(run.display_title || '') !== expectedTitle
-    || !String(run.path || '').endsWith('/repository.yml')) {
+    || String(run.path || '') !== `.github/workflows/citizenapp-${values.target}-ci.yml`) {
     throw new Error('Release 来源不是同产品、同端、同 workflow 的成功 CI');
   }
   const head = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();

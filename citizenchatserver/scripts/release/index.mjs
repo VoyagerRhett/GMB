@@ -115,7 +115,7 @@ function verifyReleaseSource(values) {
 export function isExactSuccessfulCIRun(run, sourceSHA) {
   return run?.status === 'completed' && run.conclusion === 'success'
       && run.event === 'workflow_dispatch' && run.head_branch === 'main'
-      && run.head_sha === sourceSHA && String(run.path || '').endsWith('/repository.yml')
+      && run.head_sha === sourceSHA && String(run.path || '').endsWith('/citizenchatserver-cloudflare-ci.yml')
       && String(run.display_title || '') === ciTitle;
 }
 

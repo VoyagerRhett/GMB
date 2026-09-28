@@ -21,8 +21,8 @@ test('CI 单阶段只检查本仓并生成配置候选，未配置任何上游�
   assert.match(steps['0'].source, / action --instance citizenchatserver/u);
   assert.ok(steps['0'].source.indexOf('node --test') < steps['0'].source.indexOf(' action '));
   assert.doesNotMatch(steps['0'].source, /gh |release|curl|wget|TOKEN/u);
-  const workflow = readFileSync(new URL('../../../../.github/workflows/repository.yml', import.meta.url), 'utf8');
-  const check = workflow.split('  flow_033:')[1].split('  flow_034:')[0];
+  const workflow = readFileSync(new URL('../../../../.github/workflows/citizenchatserver-cloudflare-ci.yml', import.meta.url), 'utf8');
+  const check = workflow.split('  flow:')[1];
   assert.doesNotMatch(check, /secrets[.]|GH_TOKEN|GITHUB_TOKEN|workflow-step 1|VoyagerRhett\/TATA/u);
   assert.match(check, /workflow-step 0/u);
   assert.match(check, /CitizenChatServer-Cloudflare-CI/u);

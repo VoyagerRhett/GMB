@@ -199,7 +199,7 @@ test('Release 来源只接受本仓 main 的准确成功 CI', () => {
     event: 'workflow_dispatch',
     head_branch: 'main',
     head_sha: sourceSHA,
-    path: '.github/workflows/repository.yml',
+    path: '.github/workflows/citizenchatserver-cloudflare-ci.yml',
     display_title: '公民聊天服务 · Cloudflare · CI',
   };
   assert.equal(isExactSuccessfulCIRun(run, sourceSHA), true);
@@ -366,10 +366,10 @@ test('流程不引入 GitHub 产品子工作流或非加密协议', () => {
   }
 });
 
-test('GMB 唯一 Workflow 只调用 CitizenChatServer 扁平流程入口', () => {
-  const workflow = readFileSync(join(
-    instanceRoot, '..', '.github', 'workflows', 'repository.yml',
-  ), 'utf8');
+test('CitizenChatServer 独立 Workflow 只调用本产品扁平流程入口', () => {
+  const workflow = ['citizenchatserver-cloudflare-ci.yml', 'citizenchatserver-cloudflare-release.yml']
+    .map((name) => readFileSync(join(instanceRoot, '..', '.github', 'workflows', name), 'utf8'))
+    .join('\n');
   const paths = workflow.match(
     /citizenchatserver\/scripts\/(?:ci|release)\/[A-Za-z0-9./_-]+\.mjs/g,
   ) ?? [];

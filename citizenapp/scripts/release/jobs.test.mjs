@@ -19,10 +19,11 @@ test('CitizenApp两个Release Job保留准确身份且共用唯一版本实现',
 });
 
 test('CitizenApp Release Workflow只引用两个扁平平台Job', () => {
-  const workflow = readFileSync(new URL('../../../.github/workflows/repository.yml', import.meta.url), 'utf8');
-  assert.match(workflow, /citizenapp\/scripts\/release\/android[.]mjs/u);
-  assert.match(workflow, /citizenapp\/scripts\/release\/ios[.]mjs/u);
-  assert.doesNotMatch(workflow, /citizenapp\/scripts\/release\/(?:android|ios)\//u);
+  for (const platform of ['android', 'ios']) {
+    const workflow = readFileSync(new URL(`../../../.github/workflows/citizenapp-${platform}-release.yml`, import.meta.url), 'utf8');
+    assert.match(workflow, new RegExp(`citizenapp/scripts/release/${platform}[.]mjs`, 'u'));
+    assert.doesNotMatch(workflow, /citizenapp\/scripts\/release\/(?:android|ios)\//u);
+  }
   const sources = ['./android.mjs', './ios.mjs'].map(path => readFileSync(new URL(path, import.meta.url), 'utf8'));
   for (const source of sources) assert.doesNotMatch(source, /github-release|function runExactWorkflowStep/u);
 });

@@ -33,11 +33,11 @@ test('CitizenApp四个CI Job保留准确独立身份且共用唯一执行器', a
 });
 
 test('CitizenApp CI Workflow只引用六层内的唯一扁平文件', () => {
-  const workflow = readFileSync(new URL('../../../.github/workflows/repository.yml', import.meta.url), 'utf8');
-  for (const name of ['android.mjs', 'android-check.mjs', 'ios.mjs', 'ios-check.mjs']) {
-    assert.match(workflow, new RegExp(`citizenapp/scripts/ci/${name.replace('.', '[.]')}`, 'u'));
+  for (const [platform, names] of [['android', ['android.mjs', 'android-check.mjs']], ['ios', ['ios.mjs', 'ios-check.mjs']]]) {
+    const workflow = readFileSync(new URL(`../../../.github/workflows/citizenapp-${platform}-ci.yml`, import.meta.url), 'utf8');
+    for (const name of names) assert.match(workflow, new RegExp(`citizenapp/scripts/ci/${name.replace('.', '[.]')}`, 'u'));
+    assert.doesNotMatch(workflow, /citizenapp\/scripts\/ci\/(?:android|ios)\//u);
   }
-  assert.doesNotMatch(workflow, /citizenapp\/scripts\/ci\/(?:android|ios)\//u);
   for (const source of ['./android.mjs', './android-check.mjs', './ios.mjs', './ios-check.mjs']
     .map(path => readFileSync(new URL(path, import.meta.url), 'utf8'))) {
     assert.doesNotMatch(source, /function cacheIdentity|function runExactWorkflowStep/u);

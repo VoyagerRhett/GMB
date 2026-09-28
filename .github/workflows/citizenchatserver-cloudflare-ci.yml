@@ -1,0 +1,96 @@
+# gmb.citizenchatserver.cloudflare.ci 的独立 GitHub 工作流。
+name: gmb.citizenchatserver.cloudflare.ci
+# 远端标题只展示产品、平台、流程；内部 pipeline 仍承担唯一机器身份。
+run-name: "${{ inputs.run_title }}"
+'on':
+  workflow_dispatch:
+    inputs:
+      pipeline:
+        required: true
+        type: string
+      run_title:
+        required: true
+        type: string
+      source_sha:
+        required: false
+        type: string
+      ci_run_id:
+        required: false
+        type: string
+      version_tag:
+        required: false
+        type: string
+      software_version:
+        required: false
+        type: string
+      spec_version:
+        required: false
+        type: string
+      chain_spec_version:
+        required: false
+        type: string
+      genesis_hash:
+        required: false
+        type: string
+      finalized_head:
+        required: false
+        type: string
+concurrency:
+  group: gmb.citizenchatserver.cloudflare.ci
+  cancel-in-progress: false
+jobs:
+  flow:
+    name: 聊天服务本仓配置与合同检查
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      actions: write
+      contents: read
+    env:
+      CI: true
+      WRANGLER_SEND_METRICS: false
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: '1'
+      CARGO_INCREMENTAL: '0'
+      GMB_SOURCE_SHA: "${{ github.sha }}"
+      SOURCE_SHA: "${{ github.sha }}"
+    steps:
+    - shell: bash
+      env:
+        PIPELINE: "${{ inputs.pipeline }}"
+        RUN_TITLE: "${{ inputs.run_title }}"
+        SOURCE_SHA: "${{ inputs.source_sha }}"
+        CI_RUN_ID: "${{ inputs.ci_run_id }}"
+        VERSION_TAG: "${{ inputs.version_tag }}"
+        SOFTWARE_VERSION: "${{ inputs.software_version }}"
+        SPEC_VERSION: "${{ inputs.spec_version }}"
+        CHAIN_SPEC_VERSION: "${{ inputs.chain_spec_version }}"
+        GENESIS_HASH: "${{ inputs.genesis_hash }}"
+        FINALIZED_HEAD: "${{ inputs.finalized_head }}"
+      run: |-
+        node --input-type=module <<'NODE'
+        const e=process.env,allowed=new Set(["gmb.citizenchatserver.cloudflare.ci"]);
+        if(!allowed.has(e.PIPELINE||''))throw Error('产品流程身份无效');
+        if(e.RUN_TITLE!=="公民聊天服务 · Cloudflare · CI")throw Error('产品平台流程展示标题无效');
+        if([e.CI_RUN_ID,e.VERSION_TAG,e.SOFTWARE_VERSION,e.SPEC_VERSION,e.CHAIN_SPEC_VERSION,e.GENESIS_HASH,e.FINALIZED_HEAD].some(Boolean))throw Error('CI输入包含Release字段');
+        NODE
+    - name: 检出准确产品源码
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        ref: "${{ github.sha }}"
+        fetch-depth: 0
+        persist-credentials: false
+    - name: 装载准确Node.js
+      uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+      with:
+        node-version: 25.2.1
+    - name: 检查本仓合同并生成配置候选
+      shell: bash
+      run: node "$GITHUB_WORKSPACE/citizenchatserver/scripts/ci/check/execute.mjs" workflow-step 0
+    - name: 上传本仓 CI 配置候选
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: CitizenChatServer-Cloudflare-CI
+        path: "${{ runner.temp }}/citizenchatserver-cloudflare-candidate"
+        if-no-files-found: error
+        retention-days: 7

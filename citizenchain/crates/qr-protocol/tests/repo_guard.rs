@@ -91,9 +91,7 @@ fn github_entry_only_runs_product_ci_and_release() -> Result<(), Box<dyn Error>>
         .filter(|entry| entry.path().is_file())
         .map(|entry| entry.file_name().to_string_lossy().to_string())
         .collect::<Vec<_>>();
-    assert_eq!(entries, ["repository.yml"]);
-    let workflow = fs::read_to_string(workflow_root.join("repository.yml"))
-        .map_err(|error| format!("读取GMB repository.yml失败：{error}"))?;
+    assert_eq!(entries.len(), 26);
     let forbidden = [
         ["TATA", "_CONSOLE"].concat(),
         ["Tata", "Console"].concat(),
@@ -102,12 +100,16 @@ fn github_entry_only_runs_product_ci_and_release() -> Result<(), Box<dyn Error>>
         ["塔塔", "门禁"].concat(),
         [".publish", "'"].concat(),
     ];
-    for value in forbidden {
-        assert!(!workflow.contains(&value), "Workflow包含禁止边界：{value}");
+    for entry in entries {
+        assert!(entry.ends_with(".yml") && entry != "repository.yml");
+        let workflow = fs::read_to_string(workflow_root.join(&entry))
+            .map_err(|error| format!("读取GMB Workflow失败：{error}"))?;
+        for value in &forbidden {
+            assert!(!workflow.contains(value.as_str()), "Workflow包含禁止边界：{value}");
+        }
+        assert!(workflow.contains("  flow:"));
+        assert!(workflow.contains("workflow_dispatch:"));
     }
-    assert!(workflow.contains("产品CI与Release"));
-    assert!(workflow.contains("/scripts/ci/"));
-    assert!(workflow.contains("/scripts/release/"));
     Ok(())
 }
 
