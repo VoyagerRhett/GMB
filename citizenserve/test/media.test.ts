@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { deleteR2MediaAssets, mediaRoute } from '../src/media/service';
+import { deleteR2MediaAssets, mediaRoute } from '../src/media';
 import type { Env } from '../src/types';
 
 class FakeR2 {

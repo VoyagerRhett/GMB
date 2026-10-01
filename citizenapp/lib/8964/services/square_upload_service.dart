@@ -1,12 +1,12 @@
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/square_models.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/8964/services/square_media_processor.dart';
+import 'package:citizenapp/8964/services/square_media_store.dart';
 import 'package:citizenapp/my/membership/subscription_service.dart';
 
 class SquareUploadedContent {
@@ -36,6 +36,7 @@ class SquarePreparedContent {
     required this.manifestBytes,
     required List<SquareLocalMediaDraft> mediaDrafts,
     this.processedMedia,
+    this.mediaReferences = const [],
   }) : mediaDrafts = List.unmodifiable(mediaDrafts);
 
   final SquareSession session;
@@ -47,6 +48,7 @@ class SquarePreparedContent {
   final Uint8List manifestBytes;
   final List<SquareLocalMediaDraft> mediaDrafts;
   final SquareProcessedMediaBatch? processedMedia;
+  final List<SquareMediaReference> mediaReferences;
 
   Future<void> deleteTemporaryMedia() async {
     await processedMedia?.deleteTemporaryFiles();
@@ -54,6 +56,10 @@ class SquarePreparedContent {
 }
 
 abstract class SquareContentUploader {
+  Future<SquareSession> resumeSession(
+    String accountId,
+    SquareLoginSigner signer,
+  );
   Future<SquarePreparedContent> preparePostContent({
     required String accountId,
     required SquarePostType postType,
@@ -89,6 +95,12 @@ class SquareUploadService
   final SquareApiClient _api;
   final SquareMediaProcessor _mediaProcessor;
   final SubscriptionService _subscriptionService;
+
+  @override
+  Future<SquareSession> resumeSession(
+    String accountId,
+    SquareLoginSigner signer,
+  ) => _api.ensureSession(accountId: accountId, signLoginPayload: signer);
 
   @override
   Future<void> cancelMediaProcessing() => _mediaProcessor.cancel();
@@ -146,9 +158,16 @@ class SquareUploadService
       final mediaHashes = <String>[];
       final derivativeHashes = <String>[];
       for (final draft in finalMediaDrafts) {
-        final file = File(draft.path);
-        final digest = await sha256.bind(file.openRead()).first;
-        mediaHashes.add(digest.toString());
+        // 成品完整入库后才申请上传；数据库容量不足时不会发出媒体上传。
+        final stored = await const SquareMediaStore().saveFile(
+          cidNumber: session.cidNumber,
+          path: draft.path,
+          mediaKind: draft.mediaKind.workerValue,
+          contentType: draft.contentType,
+          byteSize: draft.byteSize,
+        );
+        final digest = stored.sha256;
+        mediaHashes.add(digest);
         mediaManifests.add({
           'media_kind': draft.mediaKind.workerValue,
           'file_name': draft.fileName,
@@ -162,10 +181,14 @@ class SquareUploadService
         });
       }
       for (final derivative in derivatives) {
-        final digest = await sha256
-            .bind(File(derivative.path).openRead())
-            .first;
-        derivativeHashes.add(digest.toString());
+        final stored = await const SquareMediaStore().saveFile(
+          cidNumber: session.cidNumber,
+          path: derivative.path,
+          mediaKind: 'image',
+          contentType: derivative.contentType,
+          byteSize: derivative.byteSize,
+        );
+        derivativeHashes.add(stored.sha256);
       }
 
       final trimmedTitle = title?.trim() ?? '';
@@ -238,6 +261,26 @@ class SquareUploadService
         manifestBytes: manifestBytes,
         mediaDrafts: finalMediaDrafts,
         processedMedia: processedMedia,
+        mediaReferences: [
+          for (var i = 0; i < finalMediaDrafts.length; i++) ...[
+            SquareMediaReference(
+              cidNumber: session.cidNumber,
+              mediaId: mediaHashes[i],
+              contentKind: 'publication',
+              contentId: prepared.postId,
+              mediaIndex: i,
+              mediaRole: 'main',
+            ),
+            SquareMediaReference(
+              cidNumber: session.cidNumber,
+              mediaId: derivativeHashes[i],
+              contentKind: 'publication',
+              contentId: prepared.postId,
+              mediaIndex: i,
+              mediaRole: derivatives[i].derivativeKind.name,
+            ),
+          ],
+        ],
       );
     } catch (_) {
       await processedMedia?.deleteTemporaryFiles();
@@ -301,7 +344,7 @@ class SquareUploadService
         manifestHash: prepared.manifestHash,
       );
     } finally {
-      // 已生成的媒体只服务本次上传；失败重试必须重新处理并重新校验会员档位。
+      // 成品字节已入库并由发布恢复行持有引用；这里只删除可再生的处理文件。
       await prepared.deleteTemporaryMedia();
     }
   }

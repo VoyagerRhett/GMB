@@ -3,17 +3,20 @@ import 'dart:async';
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:provider/provider.dart';
+import 'package:citizenapp/8964/pages/square_post_detail_page.dart';
+import 'package:citizenapp/8964/widgets/square_post_card.dart';
 
 import '../support/fake_citizen_sdk.dart';
 
 import 'package:citizenapp/my/myid/identity_badge_snapshot_store.dart';
 import 'package:citizenapp/8964/compose/compose_page.dart';
-import 'package:citizenapp/8964/compose/document/document_compose_body.dart';
+import 'package:citizenapp/8964/compose/document_compose_body.dart';
 import 'package:citizenapp/8964/compose/drafts/compose_draft.dart';
 import 'package:citizenapp/8964/compose/drafts/compose_draft_store.dart';
-import 'package:citizenapp/8964/compose/video/video_compose_body.dart';
-import 'package:citizenapp/8964/compose/widgets/compose_media_widgets.dart';
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/compose/video_compose_body.dart';
+import 'package:citizenapp/8964/compose/compose_media_widgets.dart';
+import 'package:citizenapp/8964/square_models.dart';
 import 'package:citizenapp/8964/pages/square_home_page.dart';
 import 'package:citizenapp/8964/profile/models/citizen_profile.dart';
 import 'package:citizenapp/8964/profile/services/citizen_profile_cache.dart';
@@ -191,6 +194,37 @@ class _ThrowingSessionProvider implements SquareSessionProvider {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
+class _DeviceMissingSessionProvider implements SquareSessionProvider {
+  int registrationCalls = 0;
+
+  @override
+  Future<SquareSession?> ensureSession() async {
+    if (registrationCalls == 0) {
+      throw const SquareApiException(
+        '设备未登记',
+        errorCode: 'device_not_registered',
+      );
+    }
+    return SquareSession(
+      sessionToken: 'registered',
+      cidNumber: 'CN220-CTZN2-100000001-2026',
+      bindingRevision: 1,
+      accountId:
+          '0x1111111111111111111111111111111111111111111111111111111111111111',
+      expiresAt: DateTime.now().millisecondsSinceEpoch + 60000,
+    );
+  }
+
+  @override
+  Future<SquareSession?> registerCurrentDevice() async {
+    registrationCalls++;
+    return ensureSession();
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
 /// 保持生产路径类型判断成立，但不访问真实 Worker。
 class _FakeSquareApiClient extends SquareApiClient {
   @override
@@ -326,6 +360,41 @@ Widget _wrap(Widget child) {
 }
 
 void main() {
+  for (final replace in [false, true]) {
+    testWidgets('详情返回${replace ? '替换' : '删除'}结果就地更新，不重查公共流', (tester) async {
+      final source = _RecordingFeedSource();
+      final session = FakeSessionProvider(null);
+      await tester.pumpWidget(
+        Provider<SquareSessionProvider>.value(
+          value: session,
+          child: _wrap(
+            SquareHomePage(
+              identityService: const _StaticComposeIdentityService(),
+              feedSource: source,
+              sessionProvider: session,
+              seedPosts: [samplePost(text: '操作前正文')],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(source.calls, 1);
+      tester.widget<SquarePostCard>(find.byType(SquarePostCard)).onTap!();
+      await tester.pumpAndSettle();
+      Navigator.of(tester.element(find.byType(SquarePostDetailPage))).pop(
+        replace
+            ? SquarePostDetailResult(
+                replacement: samplePost(id: 'replacement', text: '操作后正文'),
+              )
+            : const SquarePostDetailResult(deleted: true),
+      );
+      await tester.pumpAndSettle();
+      expect(source.calls, 1);
+      expect(find.text('操作前正文'), findsNothing);
+      expect(find.text('操作后正文'), replace ? findsOneWidget : findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
   setUp(() {
     SharedPreferences.setMockInitialValues({});
   });
@@ -894,6 +963,31 @@ void main() {
     // 会话失败属通用故障(非未注册),维持原故障文案,不得误入注册引导。
     expect(find.text('广场内容加载失败'), findsOneWidget);
     expect(find.text('尚未注册'), findsNothing);
+  });
+
+  testWidgets('广场查看缺设备只展示明确登记入口，点击后才授权', (tester) async {
+    final provider = _DeviceMissingSessionProvider();
+    await tester.pumpWidget(
+      _wrap(
+        SquareHomePage(
+          identityService: _emptyIdentityService(),
+          feedSource: _FakeSquareApiClient(),
+          sessionProvider: provider,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(provider.registrationCalls, 0);
+    expect(
+      find.byKey(const ValueKey('square-register-device')),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const ValueKey('square-register-device')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(provider.registrationCalls, 1);
+    expect(find.byKey(const ValueKey('square-register-device')), findsNothing);
   });
 
   testWidgets('本机无绑定 → 仍由 Worker 判定未注册并显示统一注册引导', (tester) async {

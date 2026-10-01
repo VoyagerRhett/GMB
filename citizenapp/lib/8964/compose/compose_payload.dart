@@ -1,4 +1,4 @@
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/square_models.dart';
 
 /// 选中媒体后把临时文件持久化到当前 CID 草稿目录；null 时沿用原路径。
 typedef ComposeMediaPersistor = Future<SquareLocalMediaDraft> Function(

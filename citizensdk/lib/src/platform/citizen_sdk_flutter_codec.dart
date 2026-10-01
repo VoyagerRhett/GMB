@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 import '../api/citizen_qr.dart';
 import '../api/citizen_sdk_error.dart';
 import '../api/citizen_sdk_events.dart';
-import '../crypto/account_codec.dart';
+import '../account_codec.dart';
 import '../models/citizen_account.dart';
 import '../models/citizen_capability.dart';
 import '../models/citizen_chain_state.dart';
@@ -108,6 +108,7 @@ final class CitizenSdkFlutterCodec {
     'reconcileWalletCleanup',
     'signWalletPayload',
     'deriveApplicationKey',
+    'deriveApplicationKeys',
     'beginSigning',
     'consumeExternalSignature',
     'cancelSigning',
@@ -144,7 +145,10 @@ final class CitizenSdkFlutterCodec {
   };
 
   /// open唯一形状同时声明凭据提供者存在性；实际凭据绝不进入open或事件。
-  List<Object?> encodeOpen([int modules = CitizenSdkModules.full, bool hasCredentialProvider = false]) {
+  List<Object?> encodeOpen([
+    int modules = CitizenSdkModules.full,
+    bool hasCredentialProvider = false,
+  ]) {
     if (modules <= 0 || modules > 0xffffffff) {
       throw const CitizenSdkException(
         code: CitizenSdkErrorCode.invalidArgument,
@@ -175,20 +179,39 @@ final class CitizenSdkFlutterCodec {
   }
 
   List<Object?> encodeSigningPayload(CitizenSigningPayload payload) {
-    if (payload.kind < 1 || payload.kind > 6 || utf8.encode(payload.fieldsJson).length > 4096 ||
+    if (payload.kind < 1 ||
+        payload.kind > 6 ||
+        utf8.encode(payload.fieldsJson).length > 4096 ||
         payload.payloadBytes.length > maximumSigningPayloadBytes) {
-      throw const CitizenSdkException(code: CitizenSdkErrorCode.invalidArgument, message: '载荷输入超过接口边界');
+      throw const CitizenSdkException(
+        code: CitizenSdkErrorCode.invalidArgument,
+        message: '载荷输入超过接口边界',
+      );
     }
-    return [protocolVersion, payload.kind, payload.fieldsJson, payload.payloadBytes];
+    return [
+      protocolVersion,
+      payload.kind,
+      payload.fieldsJson,
+      payload.payloadBytes,
+    ];
   }
 
   Uint8List decodeSigningPayload(Object? raw, int kind) {
     final tuple = _tuple(raw, 2, 'signing payload');
     _expectProtocol(tuple[0]);
     final bytes = _bytesView(tuple[1], 'signing payload bytes');
-    final exact = switch (kind) { 1 => 32, 2 => 4, 3 => 97, 4 => 92, 6 => 8, _ => null };
-    if (bytes.isEmpty || bytes.length > maximumSigningPayloadBytes ||
-        (exact != null && bytes.length != exact)) throw _decodeFailure('载荷输出长度无效');
+    final exact = switch (kind) {
+      1 => 32,
+      2 => 4,
+      3 => 97,
+      4 => 92,
+      6 => 8,
+      _ => null,
+    };
+    if (bytes.isEmpty ||
+        bytes.length > maximumSigningPayloadBytes ||
+        (exact != null && bytes.length != exact))
+      throw _decodeFailure('载荷输出长度无效');
     return Uint8List.fromList(bytes).asUnmodifiableView();
   }
 
@@ -329,10 +352,13 @@ final class CitizenSdkFlutterCodec {
       'walletChanged' => _decodeWalletEvent(sequence, payload),
       'finalizedBlockChanged' => _decodeFinalizedBlockEvent(sequence, payload),
       'capabilitiesChanged' => _decodeCapabilitiesEvent(sequence, payload),
-      'qrCaptureResult' || 'qrCaptureError' || 'qrCapturePreview' || 'qrCaptureClosed' =>
-        _decodeCaptureEvent(sequence, type, payload),
+      'qrCaptureResult' ||
+      'qrCaptureError' ||
+      'qrCapturePreview' ||
+      'qrCaptureClosed' => _decodeCaptureEvent(sequence, type, payload),
       'privateKeyClosed' => _decodePrivateKeyClosed(sequence, payload),
-      'credentialRequest' || 'credentialCancelled' => _decodeCredentialEvent(sequence, type, payload),
+      'credentialRequest' ||
+      'credentialCancelled' => _decodeCredentialEvent(sequence, type, payload),
       _ => throw _decodeFailure('未知事件类型：$type'),
     };
     return DecodedCitizenSdkEvent(
@@ -806,18 +832,26 @@ final class CitizenSdkFlutterCodec {
     final diagnosticRaw = _list(tuple[6], 'walletState.diagnostics');
     if (diagnosticRaw.length > 1991) throw _decodeFailure('钱包诊断数量越界');
     final diagnostics = <CitizenWalletDiagnostic>[];
-    final walletIndices = accounts.map((account) => account.walletIndex).toSet();
+    final walletIndices = accounts
+        .map((account) => account.walletIndex)
+        .toSet();
     final diagnosticIds = <String>{};
     for (final raw in diagnosticRaw) {
       final item = _tuple(raw, 7, 'wallet diagnostic');
       final index = _u32Int(item[0], 'diagnostic.walletIndex');
       final name = _string(item[1], 'diagnostic.walletName');
       final id = _hex32(item[2], 'diagnostic.accountId');
-      final address = item[3] == null ? null : _string(item[3], 'diagnostic.ss58Address');
+      final address = item[3] == null
+          ? null
+          : _string(item[3], 'diagnostic.ss58Address');
       final reason = _u32Int(item[4], 'diagnostic.reason');
-      if (!_validAccountName(name) || (address != null && utf8.encode(address).length > 128) ||
-          reason < 1 || reason > 3 || !walletIndices.add(index) ||
-          accountIds.contains(id) || !diagnosticIds.add(id)) {
+      if (!_validAccountName(name) ||
+          (address != null && utf8.encode(address).length > 128) ||
+          reason < 1 ||
+          reason > 3 ||
+          !walletIndices.add(index) ||
+          accountIds.contains(id) ||
+          !diagnosticIds.add(id)) {
         throw _decodeFailure('钱包诊断事实不一致');
       }
       final mode = switch (item[5]) {
@@ -829,31 +863,61 @@ final class CitizenSdkFlutterCodec {
       CitizenWalletCleanupTargets? cleanupTargets;
       if (item[6] != null) {
         final targets = _tuple(item[6], 2, 'diagnostic.cleanupTargets');
-        final ids = _list(targets[0], 'cleanup.accountIds').map((value) => _hex32(value, 'cleanup.accountId')).toList();
-        if (ids.isEmpty || ids.length > 1990 || ids.toSet().length != ids.length ||
-            !Iterable<int>.generate(ids.length - 1).every((i) => ids[i].compareTo(ids[i + 1]) < 0)) {
+        final ids = _list(
+          targets[0],
+          'cleanup.accountIds',
+        ).map((value) => _hex32(value, 'cleanup.accountId')).toList();
+        if (ids.isEmpty ||
+            ids.length > 1990 ||
+            ids.toSet().length != ids.length ||
+            !Iterable<int>.generate(ids.length - 1)
+                .every((i) => ids[i].compareTo(ids[i + 1]) < 0)) {
           throw _decodeFailure('清理账户目标无效');
         }
-        cleanupTargets = CitizenWalletCleanupTargets(accountIds: ids, deleteWalletWideKey: _boolean(targets[1], 'cleanup.deleteWalletWideKey'));
+        cleanupTargets = CitizenWalletCleanupTargets(
+          accountIds: ids,
+          deleteWalletWideKey: _boolean(
+            targets[1],
+            'cleanup.deleteWalletWideKey',
+          ),
+        );
       }
-      diagnostics.add(CitizenWalletDiagnostic(walletIndex: index, walletName: name, accountId: id,
-        ss58Address: address, diagnosticReason: CitizenWalletDiagnosticReason.values[reason - 1],
-        signMode: mode, cleanupTargets: cleanupTargets));
+      diagnostics.add(
+        CitizenWalletDiagnostic(
+          walletIndex: index,
+          walletName: name,
+          accountId: id,
+          ss58Address: address,
+          diagnosticReason: CitizenWalletDiagnosticReason.values[reason - 1],
+          signMode: mode,
+          cleanupTargets: cleanupTargets,
+        ),
+      );
     }
     final state = _u32Int(tuple[3], 'walletState.initializationState');
     final cleanup = _boolean(tuple[4], 'walletState.cleanupPending');
-    if (state > 2 || (state == 1) != (accounts.isNotEmpty || diagnostics.isNotEmpty) || (state == 0 && cleanup)) {
+    if (state > 2 ||
+        (state == 1) != (accounts.isNotEmpty || diagnostics.isNotEmpty) ||
+        (state == 0 && cleanup)) {
       throw _decodeFailure('钱包初始化/清理事实与目录不一致');
     }
-    final activeWalletIndex = tuple[5] == null ? null : _u32Int(tuple[5], 'walletState.activeWalletIndex');
-    if (activeWalletIndex != null && !walletIndices.contains(activeWalletIndex)) {
+    final activeWalletIndex = tuple[5] == null
+        ? null
+        : _u32Int(tuple[5], 'walletState.activeWalletIndex');
+    if (activeWalletIndex != null &&
+        !walletIndices.contains(activeWalletIndex)) {
       throw _decodeFailure('付款钱包索引不在当前目录');
     }
     // 同一修订的热账户投影必须逐字段一致，不能只核账户集合。
-    for (final account in accounts.where((account) => account.signMode == CitizenWalletSignMode.hot)) {
+    for (final account in accounts.where(
+      (account) => account.signMode == CitizenWalletSignMode.hot,
+    )) {
       final original = hotProfile?.accountById(account.accountId);
-      if (original == null || original.index != account.accountIndex || original.name != account.name ||
-          original.ss58Address != account.ss58Address || original.createdAtMillis != account.createdAtMillis) {
+      if (original == null ||
+          original.index != account.accountIndex ||
+          original.name != account.name ||
+          original.ss58Address != account.ss58Address ||
+          original.createdAtMillis != account.createdAtMillis) {
         throw _decodeFailure('热账户投影与同修订profile不一致');
       }
     }
@@ -868,32 +932,51 @@ final class CitizenSdkFlutterCodec {
     );
   }
 
-  CitizenWalletInputValidation decodeWalletInputValidation(List<Object?> value) {
+  CitizenWalletInputValidation decodeWalletInputValidation(
+    List<Object?> value,
+  ) {
     _expectLength(value, 2, 'wallet input validation');
     final reason = _u32Int(value[0], 'validation.reason');
-    final position = value[1] == null ? null : _u32Int(value[1], 'validation.position');
+    final position = value[1] == null
+        ? null
+        : _u32Int(value[1], 'validation.position');
     if (reason >= CitizenWalletInputReason.values.length ||
-        (reason == 3) != (position != null) || (position != null && position >= 24)) {
+        (reason == 3) != (position != null) ||
+        (position != null && position >= 24)) {
       throw _decodeFailure('钱包输入校验原因或位置无效');
     }
-    return CitizenWalletInputValidation(reason: CitizenWalletInputReason.values[reason], position: position);
+    return CitizenWalletInputValidation(
+      reason: CitizenWalletInputReason.values[reason],
+      position: position,
+    );
   }
 
   /// 只计UTF-8传输长度，不复制敏感文本；密码/助记词规则始终由Core执行。
   bool walletInputWithinLimit(String value) {
     var bytes = 0;
     for (final rune in value.runes) {
-      bytes += rune < 0x80 ? 1 : rune < 0x800 ? 2 : rune < 0x10000 ? 3 : 4;
+      bytes += rune < 0x80
+          ? 1
+          : rune < 0x800
+          ? 2
+          : rune < 0x10000
+          ? 3
+          : 4;
       if (bytes > maximumWalletInputBytes) return false;
     }
     return true;
   }
+
   void _secretInput(Object? value, String field) {
-    if (!walletInputWithinLimit(_string(value, field))) throw _decodeFailure('钱包输入超过传输长度上限');
+    if (!walletInputWithinLimit(_string(value, field)))
+      throw _decodeFailure('钱包输入超过传输长度上限');
   }
+
   String _resource(Object? value) {
     final id = _string(value, 'resource');
-    if (id.isEmpty || id.length > 128 || !RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(id)) {
+    if (id.isEmpty ||
+        id.length > 128 ||
+        !RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(id)) {
       throw _decodeFailure('SDK资源标识无效');
     }
     return id;
@@ -1149,29 +1232,39 @@ final class CitizenSdkFlutterCodec {
     if (method == 'qrValidateSignResponse') {
       _expectLength(fields, 2, '$method fields');
       final sessionId = _string(fields[0], '$method.sessionId');
-      if (sessionId.isEmpty || utf8.encode(sessionId).length > 128) throw _decodeFailure('会话编号长度无效');
+      if (sessionId.isEmpty || utf8.encode(sessionId).length > 128)
+        throw _decodeFailure('会话编号长度无效');
       _qrText(fields[1], '$method.response');
       return;
     }
     if (method == 'qrEncodeDocument') {
       _expectLength(fields, 1, '$method fields');
-      if (utf8.encode(_string(fields[0], 'qr content')).length > 65536) throw _decodeFailure('编码输入超过64KiB');
+      if (utf8.encode(_string(fields[0], 'qr content')).length > 65536)
+        throw _decodeFailure('编码输入超过64KiB');
       return;
     }
     if (method == 'qrPrepareAccountAuthorization') {
       _expectLength(fields, 3, '$method fields');
       _u32Int(fields[0], 'action');
-      if (_bytesView(fields[1], 'authorization payload').length > maximumQrReviewPayloadBytes ||
-          utf8.encode(_string(fields[2], 'accountId')).length > 1024) throw _decodeFailure('授权准备输入超过边界');
+      if (_bytesView(fields[1], 'authorization payload').length >
+              maximumQrReviewPayloadBytes ||
+          utf8.encode(_string(fields[2], 'accountId')).length > 1024)
+        throw _decodeFailure('授权准备输入超过边界');
       return;
     }
     if (method == 'respondCredential' || method == 'cancelCredential') {
-      _expectLength(fields, method == 'respondCredential' ? 2 : 1, '$method fields');
+      _expectLength(
+        fields,
+        method == 'respondCredential' ? 2 : 1,
+        '$method fields',
+      );
       if (_u64Decimal(fields[0], 'hostOperationId') == BigInt.zero) {
         throw _decodeFailure('hostOperationId必须非零');
       }
-      if (fields.length == 2 && fields[1] != null &&
-          _bytesView(fields[1], 'credential').length > maximumWalletInputBytes) {
+      if (fields.length == 2 &&
+          fields[1] != null &&
+          _bytesView(fields[1], 'credential').length >
+              maximumWalletInputBytes) {
         throw _decodeFailure('设备凭据超过字节上限');
       }
       return;
@@ -1313,11 +1406,13 @@ final class CitizenSdkFlutterCodec {
       case 'validateWalletMnemonic':
         _expectLength(fields, 2, '$method fields');
         _secretInput(fields[0], method);
-        if (![12, 18, 24].contains(_u32Int(fields[1], 'wordCount'))) throw _decodeFailure('无效词数');
+        if (![12, 18, 24].contains(_u32Int(fields[1], 'wordCount')))
+          throw _decodeFailure('无效词数');
         return;
       case 'prepareWalletCreation':
         _expectLength(fields, 2, '$method fields');
-        if (![12, 18, 24].contains(_u32Int(fields[0], 'wordCount'))) throw _decodeFailure('无效词数');
+        if (![12, 18, 24].contains(_u32Int(fields[0], 'wordCount')))
+          throw _decodeFailure('无效词数');
         _secretInput(fields[1], 'password');
         return;
       case 'importWallet':
@@ -1359,31 +1454,43 @@ final class CitizenSdkFlutterCodec {
       case 'qrDecodeImage':
         _expectLength(fields, 2, '$method fields');
         final image = _bytesView(fields[0], 'qr.image');
-        if (image.isEmpty || image.length > maximumQrImageBytes) throw _decodeFailure('图片长度无效');
+        if (image.isEmpty || image.length > maximumQrImageBytes)
+          throw _decodeFailure('图片长度无效');
         decodeQrPurpose(fields[1]);
         return;
       case 'importColdAccountCode':
         _expectLength(fields, 2, '$method fields');
         _qrText(fields[0], '$method.code');
         final codeName = _string(fields[1], '$method.name');
-        if (codeName.isNotEmpty && !_validAccountName(codeName)) throw _decodeFailure('账户名称无效');
+        if (codeName.isNotEmpty && !_validAccountName(codeName))
+          throw _decodeFailure('账户名称无效');
         return;
       case 'repairHotWallet':
       case 'deleteDiagnosticWallet':
       case 'renameDiagnosticWallet':
-        _expectLength(fields, method == 'renameDiagnosticWallet' ? 3 : 2, '$method fields');
+        _expectLength(
+          fields,
+          method == 'renameDiagnosticWallet' ? 3 : 2,
+          '$method fields',
+        );
         _resource(fields[0]);
         _u32Int(fields[1], '$method.walletIndex');
-        if (method == 'renameDiagnosticWallet' && !_validAccountName(_string(fields[2], '$method.name'))) {
+        if (method == 'renameDiagnosticWallet' &&
+            !_validAccountName(_string(fields[2], '$method.name'))) {
           throw _decodeFailure('钱包名称无效');
         }
         return;
       case 'setActiveWallet':
       case 'renameWallet':
-        _expectLength(fields, method == 'setActiveWallet' ? 2 : 3, '$method fields');
+        _expectLength(
+          fields,
+          method == 'setActiveWallet' ? 2 : 3,
+          '$method fields',
+        );
         _u64Decimal(fields[0], '$method.expectedRevision');
         _u32Int(fields[1], '$method.walletIndex');
-        if (method == 'renameWallet' && !_validAccountName(_string(fields[2], '$method.name'))) {
+        if (method == 'renameWallet' &&
+            !_validAccountName(_string(fields[2], '$method.name'))) {
           throw _decodeFailure('钱包名称无效');
         }
         return;
@@ -1407,7 +1514,9 @@ final class CitizenSdkFlutterCodec {
         _expectLength(fields, 2, '$method fields');
         final ss58 = _string(fields[0], '$method.ss58Address');
         final ss58Name = _string(fields[1], '$method.name');
-        if (ss58.isEmpty || ss58.length > 64 || (ss58Name.isNotEmpty && !_validAccountName(ss58Name))) {
+        if (ss58.isEmpty ||
+            ss58.length > 64 ||
+            (ss58Name.isNotEmpty && !_validAccountName(ss58Name))) {
           throw _decodeFailure('冷账户 SS58 或账户名称无效');
         }
         return;
@@ -1439,6 +1548,23 @@ final class CitizenSdkFlutterCodec {
         final applicationInfo = _bytesView(fields[2], '$method.info');
         if (applicationInfo.isEmpty || applicationInfo.length > 256) {
           throw _decodeFailure('deriveApplicationKey.info 必须包含 1..256 字节');
+        }
+        return;
+      case 'deriveApplicationKeys':
+        _expectLength(fields, 3, '$method fields');
+        _hex32(fields[0], '$method.accountId');
+        if (_bytesView(fields[1], '$method.salt').length != 32) {
+          throw _decodeFailure('deriveApplicationKeys.salt 必须是 32 字节');
+        }
+        final infos = fields[2];
+        if (infos is! List || infos.isEmpty || infos.length > 16) {
+          throw _decodeFailure('deriveApplicationKeys.infos 必须包含 1..16 项');
+        }
+        for (final info in infos) {
+          final bytes = _bytesView(info, '$method.info');
+          if (bytes.isEmpty || bytes.length > 256) {
+            throw _decodeFailure('deriveApplicationKeys.info 必须包含 1..256 字节');
+          }
         }
         return;
       case 'beginSigning':
@@ -1633,7 +1759,9 @@ final class CitizenSdkFlutterCodec {
         _expectLength(value, 1, '$method value');
         final documents = _list(value[0], 'qr.imageResults');
         if (documents.length > 64) throw _decodeFailure('图片二维码数量超过上限');
-        for (final document in documents) { decodeQrDocument(document); }
+        for (final document in documents) {
+          decodeQrDocument(document);
+        }
         return;
       case 'validateWalletPassword':
       case 'validateWalletMnemonic':
@@ -1642,7 +1770,10 @@ final class CitizenSdkFlutterCodec {
       case 'walletWordSuggestions':
         _expectLength(value, 1, '$method value');
         final words = _list(value[0], 'word suggestions');
-        if (words.length > 6 || words.any((word) => word is! String || !RegExp(r'^[a-z]+$').hasMatch(word))) {
+        if (words.length > 6 ||
+            words.any(
+              (word) => word is! String || !RegExp(r'^[a-z]+$').hasMatch(word),
+            )) {
           throw _decodeFailure('候选词结果无效');
         }
         return;
@@ -1655,7 +1786,9 @@ final class CitizenSdkFlutterCodec {
       case 'revealPrivateKey':
         _expectLength(value, 1, '$method value');
         final secret = _bytesView(value[0], 'sensitive result');
-        if (method == 'revealPrivateKey' ? secret.length != 32 : (secret.isEmpty || secret.length > maximumWalletInputBytes)) {
+        if (method == 'revealPrivateKey'
+            ? secret.length != 32
+            : (secret.isEmpty || secret.length > maximumWalletInputBytes)) {
           throw _decodeFailure('受控敏感结果长度无效');
         }
         return;
@@ -1809,6 +1942,16 @@ final class CitizenSdkFlutterCodec {
           throw _decodeFailure('应用派生钥结果必须是 32 字节');
         }
         return;
+      case 'deriveApplicationKeys':
+        _expectLength(value, 1, '$method value');
+        final keys = value[0];
+        if (keys is! List ||
+            keys.isEmpty ||
+            keys.length > 16 ||
+            keys.any((key) => key is! Uint8List || key.length != 32)) {
+          throw _decodeFailure('应用派生钥批次结果无效');
+        }
+        return;
       case 'beginSigning':
       case 'consumeExternalSignature':
         _expectLength(value, 1, '$method value');
@@ -1914,14 +2057,28 @@ final class CitizenSdkFlutterCodec {
     final text = _string(raw, 'authorization');
     if (utf8.encode(text).length > 65536) throw _decodeFailure('授权准备结果超过64KiB');
     final Object? value;
-    try { value = jsonDecode(text); } on FormatException { throw _decodeFailure('授权准备结果JSON无效'); }
-    const keys = {'reason', 'genesis_hash', 'cid_number', 'current_account_id',
-      'expected_binding_revision', 'expires_at', 'materialized_payload'};
-    if (value is! Map<String, dynamic> || value.length != keys.length || !value.keys.every(keys.contains)) {
+    try {
+      value = jsonDecode(text);
+    } on FormatException {
+      throw _decodeFailure('授权准备结果JSON无效');
+    }
+    const keys = {
+      'reason',
+      'genesis_hash',
+      'cid_number',
+      'current_account_id',
+      'expected_binding_revision',
+      'expires_at',
+      'materialized_payload',
+    };
+    if (value is! Map<String, dynamic> ||
+        value.length != keys.length ||
+        !value.keys.every(keys.contains)) {
       throw _decodeFailure('授权准备结果字段不符合闭集');
     }
     final reason = _nonNegativeInt(value['reason'], 'authorization.reason');
-    if (reason >= CitizenQrAuthorizationReason.values.length) throw _decodeFailure('未知授权准备原因');
+    if (reason >= CitizenQrAuthorizationReason.values.length)
+      throw _decodeFailure('未知授权准备原因');
     if (reason != 0) {
       // 校验后的Map直接逐字段读取，不捕获try内赋值的Object?破坏类型提升。
       for (final key in keys) {
@@ -1930,27 +2087,57 @@ final class CitizenSdkFlutterCodec {
         }
         throw _decodeFailure('无效授权准备不得携带成功事实');
       }
-      return CitizenQrAuthorization(reason: CitizenQrAuthorizationReason.values[reason]);
+      return CitizenQrAuthorization(
+        reason: CitizenQrAuthorizationReason.values[reason],
+      );
     }
-    return CitizenQrAuthorization(reason: CitizenQrAuthorizationReason.valid,
+    return CitizenQrAuthorization(
+      reason: CitizenQrAuthorizationReason.valid,
       genesisHash: _hex32(value['genesis_hash'], 'authorization.genesisHash'),
       cidNumber: _string(value['cid_number'], 'authorization.cidNumber'),
-      currentAccountId: value['current_account_id'] == null ? null : _hex32(value['current_account_id'], 'authorization.currentAccountId'),
-      expectedBindingRevision: _u64Decimal(value['expected_binding_revision'], 'authorization.revision'),
+      currentAccountId: value['current_account_id'] == null
+          ? null
+          : _hex32(
+              value['current_account_id'],
+              'authorization.currentAccountId',
+            ),
+      expectedBindingRevision: _u64Decimal(
+        value['expected_binding_revision'],
+        'authorization.revision',
+      ),
       expiresAt: _u64Decimal(value['expires_at'], 'authorization.expiresAt'),
-      materializedPayload: _hexByteString(value['materialized_payload'], 'authorization.payload', 1, maximumQrReviewPayloadBytes));
+      materializedPayload: _hexByteString(
+        value['materialized_payload'],
+        'authorization.payload',
+        1,
+        maximumQrReviewPayloadBytes,
+      ),
+    );
   }
 
-  Uint8List _hexByteString(Object? input, String field, int minimum, int maximum) {
+  Uint8List _hexByteString(
+    Object? input,
+    String field,
+    int minimum,
+    int maximum,
+  ) {
     final text = _string(input, field);
-    if (!RegExp(r'^0x(?:[0-9a-f]{2})*$').hasMatch(text)) throw _decodeFailure('$field不是规范字节');
+    if (!RegExp(r'^0x(?:[0-9a-f]{2})*$').hasMatch(text))
+      throw _decodeFailure('$field不是规范字节');
     final count = (text.length - 2) ~/ 2;
-    if (count < minimum || count > maximum) throw _decodeFailure('$field字节长度无效');
-    return Uint8List.fromList([for (var offset = 2; offset < text.length; offset += 2)
-      int.parse(text.substring(offset, offset + 2), radix: 16)]);
+    if (count < minimum || count > maximum)
+      throw _decodeFailure('$field字节长度无效');
+    return Uint8List.fromList([
+      for (var offset = 2; offset < text.length; offset += 2)
+        int.parse(text.substring(offset, offset + 2), radix: 16),
+    ]);
   }
 
-  CitizenQrDocument decodeQrDocument(Object? raw, {bool signed = false, bool review = false}) {
+  CitizenQrDocument decodeQrDocument(
+    Object? raw, {
+    bool signed = false,
+    bool review = false,
+  }) {
     final text = _string(raw, 'qr.document');
     if (utf8.encode(text).length > 65536) throw _decodeFailure('二维码结果超过64KiB');
     final Object? decoded;
@@ -1982,11 +2169,27 @@ final class CitizenSdkFlutterCodec {
     } else if (kind == 3) {
       keys.addAll(<String>{'cid_number', 'account_id'});
     } else if (kind == 4) {
-      keys.addAll(<String>{'request_id', 'expires_at', 'account_id', 'amount', 'symbol', 'memo', 'bank_cid_number'});
+      keys.addAll(<String>{
+        'request_id',
+        'expires_at',
+        'account_id',
+        'amount',
+        'symbol',
+        'memo',
+        'bank_cid_number',
+      });
     } else if (kind == 5) {
       keys.add('account_id');
     } else if (kind == 6) {
-      keys.addAll(<String>{'request_id', 'expires_at', 'signer_account_id', 'signature', 'key_exchange_public_key', 'encryption_nonce', 'ciphertext'});
+      keys.addAll(<String>{
+        'request_id',
+        'expires_at',
+        'signer_account_id',
+        'signature',
+        'key_exchange_public_key',
+        'encryption_nonce',
+        'ciphertext',
+      });
     } else {
       throw _decodeFailure('二维码kind不在闭集');
     }
@@ -1996,8 +2199,18 @@ final class CitizenSdkFlutterCodec {
     }
     if (review) {
       if (kind != 1 || signed) throw _decodeFailure('审阅必须绑定签名请求');
-      keys.addAll(<String>{'pallet_name', 'call_name', 'call_arguments', 'genesis_hash',
-        'spec_version', 'transaction_version', 'era', 'nonce', 'tip', 'block_hash'});
+      keys.addAll(<String>{
+        'pallet_name',
+        'call_name',
+        'call_arguments',
+        'genesis_hash',
+        'spec_version',
+        'transaction_version',
+        'era',
+        'nonce',
+        'tip',
+        'block_hash',
+      });
       _hex32(decoded['genesis_hash'], 'review.genesisHash');
       _hex32(decoded['block_hash'], 'review.blockHash');
       _u32Int(decoded['spec_version'], 'review.specVersion');
@@ -2005,30 +2218,46 @@ final class CitizenSdkFlutterCodec {
       _u64Decimal(decoded['nonce'], 'review.nonce');
       final tip = _string(decoded['tip'], 'review.tip');
       final tipValue = BigInt.tryParse(tip);
-      if (!RegExp(r'^(0|[1-9][0-9]{0,38})$').hasMatch(tip) || tipValue == null || tipValue.bitLength > 128) {
+      if (!RegExp(r'^(0|[1-9][0-9]{0,38})$').hasMatch(tip) ||
+          tipValue == null ||
+          tipValue.bitLength > 128) {
         throw _decodeFailure('review.tip不是u128');
       }
-      for (final field in ['pallet_name', 'call_name', 'call_arguments', 'era']) {
+      for (final field in [
+        'pallet_name',
+        'call_name',
+        'call_arguments',
+        'era',
+      ]) {
         _string(decoded[field], 'review.$field');
       }
     }
     if (decoded.length != keys.length || !decoded.keys.every(keys.contains)) {
       throw _decodeFailure('二维码文档字段不符合Core闭集');
     }
-    if (kind == 1 && _u32Int(decoded['action'], 'qr.action') > 0xffff) throw _decodeFailure('二维码动作超出u16');
-    if (review && decoded['signer_account_id'] == null) throw _decodeFailure('审阅资源未绑定签名账户');
-    if (kind == 2 && ((decoded['current_account_id'] == null) != (decoded['current_account_signature'] == null))) {
+    if (kind == 1 && _u32Int(decoded['action'], 'qr.action') > 0xffff)
+      throw _decodeFailure('二维码动作超出u16');
+    if (review && decoded['signer_account_id'] == null)
+      throw _decodeFailure('审阅资源未绑定签名账户');
+    if (kind == 2 &&
+        ((decoded['current_account_id'] == null) !=
+            (decoded['current_account_signature'] == null))) {
       throw _decodeFailure('当前账户与附加签名必须同时有无');
     }
     final requestId = kind == 3 || kind == 5
         ? null
         : _string(decoded['request_id'], 'qr.requestId');
     if (requestId != null &&
-        (requestId.isEmpty || requestId.length > maximumQrTextBytes ||
-            ((kind == 1 || kind == 2) && (requestId.length < 16 || requestId.length > 128)))) {
+        (requestId.isEmpty ||
+            requestId.length > maximumQrTextBytes ||
+            ((kind == 1 || kind == 2) &&
+                (requestId.length < 16 || requestId.length > 128)))) {
       throw _decodeFailure('二维码requestId长度无效');
     }
-    final purposeMask = _positiveInt(decoded['scan_purpose_mask'], 'qr.scanPurposeMask');
+    final purposeMask = _positiveInt(
+      decoded['scan_purpose_mask'],
+      'qr.scanPurposeMask',
+    );
     if (purposeMask > 255) throw _decodeFailure('扫码用途位图超出闭集');
     return CitizenQrDocument(
       kind: CitizenQrKind.values.singleWhere((value) => value.value == kind),
@@ -2040,7 +2269,9 @@ final class CitizenSdkFlutterCodec {
           : _positiveInt(decoded['expires_at'], 'qr.expiresAt'),
       action: kind == 1 ? _u32Int(decoded['action'], 'qr.action') : null,
       signerAccountId: kind == 1 || kind == 2 || kind == 6
-          ? (kind == 1 && decoded['signer_account_id'] == null ? null : _hex32(decoded['signer_account_id'], 'qr.signerAccountId'))
+          ? (kind == 1 && decoded['signer_account_id'] == null
+                ? null
+                : _hex32(decoded['signer_account_id'], 'qr.signerAccountId'))
           : null,
       reviewPayload: kind == 1
           ? _hexByteString(
@@ -2054,31 +2285,74 @@ final class CitizenSdkFlutterCodec {
           ? _hexByteString(decoded['signature'], 'qr.signature', 64, 64)
           : null,
       currentAccountId: kind == 2 && decoded['current_account_id'] != null
-          ? _hex32(decoded['current_account_id'], 'qr.currentAccountId') : null,
-      currentAccountSignature: kind == 2 && decoded['current_account_signature'] != null
-          ? _hexByteString(decoded['current_account_signature'], 'qr.currentAccountSignature', 64, 64) : null,
+          ? _hex32(decoded['current_account_id'], 'qr.currentAccountId')
+          : null,
+      currentAccountSignature:
+          kind == 2 && decoded['current_account_signature'] != null
+          ? _hexByteString(
+              decoded['current_account_signature'],
+              'qr.currentAccountSignature',
+              64,
+              64,
+            )
+          : null,
       accountId: kind == 3 || kind == 4 || kind == 5
           ? _hex32(decoded['account_id'], 'qr.accountId')
           : null,
       signRequest: signed
           ? _qrText(decoded['sign_request'], 'qr.signRequest')
           : null,
-      cidNumber: kind == 3 ? _string(decoded['cid_number'], 'qr.cidNumber') : null,
+      cidNumber: kind == 3
+          ? _string(decoded['cid_number'], 'qr.cidNumber')
+          : null,
       amount: kind == 4 ? _string(decoded['amount'], 'qr.amount') : null,
       symbol: kind == 4 ? _string(decoded['symbol'], 'qr.symbol') : null,
       memo: kind == 4 ? _string(decoded['memo'], 'qr.memo') : null,
-      bankCidNumber: kind == 4 ? _string(decoded['bank_cid_number'], 'qr.bankCidNumber') : null,
-      keyExchangePublicKey: kind == 6 ? _hexByteString(decoded['key_exchange_public_key'], 'qr.keyExchangePublicKey', 32, 32) : null,
-      encryptionNonce: kind == 6 ? _hexByteString(decoded['encryption_nonce'], 'qr.encryptionNonce', 12, 12) : null,
-      ciphertext: kind == 6 ? _hexByteString(decoded['ciphertext'], 'qr.ciphertext', 17, maximumQrTextBytes) : null,
+      bankCidNumber: kind == 4
+          ? _string(decoded['bank_cid_number'], 'qr.bankCidNumber')
+          : null,
+      keyExchangePublicKey: kind == 6
+          ? _hexByteString(
+              decoded['key_exchange_public_key'],
+              'qr.keyExchangePublicKey',
+              32,
+              32,
+            )
+          : null,
+      encryptionNonce: kind == 6
+          ? _hexByteString(
+              decoded['encryption_nonce'],
+              'qr.encryptionNonce',
+              12,
+              12,
+            )
+          : null,
+      ciphertext: kind == 6
+          ? _hexByteString(
+              decoded['ciphertext'],
+              'qr.ciphertext',
+              17,
+              maximumQrTextBytes,
+            )
+          : null,
     );
   }
 
-  ({CitizenQrDocument document, String palletName, String callName, String callArguments}) decodeQrReview(Object? raw) {
+  ({
+    CitizenQrDocument document,
+    String palletName,
+    String callName,
+    String callArguments,
+  })
+  decodeQrReview(Object? raw) {
     final document = decodeQrDocument(raw, review: true);
     final facts = jsonDecode(raw! as String) as Map<String, dynamic>;
-    return (document: document, palletName: facts['pallet_name'] as String,
-        callName: facts['call_name'] as String, callArguments: facts['call_arguments'] as String);
+    return (
+      document: document,
+      palletName: facts['pallet_name'] as String,
+      callName: facts['call_name'] as String,
+      callArguments: facts['call_arguments'] as String,
+    );
   }
 
   String _qrText(Object? raw, String name) {
@@ -2090,33 +2364,62 @@ final class CitizenSdkFlutterCodec {
     return value;
   }
 
-  CitizenSdkEvent _decodeCredentialEvent(int sequence, String type, List<Object?> payload) {
+  CitizenSdkEvent _decodeCredentialEvent(
+    int sequence,
+    String type,
+    List<Object?> payload,
+  ) {
     _expectLength(payload, type == 'credentialRequest' ? 3 : 1, type);
     final id = _u64Decimal(payload[0], 'hostOperationId');
     if (id == BigInt.zero) throw _decodeFailure('hostOperationId必须非零');
     if (type == 'credentialCancelled') {
-      return CitizenSdkCredentialCancelled(sequence: sequence, hostOperationId: id);
+      return CitizenSdkCredentialCancelled(
+        sequence: sequence,
+        hostOperationId: id,
+      );
     }
     final purpose = _string(payload[1], 'keyPurpose');
-    if (purpose != 'create' && purpose != 'unlock') throw _decodeFailure('未知设备密钥用途');
-    return CitizenSdkCredentialRequest(sequence: sequence, hostOperationId: id,
-      keyPurpose: purpose, accountId: payload[2] == null ? null : _hex32(payload[2], 'accountId'));
+    if (purpose != 'create' && purpose != 'unlock')
+      throw _decodeFailure('未知设备密钥用途');
+    return CitizenSdkCredentialRequest(
+      sequence: sequence,
+      hostOperationId: id,
+      keyPurpose: purpose,
+      accountId: payload[2] == null ? null : _hex32(payload[2], 'accountId'),
+    );
   }
 
-  CitizenSdkPrivateKeyClosed _decodePrivateKeyClosed(int sequence, List<Object?> payload) {
+  CitizenSdkPrivateKeyClosed _decodePrivateKeyClosed(
+    int sequence,
+    List<Object?> payload,
+  ) {
     _expectLength(payload, 1, 'privateKeyClosed');
-    return CitizenSdkPrivateKeyClosed(sequence: sequence, resourceId: _resource(payload[0]));
+    return CitizenSdkPrivateKeyClosed(
+      sequence: sequence,
+      resourceId: _resource(payload[0]),
+    );
   }
 
-  CitizenSdkQrCaptureEvent _decodeCaptureEvent(int sequence, String type, List<Object?> payload) {
+  CitizenSdkQrCaptureEvent _decodeCaptureEvent(
+    int sequence,
+    String type,
+    List<Object?> payload,
+  ) {
     if (type == 'qrCaptureClosed') {
       _expectLength(payload, 1, type);
-      return CitizenSdkQrCaptureEvent(sequence: sequence, resourceId: _resource(payload[0]), closed: true);
+      return CitizenSdkQrCaptureEvent(
+        sequence: sequence,
+        resourceId: _resource(payload[0]),
+        closed: true,
+      );
     }
     if (type == 'qrCapturePreview') {
       _expectLength(payload, 4, type);
-      return CitizenSdkQrCaptureEvent(sequence: sequence, resourceId: _resource(payload[0]),
-          preview: decodeQrPreview(payload.sublist(1)));
+      return CitizenSdkQrCaptureEvent(
+        sequence: sequence,
+        resourceId: _resource(payload[0]),
+        preview: decodeQrPreview(payload.sublist(1)),
+      );
     }
     _expectLength(payload, type == 'qrCaptureError' ? 4 : 3, type);
     final id = _resource(payload[0]);
@@ -2125,21 +2428,44 @@ final class CitizenSdkFlutterCodec {
       final code = _positiveInt(payload[1], 'capture.errorCode');
       final name = _string(payload[2], 'capture.errorName');
       final stage = _positiveInt(payload[3], 'capture.failureStage');
-      final error = decodePlatformException(PlatformException(code: 'citizensdk.$name',
-          details: [protocolVersion, null, null, code, stage, 'openQrCapture', null]), expectedMethod: 'openQrCapture');
-      return CitizenSdkQrCaptureEvent(sequence: sequence, resourceId: id, error: error);
+      final error = decodePlatformException(
+        PlatformException(
+          code: 'citizensdk.$name',
+          details: [
+            protocolVersion,
+            null,
+            null,
+            code,
+            stage,
+            'openQrCapture',
+            null,
+          ],
+        ),
+        expectedMethod: 'openQrCapture',
+      );
+      return CitizenSdkQrCaptureEvent(
+        sequence: sequence,
+        resourceId: id,
+        error: error,
+      );
     }
     final purpose = decodeQrPurpose(payload[1]);
     final document = decodeQrDocument(payload[2]);
-    if (document.scanPurposeMask & (1 << (purpose.value - 1)) == 0) throw _decodeFailure('采集结果超出用途允许集');
-    return CitizenSdkQrCaptureEvent(sequence: sequence, resourceId: id,
-        result: CitizenQrScanResult(purpose: purpose, document: document));
+    if (document.scanPurposeMask & (1 << (purpose.value - 1)) == 0)
+      throw _decodeFailure('采集结果超出用途允许集');
+    return CitizenSdkQrCaptureEvent(
+      sequence: sequence,
+      resourceId: id,
+      result: CitizenQrScanResult(purpose: purpose, document: document),
+    );
   }
 
   CitizenQrScanPurpose decodeQrPurpose(Object? raw) {
     final value = _positiveInt(raw, 'qr.purpose');
-    return CitizenQrScanPurpose.values.firstWhere((purpose) => purpose.value == value,
-        orElse: () => throw _decodeFailure('未知扫码用途'));
+    return CitizenQrScanPurpose.values.firstWhere(
+      (purpose) => purpose.value == value,
+      orElse: () => throw _decodeFailure('未知扫码用途'),
+    );
   }
 
   CitizenQrPreview decodeQrPreview(List<Object?> fields) {
@@ -2147,8 +2473,13 @@ final class CitizenSdkFlutterCodec {
     final width = _positiveInt(fields[0], 'preview.width');
     final height = _positiveInt(fields[1], 'preview.height');
     final rotation = _nonNegativeInt(fields[2], 'preview.rotationDegrees');
-    if (width > 4096 || height > 4096 || ![0, 90, 180, 270].contains(rotation)) throw _decodeFailure('采集尺寸或旋转角度无效');
-    return CitizenQrPreview(width: width, height: height, rotationDegrees: rotation);
+    if (width > 4096 || height > 4096 || ![0, 90, 180, 270].contains(rotation))
+      throw _decodeFailure('采集尺寸或旋转角度无效');
+    return CitizenQrPreview(
+      width: width,
+      height: height,
+      rotationDegrees: rotation,
+    );
   }
 
   CitizenSdkHistoryChanged _decodeHistoryEvent(
@@ -2159,7 +2490,10 @@ final class CitizenSdkFlutterCodec {
     return CitizenSdkHistoryChanged(sequence: sequence);
   }
 
-  CitizenSdkWalletChanged _decodeWalletEvent(int sequence, List<Object?> payload) {
+  CitizenSdkWalletChanged _decodeWalletEvent(
+    int sequence,
+    List<Object?> payload,
+  ) {
     _expectLength(payload, 0, 'walletChanged');
     return CitizenSdkWalletChanged(sequence: sequence);
   }

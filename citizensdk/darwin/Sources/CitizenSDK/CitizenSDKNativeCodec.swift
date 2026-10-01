@@ -421,6 +421,27 @@ internal enum CitizenSDKNativeCodec {
         }
     }
 
+    static func applicationKeys(_ result: UInt64, count: Int) throws -> [Data] {
+        try inspect(result, kind: 30) {
+            var info = citizensdk_result_info_t()
+            prepare(&info.struct_size, &info.abi_version, citizensdk_result_info_t.self)
+            try CitizenSDKChecks.requireOK(citizensdk_result_get_info(result, &info),
+                                           "Core application key batch identity is invalid")
+            guard (1...16).contains(count), info.payload_len == UInt64(count * 32) else {
+                throw CitizenSDKError(.integrity, "Core application key batch size is invalid")
+            }
+            return try (0..<count).map { index in
+                var bytes = Data(count: 32)
+                let code = bytes.withUnsafeMutableBytes {
+                    citizensdk_result_get_application_key_at(
+                        result, UInt32(index), $0.bindMemory(to: UInt8.self).baseAddress)
+                }
+                try CitizenSDKChecks.requireOK(code, "Core application key batch item is invalid")
+                return bytes
+            }
+        }
+    }
+
     static func signingOutcome(_ result: UInt64) throws -> CitizenSigningOutcome {
         try inspect(result, kind: 22) {
             var info = citizensdk_signing_outcome_info_t()

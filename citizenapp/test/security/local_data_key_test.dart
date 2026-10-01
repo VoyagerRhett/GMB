@@ -1,6 +1,8 @@
 import '../support/fake_citizen_sdk.dart';
+
 import 'dart:convert';
 import 'dart:typed_data';
+
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:crypto/crypto.dart' hide Hmac;
 import 'package:cryptography/cryptography.dart';
@@ -10,6 +12,7 @@ import 'package:citizenapp/security/account_data_key_provision.dart';
 import 'package:citizenapp/security/local_cipher.dart';
 import 'package:citizenapp/security/local_data_key.dart';
 import 'package:citizenapp/security/account_security_service.dart';
+import 'package:citizenapp/security/device_data_key_vault.dart';
 
 class _MemoryStore implements LocalKeyBlobStore {
   final Map<String, String> entries = <String, String>{};
@@ -39,35 +42,85 @@ class _MemoryStore implements LocalKeyBlobStore {
   }
 }
 
-final class _DerivingWallet implements CitizenSdkWallet {
+final class _DerivingWallet implements CitizenSdkWallet, CitizenSdkWalletBatch {
   _DerivingWallet(Uint8List secret) : _secret = Uint8List.fromList(secret);
 
   final Uint8List _secret;
+  int batchCalls = 0;
+  CitizenWalletState? state;
+
+  @override
+  CitizenSdkOperation<CitizenWalletState> getState() => testCitizenOperation(
+    () async => state ?? (throw StateError('wallet state missing')),
+  );
 
   @override
   CitizenSdkOperation<Uint8List> deriveApplicationKey({
     required String accountId,
     required Uint8List salt,
     required Uint8List info,
-  }) => testCitizenOperation(() async => Uint8List.fromList(
-    sha256.convert(<int>[..._secret, ...salt, ...info]).bytes,
-  ));
+  }) => testCitizenOperation(
+    () async => Uint8List.fromList(
+      sha256.convert(<int>[..._secret, ...salt, ...info]).bytes,
+    ),
+  );
+
+  @override
+  CitizenSdkOperation<List<Uint8List>> deriveApplicationKeys({
+    required String accountId,
+    required Uint8List salt,
+    required List<Uint8List> infos,
+  }) => testCitizenOperation(() async {
+    batchCalls++;
+    return infos
+        .map(
+          (info) => Uint8List.fromList(
+            sha256.convert(<int>[..._secret, ...salt, ...info]).bytes,
+          ),
+        )
+        .toList(growable: false);
+  });
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _CleanupWallet extends TestCitizenSdkWallet {
-  CitizenWalletState state = CitizenWalletState(revision: BigInt.one, hotProfile: null, accounts: const [],
-    initializationState: CitizenWalletInitializationState.recovering, cleanupPending: true);
-  Object? error;
-  @override CitizenSdkOperation<CitizenWalletState> getState() => testCitizenOperation(() {
-    if (error != null) throw error!;
-    return state;
-  });
+final class _MemoryDeviceVault extends DeviceDataKeyVault {
+  int sealCalls = 0;
+
+  @override
+  Future<String> seal({
+    required int walletIndex,
+    required Uint8List plaintext,
+    required Uint8List aad,
+  }) async {
+    expect(plaintext, hasLength(32));
+    expect(aad, isNotEmpty);
+    sealCalls++;
+    return 'test-sealed-$sealCalls';
+  }
 }
+
+class _CleanupWallet extends TestCitizenSdkWallet {
+  CitizenWalletState state = CitizenWalletState(
+    revision: BigInt.one,
+    hotProfile: null,
+    accounts: const [],
+    initializationState: CitizenWalletInitializationState.recovering,
+    cleanupPending: true,
+  );
+  Object? error;
+  @override
+  CitizenSdkOperation<CitizenWalletState> getState() =>
+      testCitizenOperation(() {
+        if (error != null) throw error!;
+        return state;
+      });
+}
+
 class _CleanupSigning implements CitizenSigning {
-  @override dynamic noSuchMethod(Invocation invocation) => throw StateError('清理不应签名');
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw StateError('清理不应签名');
 }
 
 void main() {
@@ -85,34 +138,84 @@ void main() {
 
   test('精确清理意图接SDK账户列表，诊断仍在或安全清理未完时不删除意图和设备材料', () async {
     final store = _MemoryStore(), wallet = _CleanupWallet();
-    final service = AccountSecurityService(wallet: wallet, signing: _CleanupSigning(), blobStore: store,
-      subkeyRegistrar: ({required cidNumber, required bindingRevision, required accountId, required signBinding}) async => throw StateError('不应注册子钥'),
-      coldDeviceBindingSigner: ({required binding, required payload, required signingMessage, required devicePublicKey, required issuedAtMillis}) async => throw StateError('不应冷签'),
-      coldAccountDataKeyProvider: ({required binding, required requests}) async => throw StateError('不应派生'));
+    final service = AccountSecurityService(
+      wallet: wallet,
+      signing: _CleanupSigning(),
+      blobStore: store,
+      subkeyRegistrar: ({
+        required cidNumber,
+        required bindingRevision,
+        required accountId,
+        required signBinding,
+      }) async => throw StateError('不应注册子钥'),
+      coldDeviceBindingSigner: ({
+        required binding,
+        required payload,
+        required signingMessage,
+        required devicePublicKey,
+        required issuedAtMillis,
+      }) async => throw StateError('不应冷签'),
+      coldAccountDataKeyProvider: ({
+        required binding,
+        required requests,
+      }) async => throw StateError('不应派生'),
+    );
     final ids = ['0x${'01' * 32}', '0x${'02' * 32}'];
     try {
       expect(await service.hasPendingAccountCleanup, isFalse);
-      await service.prepareAccountCleanup(accountIds: ids, walletIndexes: {0}, deleteWalletWideKey: true);
+      await service.prepareAccountCleanup(
+        accountIds: ids,
+        walletIndexes: {0},
+        deleteWalletWideKey: true,
+      );
       final before = Map<String, String>.of(store.entries);
       final pending = jsonDecode(before.values.single) as Map<String, dynamic>;
       expect(pending['account_ids'], ids);
       expect(pending['wallet_indices'], [0]);
       expect(pending['delete_wallet_wide_key'], isTrue);
       expect(await service.hasPendingAccountCleanup, isTrue);
-      await expectLater(service.reconcileAccountCleanup(), throwsA(isA<AccountSecurityException>()));
+      await expectLater(
+        service.reconcileAccountCleanup(),
+        throwsA(isA<AccountSecurityException>()),
+      );
       expect(store.entries, before);
-      wallet.state = CitizenWalletState(revision: BigInt.two, hotProfile: null, accounts: const [],
-        initializationState: CitizenWalletInitializationState.ready, cleanupPending: false,
-        diagnostics: [CitizenWalletDiagnostic(walletIndex: 0, walletName: '异常', accountId: ids.first, ss58Address: null,
-          diagnosticReason: CitizenWalletDiagnosticReason.invalidStructure, signMode: null, cleanupTargets: null)]);
-      await expectLater(service.reconcileAccountCleanup(), throwsA(isA<AccountSecurityException>()));
+      wallet.state = CitizenWalletState(
+        revision: BigInt.two,
+        hotProfile: null,
+        accounts: const [],
+        initializationState: CitizenWalletInitializationState.ready,
+        cleanupPending: false,
+        diagnostics: [
+          CitizenWalletDiagnostic(
+            walletIndex: 0,
+            walletName: '异常',
+            accountId: ids.first,
+            ss58Address: null,
+            diagnosticReason: CitizenWalletDiagnosticReason.invalidStructure,
+            signMode: null,
+            cleanupTargets: null,
+          ),
+        ],
+      );
+      await expectLater(
+        service.reconcileAccountCleanup(),
+        throwsA(isA<AccountSecurityException>()),
+      );
       expect(store.entries, before);
-      wallet.error = const CitizenSdkException(code: CitizenSdkErrorCode.storage, message: '合成读取失败');
-      await expectLater(service.reconcileAccountCleanup(), throwsA(isA<CitizenSdkException>()));
+      wallet.error = const CitizenSdkException(
+        code: CitizenSdkErrorCode.storage,
+        message: '合成读取失败',
+      );
+      await expectLater(
+        service.reconcileAccountCleanup(),
+        throwsA(isA<CitizenSdkException>()),
+      );
       expect(store.entries, before);
       await service.cancelAccountCleanup();
       expect(await service.hasPendingAccountCleanup, isFalse);
-    } finally { service.dispose(); }
+    } finally {
+      service.dispose();
+    }
   });
 
   const genesisHash =
@@ -187,8 +290,7 @@ void main() {
         genesisHash: genesisHash,
         cidNumber: 'CN220-CTZN2-198805201-2026',
         bindingRevision: 1,
-        accountId:
-            '0x3333333333333333333333333333333333333333333333333333333333333333',
+        accountId: '0x3333333333333333333333333333333333333333333333333333333333333333',
       );
 
       await bindingStore.activate(firstBinding);
@@ -303,8 +405,7 @@ void main() {
           accountId: secondAccountId,
         ),
         const AccountDataBinding(
-          genesisHash:
-              '0x2222222222222222222222222222222222222222222222222222222222222222',
+          genesisHash: '0x2222222222222222222222222222222222222222222222222222222222222222',
           cidNumber: cidNumber,
           bindingRevision: 2,
           accountId: secondAccountId,
@@ -339,9 +440,9 @@ void main() {
         source: firstBinding,
         target: secondBinding,
       );
-      final decoded =
-          jsonDecode(store.entries[AccountDataBindingStore.pendingHandoverKey]!)
-              as Map<String, dynamic>;
+      final decoded = jsonDecode(
+        store.entries[AccountDataBindingStore.pendingHandoverKey]!,
+      ) as Map<String, dynamic>;
       (decoded['target'] as Map<String, dynamic>)['binding_revision'] = 3;
       store.entries[AccountDataBindingStore.pendingHandoverKey] = jsonEncode(
         decoded,
@@ -355,6 +456,92 @@ void main() {
   });
 
   group('当前钱包账户用途子钥', () {
+    test('首次准备全部缺失用途只请求一次批量认证，重复准备静默复用密文', () async {
+      final wallet = _DerivingWallet(firstSecret);
+      wallet.state = CitizenWalletState(
+        revision: BigInt.one,
+        hotProfile: null,
+        accounts: <CitizenWalletStateAccount>[
+          CitizenWalletStateAccount(
+            signMode: CitizenWalletSignMode.hot,
+            walletIndex: 0,
+            accountIndex: 0,
+            accountId: firstAccountId,
+            ss58Address: '',
+            name: '',
+            createdAtMillis: BigInt.zero,
+            isDefault: true,
+          ),
+        ],
+        initializationState: CitizenWalletInitializationState.ready,
+        cleanupPending: false,
+      );
+      final store = _MemoryStore(), deviceVault = _MemoryDeviceVault();
+      final service = AccountSecurityService(
+        wallet: wallet,
+        signing: _CleanupSigning(),
+        blobStore: store,
+        deviceDataKeyVault: deviceVault,
+        subkeyRegistrar: ({
+          required cidNumber,
+          required bindingRevision,
+          required accountId,
+          required signBinding,
+        }) async => throw StateError('不应注册子钥'),
+        coldDeviceBindingSigner: ({
+          required binding,
+          required payload,
+          required signingMessage,
+          required devicePublicKey,
+          required issuedAtMillis,
+        }) async => throw StateError('不应冷签'),
+        coldAccountDataKeyProvider: ({
+          required binding,
+          required requests,
+        }) async => throw StateError('不应冷派生'),
+      );
+      try {
+        // 聊天和通讯录读取缺钥只报告需要显式授权；查看本身不得触发派生。
+        await expectLater(
+          service.readDataKeysForBinding(firstBinding, const <DataKeyRequest>[
+            (purpose: LocalKeyPurpose.chat, context: null),
+          ]),
+          throwsA(isA<AccountSecurityException>()),
+        );
+        expect(wallet.batchCalls, 0);
+        await service.ensureDeviceDataKeysForBinding(firstBinding);
+        expect(wallet.batchCalls, 1);
+        expect(deviceVault.sealCalls, 7);
+        await service.ensureDeviceDataKeysForBinding(firstBinding);
+        expect(wallet.batchCalls, 1);
+        expect(deviceVault.sealCalls, 7);
+      } finally {
+        service.dispose();
+      }
+    });
+    test('一次批量请求返回逐项相同的用途钥', () async {
+      final wallet = _DerivingWallet(firstSecret);
+      final requests = <DataKeyRequest>[
+        (purpose: LocalKeyPurpose.chat, context: null),
+        (purpose: LocalKeyPurpose.contactsCloud, context: 'index'),
+      ];
+      final batch = await AccountDataKeyDeriver.deriveBatch(
+        wallet: wallet,
+        binding: firstBinding,
+        requests: requests,
+      );
+      expect(wallet.batchCalls, 1);
+      for (var index = 0; index < requests.length; index++) {
+        final request = requests[index];
+        final single = await AccountDataKeyDeriver.derive(
+          wallet: wallet,
+          binding: firstBinding,
+          purpose: request.purpose,
+          context: request.context,
+        );
+        expect(batch[index], single);
+      }
+    });
     test('同一账户同一绑定跨设备派生结果一致', () async {
       final first = await AccountDataKeyDeriver.derive(
         wallet: _DerivingWallet(firstSecret),
@@ -498,14 +685,17 @@ void main() {
           nonce: nonce,
           ciphertext: ciphertext,
         );
-        final message = (await CitizenSigning.encodePayload(CitizenSigningPayload.message(
-          opTag: kOpSignAccountDataKeyProvision,
-          scalePayload: authorization,
-        )));
+        final message = (await CitizenSigning.encodePayload(
+          CitizenSigningPayload.message(
+            opTag: kOpSignAccountDataKeyProvision,
+            scalePayload: authorization,
+          ),
+        ));
         final signature = Uint8List(64);
         final body = CitizenQrDocument(
           kind: CitizenQrKind.accountDataKeyResponse,
-          canonicalText: 'synthetic-response', scanPurposeMask: 32,
+          canonicalText: 'synthetic-response',
+          scanPurposeMask: 32,
           signerAccountId: '0x${'11' * 32}',
           signature: signature,
           keyExchangePublicKey: senderPublicKey,
@@ -527,7 +717,8 @@ void main() {
           session.open(
             CitizenQrDocument(
               kind: CitizenQrKind.accountDataKeyResponse,
-              canonicalText: 'synthetic-tampered-response', scanPurposeMask: 32,
+              canonicalText: 'synthetic-tampered-response',
+              scanPurposeMask: 32,
               signerAccountId: '0x${'11' * 32}',
               signature: signature,
               keyExchangePublicKey: senderPublicKey,

@@ -7,14 +7,14 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart' show BuildContext;
 import 'package:tatachat_sdk/tatachat_sdk.dart';
-import 'package:citizenapp/log/app_log.dart';
+import 'package:citizenapp/app_log.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/citizen/public/data/admin_division_store.dart';
 import 'package:citizenapp/citizen/public/data/area_path_formatter.dart';
 import 'package:citizenapp/citizen/public/data/isar_admin_division_store.dart';
 import 'package:citizenapp/citizen/public/data/public_provinces.dart';
-import 'package:citizenapp/citizen/cid/cid_generator.dart';
+import 'package:citizenapp/citizen/cid_generator.dart';
 import 'package:citizenapp/my/user/contact_service.dart';
 import 'package:citizenapp/my/myid/citizen_identity_transaction.dart';
 import 'package:citizenapp/my/myid/citizen_identity_chain_reader.dart';
@@ -739,7 +739,7 @@ class MyIdService {
   }
 
   /// finalized 只推进公开绑定与数据交接，不生成本地数据钥，也不登记 P-256 设备子钥。
-  /// 前者仅在真实数据访问缺钥时生成，后者仅在 Worker 明确报告未登记时登记。
+  /// 前者仅在用户明确选择用途钥准备时生成，后者仅在 Worker 报缺登记后由用户明确授权登记。
   Future<void> _finishFinalizedBinding(AccountDataBinding current) async {
     try {
       // 自助占号/换绑已经按交易finalized块验证匿名CID绑定；直接保存该事实，页面不再查链。

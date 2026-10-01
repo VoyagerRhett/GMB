@@ -68,7 +68,7 @@
         },
         {
           "path": "src/bootstrap_tests.rs",
-          "sha256": "688a8883eb780fd61c69f348353d32300115b32928b001ea1113e7ae95e0bf30"
+          "sha256": "59579491f30dcb5423269fc0a1f29159255cd95963629a9bd650e03e49d01c1e"
         },
         {
           "path": "src/bootstrap.rs",
@@ -92,11 +92,11 @@
         },
         {
           "path": "tests/account_nonce_contract.rs",
-          "sha256": "13f2d194df11c94527fd5b513228cc1ec917f3735b12f3326c239b600821b754"
+          "sha256": "7b3ea1752b1d96e2d54374ef2b45391f5281138fa7c63ae216185cb5bcb463c4"
         },
         {
           "path": "tests/baseline_lifecycle_contract.rs",
-          "sha256": "881490cfd192e6b6c5e1693ccba4a3e6725a7f8cdb7aeb34fd47de576e1cf5ee"
+          "sha256": "17411f0c473d13b1d40d1058e51f66671e68e11855c1faccfbb41b9f1f58bc1e"
         },
         {
           "path": "tests/legacy_parity.rs",
@@ -104,7 +104,7 @@
         },
         {
           "path": "tests/verified_chain_client_contract.rs",
-          "sha256": "c1fe590bfd7b60b27fa6790f31a3322b1725df1c66e1f110f3b59d78eba45a7e"
+          "sha256": "543f75c8a92a6e4e225a6c7d7c33f213687e4d6f14b25776320a2e3883a0f58d"
         }
       ],
       "excluded": [],
@@ -142,7 +142,7 @@
           "sha256": "3baf396efb453a99d1ca286bfe68fc9a2ac177f93544c1443146a958a0c0493d"
         },
         {
-          "path": "examples/basic.rs",
+          "path": "basic.rs",
           "sha256": "ba610512aba7f8e26bcfc61a4407db947cf46a0a62fd860ac895b005b6d3755a"
         },
         {
@@ -154,7 +154,7 @@
           "sha256": "6876193d3823cdb7929dc7dbf281f1feac7df110635aa15bb64ae5f5b71a012c"
         },
         {
-          "path": "src/json_rpc_service/background.rs",
+          "path": "src/json_rpc_service_background.rs",
           "sha256": "6946597eefac05103b07c51162966d639920854e4410ebb67a453ce41adfce4d"
         },
         {
@@ -162,7 +162,7 @@
           "sha256": "6d64d98034486dd381ae646523c9ce80fefcd6b34f7962727c8ebb1eb4643652"
         },
         {
-          "path": "src/network_service/tasks.rs",
+          "path": "src/network_service_tasks.rs",
           "sha256": "9ee102374302adca1d9cfb450e737ac91e461d550350699db23ef2c32bd7798d"
         },
         {
@@ -282,7 +282,7 @@
           "sha256": "71c5a2dcaac0cbfc1719a1fc719a056d453da1cec090d11cde60e7e78257347a"
         },
         {
-          "path": "src/chain/chain_information/build.rs",
+          "path": "src/chain/chain_information_build.rs",
           "sha256": "0ac03aa34dcdac91ed94921e93605778622e6bd2057e5f250d7be58155cea0e5"
         },
         {
@@ -322,7 +322,7 @@
           "sha256": "b6c685988f270a473daee616b3ec8574ee4735d1c53933d55906b730ba68c0b4"
         },
         {
-          "path": "src/database/finalized_serialize/defs.rs",
+          "path": "src/database/finalized_serialize_defs.rs",
           "sha256": "97852da758b6198ad0b62ce99b5bc5f60c143a8f5ad0d0453d024db93c41ffae"
         },
         {
@@ -430,7 +430,7 @@
           "sha256": "acc999528a49d7d800003b24171a7c738060c83152a552d52beb9eb4dbade342"
         },
         {
-          "path": "src/executor/trie_root_calculator/tests.rs",
+          "path": "src/executor/trie_root_calculator_tests.rs",
           "sha256": "c903256515dade6221013c43d9ea7f9f1e9d89cdf43f7de53704154bb3ea13cd"
         },
         {
@@ -494,7 +494,7 @@
           "sha256": "1ec3a7b48b3b9f435a07dfc6b71ffad4fa3162fa9c144854e7a7a6df6cfad6d0"
         },
         {
-          "path": "src/identity/ss58.rs",
+          "path": "src/identity_ss58.rs",
           "sha256": "4009724ef5ee71225237892a6fafb44004e690d48fa37ff87f213102cc0173c9"
         },
         {
@@ -582,7 +582,7 @@
           "sha256": "775f6064ca7e34405c34d9eb2ca837efc8bbe9f4561e85288b56929ccc29053d"
         },
         {
-          "path": "src/libp2p/connection/single_stream_handshake/tests.rs",
+          "path": "src/libp2p/connection/single_stream_handshake_tests.rs",
           "sha256": "670b71602fa0a2ca1538698862afc5753b4d09fde574edae830d4a145d6da6f8"
         },
         {
@@ -674,7 +674,7 @@
           "sha256": "d31a24fc8230510914f4b2907117ffbaf150ad0573a156fd2cf59f2541d06e10"
         },
         {
-          "path": "src/network/kademlia/kbuckets.rs",
+          "path": "src/network/kademlia_kbuckets.rs",
           "sha256": "b3a0c0c510926365ce665580d3f6b8516d02103f86e6b4172ccf98d44c453a7c"
         },
         {
@@ -722,7 +722,7 @@
           "sha256": "de66b9b9cd041391c6a10495d15fa00ba6e2f5ed9e43d79492cafeb12a5bffad"
         },
         {
-          "path": "src/transactions/light_pool/tests.rs",
+          "path": "src/transactions/light_pool_tests.rs",
           "sha256": "d14fcacea3e6172cef5eb83862c88d4395aedb4e64a4785517e791019e29e211"
         },
         {
@@ -730,7 +730,7 @@
           "sha256": "26a867bfa6527dc24d8f2d22bf2b98903a032e28d45edbe2ff049a01d705d0ae"
         },
         {
-          "path": "src/transactions/pool/tests.rs",
+          "path": "src/transactions/pool_tests.rs",
           "sha256": "b6e23a4fc9cf9a6e78a16ded56a74362e1f9245f66e378619bfbd73a21c477a7"
         },
         {
@@ -754,7 +754,7 @@
           "sha256": "bae4e9e5333ae3b530d2d2633160761d9f909e906aea5cc722a4935ddb3c1abf"
         },
         {
-          "path": "src/trie/branch_search/tests.rs",
+          "path": "src/trie/branch_search_tests.rs",
           "sha256": "66504be579374f5f4dcb0150ade9f240522665163df01cf48f9fb7b3965d0d5d"
         },
         {
@@ -814,7 +814,7 @@
           "sha256": "feb9e44921d5af4521069adb2a61babad38519575dd1ad068cafc9af9e7119ac"
         },
         {
-          "path": "src/trie/trie_structure/tests.rs",
+          "path": "src/trie/trie_structure_tests.rs",
           "sha256": "4cab9af716dd3d47fab5707fbfc9a39aa5c7ee34db56caeda9dbcf815f6a4946"
         },
         {

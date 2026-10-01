@@ -258,9 +258,9 @@ fn signing_and_default_change_results_preflight_and_project_each_variant_exactly
 
 fn chain_query_runtime() -> Arc<crate::runtime::NativeRuntime> {
     let assets = crate::assets::verify_assets(
-        include_bytes!("../../../assets/citizenchain/manifest.json"),
-        include_bytes!("../../../assets/citizenchain/chainspec.json"),
-        include_bytes!("../../../assets/citizenchain/light_sync_state.json"),
+        include_bytes!("../../../chain/manifest.json"),
+        include_bytes!("../../../chain/chainspec.json"),
+        include_bytes!("../../../chain/light_sync_state.json"),
     )
     .expect("chain assets");
     let runtime = unsafe {

@@ -8,9 +8,9 @@ use citizensdk::{
     CitizenSdkCreateOptions, CitizenSdkErrorCode, CITIZENSDK_ABI_VERSION,
 };
 
-const MANIFEST: &[u8] = include_bytes!("../../../assets/citizenchain/manifest.json");
-const CHAIN_SPEC: &[u8] = include_bytes!("../../../assets/citizenchain/chainspec.json");
-const LIGHT_STATE: &[u8] = include_bytes!("../../../assets/citizenchain/light_sync_state.json");
+const MANIFEST: &[u8] = include_bytes!("../../../chain/manifest.json");
+const CHAIN_SPEC: &[u8] = include_bytes!("../../../chain/chainspec.json");
+const LIGHT_STATE: &[u8] = include_bytes!("../../../chain/light_sync_state.json");
 
 fn view(bytes: &[u8]) -> CitizenSdkBytesView {
     CitizenSdkBytesView {

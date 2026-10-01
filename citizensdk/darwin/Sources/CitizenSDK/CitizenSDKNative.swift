@@ -925,6 +925,22 @@ internal final class CitizenSDKNative: @unchecked Sendable {
         }
     }
 
+    func deriveApplicationKeys(accountID: Data, salt: Data, infos: [Data])
+        throws -> CitizenSDKOperation<[Data]> {
+        var account = try cAccount(accountID)
+        return try withUnsafePointer(to: &account) { pointer in
+            try Self.withViews([salt] + infos) { views in
+                let infoViews = Array(views.dropFirst())
+                return try infoViews.withUnsafeBufferPointer { infoBuffer in
+                    try begin(accept: {
+                        citizensdk_derive_application_keys(handle, pointer, views[0],
+                            infoBuffer.baseAddress, UInt32(infos.count), $0)
+                    }, decode: { try CitizenSDKNativeCodec.applicationKeys($0, count: infos.count) })
+                }
+            }
+        }
+    }
+
     /// Product-independent signing. Core owns account-mode routing and exact
     /// transform application; this binding only borrows bounded opaque bytes.
     func beginSigning(_ intent: CitizenSigningIntent) throws -> CitizenSDKOperation<CitizenSigningOutcome> {

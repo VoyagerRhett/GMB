@@ -3,12 +3,12 @@ import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import 'package:citizenapp/citizen/proposal/election/election_proposal_page.dart';
-import 'package:citizenapp/citizen/proposal/grandpa-key/grandpa_key_page.dart';
-import 'package:citizenapp/citizen/proposal/legislation-yuan/legislation_intro_page.dart';
+import 'package:citizenapp/citizen/proposal/election_proposal_page.dart';
+import 'package:citizenapp/citizen/proposal/grandpa_key_page.dart';
+import 'package:citizenapp/citizen/proposal/legislation_intro_page.dart';
 import 'package:citizenapp/citizen/proposal/proposal_registry.dart';
-import 'package:citizenapp/citizen/proposal/resolution-destroy/resolution_destroy_page.dart';
-import 'package:citizenapp/citizen/proposal/resolution-issuance/resolution_issuance_page.dart';
+import 'package:citizenapp/citizen/proposal/resolution_destroy_page.dart';
+import 'package:citizenapp/citizen/proposal/resolution_issuance_page.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/widgets/chain_progress_banner.dart';
 

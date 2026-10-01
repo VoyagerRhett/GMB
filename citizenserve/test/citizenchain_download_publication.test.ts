@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Miniflare } from 'miniflare';
 import type { Env } from '../src/types';
 import { routeRequest } from '../src/routes';
-import { citizenchainDownloadRoute } from '../src/downloads/citizenchain';
+import { citizenchainDownloadRoute } from '../src/citizenchain_download';
 import { createTestMiniflare } from './miniflare';
 
 interface CitizenChainPublicationInteropFixture {

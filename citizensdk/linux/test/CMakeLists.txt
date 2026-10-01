@@ -40,7 +40,7 @@ if(TARGET citizen_sdk_plugin)
   target_compile_features(citizensdk_linux_flutter_test_support PUBLIC cxx_std_17)
   target_compile_definitions(citizensdk_linux_flutter_test_support PRIVATE FLUTTER_PLUGIN_IMPL)
   target_include_directories(citizensdk_linux_flutter_test_support PUBLIC
-    "${CMAKE_CURRENT_LIST_DIR}/../include"
+    "${CMAKE_CURRENT_LIST_DIR}/.."
     "${CMAKE_CURRENT_LIST_DIR}/../src")
   target_link_libraries(citizensdk_linux_flutter_test_support PUBLIC
     flutter CitizenSDK::Host Threads::Threads)
@@ -94,7 +94,7 @@ target_compile_definitions(citizensdk_linux_test_support PRIVATE
 )
 target_include_directories(citizensdk_linux_test_support
   PUBLIC
-    "${CMAKE_CURRENT_LIST_DIR}/../include"
+    "${CMAKE_CURRENT_LIST_DIR}/.."
     "${CMAKE_CURRENT_LIST_DIR}/../src"
     "${CITIZENSDK_CORE_INCLUDE_DIR}"
   PRIVATE

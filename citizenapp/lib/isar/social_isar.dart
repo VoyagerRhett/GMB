@@ -6,6 +6,16 @@ import 'isar_core_bootstrap.dart';
 
 part 'social_isar.g.dart';
 
+/// 用户明确删除的持久事实；确认后保留以阻止迟到同步复活帖子。
+@collection
+class SquarePostDeletionEntity {
+  Id id = Isar.autoIncrement;
+  @Index(composite: [CompositeIndex('postId')], unique: true)
+  late String cidNumber;
+  late String postId;
+  late String operationState;
+}
+
 /// 本人已发布广场内容的设备本地副本。
 ///
 /// [cidNumber] 是内容归属真源，[accountId] 只记录发布时的链上签名账户事实。
@@ -75,7 +85,7 @@ class SquarePostSyncCheckpointEntity {
   late int newestCreatedAt;
 }
 
-/// 用户明确删除草稿或上限淘汰后留下的文件清理事实。
+/// 用户明确删除草稿或发布成功后留下的文件清理事实。
 ///
 /// 数据库事务先删除草稿并写入本行，事务外再删除媒体目录；文件系统失败时保留本行，
 /// 后续显式重试仍能精确定位。禁止持久化应用容器绝对路径。
@@ -94,6 +104,96 @@ class SquareFileCleanupEntity {
   late int createdAtMillis;
   late int attemptCount;
   String? lastError;
+}
+
+/// 广场媒体描述；实际内容位于分块集合，不在列表查询中加载。
+///
+/// 同一媒体标识可以属于不同 CID。complete 只由完整长度和 SHA-256 校验推进，
+/// 不代表上传状态；未完成记录允许显式续写，不允许展示或绑定内容。
+@collection
+class SquareMediaEntity {
+  Id id = Isar.autoIncrement;
+
+  @Index(composite: [CompositeIndex('mediaId')], unique: true)
+  late String cidNumber;
+
+  late String mediaId;
+  late String mediaKind;
+  late String contentType;
+  late int byteSize;
+  late String sha256;
+  bool complete = false;
+}
+
+/// 一个媒体字节块，最多 1 MiB；chunkIndex 从零开始。
+///
+/// 唯一索引禁止不同用户或不同块互相覆盖。末块长度由媒体描述确定；分块哈希
+/// 用于范围读取校验，不能替代媒体完成前的整体哈希校验。
+@collection
+class SquareMediaChunkEntity {
+  Id id = Isar.autoIncrement;
+
+  @Index(
+    composite: [CompositeIndex('mediaId'), CompositeIndex('chunkIndex')],
+    unique: true,
+  )
+  late String cidNumber;
+
+  late String mediaId;
+  late int chunkIndex;
+  late List<byte> chunkBytes;
+  late String chunkSha256;
+}
+
+/// 草稿或帖子内的媒体槽位；主图、缩略图、视频封面分别关联。
+///
+/// referenceKey 是内容类型、内容标识、媒体序号、用途的有序 JSON 数组。
+/// 删除槽位不删除媒体；仅无引用的媒体才允许显式删除。
+@collection
+class SquareMediaReferenceEntity {
+  Id id = Isar.autoIncrement;
+
+  @Index(composite: [CompositeIndex('referenceKey')], unique: true)
+  late String cidNumber;
+
+  late String referenceKey;
+
+  @Index(composite: [CompositeIndex('cidNumber')])
+  late String mediaId;
+
+  @Index(
+    composite: [CompositeIndex('cidNumber'), CompositeIndex('contentKind')],
+  )
+  late String contentId;
+
+  late String contentKind;
+  late int mediaIndex;
+  late String mediaRole;
+}
+
+/// 一次发布的持久恢复事实，不保存会话凭据；交易提交后禁止重新发起同一草稿。
+/// 远端确认后与帖子、媒体关联及草稿删除在同一事务中收尾。
+@collection
+class SquarePublicationEntity {
+  Id id = Isar.autoIncrement;
+
+  @Index(composite: [CompositeIndex('draftId')], unique: true)
+  late String cidNumber;
+  late String draftId;
+  late String accountId;
+  late String postId;
+  late String postType;
+  late String contentHash;
+  late String storageReceiptId;
+  late String uploadId;
+  late List<byte> manifestBytes;
+  late String publicationState;
+  String? replacePostId;
+  String? blockHash;
+  String? transactionHash;
+  String? postCategory;
+  int? chainBlock;
+  int? createdAt;
 }
 
 enum _SocialIsarLifecycle { active, closing, closed }
@@ -143,11 +243,16 @@ class SocialIsar {
   /// Social 域的唯一 schema 清单。
   static const List<CollectionSchema<dynamic>> _schemas =
       <CollectionSchema<dynamic>>[
-    SquareLocalPostEntitySchema,
-    SquareComposeDraftEntitySchema,
-    SquarePostSyncCheckpointEntitySchema,
-    SquareFileCleanupEntitySchema,
-  ];
+        SquareLocalPostEntitySchema,
+        SquarePostDeletionEntitySchema,
+        SquareComposeDraftEntitySchema,
+        SquarePostSyncCheckpointEntitySchema,
+        SquareFileCleanupEntitySchema,
+        SquareMediaEntitySchema,
+        SquareMediaChunkEntitySchema,
+        SquareMediaReferenceEntitySchema,
+        SquarePublicationEntitySchema,
+      ];
 
   bool get hasActiveOperation => _operationActive;
 
@@ -192,9 +297,7 @@ class SocialIsar {
 
   Future<T> _enqueue<T>(Future<T> Function() action) {
     if (identical(Zone.current[_operationZoneKey], this)) {
-      throw StateError(
-        '禁止在 SocialIsar 操作回调内再次进入 SocialIsar；请先返回快照。',
-      );
+      throw StateError('禁止在 SocialIsar 操作回调内再次进入 SocialIsar；请先返回快照。');
     }
     _ensureActive();
 
@@ -264,8 +367,8 @@ class SocialIsar {
       return opened;
     }
     try {
-      final deleted =
-          await _deleteInstance(opened).timeout(_forcedDeleteTimeout);
+      final deleted = await _deleteInstance(opened)
+          .timeout(_forcedDeleteTimeout);
       if (!deleted) throw StateError('Social 数据库仍被其它实例持有，未实际删除。');
       throw const _SocialOpeningCancelled();
     } catch (error) {
@@ -299,9 +402,14 @@ class SocialIsar {
     if (existing != null && existing.isOpen) {
       try {
         existing.squareLocalPostEntitys;
+        existing.squarePostDeletionEntitys;
         existing.squareComposeDraftEntitys;
         existing.squarePostSyncCheckpointEntitys;
         existing.squareFileCleanupEntitys;
+        existing.squareMediaEntitys;
+        existing.squareMediaChunkEntitys;
+        existing.squareMediaReferenceEntitys;
+        existing.squarePublicationEntitys;
       } catch (error) {
         throw StateError('已打开的 SocialIsar 不是当前完整 schema：$error');
       }
@@ -312,6 +420,10 @@ class SocialIsar {
       _schemas,
       name: 'citizenapp_social',
       directory: await IsarCoreBootstrap.resolveDirectory(),
+      // 媒体完整标记只能在持久提交后返回；不能用异步落盘承诺允许清理原内容。
+      relaxedDurability: false,
+      // 媒体分块仍共享一个广场库；容量达到上限时明确失败，禁止淘汰用户内容。
+      maxSizeMiB: 64 * 1024,
     );
   }
 
@@ -383,8 +495,8 @@ class SocialIsar {
       if (!candidate.isOpen) continue;
       deleteWasAttempted = true;
       try {
-        final deleted =
-            await _deleteInstance(candidate).timeout(_forcedDeleteTimeout);
+        final deleted = await _deleteInstance(candidate)
+            .timeout(_forcedDeleteTimeout);
         if (!deleted) failures.add('Social 数据库仍被其它实例持有，未实际删除。');
       } catch (error) {
         failures.add('强制删除 Social 数据库失败：$error');

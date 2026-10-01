@@ -9,7 +9,7 @@ import { cleanupExpiredReservations } from './limits/usage';
 import { cleanupExpiredSessionIndexes } from './auth/session_index';
 import { reconcileFinalizedUserProjection } from './account/user_projection';
 import { reconcileFinalizedSubscriptionProjection } from './membership/subscription_projection';
-import { auditSquareR2Consistency } from './media/service';
+import { auditSquareR2Consistency } from './media';
 import { cleanupExpiredPushEndpoints } from './auth/push_endpoint';
 
 type ScheduledJob = {

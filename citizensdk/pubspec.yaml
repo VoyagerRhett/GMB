@@ -40,4 +40,4 @@ flutter:
       windows:
         pluginClass: CitizenSdkPlugin
   assets:
-    - assets/citizenchain/
+    - chain/

@@ -14,6 +14,7 @@ import 'package:citizenapp/chat/chat_entry.dart';
 import 'package:tatachat_sdk/tatachat_sdk.dart';
 import 'package:citizenapp/my/membership/subscription_service.dart';
 import 'package:citizenapp/my/user/contact_service.dart';
+import 'package:citizenapp/security/account_security_service.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 
 const _ownerUserId = 'CN220-CTZN2-100000001-2026';
@@ -84,6 +85,30 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
   }
+
+  testWidgets('本地用途钥缺失只显示明确授权入口，不在读取时重复认证', (tester) async {
+    const accountId =
+        '0x1111111111111111111111111111111111111111111111111111111111111111';
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ChatTab(
+            runtime: _FakeRuntime(address: accountId),
+            store: _MissingKeysChatStore(),
+            cidNumber: _ownerUserId,
+            accountId: accountId,
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(
+      find.byKey(const ValueKey('chat-prepare-data-keys')),
+      findsOneWidget,
+    );
+    expect(find.text('聊天与通讯录密钥需要首次授权准备'), findsWidgets);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets('本地会话未返回时直接显示聊天页面且不使用整页转圈', (tester) async {
     final store = _PendingChatStore();
@@ -947,6 +972,14 @@ class _PendingChatStore extends _FakeChatStore {
     required String ownerUserId,
     required String currentAccountId,
   }) => completer.future;
+}
+
+class _MissingKeysChatStore extends _FakeChatStore {
+  @override
+  Future<List<ChatConversationPreview>> readConversationPreviews({
+    required String ownerUserId,
+    required String currentAccountId,
+  }) async => throw const AccountSecurityException('设备用途钥尚未准备');
 }
 
 class _FakeProfileApi extends CitizenProfileApi {

@@ -1,5 +1,8 @@
 import 'dart:convert';
 
+import 'package:citizenapp/8964/square_models.dart';
+import 'package:citizenapp/8964/services/square_media_store.dart';
+
 import 'package:isar_community/isar.dart';
 
 import 'package:citizenapp/8964/compose/drafts/compose_draft.dart';
@@ -28,14 +31,13 @@ class SquareComposeDraftStoreException implements Exception {
 /// 广场草稿的 SocialIsar 类型化仓库。
 ///
 /// [list] 是严格纯读取：损坏行会 fail-closed 并原样保留，绝不在读取中修复、迁移、
-/// 删除数据库行或媒体。只有用户明确删除或超过 [maxPerOwner] 时才写入文件清理事实，
+/// 删除数据库行或媒体。未发布草稿不按数量淘汰；用户明确删除时才写入文件清理事实，
 /// 再于事务外尝试删除媒体目录。
 class SquareComposeDraftStore implements SquareComposeDraftRepository {
   SquareComposeDraftStore._();
 
   static final SquareComposeDraftStore instance = SquareComposeDraftStore._();
 
-  static const int maxPerOwner = 100;
   static const String _draftDirectoryCleanup = 'draft_directory';
 
   static String _draftKey(String cidNumber, String draftId) =>
@@ -44,40 +46,96 @@ class SquareComposeDraftStore implements SquareComposeDraftRepository {
   static String _cleanupKey(String cidNumber, String draftId) =>
       'draft:${_draftKey(cidNumber, draftId)}';
 
+  /// 与发布成功收尾共用的文件清理事实；调用方已处于 Social 写事务。
+  static Future<void> planCleanupInTransaction(
+    Isar db,
+    String cid,
+    String draftId,
+  ) async {
+    await db.squareFileCleanupEntitys.putByCleanupKey(
+      _newCleanup(
+        cidNumber: cid,
+        draftId: draftId,
+        createdAtMillis: DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
+  }
+
   @override
   Future<void> save(SquareComposeDraft draft) async {
-    final prepared = _toEntity(draft);
+    _validateIdentity(cidNumber: draft.cidNumber, draftId: draft.draftId);
+    if (draft.updatedAtMillis <= 0) {
+      throw const SquareComposeDraftStoreException('草稿时间不合法');
+    }
+    final normalizedMedia = <SquareLocalMediaDraft>[];
+    final importingFiles = draft.media.any((item) => item.mediaId == null);
+    for (final item in draft.media) {
+      normalizedMedia.add(
+        item.mediaId == null
+            ? await ComposeDraftMedia.persist(
+                draft.cidNumber,
+                draft.draftId,
+                item,
+              )
+            : item,
+      );
+    }
+    final normalized = draft.copyWith(media: normalizedMedia);
+    final prepared = _toEntity(normalized);
     final cleanupKeys = <String>[];
     await SocialIsar.instance.writeTxn((isar) async {
-      final existing =
-          await isar.squareComposeDraftEntitys.getByDraftKey(prepared.draftKey);
+      final publishing = await isar.squarePublicationEntitys
+          .getByCidNumberDraftId(draft.cidNumber, draft.draftId);
+      if (publishing != null) {
+        throw const SquareComposeDraftStoreException('该草稿正在恢复发布结果，不能覆盖内容');
+      }
+      for (final item in normalizedMedia) {
+        final stored = await isar.squareMediaEntitys.getByCidNumberMediaId(
+          draft.cidNumber,
+          item.mediaId!,
+        );
+        if (stored == null ||
+            stored.byteSize != item.byteSize ||
+            stored.mediaKind != item.mediaKind.workerValue ||
+            stored.contentType != item.contentType) {
+          throw const SquareMediaStoreException('草稿媒体声明与数据库不一致');
+        }
+      }
+      await SquareMediaStore.replaceReferencesInTransaction(
+        isar,
+        cidNumber: draft.cidNumber,
+        contentKind: 'draft',
+        contentId: draft.draftId,
+        references: [
+          for (var i = 0; i < normalizedMedia.length; i++)
+            SquareMediaReference(
+              cidNumber: draft.cidNumber,
+              mediaId: normalizedMedia[i].mediaId!,
+              contentKind: 'draft',
+              contentId: draft.draftId,
+              mediaIndex: i,
+              mediaRole: 'main',
+            ),
+        ],
+      );
+      final existing = await isar.squareComposeDraftEntitys.getByDraftKey(
+        prepared.draftKey,
+      );
       if (existing != null) prepared.id = existing.id;
       await isar.squareComposeDraftEntitys.putByDraftKey(prepared);
 
       // 重新保存同一 draft_id 即声明它仍是有效草稿，撤销尚未执行的旧清理事实。
-      final staleCleanup = await isar.squareFileCleanupEntitys
-          .getByCleanupKey(_cleanupKey(draft.cidNumber, draft.draftId));
+      final staleCleanup = await isar.squareFileCleanupEntitys.getByCleanupKey(
+        _cleanupKey(draft.cidNumber, draft.draftId),
+      );
       if (staleCleanup != null) {
         await isar.squareFileCleanupEntitys.delete(staleCleanup.id);
       }
 
-      final all = await isar.squareComposeDraftEntitys
-          .filter()
-          .cidNumberEqualTo(draft.cidNumber)
-          .findAll();
-      if (all.length <= maxPerOwner) return;
-
-      all.sort((left, right) {
-        final byTime = left.updatedAtMillis.compareTo(right.updatedAtMillis);
-        if (byTime != 0) return byTime;
-        return left.draftId.compareTo(right.draftId);
-      });
-      for (var i = 0; i < all.length - maxPerOwner; i++) {
-        final overflow = all[i];
-        await isar.squareComposeDraftEntitys.delete(overflow.id);
+      if (importingFiles) {
         final cleanup = _newCleanup(
-          cidNumber: overflow.cidNumber,
-          draftId: overflow.draftId,
+          cidNumber: draft.cidNumber,
+          draftId: draft.draftId,
           createdAtMillis: draft.updatedAtMillis,
         );
         await isar.squareFileCleanupEntitys.putByCleanupKey(cleanup);
@@ -85,6 +143,36 @@ class SquareComposeDraftStore implements SquareComposeDraftRepository {
       }
     });
     await _runCleanupKeys(cleanupKeys);
+  }
+
+  /// 用户明确恢复旧草稿时逐条核验文件并提交数据库，成功前绝不清除旧来源。
+  /// 新草稿只从数据库生成临时处理文件；普通列表只查询描述。
+  Future<SquareComposeDraft> restore(SquareComposeDraft draft) async {
+    var source = draft;
+    if (draft.media.any((item) => item.mediaId == null)) {
+      await ComposeDraftMedia.validateLegacyPaths(
+        draft.cidNumber,
+        draft.draftId,
+        draft.media
+            .where((item) => item.mediaId == null)
+            .map((item) => item.path),
+      );
+      await save(draft);
+      final row = await SocialIsar.instance.read(
+        (db) => db.squareComposeDraftEntitys.getByDraftKey(
+          _draftKey(draft.cidNumber, draft.draftId),
+        ),
+      );
+      if (row == null) throw const SquareComposeDraftStoreException('草稿已不存在');
+      source = _fromEntity(row);
+    }
+    final media = <SquareLocalMediaDraft>[];
+    for (final item in source.media) {
+      media.add(
+        await ComposeDraftMedia.persist(source.cidNumber, source.draftId, item),
+      );
+    }
+    return source.copyWith(media: media);
   }
 
   @override
@@ -113,6 +201,15 @@ class SquareComposeDraftStore implements SquareComposeDraftRepository {
     final cleanupKey = _cleanupKey(cidNumber, draftId);
     final createdAtMillis = DateTime.now().millisecondsSinceEpoch;
     await SocialIsar.instance.writeTxn((isar) async {
+      final publishing = await isar.squarePublicationEntitys
+          .getByCidNumberDraftId(cidNumber, draftId);
+      if (publishing != null) throw StateError('请先恢复该草稿的发布结果');
+      await SquareMediaStore.removeContentInTransaction(
+        isar,
+        cidNumber: cidNumber,
+        contentKind: 'draft',
+        contentId: draftId,
+      );
       final entity = await isar.squareComposeDraftEntitys.getByDraftKey(
         _draftKey(cidNumber, draftId),
       );
@@ -141,9 +238,9 @@ class SquareComposeDraftStore implements SquareComposeDraftRepository {
       final rows = cidNumber == null
           ? await isar.squareFileCleanupEntitys.where().findAll()
           : await isar.squareFileCleanupEntitys
-              .filter()
-              .cidNumberEqualTo(cidNumber)
-              .findAll();
+                .filter()
+                .cidNumberEqualTo(cidNumber)
+                .findAll();
       return rows.map((row) => row.cleanupKey).toList(growable: false);
     });
     await _runCleanupKeys(keys);
@@ -153,8 +250,9 @@ class SquareComposeDraftStore implements SquareComposeDraftRepository {
     final failures = <String>[];
     for (final cleanupKey in cleanupKeys) {
       final plan = await SocialIsar.instance.read((isar) async {
-        final row =
-            await isar.squareFileCleanupEntitys.getByCleanupKey(cleanupKey);
+        final row = await isar.squareFileCleanupEntitys.getByCleanupKey(
+          cleanupKey,
+        );
         return row == null ? null : _copyCleanup(row);
       });
       if (plan == null) continue;
@@ -166,8 +264,9 @@ class SquareComposeDraftStore implements SquareComposeDraftRepository {
       try {
         await ComposeDraftMedia.deleteDir(plan.cidNumber, plan.draftId);
         await SocialIsar.instance.writeTxn((isar) async {
-          final current =
-              await isar.squareFileCleanupEntitys.getByCleanupKey(cleanupKey);
+          final current = await isar.squareFileCleanupEntitys.getByCleanupKey(
+            cleanupKey,
+          );
           if (current != null && current.id == plan.id) {
             await isar.squareFileCleanupEntitys.delete(current.id);
           }
@@ -175,8 +274,9 @@ class SquareComposeDraftStore implements SquareComposeDraftRepository {
       } catch (error) {
         failures.add('$cleanupKey：$error');
         await SocialIsar.instance.writeTxn((isar) async {
-          final current =
-              await isar.squareFileCleanupEntitys.getByCleanupKey(cleanupKey);
+          final current = await isar.squareFileCleanupEntitys.getByCleanupKey(
+            cleanupKey,
+          );
           if (current == null || current.id != plan.id) return;
           current
             ..attemptCount += 1
@@ -193,10 +293,7 @@ class SquareComposeDraftStore implements SquareComposeDraftRepository {
   }
 
   static SquareComposeDraftEntity _toEntity(SquareComposeDraft draft) {
-    _validateIdentity(
-      cidNumber: draft.cidNumber,
-      draftId: draft.draftId,
-    );
+    _validateIdentity(cidNumber: draft.cidNumber, draftId: draft.draftId);
     if (draft.updatedAtMillis <= 0) {
       throw const SquareComposeDraftStoreException('草稿时间不合法');
     }
@@ -215,15 +312,15 @@ class SquareComposeDraftStore implements SquareComposeDraftRepository {
       ..updatedAtMillis = draft.updatedAtMillis;
   }
 
-  static void _validateIdentity({
-    required String cidNumber,
-    String? draftId,
-  }) {
-    final invalidCid = cidNumber.trim().isEmpty ||
+  static void _validateIdentity({required String cidNumber, String? draftId}) {
+    final invalidCid =
+        cidNumber.trim().isEmpty ||
         cidNumber.trim() != cidNumber ||
+        utf8.encode(cidNumber).length > 32 ||
         cidNumber == '.' ||
         cidNumber == '..';
-    final invalidDraft = draftId != null &&
+    final invalidDraft =
+        draftId != null &&
         (draftId.trim().isEmpty ||
             draftId.trim() != draftId ||
             draftId == '.' ||
@@ -261,35 +358,31 @@ class SquareComposeDraftStore implements SquareComposeDraftRepository {
 
   static SquareComposeDraftEntity _copyEntity(
     SquareComposeDraftEntity source,
-  ) =>
-      SquareComposeDraftEntity()
-        ..id = source.id
-        ..draftKey = source.draftKey
-        ..cidNumber = source.cidNumber
-        ..draftId = source.draftId
-        ..postType = source.postType
-        ..title = source.title
-        ..text = source.text
-        ..mediaJson = source.mediaJson
-        ..contentSectionsJson = source.contentSectionsJson
-        ..updatedAtMillis = source.updatedAtMillis;
+  ) => SquareComposeDraftEntity()
+    ..id = source.id
+    ..draftKey = source.draftKey
+    ..cidNumber = source.cidNumber
+    ..draftId = source.draftId
+    ..postType = source.postType
+    ..title = source.title
+    ..text = source.text
+    ..mediaJson = source.mediaJson
+    ..contentSectionsJson = source.contentSectionsJson
+    ..updatedAtMillis = source.updatedAtMillis;
 
   static SquareFileCleanupEntity _newCleanup({
     required String cidNumber,
     required String draftId,
     required int createdAtMillis,
-  }) =>
-      SquareFileCleanupEntity()
-        ..cleanupKey = _cleanupKey(cidNumber, draftId)
-        ..cidNumber = cidNumber
-        ..draftId = draftId
-        ..cleanupKind = _draftDirectoryCleanup
-        ..createdAtMillis = createdAtMillis
-        ..attemptCount = 0;
+  }) => SquareFileCleanupEntity()
+    ..cleanupKey = _cleanupKey(cidNumber, draftId)
+    ..cidNumber = cidNumber
+    ..draftId = draftId
+    ..cleanupKind = _draftDirectoryCleanup
+    ..createdAtMillis = createdAtMillis
+    ..attemptCount = 0;
 
-  static SquareFileCleanupEntity _copyCleanup(
-    SquareFileCleanupEntity source,
-  ) =>
+  static SquareFileCleanupEntity _copyCleanup(SquareFileCleanupEntity source) =>
       SquareFileCleanupEntity()
         ..id = source.id
         ..cleanupKey = source.cleanupKey

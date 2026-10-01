@@ -1,9 +1,13 @@
+import 'package:citizenapp/8964/services/square_post_store.dart';
+import 'package:citizenapp/8964/services/square_local_post_presenter.dart';
+import 'package:citizenapp/8964/services/square_post_sync_service.dart';
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/square_models.dart';
 import 'package:citizenapp/8964/compose/compose_page.dart';
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
@@ -73,7 +77,7 @@ class _SquarePostDetailPageState extends State<SquarePostDetailPage> {
     unawaited(_loadDetail());
   }
 
-  Future<void> _loadDetail() async {
+  Future<void> _loadDetail({bool refresh = false}) async {
     if (mounted) {
       setState(() {
         _loading = true;
@@ -81,6 +85,33 @@ class _SquarePostDetailPageState extends State<SquarePostDetailPage> {
       });
     }
     try {
+      if (_post.isLocal) {
+        final cid = _post.author.cidNumber!;
+        if (refresh) {
+          final session = await _sessionProvider.ensureSession();
+          if (session == null || session.cidNumber != cid) {
+            throw StateError('当前用户已变化');
+          }
+          await SquarePostSyncService().sync(
+            session,
+            userInitiated: true,
+            isCurrent: () => mounted,
+          );
+        }
+        final local = await const SquarePostStore().read(
+          cidNumber: cid,
+          postId: _post.postId,
+        );
+        if (local == null) throw StateError('本地尚未保存内容');
+        final presentation = const SquareLocalPostPresenter().present(local);
+        if (mounted) {
+          setState(() {
+            _post = presentation.post;
+            _loading = false;
+          });
+        }
+        return;
+      }
       final session = await _sessionProvider.ensureSession();
       if (session == null) throw const SquareApiException('请先选择默认钱包账户');
       final detail = await _api.fetchPostDetail(
@@ -94,8 +125,12 @@ class _SquarePostDetailPageState extends State<SquarePostDetailPage> {
       });
     } catch (error) {
       if (!mounted) return;
+      if (refresh) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('刷新失败，已保留本地内容')));
+      }
       setState(() {
-        _loadError = error;
+        _loadError = refresh ? null : error;
         _loading = false;
       });
     }
@@ -107,6 +142,11 @@ class _SquarePostDetailPageState extends State<SquarePostDetailPage> {
       appBar: AppBar(
         title: Text(post.postType.label),
         actions: [
+          IconButton(
+            tooltip: '刷新',
+            icon: const Icon(Icons.refresh),
+            onPressed: _loading ? null : () => _loadDetail(refresh: true),
+          ),
           PopupMenuButton<_PostDetailAction>(
             enabled: !_deleting,
             onSelected: _handleAction,
@@ -132,7 +172,10 @@ class _SquarePostDetailPageState extends State<SquarePostDetailPage> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _loadError != null
-          ? _PostDetailLoadError(error: _loadError!, onRetry: _loadDetail)
+          ? _PostDetailLoadError(
+              error: _loadError!,
+              onRetry: () => _loadDetail(refresh: true),
+            )
           : ListView(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
               children: [
@@ -208,7 +251,7 @@ class _SquarePostDetailPageState extends State<SquarePostDetailPage> {
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('删除内容'),
-        content: const Text('删除后将清理 Cloudflare 中的正文和媒体。链上发布记录保持不变。'),
+        content: const Text('删除后将清理本地及远端的正文和媒体。链上发布记录保持不变。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(false),

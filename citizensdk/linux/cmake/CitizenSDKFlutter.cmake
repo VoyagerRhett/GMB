@@ -87,7 +87,7 @@ endif()
 target_compile_features(citizen_sdk_plugin PRIVATE cxx_std_17)
 target_compile_definitions(citizen_sdk_plugin PRIVATE FLUTTER_PLUGIN_IMPL)
 target_include_directories(citizen_sdk_plugin
-  PUBLIC "${_citizensdk_linux_root}/include"
+  PUBLIC "${_citizensdk_linux_root}"
   PRIVATE "${_citizensdk_linux_root}/src"
 )
 target_link_libraries(citizen_sdk_plugin PRIVATE

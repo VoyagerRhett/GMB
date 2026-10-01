@@ -373,7 +373,7 @@ int main() {
 
   const std::string header_path =
       std::string(CITIZENSDK_WINDOWS_TEST_SOURCE_DIR) +
-      "/include/citizen_sdk/citizensdk_host.h";
+      "/citizen_sdk/citizensdk_host.h";
   std::ifstream stream(header_path, std::ios::binary);
   assert(stream.good());
   const std::string header((std::istreambuf_iterator<char>(stream)),
@@ -614,7 +614,7 @@ int main() {
   citizen_sdk::Config cpp_config;
   cpp_config.storage_root = temporary.path() / "cpp-state";
   cpp_config.asset_root = std::filesystem::path(CITIZENSDK_WINDOWS_TEST_SOURCE_DIR).parent_path() /
-                          "assets" / "citizenchain";
+                          "chain";
   cpp_config.application_id = "org.citizen.closefixture";
   citizen_sdk::Host cpp_host(cpp_config);
   cpp_host.open();

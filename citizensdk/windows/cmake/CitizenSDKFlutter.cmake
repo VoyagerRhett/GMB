@@ -115,7 +115,7 @@ function(citizensdk_configure_flutter_target target)
     WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE _WIN32_WINNT=0x0A00
     _HAS_EXCEPTIONS=1 FLUTTER_PLUGIN_IMPL
     CITIZENSDK_APPLICATION_ID="${CITIZENSDK_APPLICATION_ID}")
-  target_include_directories(${target} PUBLIC "${_citizensdk_windows_root}/include"
+  target_include_directories(${target} PUBLIC "${_citizensdk_windows_root}"
     PRIVATE "${_citizensdk_windows_root}/src")
   target_link_libraries(${target} PUBLIC flutter flutter_wrapper_plugin CitizenSDK::Host
     PRIVATE bcrypt user32 gdi32 comctl32 shell32 ole32)

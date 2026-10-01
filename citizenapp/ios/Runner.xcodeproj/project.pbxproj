@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		6A1C27010000000000000094 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 6A1C27010000000000000093 /* InfoPlist.strings */; };
+		6A1C27010000000000000094 /* InfoPlist.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 6A1C27010000000000000093 /* InfoPlist.xcstrings */; };
 		0D4CF3ABD4CE98879E36D87F /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = ECD81E79F57495B7E629D0D4 /* Pods_Runner.framework */; };
 		1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */ = {isa = PBXBuildFile; fileRef = 1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */; };
 		331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 331C807B294A618700263BE5 /* RunnerTests.swift */; };
@@ -58,8 +58,6 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		6A1C27010000000000000091 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
-		6A1C27010000000000000092 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 		0ACD2258271A798450AB896B /* Pods-RunnerTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.debug.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.debug.xcconfig"; sourceTree = "<group>"; };
 		0FB2469DDD06B133A02A3CD1 /* Pods-Runner.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.profile.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.profile.xcconfig"; sourceTree = "<group>"; };
 		1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GeneratedPluginRegistrant.h; sourceTree = "<group>"; };
@@ -93,6 +91,7 @@
 		E50916E24A9DCE2401232E89 /* Pods_RunnerTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_RunnerTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		ECD81E79F57495B7E629D0D4 /* Pods_Runner.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Runner.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		EDCC5A177FFDF81E8DB85430 /* Pods-Runner.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.release.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"; sourceTree = "<group>"; };
+		6A1C27010000000000000093 /* InfoPlist.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = "InfoPlist.xcstrings"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -134,7 +133,8 @@
 			children = (
 				331C807B294A618700263BE5 /* RunnerTests.swift */,
 			);
-			path = RunnerTests;
+			name = RunnerTests;
+			path = .;
 			sourceTree = "<group>";
 		};
 		A81100050000000000000000 /* RunnerUITests */ = {
@@ -142,7 +142,8 @@
 			children = (
 				A81100020000000000000000 /* RunnerUITests.swift */,
 			);
-			path = RunnerUITests;
+			name = RunnerUITests;
+			path = .;
 			sourceTree = "<group>";
 		};
 		51314C3C678884007158493F /* Pods */ = {
@@ -211,7 +212,7 @@
 				97C146FD1CF9000F007C117D /* Assets.xcassets */,
 				97C146FF1CF9000F007C117D /* CitizenLaunchScreen.storyboard */,
 				97C147021CF9000F007C117D /* Info.plist */,
-				6A1C27010000000000000093 /* InfoPlist.strings */,
+				6A1C27010000000000000093 /* InfoPlist.xcstrings */,
 				1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */,
 				1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */,
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
@@ -382,7 +383,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				97C147011CF9000F007C117D /* CitizenLaunchScreen.storyboard in Resources */,
-				6A1C27010000000000000094 /* InfoPlist.strings in Resources */,
+				6A1C27010000000000000094 /* InfoPlist.xcstrings in Resources */,
 				3B3967161E833CAA004F5970 /* AppFrameworkInfo.plist in Resources */,
 				97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */,
 				97C146FC1CF9000F007C117D /* Main.storyboard in Resources */,
@@ -559,15 +560,6 @@
 /* End PBXTargetDependency section */
 
 /* Begin PBXVariantGroup section */
-		6A1C27010000000000000093 /* InfoPlist.strings */ = {
-			isa = PBXVariantGroup;
-			children = (
-				6A1C27010000000000000091 /* zh-Hans */,
-				6A1C27010000000000000092 /* en */,
-			);
-			name = InfoPlist.strings;
-			sourceTree = "<group>";
-		};
 		97C146FA1CF9000F007C117D /* Main.storyboard */ = {
 			isa = PBXVariantGroup;
 			children = (

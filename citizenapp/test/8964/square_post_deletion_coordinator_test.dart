@@ -3,6 +3,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/8964/services/square_post_deletion_coordinator.dart';
 import 'package:citizenapp/8964/services/square_post_store.dart';
+import 'package:citizenapp/isar/social_isar.dart';
+
+import '../support/isar_test_env.dart';
 
 const _cidNumber = 'CN001-CTZN-000000001-2026';
 const _otherCidNumber = 'CN002-CTZN-000000002-2026';
@@ -10,12 +13,12 @@ const _accountId =
     '0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d';
 
 SquareSession _session() => const SquareSession(
-      sessionToken: 'session',
-      cidNumber: _cidNumber,
-      bindingRevision: 1,
-      accountId: _accountId,
-      expiresAt: 4102444800000,
-    );
+  sessionToken: 'session',
+  cidNumber: _cidNumber,
+  bindingRevision: 1,
+  accountId: _accountId,
+  expiresAt: 4102444800000,
+);
 
 class _FakeRemoteDeletion implements SquarePostDeletionService {
   _FakeRemoteDeletion({this.error});
@@ -34,6 +37,7 @@ class _FakeRemoteDeletion implements SquarePostDeletionService {
 }
 
 class _FakeLocalStore implements SquareLocalPostDeletionStore {
+  bool fail = false;
   int deleteCalls = 0;
   String? deletedCidNumber;
   String? deletedPostId;
@@ -44,6 +48,7 @@ class _FakeLocalStore implements SquareLocalPostDeletionStore {
     required String postId,
   }) async {
     deleteCalls += 1;
+    if (fail) throw StateError('本地事务失败');
     deletedCidNumber = cidNumber;
     deletedPostId = postId;
     return true;
@@ -51,6 +56,42 @@ class _FakeLocalStore implements SquareLocalPostDeletionStore {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  useIsolatedIsar();
+  test('远端成功本地失败，重启后只重试本地删除', () async {
+    final remote = _FakeRemoteDeletion();
+    final local = _FakeLocalStore()..fail = true;
+    await expectLater(
+      SquarePostDeletionCoordinator(
+        remoteDeletion: remote,
+        localStore: local,
+      ).delete(
+        session: _session(),
+        cidNumber: _cidNumber,
+        postId: 'pending-delete',
+      ),
+      throwsStateError,
+    );
+    expect(
+      (await const SquarePostStore().readDeletion(
+        _cidNumber,
+        'pending-delete',
+      ))!.operationState,
+      'confirmed',
+    );
+    await (await SocialIsar.instance.db()).close();
+    local.fail = false;
+    await SquarePostDeletionCoordinator(
+      remoteDeletion: remote,
+      localStore: local,
+    ).delete(
+      session: _session(),
+      cidNumber: _cidNumber,
+      postId: 'pending-delete',
+    );
+    expect(remote.calls, 1);
+    expect(local.deleteCalls, 2);
+  });
   test('Worker 删除成功后删除同 CID 本地副本', () async {
     final remote = _FakeRemoteDeletion();
     final local = _FakeLocalStore();

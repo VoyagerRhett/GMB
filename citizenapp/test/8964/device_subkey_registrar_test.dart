@@ -1,4 +1,5 @@
 import '../support/fake_citizen_sdk.dart';
+
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -54,7 +55,15 @@ class _SessionApi extends SquareApiClient {
       accountId: accountId,
     );
     await signLoginPayload(context, Uint8List(32));
-    if (deviceMissing) await onDeviceNotRegistered!(context);
+    if (deviceMissing) {
+      if (onDeviceNotRegistered == null) {
+        throw const SquareApiException(
+          '设备尚未登记',
+          errorCode: 'device_not_registered',
+        );
+      }
+      await onDeviceNotRegistered(context);
+    }
     return SquareSession(
       sessionToken: 'session',
       cidNumber: _binding.cidNumber,
@@ -72,14 +81,12 @@ class _SessionWalletManager implements AccountSecurityService {
   @override
   Future<AccountDataBinding> accountDataBindingForAccountId(
     String accountId,
-  ) async =>
-      _binding;
+  ) async => _binding;
 
   @override
   Future<AccountDataBinding?> readAccountDataBindingForAccountId(
     String accountId,
-  ) async =>
-      _binding;
+  ) async => _binding;
 
   @override
   Future<void> activateAccountDataBinding({
@@ -103,18 +110,18 @@ class _SessionWalletManager implements AccountSecurityService {
 class _SessionIdentityCache implements CurrentUserContext {
   @override
   Future<CurrentUser?> resolve() async => CurrentUser(
-        account: CitizenWalletStateAccount(
-          signMode: CitizenWalletSignMode.hot,
-          walletIndex: 7,
-          accountIndex: 0,
-          accountId: _accountId,
-          ss58Address: 'ss58',
-          name: '测试账户',
-          createdAtMillis: BigInt.one,
-          isDefault: true,
-        ),
-        binding: _binding,
-      );
+    account: CitizenWalletStateAccount(
+      signMode: CitizenWalletSignMode.hot,
+      walletIndex: 7,
+      accountIndex: 0,
+      accountId: _accountId,
+      ss58Address: 'ss58',
+      name: '测试账户',
+      createdAtMillis: BigInt.one,
+      isDefault: true,
+    ),
+    binding: _binding,
+  );
 
   @override
   void invalidate() {}
@@ -158,8 +165,7 @@ void main() {
         required signingMessage,
         required devicePublicKey,
         required issuedAtMillis,
-      }) async =>
-          '0xBINDINGSIG',
+      }) async => '0xBINDINGSIG',
       issuedAtMillis: 1700000000000,
     );
 
@@ -168,10 +174,7 @@ void main() {
     expect(registerBody!['p256_public_key'], '0x$barePub');
     expect(registerBody!['account_id'], accountId);
     expect(registerBody!['binding_signature'], '0xBINDINGSIG');
-    expect(
-      registerBody!['turnstile_token'],
-      'turnstile-device-bind-token',
-    );
+    expect(registerBody!['turnstile_token'], 'turnstile-device-bind-token');
   });
 
   test('冷启动等待根导航器就绪后只展示一次设备验证', () async {
@@ -224,7 +227,7 @@ void main() {
     );
   });
 
-  test('广场已有子钥直接静默登录；Worker 确认缺钥时才登记一次', () async {
+  test('广场查看静默登录；缺设备时只在明确登记动作鉴权一次', () async {
     final existingWallet = _SessionWalletManager();
     final existing = SquareSessionProvider(
       client: _SessionApi(deviceMissing: false),
@@ -242,7 +245,12 @@ void main() {
       deviceSubkey: _FakeDeviceSubkey('04${'b' * 128}'),
       currentUserContext: _SessionIdentityCache(),
     );
-    expect(await missing.ensureSession(), isNotNull);
+    await expectLater(
+      missing.ensureSession(),
+      throwsA(isA<SquareApiException>()),
+    );
+    expect(missingWallet.registrationCalls, 0);
+    expect(await missing.registerCurrentDevice(), isNotNull);
     expect(missingWallet.registrationCalls, 1);
   });
 }

@@ -6,7 +6,21 @@ import 'isar_core_bootstrap.dart';
 
 part 'user_isar.g.dart';
 
-/// 按永久 CID 保存的公开资料离线缓存。
+/// 资料修改的跨进程恢复记录，完整字节与请求同事务保存，不保存会话凭据。
+@collection
+class UserProfileUpdateEntity {
+  Id id = Isar.autoIncrement;
+  @Index(unique: true)
+  late String cidNumber;
+  late String operationState;
+  late String requestJson;
+  String? responseJson;
+  late String contentHash;
+  late List<byte> avatarBytes;
+  late List<byte> bannerBytes;
+}
+
+/// 按永久 CID 保存的公开资料；持久记录不按时间或数量淘汰。
 @collection
 class UserPublicProfileCacheEntity {
   Id id = Isar.autoIncrement;
@@ -15,6 +29,28 @@ class UserPublicProfileCacheEntity {
   late String cidNumber;
 
   late String profileJson;
+}
+
+/// 资料图片本体，与广场媒体分库；CID、用途及准确资料版本共同隔离。
+/// 头像和背景上限分别为512KiB和1536KiB，可在一条记录内原子保存完整字节。
+@collection
+class UserProfileMediaEntity {
+  Id id = Isar.autoIncrement;
+
+  @Index(
+    composite: [CompositeIndex('mediaRole'), CompositeIndex('mediaId')],
+    unique: true,
+  )
+  late String cidNumber;
+
+  late String mediaRole;
+  late String mediaId;
+  late String objectKey;
+  late int updatedAt;
+  late String contentType;
+  late int byteSize;
+  late String sha256;
+  late List<byte> mediaBytes;
 }
 
 /// 身份展示唯一快照；CID 供徽章读取，账户用于恢复完整身份及已验证未注册状态。
@@ -134,6 +170,8 @@ class UserIsar {
   static const List<CollectionSchema<dynamic>> _schemas =
       <CollectionSchema<dynamic>>[
         UserPublicProfileCacheEntitySchema,
+        UserProfileUpdateEntitySchema,
+        UserProfileMediaEntitySchema,
         UserIdentityBadgeSnapshotEntitySchema,
         UserContactStateEntitySchema,
         UserSettingsEntitySchema,
@@ -308,6 +346,8 @@ class UserIsar {
     if (existing != null && existing.isOpen) {
       try {
         existing.userPublicProfileCacheEntitys;
+        existing.userProfileUpdateEntitys;
+        existing.userProfileMediaEntitys;
         existing.userIdentityBadgeSnapshotEntitys;
         existing.userContactStateEntitys;
         existing.userSettingsEntitys;
@@ -321,6 +361,7 @@ class UserIsar {
     return Isar.open(
       _schemas,
       name: 'citizenapp_user',
+      relaxedDurability: false,
       directory: await IsarCoreBootstrap.resolveDirectory(),
     );
   }

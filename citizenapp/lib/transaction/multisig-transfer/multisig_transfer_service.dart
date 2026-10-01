@@ -6,7 +6,7 @@ import 'package:citizenapp/citizen/shared/pallet_registry.dart';
 
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter/foundation.dart';
-import 'package:citizenapp/log/app_log.dart';
+import 'package:citizenapp/app_log.dart';
 import 'package:polkadart/polkadart.dart' show Hasher;
 import 'package:polkadart/scale_codec.dart' show CompactBigIntCodec, ByteOutput;
 import 'package:polkadart_keyring/polkadart_keyring.dart' show Keyring;

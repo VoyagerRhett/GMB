@@ -8,7 +8,7 @@ import type {
   UserProfileCounts
 } from '../types';
 import { hydrateFeedMediaItems } from '../posts/confirm';
-import { resolveAuthorSignals } from '../social/author_signals';
+import { resolveAuthorSignals } from '../author_signals';
 import { readUserProfile } from '../account/user_repository';
 import { HttpError } from '../shared/http';
 import { assertCidNumber } from '../shared/ids';

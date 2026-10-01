@@ -193,7 +193,7 @@ Config FlutterEnvironment::resolve(const NativeEnvironmentInputs &inputs, uint32
   ordinary_path(inputs.executable, false);
   ordinary_path(inputs.user_data, true);
   const auto assets = inputs.executable.parent_path() / L"data" / L"flutter_assets" /
-      L"packages" / L"citizen_sdk" / L"assets" / L"citizenchain";
+      L"packages" / L"citizen_sdk" / L"chain";
   // 未选择链时不得探测包内链资产。
   if ((modules & CITIZENSDK_MODULE_CHAIN) != 0) {
     ordinary_path(assets, true);

@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
-import '../login/login_qr_handler.dart';
+import '../login_qr_handler.dart';
 import '../wallet/wallet_manager.dart';
 import 'app_theme.dart';
 

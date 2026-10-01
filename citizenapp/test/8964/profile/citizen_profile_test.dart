@@ -1,4 +1,10 @@
+import 'dart:async';
+
+import 'package:crypto/crypto.dart';
+import 'package:isar_community/isar.dart';
+
 import '../../support/fake_citizen_sdk.dart';
+
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -7,14 +13,20 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/square_models.dart';
 import 'package:citizenapp/8964/profile/models/citizen_profile.dart';
 import 'package:citizenapp/8964/profile/models/profile_presentation.dart';
 import 'package:citizenapp/8964/profile/services/citizen_profile_cache.dart';
+import 'package:citizenapp/8964/profile/services/citizen_profile_api.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/isar/user_isar.dart';
 
 import '../../support/isar_test_env.dart';
+
+// 固定1×1 PNG测试素材，不来自用户图片。
+final Uint8List _png = base64Decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWQAAAABJRU5ErkJggg==',
+);
 
 const String _owner = '5GrwvaEF5zXb26Fz9rcQpDWS7u4m6DXb6T6TQvF9j5uQ8g6U';
 
@@ -65,25 +77,103 @@ SquareApiClient _client(MockClient mock) =>
 
 /// http.Response(String) 默认按 Latin1 编码，中文会抛异常；显式声明 utf-8。
 http.Response _ok(Map<String, dynamic> body) => http.Response(
-      jsonEncode(body),
-      200,
-      headers: {'content-type': 'application/json; charset=utf-8'},
-    );
+  jsonEncode(body),
+  200,
+  headers: {'content-type': 'application/json; charset=utf-8'},
+);
 
 // `_headers` 对带 session 的请求强制要求设备请求签名器（发布会员体系后新增硬校验）；
 // 测试用固定假签名占位，MockClient 不校验签名头。
 SquareSession _session() => SquareSession(
-      sessionToken: 'tok',
-      cidNumber: "CN220-CTZN2-198805200-2026",
-      bindingRevision: 1,
-      accountId: _owner,
-      expiresAt: DateTime.now().millisecondsSinceEpoch + 60000,
-      signRequest: (_) async => 'test-device-signature',
-    );
+  sessionToken: 'tok',
+  cidNumber: "CN220-CTZN2-198805200-2026",
+  bindingRevision: 1,
+  accountId: _owner,
+  expiresAt: DateTime.now().millisecondsSinceEpoch + 60000,
+  signRequest: (_) async => 'test-device-signature',
+);
 
 void main() {
   TestCitizenSdkHarness();
   useIsolatedIsar();
+  test('公开资料显式刷新跨实例合并，普通读取不发请求', () async {
+    final gate = Completer<http.Response>();
+    var requests = 0;
+    final client = _client(
+      MockClient((_) {
+        requests++;
+        return gate.future;
+      }),
+    );
+    final firstApi = CitizenProfileApi(client: client),
+        secondApi = CitizenProfileApi(client: client);
+    const cid = 'CN001-CTZN-000000001-2026';
+    expect(
+      () => firstApi.refreshProfile(
+        cid,
+        session: _session(),
+        userInitiated: false,
+      ),
+      throwsStateError,
+    );
+    expect(await const CitizenProfileCache().read(cid), isNull);
+    expect(requests, 0);
+    final first = firstApi.refreshProfile(
+      cid,
+      session: _session(),
+      userInitiated: true,
+    );
+    final second = secondApi.refreshProfile(
+      cid,
+      session: _session(),
+      userInitiated: true,
+    );
+    expect(identical(first, second), isTrue);
+    final json = _profileJson()..['avatar_object_key'] = null;
+    gate.complete(_ok({'profile': json}));
+    await first;
+    expect(requests, 1);
+    expect((await const CitizenProfileCache().read(cid))!.displayName, '轻节点');
+  });
+  test('资料修改原件跨重启保留，已确认恢复原子保存资料和图片并清除操作行', () async {
+    const cache = CitizenProfileCache();
+    final profile = CitizenProfile.fromJson(_profileJson(displayName: '新名'));
+    final cid = profile.cidNumber!;
+    final request = {
+      'display_name': '新名',
+      'avatar_object_key': profile.avatarObjectKey!,
+      'avatar_content_hash': sha256.convert(_png).toString(),
+    };
+    await cache.prepareUpdate(cid, request: request, avatarBytes: _png);
+    await (await UserIsar.instance.db()).close();
+    final pending = await cache.readUpdate(cid);
+    expect(pending!.avatarBytes, _png);
+    expect(pending.operationState, 'pending');
+    await expectLater(
+      cache.prepareUpdate(cid, request: {'display_name': '另一修改'}),
+      throwsStateError,
+    );
+    expect(cache.updateMatches(pending, profile), isTrue);
+    await cache.confirmUpdate(profile);
+    await (await UserIsar.instance.db()).close();
+    await cache.finishUpdate(cid);
+    expect((await cache.read(cid))!.displayName, '新名');
+    expect(await cache.readUpdate(cid), isNull);
+    final rows = await UserIsar.instance.read(
+      (db) => db.userProfileMediaEntitys.where().findAll(),
+    );
+    expect(rows.single.mediaBytes, _png);
+  });
+
+  test('清除指定CID同时清除待修改原件，不波及其他CID', () async {
+    const cache = CitizenProfileCache();
+    const a = 'CN001-CTZN-000000001-2026', b = 'CN002-CTZN-000000002-2026';
+    await cache.prepareUpdate(a, request: {'display_name': 'A'});
+    await cache.prepareUpdate(b, request: {'display_name': 'B'});
+    await cache.clear(a);
+    expect(await cache.readUpdate(a), isNull);
+    expect(await cache.readUpdate(b), isNotNull);
+  });
   group('CitizenProfile model', () {
     test('maps counts, certification and follow state from json', () {
       final profile = CitizenProfile.fromJson(
@@ -168,7 +258,6 @@ void main() {
       expect(restored.articles, original.articles);
       expect(restored.avatarObjectKey, original.avatarObjectKey);
     });
-
   });
 
   group('CitizenProfileCache', () {
@@ -201,23 +290,51 @@ void main() {
       expect(CitizenProfileCache.revision.value!.revision, greaterThan(before));
     });
 
-    test('old cache without complete relation and content counts is rejected',
-        () async {
-      await UserIsar.instance.writeTxn((isar) async {
-        await isar.userPublicProfileCacheEntitys.putByCidNumber(
+    test('较旧资料不能覆盖新版本，数据库主键与正文CID不一致拒绝展示', () async {
+      const cache = CitizenProfileCache();
+      final profile = CitizenProfile.fromJson(_profileJson());
+      await cache.write(profile.copyWith(updatedAt: 200));
+      await expectLater(cache.write(profile), throwsStateError);
+      expect((await cache.read(cid))!.updatedAt, 200);
+      await UserIsar.instance.writeTxn((db) async {
+        await db.userPublicProfileCacheEntitys.putByCidNumber(
           UserPublicProfileCacheEntity()
             ..cidNumber = cid
-            ..profileJson = jsonEncode({
-              ..._profileJson(),
-              'counts': {'following': 2, 'followers': 128, 'posts': 48},
-            }),
+            ..profileJson = jsonEncode(
+              _profileJson(cidNumber: 'CN001-CTZN-000000002-2026'),
+            ),
         );
       });
-      expect(await const CitizenProfileCache().read(cid), isNull);
-      final retained = await UserIsar.instance.read((isar) async =>
-          isar.userPublicProfileCacheEntitys.getByCidNumber(cid));
-      expect(retained, isNotNull, reason: '损坏缓存读取不得隐式删除事实');
+      expect(await cache.read(cid), isNull);
+      expect(
+        await UserIsar.instance.read(
+          (db) => db.userPublicProfileCacheEntitys.count(),
+        ),
+        1,
+      );
     });
+
+    test(
+      'old cache without complete relation and content counts is rejected',
+      () async {
+        await UserIsar.instance.writeTxn((isar) async {
+          await isar.userPublicProfileCacheEntitys.putByCidNumber(
+            UserPublicProfileCacheEntity()
+              ..cidNumber = cid
+              ..profileJson = jsonEncode({
+                ..._profileJson(),
+                'counts': {'following': 2, 'followers': 128, 'posts': 48},
+              }),
+          );
+        });
+        expect(await const CitizenProfileCache().read(cid), isNull);
+        final retained = await UserIsar.instance.read(
+          (isar) async =>
+              isar.userPublicProfileCacheEntitys.getByCidNumber(cid),
+        );
+        expect(retained, isNotNull, reason: '损坏缓存读取不得隐式删除事实');
+      },
+    );
   });
 
   group('CitizenProfileMediaCache', () {
@@ -231,6 +348,248 @@ void main() {
       if (await root.exists()) await root.delete(recursive: true);
     });
 
+    test('重开数据库并删除临时文件后两种图片仍可恢复，普通读取不联网', () async {
+      var requests = 0;
+      final cache = CitizenProfileMediaCache(
+        supportDirectoryProvider: () async => root,
+        client: MockClient((_) async {
+          requests++;
+          throw StateError('普通读取不能联网');
+        }),
+      );
+      final profile = CitizenProfile.fromJson(_profileJson())
+          .copyWith(bannerObjectKey: 'profile/banner');
+      final saved = await cache.rememberSelected(
+        profile: profile,
+        avatarBytes: _png,
+        bannerBytes: _png,
+      );
+      expect(
+        (await const CitizenProfileCache().read(profile.cidNumber!))
+            ?.bannerObjectKey,
+        'profile/banner',
+      );
+      final rows = await UserIsar.instance.read(
+        (db) => db.userProfileMediaEntitys.where().findAll(),
+      );
+      expect(rows, hasLength(2));
+      expect(rows.map((r) => r.mediaRole).toSet(), {'avatar', 'banner'});
+      for (final row in rows) {
+        expect(row.mediaBytes, _png);
+      }
+      await File(saved.avatarPath!).delete();
+      await File(saved.bannerPath!).delete();
+      await (await UserIsar.instance.db()).close();
+      final restored = await cache.read(profile);
+      expect(await File(restored.avatarPath!).readAsBytes(), _png);
+      expect(await File(restored.bannerPath!).readAsBytes(), _png);
+      expect(requests, 0);
+    });
+
+    test('同版本媒体冲突整笔回滚，资料和已有图片不被半更新', () async {
+      const profiles = CitizenProfileCache();
+      final profile = CitizenProfile.fromJson(_profileJson())
+          .copyWith(bannerObjectKey: 'profile/banner');
+      await profiles.writeWithMedia(
+        profile,
+        avatarBytes: _png,
+        bannerBytes: _png,
+      );
+      await expectLater(
+        profiles.writeWithMedia(
+          profile.copyWith(displayName: '不得提交'),
+          avatarBytes: _png,
+          bannerBytes: Uint8List.fromList([..._png, 0]),
+        ),
+        throwsStateError,
+      );
+      expect(
+        (await profiles.read(profile.cidNumber!))!.displayName,
+        profile.displayName,
+      );
+      final rows = await UserIsar.instance.read(
+        (db) => db.userProfileMediaEntitys.where().findAll(),
+      );
+      for (final row in rows) {
+        expect(row.mediaBytes, _png);
+      }
+    });
+
+    test('图片损坏拒绝读取且保留记录，不自动下载或清空', () async {
+      final cache = CitizenProfileMediaCache(
+        supportDirectoryProvider: () async => root,
+      );
+      final profile = CitizenProfile.fromJson(_profileJson());
+      await cache.rememberSelected(profile: profile, avatarBytes: _png);
+      await UserIsar.instance.writeTxn((db) async {
+        final row = (await db.userProfileMediaEntitys.where().findAll()).single;
+        row.mediaBytes = [...row.mediaBytes]..[0] = 0;
+        await db.userProfileMediaEntitys.put(row);
+      });
+      await expectLater(cache.read(profile), throwsStateError);
+      expect(
+        await UserIsar.instance.read(
+          (db) => db.userProfileMediaEntitys.count(),
+        ),
+        1,
+      );
+    });
+
+    test('图片大小边界和格式错误不改变已有资料', () async {
+      const profiles = CitizenProfileCache();
+      final profile = CitizenProfile.fromJson(_profileJson());
+      await profiles.write(profile);
+      for (final input in [
+        Uint8List(0),
+        Uint8List(512 * 1024 + 1),
+        Uint8List.fromList([1, 2, 3]),
+      ]) {
+        await expectLater(
+          profiles.writeWithMedia(
+            profile.copyWith(displayName: '不得提交'),
+            avatarBytes: input,
+          ),
+          throwsFormatException,
+        );
+      }
+      expect(
+        (await profiles.read(profile.cidNumber!))!.displayName,
+        profile.displayName,
+      );
+      final atLimit = Uint8List(512 * 1024)..setRange(0, _png.length, _png);
+      await profiles.writeWithMedia(profile, avatarBytes: atLimit);
+      expect(
+        await UserIsar.instance.read(
+          (db) => db.userProfileMediaEntitys.count(),
+        ),
+        1,
+      );
+    });
+
+    test('准确旧版本文件先入库回读再删除，未知版本文件保留', () async {
+      final profile = CitizenProfile.fromJson(_profileJson());
+      final cid = profile.cidNumber!;
+      final hash = sha256.convert(utf8.encode(cid)).toString();
+      final revision = sha256
+          .convert(
+            utf8.encode(
+              '$cid\u0000avatar\u0000${profile.avatarObjectKey}\u0000${profile.updatedAt}',
+            ),
+          )
+          .toString();
+      final dir = Directory('${root.path}/user/profile_media/$hash');
+      await dir.create(recursive: true);
+      final old = File('${dir.path}/avatar_$revision');
+      final unknown = File('${dir.path}/avatar_unknown');
+      await old.writeAsBytes(_png);
+      await unknown.writeAsBytes(_png);
+      final cache = CitizenProfileMediaCache(
+        supportDirectoryProvider: () async => root,
+      );
+      final result = await cache.read(profile);
+      expect(await old.exists(), isFalse);
+      expect(await unknown.exists(), isTrue);
+      expect(await File(result.avatarPath!).readAsBytes(), _png);
+      await File(result.avatarPath!).delete();
+      expect((await cache.read(profile)).avatarPath, isNotNull);
+    });
+
+    test('旧文件为符号链接或损坏时保留来源且不入库', () async {
+      final profile = CitizenProfile.fromJson(_profileJson());
+      final cid = profile.cidNumber!;
+      final hash = sha256.convert(utf8.encode(cid)).toString();
+      final revision = sha256
+          .convert(
+            utf8.encode(
+              '$cid\u0000avatar\u0000${profile.avatarObjectKey}\u0000${profile.updatedAt}',
+            ),
+          )
+          .toString();
+      final dir = Directory('${root.path}/user/profile_media/$hash');
+      await dir.create(recursive: true);
+      final outside = File('${root.path}/outside');
+      await outside.writeAsBytes(_png);
+      final link = Link('${dir.path}/avatar_$revision');
+      await link.create(outside.path);
+      final cache = CitizenProfileMediaCache(
+        supportDirectoryProvider: () async => root,
+      );
+      await expectLater(cache.read(profile), throwsStateError);
+      expect(await link.exists(), isTrue);
+      await link.delete();
+      final broken = File(link.path);
+      await broken.writeAsBytes([1, 2, 3]);
+      await expectLater(cache.read(profile), throwsFormatException);
+      expect(await broken.readAsBytes(), [1, 2, 3]);
+      expect(
+        await UserIsar.instance.read(
+          (db) => db.userProfileMediaEntitys.count(),
+        ),
+        0,
+      );
+    });
+
+    test('清除CID后迟到下载不得写回', () async {
+      final entered = Completer<void>();
+      final response = Completer<http.Response>();
+      final cache = CitizenProfileMediaCache(
+        supportDirectoryProvider: () async => root,
+        client: MockClient((_) {
+          entered.complete();
+          return response.future;
+        }),
+      );
+      final profile = CitizenProfile.fromJson(_profileJson());
+      final pending = cache.refresh(
+        profile: profile,
+        avatarUrl: 'https://example.com/avatar',
+        bannerUrl: null,
+        headers: null,
+      );
+      final rejected = expectLater(pending, throwsStateError);
+      await entered.future;
+      await cache.clearCid(profile.cidNumber!);
+      response.complete(http.Response.bytes(_png, 200));
+      await rejected;
+      expect(
+        await UserIsar.instance.read(
+          (db) => db.userProfileMediaEntitys.count(),
+        ),
+        0,
+      );
+    });
+
+    test('显式下载入库后后续刷新复用本地，拒绝非HTTPS地址', () async {
+      var requests = 0;
+      final cache = CitizenProfileMediaCache(
+        supportDirectoryProvider: () async => root,
+        client: MockClient((_) async {
+          requests++;
+          return http.Response.bytes(_png, 200);
+        }),
+      );
+      final profile = CitizenProfile.fromJson(_profileJson());
+      await expectLater(
+        cache.refresh(
+          profile: profile,
+          avatarUrl: 'file:///image',
+          bannerUrl: null,
+          headers: null,
+        ),
+        throwsArgumentError,
+      );
+      for (var i = 0; i < 2; i++) {
+        final result = await cache.refresh(
+          profile: profile,
+          avatarUrl: 'https://example.com/avatar',
+          bannerUrl: null,
+          headers: null,
+        );
+        expect(await File(result.avatarPath!).readAsBytes(), _png);
+      }
+      expect(requests, 1);
+    });
+
     test('用户设置图片后首帧读取本机副本，未设置才返回空让页面使用内置图', () async {
       final cache = CitizenProfileMediaCache(
         supportDirectoryProvider: () async => root,
@@ -238,14 +597,11 @@ void main() {
       final profile = CitizenProfile.fromJson(_profileJson());
       final remembered = await cache.rememberSelected(
         profile: profile,
-        avatarBytes: Uint8List.fromList(const <int>[1, 2, 3, 4]),
+        avatarBytes: Uint8List.fromList(_png),
       );
 
       expect(remembered.avatarPath, isNotNull);
-      expect(
-        await File(remembered.avatarPath!).readAsBytes(),
-        const <int>[1, 2, 3, 4],
-      );
+      expect(await File(remembered.avatarPath!).readAsBytes(), _png);
 
       final unset = profile.copyWith(
         avatarObjectKey: null,
@@ -262,7 +618,7 @@ void main() {
       );
       final previous = await cache.rememberSelected(
         profile: profile,
-        avatarBytes: Uint8List.fromList(const <int>[9, 8, 7]),
+        avatarBytes: Uint8List.fromList(_png),
       );
       final changed = profile.copyWith(updatedAt: profile.updatedAt + 1);
 
@@ -274,35 +630,35 @@ void main() {
       );
 
       expect(refreshed.avatarPath, previous.avatarPath);
-      expect(
-        await File(refreshed.avatarPath!).readAsBytes(),
-        const <int>[9, 8, 7],
-      );
+      expect(await File(refreshed.avatarPath!).readAsBytes(), _png);
     });
 
     test('按 CID 清理不影响其它用户，全量安全擦除删除整个资料媒体域', () async {
       final cache = CitizenProfileMediaCache(
         supportDirectoryProvider: () async => root,
       );
-      final first = CitizenProfile.fromJson(
-        {..._profileJson(), 'cid_number': 'CN001-CTZN-000000001-2026'},
-      );
-      final second = CitizenProfile.fromJson(
-        {..._profileJson(), 'cid_number': 'CN001-CTZN-000000002-2026'},
-      );
+      final first = CitizenProfile.fromJson({
+        ..._profileJson(),
+        'cid_number': 'CN001-CTZN-000000001-2026',
+      });
+      final second = CitizenProfile.fromJson({
+        ..._profileJson(),
+        'cid_number': 'CN001-CTZN-000000002-2026',
+      });
       final firstMedia = await cache.rememberSelected(
         profile: first,
-        avatarBytes: Uint8List.fromList(const <int>[1]),
+        avatarBytes: Uint8List.fromList(_png),
       );
       final secondMedia = await cache.rememberSelected(
         profile: second,
-        avatarBytes: Uint8List.fromList(const <int>[2]),
+        avatarBytes: Uint8List.fromList(_png),
       );
 
       await cache.clearCid(first.cidNumber!);
       expect(await File(firstMedia.avatarPath!).exists(), isFalse);
       expect(await File(secondMedia.avatarPath!).exists(), isTrue);
 
+      await UserIsar.instance.closeAndDeleteFromDisk();
       await cache.closeAndDeleteAll();
       expect(await File(secondMedia.avatarPath!).exists(), isFalse);
     });
@@ -378,42 +734,39 @@ void main() {
       },
     );
 
-    test(
-      'fetchAuthorPosts parses post_type and title for articles',
-      () async {
-        final client = _client(
-          MockClient((request) async {
-            return _ok({
-              'ok': true,
-              'posts': [
-                {
-                  'post_id': 'a1',
-                  'account_id': _owner,
-                  'post_category': 'normal',
-                  'post_type': 'article',
-                  'title': '我的文章',
-                  'excerpt': '正文摘要',
-                  'created_at': 100,
-                  'media_items': [
-                    {
-                      'media_kind': 'image',
-                      'url': 'https://media.test/cover.jpg',
-                    }
-                  ],
-                },
-              ],
-              'next_cursor': null,
-            });
-          }),
-        );
+    test('fetchAuthorPosts parses post_type and title for articles', () async {
+      final client = _client(
+        MockClient((request) async {
+          return _ok({
+            'ok': true,
+            'posts': [
+              {
+                'post_id': 'a1',
+                'account_id': _owner,
+                'post_category': 'normal',
+                'post_type': 'article',
+                'title': '我的文章',
+                'excerpt': '正文摘要',
+                'created_at': 100,
+                'media_items': [
+                  {
+                    'media_kind': 'image',
+                    'url': 'https://media.test/cover.jpg',
+                  },
+                ],
+              },
+            ],
+            'next_cursor': null,
+          });
+        }),
+      );
 
-        final page = await client.fetchAuthorPosts(cidNumber: _owner);
-        final post = page.posts.single;
+      final page = await client.fetchAuthorPosts(cidNumber: _owner);
+      final post = page.posts.single;
 
-        expect(post.postType, SquarePostType.article);
-        expect(post.title, '我的文章');
-      },
-    );
+      expect(post.postType, SquarePostType.article);
+      expect(post.title, '我的文章');
+    });
 
     test('fetchAuthorPosts sends post_type query', () async {
       Uri? seen;
@@ -432,14 +785,14 @@ void main() {
       expect(seen!.queryParameters['post_type'], 'article');
     });
 
-    test(
-        'fetchFollows sends the mutual_following query without local intersection',
-        () async {
+    test('fetchFollows sends the mutual_following query without local intersection', () async {
       Uri? seen;
-      final client = _client(MockClient((request) async {
-        seen = request.url;
-        return _ok({'ok': true, 'entries': [], 'next_cursor': null});
-      }));
+      final client = _client(
+        MockClient((request) async {
+          seen = request.url;
+          return _ok({'ok': true, 'entries': [], 'next_cursor': null});
+        }),
+      );
 
       await client.fetchFollows(
         cidNumber: 'CN001-CTZN-000000001-2026',

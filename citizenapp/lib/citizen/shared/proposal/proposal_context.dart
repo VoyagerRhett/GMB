@@ -1,6 +1,6 @@
 import 'package:citizen_sdk/citizen_sdk.dart';
 
-import 'package:citizenapp/log/app_log.dart';
+import 'package:citizenapp/app_log.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/services/admin_activation_service.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/models/admin_account.dart';
 import 'package:citizenapp/citizen/proposal/admins-change/services/institution_admin_service.dart';

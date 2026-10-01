@@ -95,7 +95,7 @@ foreach(_kind Core Host)
   endforeach()
 endforeach()
 if(NOT CITIZENSDK_ASSET_DIR STREQUAL
-   "${CITIZENSDK_CONSUMER_PREFIX}/share/citizensdk/citizenchain")
+   "${CITIZENSDK_CONSUMER_PREFIX}/share/citizensdk/chain")
   message(FATAL_ERROR "CitizenSDK consumer must use the installed chain assets")
 endif()
 foreach(_asset manifest.json chainspec.json light_sync_state.json)

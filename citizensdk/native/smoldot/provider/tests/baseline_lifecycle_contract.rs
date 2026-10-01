@@ -15,9 +15,9 @@ use citizen_sdk_smoldot_provider::{
 };
 use futures::StreamExt;
 
-const CHAIN_SPEC: &str = include_str!("../../../../assets/citizenchain/chainspec.json");
+const CHAIN_SPEC: &str = include_str!("../../../../chain/chainspec.json");
 const LIGHT_SYNC_STATE: &str =
-    include_str!("../../../../assets/citizenchain/light_sync_state.json");
+    include_str!("../../../../chain/light_sync_state.json");
 const SAMPLE_ROUNDS: usize = 5;
 
 fn offline_chain_spec() -> String {

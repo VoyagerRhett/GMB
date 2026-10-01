@@ -1,19 +1,20 @@
 import 'package:citizenapp/wallet/account_balance_snapshot_store.dart';
 
-import 'dart:async';
+import 'package:citizenapp/isar/social_isar.dart';
+import 'package:citizenapp/8964/compose/drafts/compose_draft_store.dart';
+import 'package:citizenapp/8964/services/square_local_post_presenter.dart';
 
 import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
 
 import 'package:citizen_sdk/citizen_sdk.dart';
-import 'package:citizenapp/log/app_log.dart';
+import 'package:citizenapp/app_log.dart';
 
-import 'package:citizenapp/8964/chain/square_chain_service.dart';
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/services/square_chain_service.dart';
+import 'package:citizenapp/8964/square_models.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/8964/services/square_identity_state.dart';
 import 'package:citizenapp/8964/services/square_post_deletion_coordinator.dart';
 import 'package:citizenapp/8964/services/square_post_store.dart';
-import 'package:citizenapp/8964/services/square_post_sync_service.dart';
 import 'package:citizenapp/8964/services/square_upload_service.dart';
 
 class SquarePublishException implements Exception {
@@ -37,11 +38,9 @@ class SquarePublishResult {
   final String txHash;
   final String blockHashHex;
 
-  /// 远端发布已经完成，但本地副本或被替换内容清理仍需后台收敛时的成功告警。
+  /// 远端已发布、本地收尾或原帖删除仍待显式恢复时的成功告警。
   final String? completionWarning;
 }
-
-typedef SquarePostRecoveryScheduler = void Function(SquareSession session);
 
 abstract class SquarePublishBalanceReader {
   Future<double> fetchFreshFinalizedBalanceYuan(String accountId);
@@ -80,7 +79,6 @@ class SquarePublishService {
     SquarePostDeleteCoordinator? postDeletionCoordinator,
     SquarePublishBalanceReader? balanceReader,
     SquareLocalPostWriter? localPostWriter,
-    SquarePostRecoveryScheduler? recoveryScheduler,
   }) : _identityResolver = identityResolver,
        _uploadService = uploadService,
        _chainService =
@@ -90,8 +88,7 @@ class SquarePublishService {
        _postDeletionCoordinator =
            postDeletionCoordinator ?? SquarePostDeletionCoordinator(),
        _balanceReader = balanceReader ?? SquareChainBalanceReader(chain),
-       _localPostWriter = localPostWriter ?? const SquarePostStore(),
-       _recoveryScheduler = recoveryScheduler ?? _scheduleDefaultLocalRecovery;
+       _localPostWriter = localPostWriter ?? const SquarePostStore();
 
   final FinalizedIdentityResolver _identityResolver;
   final SquareContentUploader _uploadService;
@@ -100,7 +97,7 @@ class SquarePublishService {
   final SquarePostDeleteCoordinator _postDeletionCoordinator;
   final SquarePublishBalanceReader _balanceReader;
   final SquareLocalPostWriter _localPostWriter;
-  final SquarePostRecoveryScheduler _recoveryScheduler;
+  static const _postStore = SquarePostStore();
 
   /// 只取消尚未上传的本地媒体处理；链上或云端阶段不接受客户端取消。
   Future<void> cancelMediaProcessing() async {
@@ -113,6 +110,7 @@ class SquarePublishService {
 
   Future<SquarePublishResult> publish({
     required SquareIdentityState identity,
+    required String draftId,
     required SquarePostType postType,
     required String text,
     required List<SquareLocalMediaDraft> mediaDrafts,
@@ -132,6 +130,24 @@ class SquarePublishService {
     }
     if (trimmedText.isEmpty && mediaDrafts.isEmpty) {
       throw const SquarePublishException('发布内容不能为空');
+    }
+
+    final cid = identity.cidNumber;
+    final pending = cid == null
+        ? null
+        : await _postStore.readPublication(cid, draftId);
+    if (pending?.publicationState == 'confirmed') {
+      // 远端成功事实已在本机：仅恢复本地事务，不再验真、上传或发起交易。
+      final local = SquarePostStore.confirmedPublication(pending!);
+      final warning = await _finishLocal(pending);
+      return SquarePublishResult(
+        post: const SquareLocalPostPresenter().present(local).post,
+        txHash: pending.transactionHash!,
+        blockHashHex: pending.blockHash!,
+        completionWarning:
+            warning ??
+            (pending.replacePostId == null ? null : '本地副本已恢复，请检查原帖删除状态'),
+      );
     }
 
     // 点击发布才验真一次；后续上传与签名只复用此结果和本机版本校验。
@@ -160,6 +176,67 @@ class SquarePublishService {
     );
     await _identityResolver.assertCurrent(verified);
 
+    if (pending != null) {
+      final session = await _uploadService.resumeSession(
+        identity.accountId,
+        signLoginPayload,
+      );
+      if (session.cidNumber != pending.cidNumber ||
+          session.accountId != pending.accountId) {
+        throw const SquarePublishException('发布恢复会话与原发布归属不一致');
+      }
+      if (pending.publicationState == 'submitting') {
+        // 进程可能在交易提交后退出。只查询已有发布证明，绝不再次签名或提交。
+        final proof = await _publicationConfirmer.readPublishedProof(
+          session: session,
+          postId: pending.postId,
+        );
+        _recordConfirmation(pending, proof.post);
+        pending
+          ..blockHash = proof.blockHash
+          ..transactionHash = proof.transactionHash
+          ..publicationState = 'finalized';
+        await _postStore.savePublication(pending);
+        pending.publicationState = 'confirmed';
+        await _postStore.savePublication(pending);
+        final warning = await _finishLocal(pending);
+        return SquarePublishResult(
+          post: proof.post,
+          txHash: proof.transactionHash,
+          blockHashHex: proof.blockHash,
+          completionWarning: warning,
+        );
+      }
+      if (pending.publicationState == 'finalized') {
+        final post = await _publicationConfirmer.confirmPublishedPost(
+          session: session,
+          postId: pending.postId,
+          blockHashHex: pending.blockHash!,
+          txHash: pending.transactionHash!,
+        );
+        _recordConfirmation(pending, post);
+        await _postStore.savePublication(pending);
+        final warning = await _finishLocal(pending);
+        return SquarePublishResult(
+          post: post,
+          txHash: pending.transactionHash!,
+          blockHashHex: pending.blockHash!,
+          completionWarning: warning,
+        );
+      }
+      // 尚未进入交易的遗留准备可先由服务端核实释放，再重新准备当前草稿。
+      await _publicationConfirmer.abortUpload(
+        session: session,
+        uploadId: pending.uploadId,
+      );
+      await _postStore.discardPublication(
+        pending.cidNumber,
+        draftId,
+        pending.postId,
+      );
+    }
+
+    SquarePublicationEntity? publication;
     SquarePreparedContent? prepared;
     SquareUploadedContent? uploaded;
     SquareChainPublishedResult? chainResult;
@@ -181,6 +258,22 @@ class SquarePublishService {
           prepared.session.bindingRevision != snapshot.bindingRevision) {
         throw const SquarePublishException('发布会话与已验证身份不一致，请重新操作');
       }
+      publication = SquarePublicationEntity()
+        ..cidNumber = prepared.session.cidNumber
+        ..draftId = draftId
+        ..accountId = identity.accountId
+        ..postId = prepared.postId
+        ..postType = postType.workerValue
+        ..contentHash = prepared.contentHash
+        ..storageReceiptId = prepared.storageReceiptId
+        ..uploadId = prepared.preparedUpload.uploadId
+        ..manifestBytes = prepared.manifestBytes
+        ..publicationState = 'prepared'
+        ..replacePostId = replacePostId;
+      await _postStore.savePublication(
+        publication,
+        references: prepared.mediaReferences,
+      );
       uploaded = await _uploadService.uploadPreparedContent(
         prepared,
         onStage: onStage,
@@ -192,6 +285,8 @@ class SquarePublishService {
       await _ensurePublishBalance(identity.accountId);
       onStage?.call(SquarePublishStage.submittingChain);
       await _identityResolver.assertCurrent(verified);
+      publication.publicationState = 'submitting';
+      await _postStore.savePublication(publication);
       chainExecutionStarted = true;
       final chainFuture = _chainService.publishPost(
         signerPublicKey: SquareChainService.hexDecode(identity.accountId),
@@ -205,6 +300,11 @@ class SquarePublishService {
       // 自建交易池监听，只把这段唯一等待期映射到现有发布进度 UI。
       onStage?.call(SquarePublishStage.waitingInBlock);
       chainResult = await chainFuture;
+      publication
+        ..publicationState = 'finalized'
+        ..transactionHash = chainResult.txHash
+        ..blockHash = chainResult.blockHashHex;
+      await _postStore.savePublication(publication);
 
       onStage?.call(SquarePublishStage.confirmingPost);
       final confirmedPost = await _publicationConfirmer.confirmPublishedPost(
@@ -215,6 +315,7 @@ class SquarePublishService {
       );
 
       final localCopyWarning = await _saveLocalCopyAfterSuccess(
+        publication: publication,
         identity: identity,
         session: uploaded.session,
         prepared: prepared,
@@ -238,16 +339,30 @@ class SquarePublishService {
         completionWarning: completionWarning.isEmpty ? null : completionWarning,
       );
     } catch (e) {
+      var temporaryWarning = '';
+      if (prepared != null && uploaded == null) {
+        try {
+          await prepared.deleteTemporaryMedia();
+        } catch (_) {
+          temporaryWarning = '\n临时处理文件尚未清理';
+        }
+      }
       // 已完成上传但尚未取得 finalized 发布结果时，必须请求 Worker 再查链后硬清理。
       // confirm 失败时 chainResult 已存在，保留云端正文供同一 finalized 事实重试确认。
       final chainFailureAllowsAbort =
           e is SquareChainPublishException && e.canAbortUpload;
       final canAbortUpload = !chainExecutionStarted || chainFailureAllowsAbort;
-      if (uploaded != null && chainResult == null && canAbortUpload) {
+      if (prepared != null && chainResult == null && canAbortUpload) {
         try {
           await _publicationConfirmer.abortUpload(
-            session: uploaded.session,
-            uploadId: prepared!.preparedUpload.uploadId,
+            session: prepared.session,
+            uploadId: prepared.preparedUpload.uploadId,
+          );
+          await _postStore.discardPublication(
+            prepared.session.cidNumber,
+            draftId,
+            prepared.postId,
+            definitiveFailure: chainFailureAllowsAbort,
           );
         } catch (cleanupError) {
           throw SquarePublishException(
@@ -260,12 +375,13 @@ class SquarePublishService {
           '${_messageOf(e)}\n交易终态尚未确定，上传内容已保留，禁止重复发布',
         );
       }
-      // 失败内容由发布页持续自动保存兜底进草稿箱；此处只规整错误消息后上抛。
-      throw SquarePublishException(_messageOf(e));
+      // 发布前已保存草稿，失败时不以自动保存覆盖本次恢复事实。
+      throw SquarePublishException('${_messageOf(e)}$temporaryWarning');
     }
   }
 
   Future<String?> _saveLocalCopyAfterSuccess({
+    required SquarePublicationEntity publication,
     required SquareIdentityState identity,
     required SquareSession session,
     required SquarePreparedContent prepared,
@@ -282,37 +398,53 @@ class SquarePublishService {
           confirmedPost.storageReceiptId != prepared.storageReceiptId) {
         throw const SquarePostStoreException('发布确认字段与本地 manifest 不一致');
       }
-      await _localPostWriter.save(
-        SquareLocalPost(
-          postId: prepared.postId,
-          cidNumber: session.cidNumber,
-          accountId: identity.accountId,
-          postCategory: confirmedPost.postCategory.workerValue,
-          postType: postType.workerValue,
-          manifestBytes: prepared.manifestBytes,
-          contentHash: prepared.contentHash,
-          storageReceiptId: prepared.storageReceiptId,
-          chainBlock: confirmedPost.chainBlock,
-          createdAt: confirmedPost.createdAt.millisecondsSinceEpoch,
-          postState: SquarePostStore.publishedState,
-        ),
-      );
-      return null;
+      _recordConfirmation(publication, confirmedPost);
+      await _postStore.savePublication(publication);
+      return await _finishLocal(publication);
     } catch (error) {
       // 链上和 Worker 已确认后绝不能把本地磁盘失败包装成“发布失败”供用户重试，
-      // 否则会重复扣费、重复发帖；立即调度本人回灌，并以成功告警说明收敛状态。
+      // 否则会重复扣费、重复发帖；持久恢复行保留，用户重试只收尾，不后台回灌。
       AppLog.d('[SquarePublishService] local copy pending: $error');
-      _recoveryScheduler(session);
-      return '内容已发布，本地副本将在后台重新同步';
+      return '内容已发布，本地收尾尚未完成；请从草稿重试恢复，不会重复发布';
     }
   }
 
-  static void _scheduleDefaultLocalRecovery(SquareSession session) {
-    unawaited(
-      SquarePostSyncService().sync(session).catchError((Object error) {
-        AppLog.d('[SquarePublishService] local copy recovery failed: $error');
-      }),
-    );
+  Future<String?> _finishLocal(SquarePublicationEntity row) async {
+    try {
+      await _localPostWriter.save(
+        SquarePostStore.confirmedPublication(row),
+        draftId: row.draftId,
+      );
+    } catch (_) {
+      return '内容已发布，本地收尾尚未完成；请从草稿重试恢复，不会重复发布';
+    }
+    try {
+      await SquareComposeDraftStore.instance.retryPendingFileCleanup(
+        cidNumber: row.cidNumber,
+      );
+      return null;
+    } catch (_) {
+      return '内容已发布并保存在数据库，临时媒体文件仍待清理';
+    }
+  }
+
+  static void _recordConfirmation(
+    SquarePublicationEntity row,
+    SquarePost post,
+  ) {
+    if (post.postId != row.postId ||
+        post.author.cidNumber != row.cidNumber ||
+        post.author.accountId != row.accountId ||
+        post.contentHash != row.contentHash ||
+        post.storageReceiptId != row.storageReceiptId ||
+        post.postType.workerValue != row.postType) {
+      throw const SquarePublishException('远端确认与本机发布记录不一致');
+    }
+    row
+      ..publicationState = 'confirmed'
+      ..postCategory = post.postCategory.workerValue
+      ..chainBlock = post.chainBlock
+      ..createdAt = post.createdAt.millisecondsSinceEpoch;
   }
 
   Future<String?> _deleteReplacedPostAfterSuccess({

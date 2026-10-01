@@ -260,6 +260,16 @@ public final class CitizenSdk: @unchecked Sendable {
         return try native.deriveApplicationKey(accountID: account, salt: salt, info: info)
     }
 
+    public func deriveApplicationKeys(accountID: Data, salt: Data, infos: [Data])
+        throws -> CitizenSDKOperation<[Data]> {
+        let account = try CitizenSDKInputLimits.accountID(accountID)
+        guard salt.count == 32, (1...16).contains(infos.count),
+              infos.allSatisfy({ (1...256).contains($0.count) }) else {
+            throw CitizenSDKError(.invalidArgument, "application key batch salt/infos are invalid")
+        }
+        return try native.deriveApplicationKeys(accountID: account, salt: salt, infos: infos)
+    }
+
     public func importColdAccount(accountID: Data, name: String = "") throws -> CitizenSDKOperation<CitizenWalletState> {
         let account = try CitizenSDKInputLimits.accountID(accountID)
         let checkedName = name.isEmpty ? "" : try CitizenSDKInputLimits.accountName(name)

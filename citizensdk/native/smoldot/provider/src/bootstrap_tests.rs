@@ -4,7 +4,7 @@
 
 use super::*;
 
-const SPEC: &str = include_str!("../../../../assets/citizenchain/chainspec.json");
+const SPEC: &str = include_str!("../../../../chain/chainspec.json");
 const WIRE: &str = include_str!("../../../../test/node/citizensdk_bootstrap_manifest.json");
 
 fn manifest() -> Value {

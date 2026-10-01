@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 
-import 'package:citizenapp/citizen/election/election_tab.dart';
+import 'package:citizenapp/citizen/election_tab.dart';
 import 'package:citizenapp/citizen/governance/governance_tab.dart';
 import 'package:citizenapp/citizen/legislation/legislation_tab.dart';
 import 'package:citizenapp/citizen/public/public_page.dart';
-import 'package:citizenapp/citizen/feed/proposal_tab.dart';
+import 'package:citizenapp/citizen/proposal_tab.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/app_layout.dart';
 

@@ -1,6 +1,6 @@
 import type { Env, FeedKind, SquarePostFeedItem, SquarePostRow } from '../types';
 import { hydrateFeedMediaItems } from './confirm';
-import { resolveAuthorSignals } from '../social/author_signals';
+import { resolveAuthorSignals } from '../author_signals';
 
 export async function listFeedPosts(
   env: Env,

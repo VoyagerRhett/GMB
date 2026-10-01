@@ -9,10 +9,9 @@ use citizensdk::{
     CitizenSdkFailureStage, CitizenSdkFeeSnapshotInfo, CitizenSdkHostBoolResultV1,
     CitizenSdkHostBytesKind, CitizenSdkHostBytesResultV1, CitizenSdkHostHash32,
     CitizenSdkHostId128, CitizenSdkHostPublicStoreV1, CitizenSdkHostRecordDomain,
-    CitizenSdkHostRecordResultV1, CitizenSdkHostSecretKind, CitizenSdkHostSecretRefV1,
-    CitizenSdkHostSecretVaultV1, CitizenSdkHostSecureStoreV1, CitizenSdkHostServicesV1,
-    CitizenSdkHostSecretPresenceV1,
-    CitizenSdkHostStatusResultV1, CitizenSdkHostVaultAvailability,
+    CitizenSdkHostRecordResultV1, CitizenSdkHostSecretKind, CitizenSdkHostSecretPresenceV1,
+    CitizenSdkHostSecretRefV1, CitizenSdkHostSecretVaultV1, CitizenSdkHostSecureStoreV1,
+    CitizenSdkHostServicesV1, CitizenSdkHostStatusResultV1, CitizenSdkHostVaultAvailability,
     CitizenSdkHostVaultAvailabilityResultV1, CitizenSdkHostWalletKeyRefV1,
     CitizenSdkMutableBytesView, CitizenSdkPreparedTransactionInfo, CitizenSdkPreparedWalletInfo,
     CitizenSdkResultInfo, CitizenSdkResultKind, CitizenSdkRuntimeContextInfo,
@@ -53,6 +52,7 @@ fn original_public_layout_remains_frozen() {
     assert_eq!(CitizenSdkFailureStage::Teardown as u32, 8);
     assert_eq!(CitizenSdkEventType::HistoryChanged as u32, 5);
     assert_eq!(CitizenSdkEventType::FinalizedBlockChanged as u32, 6);
+    assert_eq!(CitizenSdkResultKind::ApplicationKeys as u32, 30);
 
     assert_layout!(CitizenSdkBytesView, 16, 8, { data: 0, len: 8 });
     assert_layout!(CitizenSdkU128, 16, 8, { low: 0, high: 8 });

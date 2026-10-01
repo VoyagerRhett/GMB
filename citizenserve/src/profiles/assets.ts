@@ -6,7 +6,7 @@ import {
   requireSession
 } from '../shared/http';
 import { isSha256Hex } from '../shared/hash';
-import { profileAssetPrefix } from '../storage/r2_keys';
+import { profileAssetPrefix } from '../r2_keys';
 import { resourceLimit, type ResourceKey } from '../limits/catalog';
 import { apiRouteUrl, readLimitedBytes } from '../limits/request';
 import { assertDeclaredResource, validateUploadBytes } from '../limits/upload';

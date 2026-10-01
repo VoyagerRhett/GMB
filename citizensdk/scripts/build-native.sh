@@ -12,8 +12,9 @@ while [[ -L "$script_path" ]]; do
 done
 script_dir="$(cd "$(dirname "$script_path")" && pwd -P)"
 sdk_dir="$(dirname "$script_dir")"
-ffi_manifest="$sdk_dir/native/smoldot/ffi/Cargo.toml"
-product_ffi_manifest="$sdk_dir/native/ffi/Cargo.toml"
+# Cargo清单由源码外工程准备完成后赋值，禁止直接编译仓库存放布局。
+ffi_manifest=''
+product_ffi_manifest=''
 product_header="$sdk_dir/include/citizensdk.h"
 product_types_header="$sdk_dir/include/citizensdk_types.h"
 qr_image_source_root="$sdk_dir/native/qr-image"
@@ -22,7 +23,7 @@ darwin_source_root="$sdk_dir/darwin/Sources/CitizenSDK"
 darwin_flutter_source_root="$sdk_dir/darwin/Sources/CitizenSDKFlutter"
 linux_source_root="$sdk_dir/linux"
 windows_source_root="$sdk_dir/windows"
-apple_asset_root="$sdk_dir/assets/citizenchain"
+apple_asset_root="$sdk_dir/chain"
 target_name="${1:-all}"
 # 六个显式参数表示消费最终包；没有参数的原生构建仍由各平台原入口负责。
 hosted_consumer=false
@@ -306,7 +307,7 @@ product_header_symbols() {
     "$product_header" | sort -u
 }
 
-# 公开146符号精确封闭，旧窗口私有符号已清零；内部模块只复用公开声明。
+# 公开148符号精确封闭，旧窗口私有符号已清零；内部模块只复用公开声明。
 product_internal_symbols() {
   node --input-type=module - "$script_dir/release.mjs" <<'NODE'
 import {pathToFileURL} from 'node:url';
@@ -368,7 +369,7 @@ verify_product_abi_symbols() {
   local actual expected forbidden
   actual="$(product_library_symbols "$library" "$nm_bin" "$prefix")"
   expected="$(product_linked_symbols)"
-  # Android 证书初始化只在 Android Core 中导出；其它平台的146个公开函数不变。
+  # Android 证书初始化只在 Android Core 中导出；其它平台的148个公开函数不变。
   if [[ "$label" == 'Android libcitizensdk.so' ]]; then
     expected="$(printf '%s\n%s\n' "$expected" citizensdk_android_init_tls | LC_ALL=C sort -u)"
   fi
@@ -427,7 +428,7 @@ verify_android_elf_identity() {
 }
 
 linux_host_header_symbols() {
-  local header="$linux_source_root/include/citizen_sdk/citizensdk_host.h"
+  local header="$linux_source_root/citizen_sdk/citizensdk_host.h"
   [[ -f "$header" && ! -L "$header" ]] \
     || fail "Linux Host 公共头缺失或不是普通文件：$header"
   perl -0777 -ne \
@@ -487,9 +488,9 @@ linux_install_files() {
     "lib/$platform/cmake/CitizenSDK/CitizenSDKDependencies.cmake" \
     "lib/$platform/cmake/CitizenSDK/CitizenSDKTargets.cmake" \
     "lib/$platform/cmake/CitizenSDK/CitizenSDKTargets-release.cmake" \
-    share/citizensdk/citizenchain/manifest.json \
-    share/citizensdk/citizenchain/chainspec.json \
-    share/citizensdk/citizenchain/light_sync_state.json \
+    share/citizensdk/chain/manifest.json \
+    share/citizensdk/chain/chainspec.json \
+    share/citizensdk/chain/light_sync_state.json \
     | LC_ALL=C sort
 }
 
@@ -525,11 +526,11 @@ verify_linux_install() {
     || fail "$platform 安装统一 QR 图像头字节漂移"
   for path in citizen_sdk.hpp citizen_sdk_config.hpp citizen_sdk_error.hpp \
       citizen_sdk_events.hpp citizen_sdk_models.hpp citizensdk_host.h; do
-    cmp -s "$linux_source_root/include/citizen_sdk/$path" "$prefix/include/citizen_sdk/$path" \
+    cmp -s "$linux_source_root/citizen_sdk/$path" "$prefix/include/citizen_sdk/$path" \
       || fail "$platform 安装 Host 头字节漂移：$path"
   done
   for path in manifest.json chainspec.json light_sync_state.json; do
-    cmp -s "$apple_asset_root/$path" "$prefix/share/citizensdk/citizenchain/$path" \
+    cmp -s "$apple_asset_root/$path" "$prefix/share/citizensdk/chain/$path" \
       || fail "$platform 安装链资产字节漂移：$path"
   done
   cmp -s "$source_core" "$prefix/lib/$platform/libcitizensdk.so" \
@@ -549,9 +550,9 @@ verify_linux_install() {
   fi
   core_symbols="$(product_header_symbols)"
   host_symbols="$(linux_host_header_symbols)"
-  [[ "$(printf '%s\n' "$core_symbols" | wc -l | tr -d ' ')" == 146 \
+  [[ "$(printf '%s\n' "$core_symbols" | wc -l | tr -d ' ')" == 148 \
     && "$(printf '%s\n' "$host_symbols" | wc -l | tr -d ' ')" == 19 ]] \
-    || fail "$platform 公开 ABI 必须精确为 146 Core / 19 Host"
+    || fail "$platform 公开 ABI 必须精确为 148 Core / 19 Host"
   verify_linux_elf_identity "$platform" "$prefix/lib/$platform/libcitizensdk.so" \
     "$prefix/lib/$platform/libcitizensdk_host.so" "$readelf_bin" "$nm_bin"
 }
@@ -699,6 +700,24 @@ resolve_gradle() {
   printf '%s\n' "$executable"
 }
 
+# Android标准assets容器与源码chain分开校验；仅允许精确三文件，逐个回读源码字节。
+verify_android_chain_assets() {
+  local aar="$1" entries asset actual expected
+  entries="$(unzip -Z1 "$aar")" || fail "无法读取 Android AAR 链资产"
+  actual="$(printf '%s\n' "$entries" | grep '^assets/' | grep -v '/$' | LC_ALL=C sort || true)"
+  expected=$'assets/chain/chainspec.json\nassets/chain/light_sync_state.json\nassets/chain/manifest.json'
+  [[ "$actual" == "$expected" ]] || fail "Android AAR 链资产闭集漂移"
+  for asset in \
+    chain/chainspec.json \
+    chain/light_sync_state.json \
+    chain/manifest.json; do
+    printf '%s\n' "$entries" | grep -Fxq "assets/$asset" \
+      || fail "Android AAR 缺少已验证链资产：$asset"
+    cmp -s <(unzip -p "$aar" "assets/$asset") "$sdk_dir/$asset" \
+      || fail "Android AAR 链资产与源码信任锚字节不一致：$asset"
+  done
+}
+
 verify_android_aar() {
   local aar="$1" core_library="$2" jni_library="$3" nm_bin="$4"
   local entries native_entries expected_native verify_dir aar_core aar_jni classes
@@ -718,15 +737,7 @@ verify_android_aar() {
     || fail "Android AAR 缺少 AndroidManifest.xml"
   printf '%s\n' "$entries" | grep -Fxq classes.jar \
     || fail "Android AAR 缺少 classes.jar"
-  for asset in \
-    assets/citizenchain/chainspec.json \
-    assets/citizenchain/light_sync_state.json \
-    assets/citizenchain/manifest.json; do
-    printf '%s\n' "$entries" | grep -Fxq "$asset" \
-      || fail "Android AAR 缺少已验证链资产：$asset"
-    cmp -s <(unzip -p "$aar" "$asset") "$sdk_dir/$asset" \
-      || fail "Android AAR 链资产与源码信任锚字节不一致：$asset"
-  done
+  verify_android_chain_assets "$aar"
   if printf '%s\n' "$entries" | grep -Eq '(^|/)(libsmoldot|libc\+\+_shared)\.so$|\.aar$'; then
     fail "Android AAR 混入 legacy/C++ 共享运行库或嵌套 AAR"
   fi
@@ -972,8 +983,8 @@ verify_apple_product_abi_symbols() {
   actual="$(printf '%s\n' "$all_symbols" | grep '^citizensdk_' || true)"
   expected="$(apple_public_symbols)"
   expected_count="$(printf '%s\n' "$expected" | grep -c '^citizensdk_' || true)"
-  [[ "$expected_count" == 150 ]] \
-    || fail "Apple 产品头必须精确声明 146 个 Core 与 4 个图像函数"
+  [[ "$expected_count" == 152 ]] \
+    || fail "Apple 产品头必须精确声明 148 个 Core 与 4 个图像函数"
   forbidden="$(printf '%s\n' "$all_symbols" \
     | grep -E '^(smoldot_|citizen_sr25519_|account_crypto_)' || true)"
   [[ -z "$forbidden" ]] \
@@ -982,11 +993,11 @@ verify_apple_product_abi_symbols() {
     local missing extra
     missing="$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))"
     extra="$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))"
-    fail "$label 的 citizensdk_* 与 146 Core + 4 图像函数产品头不一致；缺失=${missing:-无}；额外=${extra:-无}"
+    fail "$label 的 citizensdk_* 与 148 Core + 4 图像函数产品头不一致；缺失=${missing:-无}；额外=${extra:-无}"
   }
   # 动态 framework 同时提供 Swift API 和 C ABI。Swift public/ABI-support 符号
   # 只能属于本模块 mangling；除这组 Swift 符号外，全部外部已定义符号必须正好
-  # 是产品头中的 146 个 Core + 4 个图像 C ABI，Rust staticlib 及其依赖不得穿透边界。
+  # 是产品头中的 148 个 Core + 4 个图像 C ABI，Rust staticlib 及其依赖不得穿透边界。
   swift_symbols="$(printf '%s\n' "$all_symbols" | grep '^\$s10CitizenSDK' || true)"
   [[ -n "$swift_symbols" ]] || fail "$label 未导出 CitizenSDK Swift 模块符号"
   foreign="$(printf '%s\n' "$all_symbols" \
@@ -1011,8 +1022,8 @@ write_apple_exported_symbols() {
     apple_public_symbols
     printf '%s\n' "$swift_symbols"
   } | sed 's/^/_/' | LC_ALL=C sort -u >"$destination"
-  [[ "$(grep -c '^_citizensdk_' "$destination" || true)" == 150 ]] \
-    || fail "$label 导出允许集没有精确 146 个 Core + 4 个图像 C ABI"
+  [[ "$(grep -c '^_citizensdk_' "$destination" || true)" == 152 ]] \
+    || fail "$label 导出允许集没有精确 148 个 Core + 4 个图像 C ABI"
 }
 
 write_framework_plist() {
@@ -1433,11 +1444,11 @@ NODE
   [[ "$source_uuid" == "$installed_uuid" && "$source_uuid" == *' (arm64)' && "$source_uuid" != *$'\n'* ]] \
     || fail "macOS Hosted 已安装 Core UUID 或架构漂移"
   for path in manifest.json chainspec.json light_sync_state.json; do
-    cmp -s "$package/assets/citizenchain/$path" \
-      "$bundle/Contents/Frameworks/App.framework/Resources/flutter_assets/packages/citizen_sdk/assets/citizenchain/$path" \
+    cmp -s "$package/chain/$path" \
+      "$bundle/Contents/Frameworks/App.framework/Resources/flutter_assets/packages/citizen_sdk/chain/$path" \
       || fail "macOS Hosted Flutter 安装链资产漂移：$path"
-    cmp -s "$package/assets/citizenchain/$path" \
-      "$bundle/Contents/Frameworks/CitizenSDK.framework/Resources/citizenchain/$path" \
+    cmp -s "$package/chain/$path" \
+      "$bundle/Contents/Frameworks/CitizenSDK.framework/Resources/chain/$path" \
       || fail "macOS Hosted 原生安装链资产漂移：$path"
   done
   macos_command consumer 200 "$root" /usr/bin/sandbox-exec -f "$root/runtime.sb" "$executable"
@@ -1702,7 +1713,7 @@ run_apple_test_harness() {
     # SwiftPM把SDK静态链接进测试bundle；正式加载器仍从所属bundle读取同一链资产。
     # 仅投影冻结资源，不改生产Bundle查找路径、不构造替身链身份。
     for test_bundle_name in CitizenSDKTests.xctest CitizenSDKFlutterTests.xctest; do
-      resource_destination="$test_product_root/$test_bundle_name/Contents/Resources/citizenchain"
+      resource_destination="$test_product_root/$test_bundle_name/Contents/Resources/chain"
       prepare_safe_directory "$work_dir" "$resource_destination" "XCTest正式链资源"
       for asset_name in manifest.json chainspec.json light_sync_state.json; do
         prepare_safe_output_file "$work_dir" "$resource_destination/$asset_name" "XCTest链资产"
@@ -2009,7 +2020,7 @@ build_apple_framework_slice() {
   module_map="$framework_content_root/Modules/module.modulemap"
   module_cache="$work_dir/apple-module-cache/$slice_name"
   for directory in \
-    "$framework_headers" "$modules" "$framework_resources/citizenchain" "$module_cache"; do
+    "$framework_headers" "$modules" "$framework_resources/chain" "$module_cache"; do
     prepare_safe_directory "$work_dir" "$directory" "$slice_name Apple 构建目录"
   done
   cp "$product_header" "$framework_headers/citizensdk.h"
@@ -2019,7 +2030,7 @@ build_apple_framework_slice() {
   for asset in chainspec.json light_sync_state.json manifest.json; do
     [[ -f "$apple_asset_root/$asset" && ! -L "$apple_asset_root/$asset" ]] \
       || fail "Apple 链资产缺失：$asset"
-    cp "$apple_asset_root/$asset" "$framework_resources/citizenchain/$asset"
+    cp "$apple_asset_root/$asset" "$framework_resources/chain/$asset"
   done
   cp "$privacy_file" "$framework_resources/PrivacyInfo.xcprivacy"
   prepare_safe_output_file "$work_dir" "$framework_plist" "$slice_name Info.plist"
@@ -2239,7 +2250,7 @@ MACOS_FRAMEWORK_LINKS
       || fail "$label shallow framework 禁止符号链接"
     top_entries="$(find "$framework" -mindepth 1 -maxdepth 1 -print \
       | sed 's#^.*/##' | LC_ALL=C sort)"
-    [[ "$top_entries" == $'CitizenSDK\nHeaders\nInfo.plist\nModules\nPrivacyInfo.xcprivacy\ncitizenchain' ]] \
+    [[ "$top_entries" == $'CitizenSDK\nHeaders\nInfo.plist\nModules\nPrivacyInfo.xcprivacy\nchain' ]] \
       || fail "$label shallow framework 顶层闭集漂移"
     framework_content_root="$framework"
     framework_plist="$framework/Info.plist"
@@ -2323,26 +2334,26 @@ MACOS_FRAMEWORK_LINKS
       && ! -L "$framework_content_root/Modules/CitizenSDK.swiftmodule/$module_file" ]] \
       || fail "$label Swift module 必须全部为普通文件：$module_file"
   done <<<"$swift_modules"
-  [[ -d "$framework_resources/citizenchain" \
-    && ! -L "$framework_resources/citizenchain" ]] \
-    || fail "$label citizenchain 不是普通目录"
+  [[ -d "$framework_resources/chain" \
+    && ! -L "$framework_resources/chain" ]] \
+    || fail "$label chain 不是普通目录"
   if [[ "$module_identity" == arm64-apple-macos ]]; then
     [[ -d "$framework_resources" && ! -L "$framework_resources" ]] \
       || fail "$label Resources 不是普通目录"
     entries="$(find "$framework_resources" -mindepth 1 -print \
       | sed "s#^$framework_resources/##" | LC_ALL=C sort)"
-    expected_entries=$'Info.plist\nPrivacyInfo.xcprivacy\ncitizenchain\ncitizenchain/chainspec.json\ncitizenchain/light_sync_state.json\ncitizenchain/manifest.json'
+    expected_entries=$'Info.plist\nPrivacyInfo.xcprivacy\nchain\nchain/chainspec.json\nchain/light_sync_state.json\nchain/manifest.json'
   else
-    entries="$(find "$framework_resources/citizenchain" -mindepth 1 -maxdepth 1 -print \
+    entries="$(find "$framework_resources/chain" -mindepth 1 -maxdepth 1 -print \
       | sed 's#^.*/##' | LC_ALL=C sort)"
     expected_entries=$'chainspec.json\nlight_sync_state.json\nmanifest.json'
   fi
   [[ "$entries" == "$expected_entries" ]] || fail "$label 资源闭集漂移"
   for asset in chainspec.json light_sync_state.json manifest.json; do
-    [[ -f "$framework_resources/citizenchain/$asset" \
-      && ! -L "$framework_resources/citizenchain/$asset" ]] \
+    [[ -f "$framework_resources/chain/$asset" \
+      && ! -L "$framework_resources/chain/$asset" ]] \
       || fail "$label 链资产不是普通文件：$asset"
-    cmp -s "$framework_resources/citizenchain/$asset" "$apple_asset_root/$asset" \
+    cmp -s "$framework_resources/chain/$asset" "$apple_asset_root/$asset" \
       || fail "$label 链资产字节漂移：$asset"
   done
   [[ -f "$framework_resources/PrivacyInfo.xcprivacy" \
@@ -2751,8 +2762,8 @@ verify_linux_flutter_elf() {
   runpath="$(linux_elf_dynamic_values "$bundle/citizensdk_consumer" "$readelf_bin" RUNPATH)"
   [[ -z "$rpath" && "$runpath" == '$ORIGIN/lib' ]] || fail "$platform Flutter runner RUNPATH 必须精确为 \$ORIGIN/lib"
   for library in manifest.json chainspec.json light_sync_state.json; do
-    cmp -s "$prefix/share/citizensdk/citizenchain/$library" \
-      "$bundle/data/flutter_assets/packages/citizen_sdk/assets/citizenchain/$library" \
+    cmp -s "$prefix/share/citizensdk/chain/$library" \
+      "$bundle/data/flutter_assets/packages/citizen_sdk/chain/$library" \
       || fail "$platform Flutter bundle 链资产漂移：$library"
   done
 }
@@ -2805,6 +2816,10 @@ build_linux_flutter_consumer() (
   cp -a "$flutter_source/." "$tool_root/"
   cp -a "$cache_source/." "$cache_root/"
   cp -a "${package:-$sdk_dir}/." "$sdk_stage/"
+  if [[ -z "$package" ]]; then
+    node "$sdk_dir/scripts/release.mjs" \
+      --flutter-source-entry "$sdk_dir" --output "$sdk_stage" >/dev/null
+  fi
   chmod 0700 "$tool_root" "$cache_root" "$sdk_stage"
   verify_linux_tool_tree "$tool_root" "$platform Flutter 工具副本"
   verify_linux_tool_tree "$cache_root" "$platform PUB_CACHE 副本"
@@ -3143,9 +3158,9 @@ windows_install_files() {
     lib/Windows/cmake/CitizenSDK/CitizenSDKDependencies.cmake \
     lib/Windows/cmake/CitizenSDK/CitizenSDKTargets.cmake \
     lib/Windows/cmake/CitizenSDK/CitizenSDKTargets-release.cmake \
-    share/citizensdk/citizenchain/manifest.json \
-    share/citizensdk/citizenchain/chainspec.json \
-    share/citizensdk/citizenchain/light_sync_state.json | LC_ALL=C sort
+    share/citizensdk/chain/manifest.json \
+    share/citizensdk/chain/chainspec.json \
+    share/citizensdk/chain/light_sync_state.json | LC_ALL=C sort
 }
 
 verify_windows_install() {
@@ -3208,9 +3223,9 @@ verify_windows_install() {
     for(const name of ["citizensdk.h","citizensdk_types.h"]) same(p.join(sdk,"include",name),"include/"+name);
     same(p.join(sdk,"native","qr-image","citizensdk_qr_image.h"),"include/citizensdk_qr_image.h");
     for(const name of ["citizen_sdk.hpp","citizen_sdk_config.hpp","citizen_sdk_error.hpp","citizen_sdk_events.hpp","citizen_sdk_models.hpp","citizensdk_host.h"])
-      same(p.join(windows,"include","citizen_sdk",name),"include/citizen_sdk/"+name);
+      same(p.join(windows,"citizen_sdk",name),"include/citizen_sdk/"+name);
     for(const name of ["manifest.json","chainspec.json","light_sync_state.json"])
-      same(p.join(assets,name),"share/citizensdk/citizenchain/"+name);
+      same(p.join(assets,name),"share/citizensdk/chain/"+name);
     same(p.join(core,"citizensdk.dll"),"bin/Windows/citizensdk.dll");
     same(p.join(core,"citizensdk.dll.lib"),"lib/Windows/citizensdk.dll.lib");
     same(p.join(build,"Release","citizensdk_host.dll"),"bin/Windows/citizensdk_host.dll");
@@ -3253,7 +3268,7 @@ verify_windows_install() {
     || fail "Windows 安装闭集、清单、版本或来源字节验证失败"
   verify_windows_exports "$prefix/bin/Windows/citizensdk.dll" "$product_header" Core
   verify_windows_exports "$prefix/bin/Windows/citizensdk_host.dll" \
-    "$windows_source_root/include/citizen_sdk/citizensdk_host.h" Host
+    "$windows_source_root/citizen_sdk/citizensdk_host.h" Host
 }
 
 verify_windows_consumer_inventory() {
@@ -3271,7 +3286,7 @@ verify_windows_consumer_inventory() {
     const names=data.tests.map(x=>x.name).sort();
     if(JSON.stringify(names)!==JSON.stringify(expected.map(x=>x[0]))) throw Error("Windows consumer exact test set drift");
     const identity=x=>process.platform==="win32"?p.resolve(x).toLowerCase():p.resolve(x);
-    const runtime=p.join(build,configuration), assets=p.join(prefix,"share","citizensdk","citizenchain");
+    const runtime=p.join(build,configuration), assets=p.join(prefix,"share","citizensdk","chain");
     function ordinaryFile(path) {
       let current=p.parse(path).root;
       for(const part of p.relative(current,path).split(p.sep)) {
@@ -3721,6 +3736,7 @@ import {pathToFileURL} from 'node:url';
 import {join} from 'node:path';
 const [source,prefix,stage]=process.argv.slice(2);
 const release=await import(pathToFileURL(join(source,'scripts/release.mjs')));
+release.projectFlutterSourceEntry(source,stage);
 release.copyWindowsNativeArtifact(source,prefix,stage);
 release.assertWindowsReleaseProjection(stage);
 release.assertHostedRuntimeWindowsProjection(stage,{allowInjectedWindowsArtifacts:true});
@@ -4177,6 +4193,25 @@ require_zxing_source() {
 case "$target_name" in
   android|apple|LinuxARM|LinuxAMD|Windows|all)
     if [[ "$hosted_consumer" != true ]]; then require_zxing_source; fi ;;
+esac
+
+# 每轮编译只使用SDK自身装配的普通文件工程；build.rs不能写回上游原件。
+prepare_native_source() {
+  local node_bin="${NODE:-$(command -v node || true)}" source="$sdk_dir" destination="$work_dir/native-source"
+  [[ -n "$node_bin" && -x "$node_bin" ]] || fail "原生输入装配缺少Node"
+  if [[ "$target_name" == Windows ]]; then
+    source="$(cygpath -m "$source")"
+    destination="$(cygpath -m "$destination")"
+  fi
+  native_source_root="$("$node_bin" "$sdk_dir/scripts/release.mjs" \
+    --native-source-view "$source" --output "$destination")" || fail "原生输入装配失败"
+  ffi_manifest="$native_source_root/native/smoldot/ffi/Cargo.toml"
+  product_ffi_manifest="$native_source_root/native/ffi/Cargo.toml"
+}
+
+case "$target_name" in
+  android|apple|LinuxARM|LinuxAMD|Windows|host|abi-host|all)
+    if [[ "$hosted_consumer" != true ]]; then prepare_native_source; fi ;;
 esac
 
 case "$target_name" in

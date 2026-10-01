@@ -27,3 +27,15 @@ test('CitizenApp Release Workflow只引用两个扁平平台Job', () => {
   const sources = ['./android.mjs', './ios.mjs'].map(path => readFileSync(new URL(path, import.meta.url), 'utf8'));
   for (const source of sources) assert.doesNotMatch(source, /github-release|function runExactWorkflowStep/u);
 });
+
+
+test('Android Release的Pub、Gradle与产物回读消费同一轮目录', () => {
+  assert.match(androidSteps['6'].source, /create-android/u);
+  assert.match(androidSteps['7'].source, /project="\$CITIZENAPP_PROJECT_ROOT"/u);
+  assert.match(androidSteps['7'].source, /CITIZENAPP_PROJECT_ROOT/u);
+  assert.match(androidSteps['7'].source, /CITIZENAPP_BUILD_DIR/u);
+  assert.match(androidSteps['7'].source, /ln -s "\$build" "\$project\/build"/u);
+  assert.match(androidSteps['8'].source, /^cd "\$CITIZENAPP_PROJECT_ROOT"/u);
+  assert.match(androidSteps['9'].source, /citizenapp\/build\/app\/outputs/u);
+  assert.match(iosSteps['5'].source, /citizenapp-view\.mjs/u);
+});

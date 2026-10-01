@@ -28,7 +28,7 @@ void main() {
     expect(
       runner,
       contains(
-        r'GRADLE_EXECUTABLE="${CITIZENAPP_GRADLE:-$APP_ROOT/android/gradlew}"',
+        r'GRADLE_EXECUTABLE="${CITIZENAPP_GRADLE:-$CITIZENAPP_PROJECT_ROOT/android/gradlew}"',
       ),
     );
     expect(

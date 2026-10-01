@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:citizenapp/log/app_log.dart';
+import 'package:citizenapp/app_log.dart';
 import 'package:flutter/services.dart';
 import 'package:citizenapp/isar/wallet_isar.dart';
 import 'package:citizenapp/my/util/amount_format.dart';

@@ -571,7 +571,7 @@ class AppLockService {
       'UserProfileFiles',
       CitizenProfileMediaCache(
         // 测试复用同一临时根目录，避免调用未注册的平台 path_provider；生产为 null
-        // 时仍严格使用 Application Support/user/profile_media。
+        // 时分别清理旧 Application Support/user/profile_media 与临时展示目录；字节已由 UserIsar 擦除。
         supportDirectoryProvider: debugChatDocumentsDirectoryProvider,
       ).closeAndDeleteAll,
       failures,

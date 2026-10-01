@@ -8,21 +8,105 @@ import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:citizenapp/8964/chain/square_chain_service.dart';
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/services/square_chain_service.dart';
+import 'package:citizenapp/8964/square_models.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/8964/services/square_identity_state.dart';
 import 'package:citizenapp/8964/services/square_post_deletion_coordinator.dart';
 import 'package:citizenapp/8964/services/square_post_store.dart';
 import 'package:citizenapp/8964/services/square_publish_service.dart';
 import 'package:citizenapp/8964/services/square_upload_service.dart';
+import 'package:citizenapp/isar/social_isar.dart';
 
 import '../support/isar_test_env.dart';
 import '../support/fake_citizen_sdk.dart';
 
+Uint8List _testManifest() => Uint8List.fromList(
+  utf8.encode(
+    jsonEncode({
+      'schema': SquarePostStore.manifestSchema,
+      'cid_number': 'CN001-CTZN-000000001-2026',
+      'post_type': 'document',
+      'text': '测试发布',
+      'media_items': <Object>[],
+    }),
+  ),
+);
+
 void main() {
   useIsolatedIsar();
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('远端确认失败后重开数据库，恢复只确认既有finalized交易', () async {
+    final order = <String>[];
+    final confirmer = _FakePublicationConfirmer(order)..throwOnConfirm = true;
+    final service = SquarePublishService(
+      identityResolver: _PublishIdentityResolver(),
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
+      uploadService: _FakeUploader(order),
+      chainService: _FakeChainPublisher(order),
+      publicationConfirmer: confirmer,
+      balanceReader: _FakeBalanceReader(order),
+      localPostWriter: _FakeLocalPostWriter(),
+    );
+    Future<SquarePublishResult> publish() => service.publish(
+      draftId: 'recover',
+      identity: _identity(cidNumber: 'CN001-CTZN-000000001-2026'),
+      postType: SquarePostType.document,
+      text: '恢复',
+      mediaDrafts: [],
+      signLoginPayload: (_, _) async => '0x11',
+      externalSigning: (_) async => 'QR_V1',
+    );
+    await expectLater(publish(), throwsA(isA<SquarePublishException>()));
+    expect(
+      (await const SquarePostStore().readPublication(
+        'CN001-CTZN-000000001-2026',
+        'recover',
+      ))!.publicationState,
+      'finalized',
+    );
+    await (await SocialIsar.instance.db()).close();
+    order.clear();
+    confirmer.throwOnConfirm = false;
+    await publish();
+    expect(order, ['resume', 'confirm']);
+  });
+
+  test('提交终态不明时只查询证明，证明到达后恢复且不重新签交易', () async {
+    final order = <String>[];
+    final publisher = _FakeChainPublisher(order)..throwAfterSign = true;
+    final confirmer = _FakePublicationConfirmer(order);
+    final service = SquarePublishService(
+      identityResolver: _PublishIdentityResolver(),
+      chain: TestCitizenChain(),
+      transactions: TestCitizenTransactions(),
+      uploadService: _FakeUploader(order),
+      chainService: publisher,
+      publicationConfirmer: confirmer,
+      balanceReader: _FakeBalanceReader(order),
+      localPostWriter: _FakeLocalPostWriter(),
+    );
+    Future<SquarePublishResult> publish() => service.publish(
+      draftId: 'uncertain',
+      identity: _identity(cidNumber: 'CN001-CTZN-000000001-2026'),
+      postType: SquarePostType.document,
+      text: '恢复',
+      mediaDrafts: [],
+      signLoginPayload: (_, _) async => '0x11',
+      externalSigning: (_) async => 'QR_V1',
+    );
+    await expectLater(publish(), throwsA(isA<SquarePublishException>()));
+    order.clear();
+    await expectLater(publish(), throwsA(isA<SquarePublishException>()));
+    expect(order, ['resume', 'proof']);
+    await (await SocialIsar.instance.db()).close();
+    order.clear();
+    confirmer.proofAvailable = true;
+    await publish();
+    expect(order, ['resume', 'proof']);
+  });
 
   test('实际发布只验真一次，后续只作本机版本检查', () async {
     final order = <String>[];
@@ -38,6 +122,7 @@ void main() {
       localPostWriter: _FakeLocalPostWriter(),
     );
     await service.publish(
+      draftId: 'draft-test',
       identity: _identity(cidNumber: 'CN001-CTZN-000000001-2026'),
       postType: SquarePostType.document,
       text: '测试内容',
@@ -64,6 +149,7 @@ void main() {
     );
     await expectLater(
       service.publish(
+        draftId: 'draft-test',
         identity: _identity(cidNumber: 'CN001-CTZN-000000001-2026'),
         postType: SquarePostType.document,
         text: '测试内容',
@@ -92,6 +178,7 @@ void main() {
     );
     await expectLater(
       service.publish(
+        draftId: 'draft-test',
         identity: _identity(cidNumber: 'CN001-CTZN-000000001-2026'),
         postType: SquarePostType.document,
         text: '测试内容',
@@ -126,6 +213,7 @@ void main() {
 
     await expectLater(
       service.publish(
+        draftId: 'draft-test',
         identity: _identity(cidNumber: null),
         postType: SquarePostType.document,
         text: '竞选说明',
@@ -158,6 +246,7 @@ void main() {
     );
 
     final result = await service.publish(
+      draftId: 'draft-test',
       identity: _identity(cidNumber: 'CN001-CTZN-000000001-2026'),
       postType: SquarePostType.document,
       text: '公文',
@@ -171,7 +260,7 @@ void main() {
     expect(chain.called, isTrue);
     expect(chain.postId, 'sqp_test');
     expect(chain.storageReceiptId, 'sqr_test');
-    expect(result.post.contentHash, '11' * 32);
+    expect(result.post.contentHash, sha256.convert(_testManifest()).toString());
     expect(localWriter.saved?.postId, 'sqp_test');
     expect(localWriter.saved?.cidNumber, 'CN001-CTZN-000000001-2026');
     expect(localWriter.saved?.createdAt, 1800000000000);
@@ -207,6 +296,7 @@ void main() {
     );
 
     final result = await service.publish(
+      draftId: 'draft-test',
       identity: _identity(cidNumber: 'CN001-CTZN-000000001-2026'),
       postType: SquarePostType.document,
       text: '修改后的公文',
@@ -245,6 +335,7 @@ void main() {
 
     await expectLater(
       service.publish(
+        draftId: 'draft-test',
         identity: _identity(cidNumber: 'CN001-CTZN-000000001-2026'),
         postType: SquarePostType.document,
         text: '余额不足的公文',
@@ -278,6 +369,7 @@ void main() {
 
     await expectLater(
       service.publish(
+        draftId: 'draft-test',
         identity: _identity(cidNumber: 'CN001-CTZN-000000001-2026'),
         postType: SquarePostType.document,
         text: '链上未入块的公文',
@@ -308,6 +400,7 @@ void main() {
 
     await expectLater(
       service.publish(
+        draftId: 'draft-test',
         identity: _identity(cidNumber: 'CN001-CTZN-000000001-2026'),
         postType: SquarePostType.document,
         text: '终态不确定的公文',
@@ -327,10 +420,9 @@ void main() {
     expect(order, ['prepare', 'upload', 'balance', 'chain']);
   });
 
-  test('远端确认后本地落盘失败仍返回发布成功并立即调度回灌', () async {
+  test('远端确认后本地失败保存恢复事实，重试不验真不上传不签名', () async {
     final order = <String>[];
     final localWriter = _FakeLocalPostWriter()..throwOnSave = true;
-    SquareSession? scheduledSession;
     final service = SquarePublishService(
       identityResolver: _PublishIdentityResolver(),
       chain: TestCitizenChain(),
@@ -340,10 +432,10 @@ void main() {
       publicationConfirmer: _FakePublicationConfirmer(order),
       balanceReader: _FakeBalanceReader(order),
       localPostWriter: localWriter,
-      recoveryScheduler: (session) => scheduledSession = session,
     );
 
     final result = await service.publish(
+      draftId: 'draft-test',
       identity: _identity(cidNumber: 'CN001-CTZN-000000001-2026'),
       postType: SquarePostType.document,
       text: '远端已成功的公文',
@@ -353,8 +445,24 @@ void main() {
     );
 
     expect(result.post.postId, 'sqp_test');
-    expect(result.completionWarning, contains('本地副本将在后台重新同步'));
-    expect(scheduledSession?.cidNumber, 'CN001-CTZN-000000001-2026');
+    expect(result.completionWarning, contains('不会重复发布'));
+    final pending = await const SquarePostStore().readPublication(
+      'CN001-CTZN-000000001-2026',
+      'draft-test',
+    );
+    expect(pending!.publicationState, 'confirmed');
+    order.clear();
+    localWriter.throwOnSave = false;
+    await service.publish(
+      draftId: 'draft-test',
+      identity: _identity(cidNumber: 'CN001-CTZN-000000001-2026'),
+      postType: SquarePostType.document,
+      text: '不能重复发布',
+      mediaDrafts: [],
+      signLoginPayload: (_, _) async => throw StateError('不应请求身份验证'),
+      externalSigning: (_) async => throw StateError('不应签名'),
+    );
+    expect(order, isEmpty);
   });
 
   test('远端确认成功后把同一份规范 manifest 原始字节写入真实 Isar', () async {
@@ -385,6 +493,7 @@ void main() {
     );
 
     await service.publish(
+      draftId: 'draft-test',
       identity: _identity(cidNumber: 'CN001-CTZN-000000001-2026'),
       postType: SquarePostType.document,
       text: '真实本地副本',
@@ -434,6 +543,21 @@ class _FakeUploader implements SquareContentUploader {
   bool uploadCalled = false;
 
   @override
+  Future<SquareSession> resumeSession(
+    String accountId,
+    SquareLoginSigner signer,
+  ) async {
+    order.add('resume');
+    return SquareSession(
+      sessionToken: 'sqs_test',
+      cidNumber: 'CN001-CTZN-000000001-2026',
+      bindingRevision: 1,
+      accountId: accountId,
+      expiresAt: 1800000000000,
+    );
+  }
+
+  @override
   Future<SquarePreparedContent> preparePostContent({
     required String accountId,
     required SquarePostType postType,
@@ -447,9 +571,9 @@ class _FakeUploader implements SquareContentUploader {
     called = true;
     order.add('prepare');
     onStage?.call(SquarePublishStage.preparingStorage);
-    final bytes = manifestBytes ?? Uint8List.fromList([1, 2, 3]);
+    final bytes = manifestBytes ?? _testManifest();
     final contentHash = manifestBytes == null
-        ? '11' * 32
+        ? sha256.convert(_testManifest()).toString()
         : sha256.convert(bytes).toString();
     return SquarePreparedContent(
       session: const SquareSession(
@@ -466,7 +590,7 @@ class _FakeUploader implements SquareContentUploader {
         expiresAt: 1800000000000,
         estimatedBytes: 1024,
         manifestObjectKey: 'square/test/manifest.json',
-        manifestUploadUrl: 'http://127.0.0.1/manifest',
+        manifestUploadUrl: 'https://media.example.invalid/manifest',
         mediaItems: [
           SquarePreparedMediaUpload(
             mediaKind: SquareMediaKind.image,
@@ -520,12 +644,44 @@ class _FakeUploader implements SquareContentUploader {
 }
 
 class _FakePublicationConfirmer implements SquarePublicationConfirmer {
-  _FakePublicationConfirmer([this.order]) : contentHash = '11' * 32;
+  _FakePublicationConfirmer([this.order])
+    : contentHash = sha256.convert(_testManifest()).toString();
 
   _FakePublicationConfirmer.withHash(this.order, this.contentHash);
 
   final List<String>? order;
   final String contentHash;
+  bool throwOnConfirm = false;
+  bool proofAvailable = false;
+
+  @override
+  Future<({SquarePost post, String blockHash, String transactionHash})>
+  readPublishedProof({
+    required SquareSession session,
+    required String postId,
+  }) async {
+    order?.add('proof');
+    if (!proofAvailable) throw const SquarePublishException('上次发布尚无证明，禁止重复提交');
+    final post = SquarePost(
+      postId: postId,
+      author: SquareAuthor(
+        accountId: session.accountId,
+        cidNumber: session.cidNumber,
+      ),
+      postCategory: SquarePostCategory.normal,
+      postType: SquarePostType.document,
+      text: '公文',
+      createdAt: DateTime.fromMillisecondsSinceEpoch(1800000000000),
+      contentHash: contentHash,
+      storageReceiptId: 'sqr_test',
+      chainBlock: 88,
+    );
+    return (
+      post: post,
+      blockHash: '0x${List.filled(64, 'a').join()}',
+      transactionHash: '0x${List.filled(64, 'b').join()}',
+    );
+  }
 
   @override
   Future<void> abortUpload({
@@ -543,6 +699,7 @@ class _FakePublicationConfirmer implements SquarePublicationConfirmer {
     required String txHash,
   }) async {
     order?.add('confirm');
+    if (throwOnConfirm) throw StateError('远端确认暂不可用');
     return SquarePost(
       postId: postId,
       author: SquareAuthor(
@@ -565,7 +722,7 @@ class _FakeLocalPostWriter implements SquareLocalPostWriter {
   bool throwOnSave = false;
 
   @override
-  Future<void> save(SquareLocalPost post) async {
+  Future<void> save(SquareLocalPost post, {String? draftId}) async {
     if (throwOnSave) {
       throw StateError('disk unavailable');
     }

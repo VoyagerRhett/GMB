@@ -1,5 +1,5 @@
 import 'package:citizenapp/8964/compose/article/article_section_editor.dart';
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/square_models.dart';
 
 const int articleTitleMin = 10;
 const int articleTitleMax = 50;

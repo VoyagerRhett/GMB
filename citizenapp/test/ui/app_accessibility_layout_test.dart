@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -53,29 +54,31 @@ void _setViewport(WidgetTester tester, Size logicalSize) {
 
 void main() {
   test('移动端产品名称中文为公民、英文为 CitizenApp', () {
-    final iosChinese = File(
-      'ios/Runner/zh-Hans.lproj/InfoPlist.strings',
-    ).readAsStringSync();
-    final iosEnglish = File(
-      'ios/Runner/en.lproj/InfoPlist.strings',
-    ).readAsStringSync();
+    final catalog = jsonDecode(
+      File('ios/Runner/InfoPlist.xcstrings').readAsStringSync(),
+    ) as Map<String, dynamic>;
+    final strings = catalog['strings'] as Map<String, dynamic>;
+    Map<String, String> language(String name) => strings.map((key, value) =>
+      MapEntry(key, value['localizations'][name]['stringUnit']['value'] as String));
+    final iosChinese = language('zh-Hans');
+    final iosEnglish = language('en');
     final androidChinese = File(
       'android/app/src/main/res/values/strings.xml',
     ).readAsStringSync();
     final androidEnglish = File(
-      'android/app/src/main/res/values-en/strings.xml',
+      'android/app/src/main/res/values-en_strings.xml',
     ).readAsStringSync();
 
-    expect(iosChinese, contains('"CFBundleDisplayName" = "公民";'));
-    expect(iosChinese, contains('"CFBundleName" = "公民";'));
-    expect(iosEnglish, contains('"CFBundleDisplayName" = "CitizenApp";'));
-    expect(iosEnglish, contains('"CFBundleName" = "CitizenApp";'));
+    expect(iosChinese['CFBundleDisplayName'], '公民');
+    expect(iosChinese['CFBundleName'], '公民');
+    expect(iosEnglish['CFBundleDisplayName'], 'CitizenApp');
+    expect(iosEnglish['CFBundleName'], 'CitizenApp');
     expect(androidChinese, contains('<string name="app_name">公民</string>'));
     expect(
       androidEnglish,
       contains('<string name="app_name">CitizenApp</string>'),
     );
-    expect(iosEnglish, isNot(contains('"Citizen"')));
+    expect(iosEnglish.values, isNot(contains('Citizen')));
     expect(androidEnglish, isNot(contains('>Citizen<')));
   });
 
@@ -84,27 +87,23 @@ void main() {
     final project = File(
       'ios/Runner.xcodeproj/project.pbxproj',
     ).readAsStringSync();
-    final iosChinese = File(
-      'ios/Runner/zh-Hans.lproj/InfoPlist.strings',
-    ).readAsStringSync();
-    final iosEnglish = File(
-      'ios/Runner/en.lproj/InfoPlist.strings',
-    ).readAsStringSync();
+    final catalog = jsonDecode(
+      File('ios/Runner/InfoPlist.xcstrings').readAsStringSync(),
+    ) as Map<String, dynamic>;
+    final strings = catalog['strings'] as Map<String, dynamic>;
+    Map<String, String> language(String name) => strings.map((key, value) =>
+      MapEntry(key, value['localizations'][name]['stringUnit']['value'] as String));
+    final iosChinese = language('zh-Hans');
+    final iosEnglish = language('en');
 
     expect(project, contains('developmentRegion = "zh-Hans";'));
-    expect(project, contains('name = "zh-Hans";'));
-    expect(project, contains('name = en;'));
-    expect(project, contains('InfoPlist.strings in Resources'));
-    expect(project, contains('isa = PBXVariantGroup;'));
+    expect(catalog['sourceLanguage'], 'zh-Hans');
+    expect(project, contains('InfoPlist.xcstrings in Resources'));
+    expect(project, contains('lastKnownFileType = text.json.xcstrings;'));
     expect(infoPlist, contains('<string>zh-Hans</string>'));
     expect(infoPlist, contains('<string>en</string>'));
 
-    String keys(String source) {
-      final pattern = RegExp(r'^"([^"]+)"\s*=', multiLine: true);
-      return (pattern.allMatches(source).map((match) => match.group(1)).toList()
-            ..sort())
-          .join(',');
-    }
+    String keys(Map<String, String> source) => (source.keys.toList()..sort()).join(',');
 
     expect(keys(iosChinese), keys(iosEnglish));
     expect(keys(iosChinese), contains('CFBundleDisplayName'));
@@ -119,7 +118,7 @@ void main() {
       'android/app/src/main/res/values/strings.xml',
     ).readAsStringSync();
     final androidEnglish = File(
-      'android/app/src/main/res/values-en/strings.xml',
+      'android/app/src/main/res/values-en_strings.xml',
     ).readAsStringSync();
 
     expect(manifest, contains('android:label="@string/app_name"'));
@@ -146,7 +145,7 @@ void main() {
       'android/app/build.gradle.kts',
     ).readAsStringSync();
     final androidEntry = File(
-      'android/app/src/main/kotlin/com/crcfrcn/citizenapp/MainActivity.kt',
+      'android/app/src/main/MainActivity.kt',
     ).readAsStringSync();
 
     expect(manifest, contains('android:name=".MainActivity"'));

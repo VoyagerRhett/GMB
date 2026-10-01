@@ -8,8 +8,8 @@ import { membershipPlan, type MembershipLevel } from '../membership/plans';
 import {
   createR2ObjectUpload,
   deleteR2MediaAssets,
-} from '../media/service';
-import { buildObjectKeyPlan, manifestObjectKey, squareMediaObjectKeys } from '../storage/r2_keys';
+} from '../media';
+import { buildObjectKeyPlan, manifestObjectKey, squareMediaObjectKeys } from '../r2_keys';
 import { assertManifestHash, assertPostType, estimateUploadBytes, validateUploadItems } from './validation';
 import { assertDeclaredContentQuota, assertDeclaredLength, assertManifestQuota } from './quota';
 import { imageResource, resourceLimit, videoResource, type ResourceKey } from '../limits/catalog';

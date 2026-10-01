@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:citizenapp/8964/profile/widgets/creator_subscribe_button.dart';
-import 'package:citizenapp/8964/subscribe/creator_subscribe_service.dart';
+import 'package:citizenapp/8964/services/creator_subscribe_service.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart'
     show SquareSession;
 import 'package:citizenapp/my/creator/creator_api.dart';

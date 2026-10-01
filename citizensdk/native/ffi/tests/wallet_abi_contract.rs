@@ -75,7 +75,7 @@ fn base_wallet_and_qr_exports_are_exact_and_disjoint() {
     let qr = rust_exports(include_str!("../src/qr_abi.rs"));
     // 无UI钱包/QR及两个独立Host查询按实际所属文件分组，仍是同一公开C闭集。
     assert_eq!(old.len(), 53);
-    assert_eq!(wallet.len(), 69);
+    assert_eq!(wallet.len(), 71);
     assert_eq!(qr.len(), 11);
     assert!(old.is_disjoint(&wallet));
     assert!(old.is_disjoint(&qr));
@@ -128,6 +128,7 @@ fn base_wallet_and_qr_exports_are_exact_and_disjoint() {
         "citizensdk_delete_wallet_account",
         "citizensdk_delete_wallet",
         "citizensdk_derive_application_key",
+        "citizensdk_derive_application_keys",
         "citizensdk_reconcile_wallet_cleanup",
         "citizensdk_sign_wallet_payload",
         "citizensdk_begin_signing",
@@ -150,6 +151,7 @@ fn base_wallet_and_qr_exports_are_exact_and_disjoint() {
         "citizensdk_result_get_signing_outcome",
         "citizensdk_result_get_default_account_change",
         "citizensdk_result_get_application_key",
+        "citizensdk_result_get_application_key_at",
         "citizensdk_result_get_prepared_wallet",
     ]
     .into_iter()
@@ -177,10 +179,13 @@ fn base_wallet_and_qr_exports_are_exact_and_disjoint() {
     assert_eq!(transaction, expected_transaction);
 
     let presence = rust_exports(include_str!("../src/host_providers.rs"));
-    assert_eq!(presence, BTreeSet::from([
-        "citizensdk_set_secret_presence_provider".to_owned(),
-        "citizensdk_encrypted_secret_record_has_secret".to_owned(),
-    ]));
+    assert_eq!(
+        presence,
+        BTreeSet::from([
+            "citizensdk_set_secret_presence_provider".to_owned(),
+            "citizensdk_encrypted_secret_record_has_secret".to_owned(),
+        ])
+    );
     assert!(presence.is_disjoint(&old));
     assert!(presence.is_disjoint(&wallet));
     assert!(presence.is_disjoint(&qr));
@@ -200,8 +205,14 @@ fn base_wallet_and_qr_exports_are_exact_and_disjoint() {
 fn new_exports_allow_only_the_reviewed_receiver_not_raw_rpc_or_secret_getters() {
     let wallet = rust_exports(include_str!("../src/wallet_abi.rs"));
     for symbol in wallet {
-        if ["citizensdk_private_key_open", "citizensdk_private_key_reveal",
-            "citizensdk_private_key_cancel", "citizensdk_private_key_finish"].contains(&symbol.as_str()) {
+        if [
+            "citizensdk_private_key_open",
+            "citizensdk_private_key_reveal",
+            "citizensdk_private_key_cancel",
+            "citizensdk_private_key_finish",
+        ]
+        .contains(&symbol.as_str())
+        {
             continue; // 四入口的精确签名和receiver布局由C/符号合同另行冻结。
         }
         for forbidden in [
@@ -231,6 +242,7 @@ fn appended_result_values_and_portable_product_layouts_are_frozen() {
     assert_eq!(CitizenSdkResultKind::QrSigned as u32, 20);
     assert_eq!(CitizenSdkResultKind::WalletState as u32, 21);
     assert_eq!(CitizenSdkResultKind::ApplicationKey as u32, 29);
+    assert_eq!(CitizenSdkResultKind::ApplicationKeys as u32, 30);
     assert!(include_str!("../../../include/citizensdk_types.h")
         .contains("#define CITIZENSDK_RESULT_ACCOUNT_BALANCES 18U"));
 
@@ -397,7 +409,10 @@ fn module_validation_rejects_invalid_or_uncompiled_combinations() {
 
 #[cfg(feature = "signing")]
 #[test]
-#[expect(unsafe_code, reason = "公开C ABI测试必须跨raw-pointer边界，借用存续与长度由本用例固定")]
+#[expect(
+    unsafe_code,
+    reason = "公开C ABI测试必须跨raw-pointer边界，借用存续与长度由本用例固定"
+)]
 fn pure_signature_verification_needs_no_wallet_vault_or_chain_instance() {
     use citizensdk::{citizensdk_verify_signature, CitizenSdkBytesView, CitizenSdkErrorCode};
     fn bytes(value: &str) -> Vec<u8> {
@@ -459,7 +474,10 @@ fn pure_signature_verification_needs_no_wallet_vault_or_chain_instance() {
 
 #[cfg(feature = "signing")]
 #[test]
-#[expect(unsafe_code, reason = "验证公开C入口拒绝缺失宿主表，全部非空指针均指向本用例存续对象")]
+#[expect(
+    unsafe_code,
+    reason = "验证公开C入口拒绝缺失宿主表，全部非空指针均指向本用例存续对象"
+)]
 fn local_signing_create_rejects_absent_or_partial_secure_resources() {
     use citizen_sdk_contracts::Modules;
     use citizensdk::{

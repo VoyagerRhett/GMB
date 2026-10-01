@@ -94,18 +94,10 @@ prepare_flutter_project() {
   local project_root="$1"
   [[ -d "$project_root" && ! -L "$project_root" ]] \
     || { echo 'CitizenSDK Flutter 隔离测试根无效' >&2; return 1; }
-  local source name
-  while IFS= read -r -d '' source; do
-    name="${source##*/}"
-    case "$name" in
-      .dart_tool|build|target) continue ;;
-      pubspec.yaml|pubspec.lock)
-        # Pub的可写工程元数据只复制到本轮视图，绝不经链接改写源码锁。
-        cp "$source" "$project_root/$name" || return 1
-        continue ;;
-    esac
-    ln -s "$source" "$project_root/$name" || return 1
-  done < <(find "$sdk_dir" -mindepth 1 -maxdepth 1 -print0)
+  # mktemp只分配独占名称；视图接口要求目标不存在，避免复用旧状态。
+  rmdir -- "$project_root" || return 1
+  "$node_bin" "$sdk_dir/scripts/release.mjs" \
+    --flutter-source-view "$sdk_dir" --output "$project_root" >/dev/null || return 1
   if [[ -n "$test_smoldot_library" ]]; then
     [[ "$test_smoldot_library" == /* && -f "$test_smoldot_library" && ! -L "$test_smoldot_library" ]] \
       || { echo 'CitizenSDK Flutter 测试 smoldot 宿主库必须是绝对普通文件' >&2; return 1; }
@@ -161,7 +153,10 @@ run_flutter() {
 run_cargo() {
   [[ -n "$cargo_bin" && -x "$cargo_bin" ]] \
     || { echo 'CitizenSDK 测试缺少 Cargo' >&2; exit 1; }
-  (cd "$sdk_dir" && "$cargo_bin" test "$@")
+  local project_root="$test_root/native-source"
+  "$node_bin" "$sdk_dir/scripts/release.mjs" \
+    --native-source-view "$sdk_dir" --output "$project_root" >/dev/null || return 1
+  (cd "$project_root" && "$cargo_bin" test "$@")
 }
 
 run_release() {

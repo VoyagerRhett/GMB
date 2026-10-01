@@ -3,7 +3,7 @@ import 'dart:typed_data';
 
 import 'package:polkadart_keyring/polkadart_keyring.dart' show Keyring;
 
-import '../chain/chain_constants.dart';
+import '../chain_constants.dart';
 import '../qr/generated/qr_action_registry.g.dart';
 import '../security/account_data_key_provision.dart';
 import 'institution_code.dart';

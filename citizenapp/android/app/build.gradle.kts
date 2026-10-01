@@ -1,9 +1,64 @@
+import org.gradle.api.DefaultTask
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.FileSystemOperations
+import org.gradle.api.file.RelativePath
+import org.gradle.api.tasks.CacheableTask
+import org.gradle.api.tasks.InputDirectory
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
+import org.gradle.api.tasks.TaskAction
+import javax.inject.Inject
 import java.util.Properties
 
 plugins {
     id("com.android.application")
     // AGP 9提供内置Kotlin；Flutter插件在Android插件之后接入唯一工具链。
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+
+// 限定资源的语义由明确映射保留；输入与输出隔离，正常编译自动依赖本任务。
+@CacheableTask
+abstract class PrepareCitizenAppResources @Inject constructor(
+    private val files: FileSystemOperations,
+) : DefaultTask() {
+    @get:InputDirectory
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val sourceDirectory: DirectoryProperty
+
+    @get:OutputDirectory
+    abstract val outputDirectory: DirectoryProperty
+
+    @TaskAction
+    fun prepare() {
+        val names = mapOf(
+            "drawable_launch_background.xml" to "drawable/launch_background.xml",
+            "drawable-v21_launch_background.xml" to "drawable-v21/launch_background.xml",
+            "values-en_strings.xml" to "values-en/strings.xml",
+            "values-night_styles.xml" to "values-night/styles.xml",
+        )
+        val source = sourceDirectory.get().asFile
+        names.keys.forEach { require(source.resolve(it).isFile) { "缺少平台资源输入：$it" } }
+        require(!outputDirectory.get().asFile.toPath().toAbsolutePath().normalize()
+            .startsWith(source.toPath().toAbsolutePath().normalize())) { "资源输出不得回写源码" }
+        files.sync {
+            from(sourceDirectory)
+            into(outputDirectory)
+            includeEmptyDirs = false
+            exclude("**/.DS_Store")
+            eachFile {
+                names[relativePath.pathString]?.let { mapped ->
+                    relativePath = RelativePath(true, *mapped.split('/').toTypedArray())
+                }
+            }
+        }
+    }
+}
+
+val prepareCitizenAppResources = tasks.register<PrepareCitizenAppResources>("prepareCitizenAppResources") {
+    sourceDirectory.set(layout.projectDirectory.dir("src/main/res"))
+    outputDirectory.set(layout.buildDirectory.dir("generated/qualified-resources"))
 }
 
 val flutterProductRoot = System.getenv("CITIZENAPP_PROJECT_ROOT")
@@ -16,6 +71,19 @@ val productVersionCode = flutterBuildProperties.getProperty("flutter.versionCode
 val productVersionName = flutterBuildProperties.getProperty("flutter.versionName", "1.0")
 
 android {
+    // AGP 9 的 Kotlin 与 Java 源集独立；必须显式登记，否则可生成缺少入口类的 APK。
+    sourceSets.getByName("main").kotlin.directories.apply { clear(); add("src/main") }
+    sourceSets.getByName("androidTest").kotlin.directories.apply { clear(); add("src/androidTest") }
+    // Flutter 在当轮外部工程生成插件注册表；必须显式编译它，不能依赖源码内旧生成物。
+    sourceSets.getByName("main").java.directories.apply {
+        clear()
+        add("src/main")
+        add(flutterProductRoot.resolve("android/app/src/main/java").absolutePath)
+    }
+    sourceSets.getByName("androidTest").java.directories.apply { clear(); add("src/androidTest") }
+    sourceSets.getByName("debug").manifest.srcFile("src/debug_manifest.xml")
+    sourceSets.getByName("profile").manifest.srcFile("src/profile_manifest.xml")
+    sourceSets.getByName("main").res.directories.clear()
     namespace = "com.crcfrcn.citizenapp"
     compileSdk = 36
     ndkVersion = "28.2.13676358"
@@ -86,4 +154,13 @@ kotlin {
 flutter {
     // 调用方可以提供源码外Flutter工程视图；普通产品构建仍以本工程根为Flutter根。
     source = System.getenv("CITIZENAPP_PROJECT_ROOT") ?: "../.."
+}
+
+// 通过 Android 官方变体 API 传递生成目录和任务依赖，避免手写任务顺序。
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.sources.res?.addGeneratedSourceDirectory(
+            prepareCitizenAppResources, PrepareCitizenAppResources::outputDirectory,
+        )
+    }
 }

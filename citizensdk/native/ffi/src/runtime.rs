@@ -1082,9 +1082,9 @@ mod tests {
 
     fn runtime() -> std::sync::Arc<NativeRuntime> {
         let assets = crate::assets::verify_assets(
-            include_bytes!("../../../assets/citizenchain/manifest.json"),
-            include_bytes!("../../../assets/citizenchain/chainspec.json"),
-            include_bytes!("../../../assets/citizenchain/light_sync_state.json"),
+            include_bytes!("../../../chain/manifest.json"),
+            include_bytes!("../../../chain/chainspec.json"),
+            include_bytes!("../../../chain/light_sync_state.json"),
         )
         .unwrap_or_else(|error| panic!("asset verification failed: {error:?}"));
         NativeRuntime::new(
@@ -1138,9 +1138,9 @@ mod tests {
 
     fn runtime_with_exhausted_result_handles() -> Arc<NativeRuntime> {
         let assets = crate::assets::verify_assets(
-            include_bytes!("../../../assets/citizenchain/manifest.json"),
-            include_bytes!("../../../assets/citizenchain/chainspec.json"),
-            include_bytes!("../../../assets/citizenchain/light_sync_state.json"),
+            include_bytes!("../../../chain/manifest.json"),
+            include_bytes!("../../../chain/chainspec.json"),
+            include_bytes!("../../../chain/light_sync_state.json"),
         )
         .unwrap_or_else(|error| panic!("asset verification failed: {error:?}"));
         NativeRuntime::new_with_result_allocator(

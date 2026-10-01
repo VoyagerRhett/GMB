@@ -291,6 +291,7 @@ void test_method_closure_and_requests() {
       Method::reconcile_wallet_cleanup,
       Method::sign_wallet_payload,
       Method::derive_application_key,
+      Method::derive_application_keys,
       Method::begin_signing,
       Method::consume_external_signature,
       Method::cancel_signing,
@@ -410,6 +411,24 @@ void test_method_closure_and_requests() {
       Value::bytes(Value::Bytes(32, 7)), Value::bytes({1})}));
   assert(application_key.application_key_salt.size() == 32 &&
          application_key.application_key_info.size() == 1);
+  const auto application_keys = decode("deriveApplicationKeys", list({Value::integer(2),
+      Value::string("s"), Value::integer(1), Value::string(account('2')),
+      Value::bytes(Value::Bytes(32, 7)), list({Value::bytes({1}), Value::bytes({2})})}));
+  assert(application_keys.application_key_salt.size() == 32 &&
+         application_keys.application_key_infos.size() == 2);
+  expect_failure([&] { decode("deriveApplicationKeys", list({Value::integer(2),
+      Value::string("s"), Value::integer(1), Value::string(account('2')),
+      Value::bytes(Value::Bytes(32, 7)), list({})})); }, CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  Value::List too_many_infos(17, Value::bytes({1}));
+  expect_failure([&] { decode("deriveApplicationKeys", list({Value::integer(2),
+      Value::string("s"), Value::integer(1), Value::string(account('2')),
+      Value::bytes(Value::Bytes(32, 7)), Value::list(too_many_infos)})); },
+      CITIZENSDK_ERROR_INVALID_ARGUMENT);
+  citizen_sdk::flutter::validate_public_value(Method::derive_application_keys,
+      list({list({Value::bytes(Value::Bytes(32, 1)), Value::bytes(Value::Bytes(32, 2))})}));
+  expect_failure([&] { citizen_sdk::flutter::validate_public_value(
+      Method::derive_application_keys, list({list({Value::bytes(Value::Bytes(31))})})); },
+      CITIZENSDK_ERROR_INTEGRITY);
   const auto signing = decode("beginSigning", list({Value::integer(2), Value::string("s"),
       Value::integer(1), Value::string(account('2')), Value::bytes({1, 2}), Value::string("raw"),
       Value::bytes({}), Value::string("none"), Value::integer(0), Value::integer(120)}));

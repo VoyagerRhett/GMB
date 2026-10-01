@@ -406,6 +406,7 @@ constexpr const char *kMethods[] = {
     "reconcileWalletCleanup",
     "signWalletPayload",
     "deriveApplicationKey",
+    "deriveApplicationKeys",
     "beginSigning",
     "consumeExternalSignature",
     "cancelSigning",
@@ -1303,6 +1304,20 @@ DecodedRequest decode_request(const std::string &name, FlValue *arguments) {
         result.application_key_salt = *salt;
         result.application_key_info = *info; break;
       }
+      case Method::derive_application_keys: {
+        (void)list(root, 6); result.account_id = account(fields[3]);
+        const auto *salt = std::get_if<Value::Bytes>(&fields[4].data);
+        require(salt != nullptr && salt->size() == 32,
+                CITIZENSDK_ERROR_INVALID_ARGUMENT, "Application key batch salt is invalid");
+        result.application_key_salt = *salt;
+        for (const auto &item : bounded_list(fields[5], 16)) {
+          const auto *info = std::get_if<Value::Bytes>(&item.data);
+          require(info != nullptr && !info->empty() && info->size() <= 256,
+                  CITIZENSDK_ERROR_INVALID_ARGUMENT, "Application key batch info is invalid");
+          result.application_key_infos.push_back(*info);
+        }
+        break;
+      }
       case Method::begin_signing: {
         (void)list(root, 10); result.account_id = account(fields[3]);
         const auto *payload = std::get_if<Value::Bytes>(&fields[4].data);
@@ -2151,6 +2166,20 @@ Value copy_public_result(Method method, citizensdk_result_handle_t result) {
       check_code(citizensdk_result_get_application_key(result, bytes.data()));
       return checked(tuple({Value::sensitive_bytes(std::move(bytes))}));
     }
+    case Method::derive_application_keys: {
+      const auto info = inspect_result(result, CITIZENSDK_RESULT_APPLICATION_KEYS);
+      require(info.payload_len >= 32 && info.payload_len <= 16 * 32 &&
+                  info.payload_len % 32 == 0,
+              CITIZENSDK_ERROR_INTEGRITY, "Application key batch result size is invalid");
+      Value::List keys;
+      for (uint32_t index = 0; index < info.payload_len / 32; ++index) {
+        auto key = Value::sensitive_bytes(Value::Bytes(32));
+        auto &bytes = std::get<Value::Bytes>(key.data);
+        check_code(citizensdk_result_get_application_key_at(result, index, bytes.data()));
+        keys.push_back(std::move(key));
+      }
+      return checked(tuple({Value::list(std::move(keys))}));
+    }
     case Method::begin_signing: case Method::consume_external_signature:
       (void)inspect_result(result, CITIZENSDK_RESULT_SIGNING_OUTCOME);
       return checked(tuple({copy_signing_outcome(result)}));
@@ -2509,6 +2538,17 @@ void validate_public_value(Method method, const Value &value) {
         require(bytes != nullptr && bytes->size() == 32,
                 CITIZENSDK_ERROR_INTEGRITY,
                 "Application key must contain exactly 32 bytes"); return;
+      }
+      case Method::derive_application_keys: {
+        const auto *keys = std::get_if<Value::List>(&item.data);
+        require(keys != nullptr && !keys->empty() && keys->size() <= 16,
+                CITIZENSDK_ERROR_INTEGRITY, "Application key batch count is invalid");
+        for (const auto &key : *keys) {
+          const auto *bytes = std::get_if<Value::Bytes>(&key.data);
+          require(bytes != nullptr && bytes->size() == 32,
+                  CITIZENSDK_ERROR_INTEGRITY, "Application key batch item is invalid");
+        }
+        return;
       }
       case Method::begin_signing: case Method::consume_external_signature: {
         const auto &outcome = semantic_tuple(item, 7);

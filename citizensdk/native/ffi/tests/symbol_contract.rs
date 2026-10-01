@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 // 独立显式金标：保留原119项与本步26项无UI入口，不从生产头动态生成预期。
-const EXPECTED_EXPORTS: [&str; 146] = [
+const EXPECTED_EXPORTS: [&str; 148] = [
     "citizensdk_add_next_wallet_account",
     "citizensdk_delete_diagnostic_wallet",
     "citizensdk_encode_signing_payload",
@@ -48,6 +48,7 @@ const EXPECTED_EXPORTS: [&str; 146] = [
     "citizensdk_delete_wallet",
     "citizensdk_delete_wallet_account",
     "citizensdk_derive_application_key",
+    "citizensdk_derive_application_keys",
     "citizensdk_destroy",
     "citizensdk_export_state",
     "citizensdk_execute_prepared_transaction",
@@ -123,6 +124,7 @@ const EXPECTED_EXPORTS: [&str; 146] = [
     "citizensdk_result_get_runtime_context",
     "citizensdk_result_get_signature",
     "citizensdk_result_get_application_key",
+    "citizensdk_result_get_application_key_at",
     "citizensdk_result_get_signing_outcome",
     "citizensdk_result_get_storage_batch_count",
     "citizensdk_result_get_sync_status",
@@ -187,14 +189,17 @@ fn rust_exports(source: &str) -> BTreeSet<String> {
 fn retired_private_view_exports_are_absent() {
     let source = include_str!("../src/wallet_abi.rs");
     assert!(!source.contains("fn citizensdk_internal_"));
-    for name in ["citizensdk_private_key_open", "citizensdk_private_key_reveal",
-        "citizensdk_private_key_cancel", "citizensdk_private_key_finish"] {
+    for name in [
+        "citizensdk_private_key_open",
+        "citizensdk_private_key_reveal",
+        "citizensdk_private_key_cancel",
+        "citizensdk_private_key_finish",
+    ] {
         assert!(EXPECTED_EXPORTS.contains(&name));
     }
     assert!(!include_str!("../../../include/citizensdk.h").contains("citizensdk_internal_"));
     assert!(!include_str!("../../../include/citizensdk_types.h").contains("citizensdk_internal_"));
 }
-
 
 fn without_block_comments(source: &str) -> String {
     let mut output = String::with_capacity(source.len());
@@ -264,7 +269,7 @@ fn rust_and_c_publish_exactly_the_reviewed_product_symbols() {
     let qr = rust_exports(include_str!("../src/qr_abi.rs"));
     let transaction = rust_exports(include_str!("../src/transaction_abi.rs"));
     assert_eq!(rust.len(), 53, "base Rust export count changed");
-    assert_eq!(wallet.len(), 69, "wallet Rust export count changed");
+    assert_eq!(wallet.len(), 71, "wallet Rust export count changed");
     for export in wallet {
         assert!(
             rust.insert(export.clone()),
@@ -292,14 +297,17 @@ fn rust_and_c_publish_exactly_the_reviewed_product_symbols() {
     let presence = rust_exports(include_str!("../src/host_providers.rs"));
     assert_eq!(presence.len(), 2);
     for export in presence {
-        assert!(rust.insert(export.clone()), "duplicate Rust export {export}");
+        assert!(
+            rust.insert(export.clone()),
+            "duplicate Rust export {export}"
+        );
     }
     let header: BTreeSet<_> = header_declarations(include_str!("../../../include/citizensdk.h"))
         .into_keys()
         .collect();
 
-    assert_eq!(rust.len(), 146, "Rust export count changed");
-    assert_eq!(header.len(), 146, "C declaration count changed");
+    assert_eq!(rust.len(), 148, "Rust export count changed");
+    assert_eq!(header.len(), 148, "C declaration count changed");
     assert_eq!(rust, expected, "Rust export set changed");
     assert_eq!(header, expected, "C declaration set changed");
     assert!(!rust.contains("citizensdk_set_default_wallet_account"));
@@ -324,7 +332,11 @@ fn product_header_has_only_the_reviewed_mnemonic_crossings() {
         ])
     );
 
-    for name in ["citizensdk_add_wallet_accounts", "citizensdk_add_next_wallet_account", "citizensdk_import_wallet"] {
+    for name in [
+        "citizensdk_add_wallet_accounts",
+        "citizensdk_add_next_wallet_account",
+        "citizensdk_import_wallet",
+    ] {
         let declaration = &declarations[name];
         assert!(declaration.contains("citizensdk_bytes_view_t mnemonic"));
         assert!(!declaration.contains("uint8_t *buffer"));
@@ -369,15 +381,26 @@ fn product_exports_have_no_provider_rpc_or_secret_escape_hatch() {
     // 只允许绑定实例与receiver的既定四签名；同名改参数也必须失败。
     assert_eq!(declarations["citizensdk_private_key_open"],
         "CITIZENSDK_API citizensdk_error_code_t citizensdk_private_key_open( citizensdk_handle_t handle, const citizensdk_account_id_t *account_id, const citizensdk_private_key_receiver_v1_t *receiver, uint64_t *out_secret_id, citizensdk_request_id_t *out_request_id)");
-    for name in ["citizensdk_private_key_reveal", "citizensdk_private_key_cancel", "citizensdk_private_key_finish"] {
+    for name in [
+        "citizensdk_private_key_reveal",
+        "citizensdk_private_key_cancel",
+        "citizensdk_private_key_finish",
+    ] {
         assert_eq!(declarations[name],
             format!("CITIZENSDK_API citizensdk_error_code_t {name}( citizensdk_handle_t handle, uint64_t secret_id)"));
     }
     let exported_surface = declarations
         .iter()
         // 仅既定四项receiver允许私钥词项，下面独立核对完整签名，不能按前缀放行。
-        .filter(|(name, _)| !["citizensdk_private_key_open", "citizensdk_private_key_reveal",
-            "citizensdk_private_key_cancel", "citizensdk_private_key_finish"].contains(&name.as_str()))
+        .filter(|(name, _)| {
+            ![
+                "citizensdk_private_key_open",
+                "citizensdk_private_key_reveal",
+                "citizensdk_private_key_cancel",
+                "citizensdk_private_key_finish",
+            ]
+            .contains(&name.as_str())
+        })
         .map(|(name, declaration)| format!("{name} {declaration}"))
         .collect::<Vec<_>>()
         .join("\n")

@@ -6,20 +6,21 @@ import 'package:provider/provider.dart';
 
 import 'package:citizenapp/8964/compose/article/article_compose_body.dart';
 import 'package:citizenapp/8964/compose/compose_payload.dart';
-import 'package:citizenapp/8964/compose/document/document_compose_body.dart';
+import 'package:citizenapp/8964/compose/document_compose_body.dart';
 import 'package:citizenapp/8964/compose/drafts/compose_draft.dart';
 import 'package:citizenapp/8964/compose/drafts/compose_draft_media.dart';
 import 'package:citizenapp/8964/compose/drafts/compose_draft_store.dart';
 import 'package:citizenapp/8964/compose/drafts/drafts_page.dart';
-import 'package:citizenapp/8964/compose/video/video_compose_body.dart';
-import 'package:citizenapp/8964/compose/widgets/compose_media_widgets.dart';
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/compose/video_compose_body.dart';
+import 'package:citizenapp/8964/compose/compose_media_widgets.dart';
+import 'package:citizenapp/8964/square_models.dart';
 import 'package:citizenapp/8964/profile/services/citizen_profile_cache.dart';
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/8964/profile/widgets/profile_avatar.dart';
 import 'package:citizenapp/8964/services/square_compose_signers.dart';
 import 'package:citizenapp/8964/services/square_identity_state.dart';
 import 'package:citizenapp/8964/services/square_publish_service.dart';
+import 'package:citizenapp/8964/services/square_post_store.dart';
 import 'package:citizenapp/8964/services/square_upload_service.dart';
 import 'package:citizenapp/my/membership/subscription_service.dart';
 import 'package:citizenapp/my/myid/current_user_context.dart';
@@ -87,6 +88,8 @@ class _SquareComposePageState extends State<SquareComposePage>
 
   SquarePublishStage _stage = SquarePublishStage.idle;
   bool _publishing = false;
+  bool _published = false;
+  bool _recovering = false;
   bool _contentValid = false;
   bool _dependenciesReady = false;
 
@@ -223,6 +226,7 @@ class _SquareComposePageState extends State<SquareComposePage>
 
   /// 保存调用严格串行，确保较慢的旧快照永远不能在新快照之后覆盖草稿。
   Future<void> _flushLatestSnapshot() async {
+    if (_publishing || _published || _recovering) return;
     final cidNumber = _identity?.cidNumber;
     final snapshot = _latestSnapshot;
     if (cidNumber == null || cidNumber.isEmpty) {
@@ -274,13 +278,6 @@ class _SquareComposePageState extends State<SquareComposePage>
     if (mounted) Navigator.of(context).maybePop();
   }
 
-  Future<void> _deleteCurrentDraft() async {
-    final cidNumber = _identity?.cidNumber;
-    if (cidNumber == null || !_draftSaved) return;
-    await _draftStore.delete(cidNumber, _draftId);
-    _draftSaved = false;
-  }
-
   @override
   Widget build(BuildContext context) {
     return PopScope(
@@ -300,6 +297,7 @@ class _SquareComposePageState extends State<SquareComposePage>
                   _TopBar(
                     title: '发${widget.postType.label}',
                     publishing: _publishing,
+                    recovering: _recovering,
                     canCancel:
                         !_publishing ||
                         _stage == SquarePublishStage.processingMedia,
@@ -323,9 +321,16 @@ class _SquareComposePageState extends State<SquareComposePage>
                     identity: identity,
                     avatarPath: _avatarPath,
                     avatarSet: _avatarSet,
-                    mediaAction: _buildMediaAction(),
+                    mediaAction: _publishing || _recovering
+                        ? null
+                        : _buildMediaAction(),
                   ),
-                  Expanded(child: _buildBody()),
+                  Expanded(
+                    child: IgnorePointer(
+                      ignoring: _publishing || _recovering,
+                      child: _buildBody(),
+                    ),
+                  ),
                 ],
               );
             },
@@ -422,18 +427,34 @@ class _SquareComposePageState extends State<SquareComposePage>
       _showError('草稿类型与当前发布页面不一致');
       return;
     }
+    var restored = selected;
+    try {
+      if (_draftStore is SquareComposeDraftStore) {
+        restored = await _draftStore.restore(restored);
+      }
+    } catch (error) {
+      if (mounted) _showError('草稿媒体恢复失败，原数据已保留：$error');
+      return;
+    }
+    if (!mounted) return;
+    final pending = await const SquarePostStore().readPublication(
+      cidNumber,
+      restored.draftId,
+    );
+    if (!mounted) return;
     setState(() {
-      _draftId = selected.draftId;
+      _recovering = pending != null;
+      _draftId = restored.draftId;
       _draftSaved = true;
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       switch (widget.postType) {
         case SquarePostType.document:
-          _documentKey.currentState?.restore(selected);
+          _documentKey.currentState?.restore(restored);
         case SquarePostType.article:
-          _articleKey.currentState?.restore(selected);
+          _articleKey.currentState?.restore(restored);
         case SquarePostType.video:
-          _videoKey.currentState?.restore(selected);
+          _videoKey.currentState?.restore(restored);
       }
     });
   }
@@ -469,13 +490,26 @@ class _SquareComposePageState extends State<SquareComposePage>
       _showError(payload.error!);
       return;
     }
+    _captureLatestSnapshot();
+    _autosaveTimer?.cancel();
     setState(() {
       _publishing = true;
       _stage = SquarePublishStage.signingIn;
     });
     final signers = SquareComposeSigners(context: context, identity: identity);
     try {
+      await _saveChain;
+      final cid = identity.cidNumber;
+      if (cid == null) throw StateError('保存发布草稿前必须取得 CID');
+      final pending = await const SquarePostStore().readPublication(
+        cid,
+        _draftId,
+      );
+      if (pending == null && _latestSnapshot != null) {
+        await _writeSnapshot(cid, _draftId, _latestSnapshot!);
+      }
       final result = await _requirePublishService().publish(
+        draftId: _draftId,
         identity: identity,
         postType: widget.postType,
         text: payload.text,
@@ -495,9 +529,12 @@ class _SquareComposePageState extends State<SquareComposePage>
           if (mounted) setState(() => _stage = stage);
         },
       );
-      // 发布成功：删除该草稿（含媒体目录）。
+      // 帖子、媒体引用和草稿删除已由服务端结果驱动的本地事务处理。
+      // 关闭快照，避免 dispose/生物识别生命周期回调把已发布草稿重新写回。
+      _published = true;
+      _latestSnapshot = null;
+      _draftSaved = false;
       _autosaveTimer?.cancel();
-      await _deleteCurrentDraft();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -507,8 +544,16 @@ class _SquareComposePageState extends State<SquareComposePage>
       );
       Navigator.of(context).pop(result.post);
     } catch (e) {
-      // 失败保留草稿（已由自动保存落盘）；用户可再次点发布重试。
-      if (mounted) _showError('发布失败：$e');
+      // 失败保留已提交草稿；存在发布恢复行时重试只继续确认/收尾，禁止重发。
+      final cid = identity.cidNumber;
+      if (cid != null) {
+        final pending = await const SquarePostStore().readPublication(
+          cid,
+          _draftId,
+        );
+        if (mounted) setState(() => _recovering = pending != null);
+      }
+      if (mounted) _showError('发布未完成：$e');
     } finally {
       if (mounted) {
         setState(() {
@@ -534,6 +579,7 @@ class _TopBar extends StatelessWidget {
   const _TopBar({
     required this.title,
     required this.publishing,
+    required this.recovering,
     required this.canCancel,
     required this.stageLabel,
     required this.onCancel,
@@ -543,6 +589,7 @@ class _TopBar extends StatelessWidget {
 
   final String title;
   final bool publishing;
+  final bool recovering;
   final bool canCancel;
   final String stageLabel;
   final VoidCallback onCancel;
@@ -594,7 +641,11 @@ class _TopBar extends StatelessWidget {
                   ),
                   SizedBox(width: AppLayout.scaled(context, 2)),
                   Tooltip(
-                    message: publishing ? stageLabel : '发布',
+                    message: publishing
+                        ? stageLabel
+                        : recovering
+                        ? '恢复上次发布'
+                        : '发布',
                     child: FilledButton(
                       key: const ValueKey('compose-publish-button'),
                       onPressed: onPublish,
@@ -614,7 +665,13 @@ class _TopBar extends StatelessWidget {
                           fontWeight: FontWeight.w600,
                         ),
                       ),
-                      child: Text(publishing ? '发布中' : '发布'),
+                      child: Text(
+                        publishing
+                            ? '发布中'
+                            : recovering
+                            ? '恢复'
+                            : '发布',
+                      ),
                     ),
                   ),
                 ],

@@ -2,7 +2,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:citizenwallet/wallet/wallet_mini_secret.dart';
-import 'package:citizenwallet/chain/chain_constants.dart';
+import 'package:citizenwallet/chain_constants.dart';
 import 'package:citizenwallet/wallet/native_sr25519.dart';
 import 'package:polkadart_keyring/polkadart_keyring.dart';
 import 'package:citizenwallet/signer/offline_sign_service.dart';

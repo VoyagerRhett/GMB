@@ -6,7 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/isar/wallet_isar.dart';
-import 'package:citizenapp/transaction/offchain-transaction/rpc/offchain_clearing_rpc.dart';
+import 'package:citizenapp/transaction/offchain-transaction/offchain_clearing_rpc.dart';
 
 /// 钱包各入口共享同一加载和展示状态；失败保留成功值，未知值始终为 null。
 /// 测试可注入读取器，生产状态只由下方余额所有者按账户和来源创建。

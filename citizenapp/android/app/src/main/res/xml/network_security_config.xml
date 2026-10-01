@@ -4,11 +4,8 @@
          GitHub 更新和 CitizenSDK 公民链节点。
          默认阻断一切明文流量，防中间人（iOS 侧由默认 ATS 同等阻断）。 -->
     <base-config cleartextTrafficPermitted="false" />
-    <!-- 仅本机开发调试放行 dart-define 的 127.0.0.1/localhost 端点
-         与 Android 模拟器宿主映射；生产配置不使用这些地址。 -->
+    <!-- 数据库视频仅通过手机自身127.0.0.1交给原生播放器；无外部明文例外。 -->
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">127.0.0.1</domain>
-        <domain includeSubdomains="false">localhost</domain>
-        <domain includeSubdomains="false">10.0.2.2</domain>
     </domain-config>
 </network-security-config>

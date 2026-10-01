@@ -6,10 +6,10 @@ use std::sync::Arc;
 #[test]
 fn native_assets_reject_every_manifest_drift_before_provider_creation() {
     let original: serde_json::Value =
-        serde_json::from_slice(include_bytes!("../../../assets/citizenchain/manifest.json"))
+        serde_json::from_slice(include_bytes!("../../../chain/manifest.json"))
             .unwrap();
-    let spec = include_bytes!("../../../assets/citizenchain/chainspec.json");
-    let sync = include_bytes!("../../../assets/citizenchain/light_sync_state.json");
+    let spec = include_bytes!("../../../chain/chainspec.json");
+    let sync = include_bytes!("../../../chain/light_sync_state.json");
     for (key, value) in [
         ("extra", serde_json::Value::Bool(true)),
         ("chain_id", "other-network".into()),
@@ -454,9 +454,9 @@ impl TransactionHistoryStore for FakeHistoryStore {
 #[cfg(feature = "chain")]
 fn provider_config(name: &str) -> SmoldotProviderConfig {
     let assets = crate::assets::verify_assets(
-        include_bytes!("../../../assets/citizenchain/manifest.json"),
-        include_bytes!("../../../assets/citizenchain/chainspec.json"),
-        include_bytes!("../../../assets/citizenchain/light_sync_state.json"),
+        include_bytes!("../../../chain/manifest.json"),
+        include_bytes!("../../../chain/chainspec.json"),
+        include_bytes!("../../../chain/light_sync_state.json"),
     )
     .unwrap_or_else(|error| panic!("asset verification failed: {error:?}"));
     SmoldotProviderConfig::try_new(

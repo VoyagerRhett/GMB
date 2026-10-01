@@ -22,7 +22,7 @@ import {
 } from '../membership/service';
 import type { MembershipLevel } from '../membership/plans';
 import { addBrowseCount, assertBrowseAvailable, getBrowseState } from '../feeds/browse';
-import { profileAssetPrefix } from '../storage/r2_keys';
+import { profileAssetPrefix } from '../r2_keys';
 import {
   countUserStats,
   defaultProfileDoc,

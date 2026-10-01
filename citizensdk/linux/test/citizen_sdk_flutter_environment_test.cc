@@ -24,8 +24,7 @@ int main() {
   TempDirectory temporary("flutter-environment");
   const auto executable = temporary.path() / "bundle" / "citizen_fixture";
   const auto assets = executable.parent_path() / "data" / "flutter_assets" /
-                      "packages" / "citizen_sdk" / "assets" /
-                      "citizenchain";
+                      "packages" / "citizen_sdk" / "chain";
   std::filesystem::create_directories(assets);
   write_asset(assets / "manifest.json");
   write_asset(assets / "chainspec.json");

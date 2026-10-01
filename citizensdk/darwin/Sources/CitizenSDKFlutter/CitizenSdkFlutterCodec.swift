@@ -79,6 +79,7 @@ internal enum CitizenSdkFlutterCodec {
         "reconcileWalletCleanup",
         "signWalletPayload",
         "deriveApplicationKey",
+        "deriveApplicationKeys",
         "beginSigning",
         "consumeExternalSignature",
         "cancelSigning",
@@ -142,6 +143,8 @@ internal enum CitizenSdkFlutterCodec {
         case sign(session: String, sequence: Int64, accountID: Data, payload: Data)
         case deriveApplicationKey(session: String, sequence: Int64, accountID: Data,
                                   salt: Data, info: Data)
+        case deriveApplicationKeys(session: String, sequence: Int64, accountID: Data,
+                                   salt: Data, infos: [Data])
         case beginSigning(session: String, sequence: Int64, intent: CitizenSigningIntent)
         case externalSignature(method: String, session: String, sequence: Int64,
                                signingSessionID: String, response: String)
@@ -175,6 +178,7 @@ internal enum CitizenSdkFlutterCodec {
                  let .storageKeysPage(value, _, _, _, _, _),
                  let .runtimeAPI(value, _, _, _, _),
                  let .deriveApplicationKey(value, _, _, _, _),
+                 let .deriveApplicationKeys(value, _, _, _, _),
                  let .importState(value, _, _): return value
             }
         }
@@ -196,6 +200,7 @@ internal enum CitizenSdkFlutterCodec {
                  let .storageKeysPage(_, value, _, _, _, _),
                  let .runtimeAPI(_, value, _, _, _),
                  let .deriveApplicationKey(_, value, _, _, _),
+                 let .deriveApplicationKeys(_, value, _, _, _),
                  let .importState(_, value, _): return value
             }
         }
@@ -223,6 +228,7 @@ internal enum CitizenSdkFlutterCodec {
             case .reorder: return "reorderWalletAccountsWithoutDefaultChange"
             case .sign: return "signWalletPayload"
             case .deriveApplicationKey: return "deriveApplicationKey"
+            case .deriveApplicationKeys: return "deriveApplicationKeys"
             case .beginSigning: return "beginSigning"
             case .cancelSigning: return "cancelSigning"
             case .beginDefaultChange: return "beginDefaultAccountChange"
@@ -504,6 +510,20 @@ internal enum CitizenSdkFlutterCodec {
                 return .deriveApplicationKey(
                     session: session, sequence: sequence, accountID: try hash32(tuple[3]),
                     salt: salt, info: info)
+            case "deriveApplicationKeys":
+                try length(6)
+                let salt = try bytes(tuple[4], maximum: 32)
+                guard salt.count == 32, let rawInfos = tuple[5] as? [Any],
+                      (1...16).contains(rawInfos.count) else {
+                    throw failure(.invalidArgument, "application key batch is invalid")
+                }
+                let infos = try rawInfos.map { try bytes($0, maximum: 256) }
+                guard infos.allSatisfy({ !$0.isEmpty }) else {
+                    throw failure(.invalidArgument, "application key info is empty")
+                }
+                return .deriveApplicationKeys(
+                    session: session, sequence: sequence, accountID: try hash32(tuple[3]),
+                    salt: salt, infos: infos)
             case "beginSigning":
                 try length(10)
                 let payload = try bytes(tuple[4], maximum: 16 * 1_024 * 1_024)

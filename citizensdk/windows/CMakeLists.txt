@@ -20,7 +20,7 @@ set(CITIZENSDK_CORE_LIBRARY "" CACHE FILEPATH "Matching citizensdk.dll")
 set(CITIZENSDK_CORE_IMPORT_LIBRARY "" CACHE FILEPATH "Matching citizensdk.dll.lib")
 set(CITIZENSDK_CORE_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/../include" CACHE PATH "Core public headers")
 set(CITIZENSDK_INTERNAL_INCLUDE_DIR "" CACHE PATH "本轮构建生成的 SDK 私有声明目录；不安装")
-set(CITIZENSDK_ASSET_DIR "${CMAKE_CURRENT_LIST_DIR}/../assets/citizenchain" CACHE PATH "Canonical chain assets")
+set(CITIZENSDK_ASSET_DIR "${CMAKE_CURRENT_LIST_DIR}/../chain" CACHE PATH "Canonical chain assets")
 set(CITIZENSDK_SQLITE_INCLUDE_DIR "" CACHE PATH "Pinned SQLite headers")
 set(CITIZENSDK_SQLITE_ARCHIVE "" CACHE FILEPATH "Pinned MSVC SQLite static archive")
 set(CITIZENSDK_ZXING_SOURCE_DIR "" CACHE PATH "Official complete ZXing-C++ 3.1.1 source directory")
@@ -101,7 +101,7 @@ target_compile_definitions(citizensdk_host PRIVATE
   WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE _WIN32_WINNT=0x0A00
   CITIZENSDK_HOST_BUILDING=1 CITIZENSDK_HOST_VERSION="${PROJECT_VERSION}")
 target_include_directories(citizensdk_host PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}>
   $<BUILD_INTERFACE:${CITIZENSDK_CORE_INCLUDE_DIR}>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   PRIVATE src "${CITIZENSDK_INTERNAL_INCLUDE_DIR}" "${CITIZENSDK_SQLITE_INCLUDE_DIR}")
@@ -124,10 +124,10 @@ install(FILES "${CITIZENSDK_CORE_INCLUDE_DIR}/citizensdk.h"
   "${CMAKE_CURRENT_LIST_DIR}/../native/qr-image/citizensdk_qr_image.h"
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 # Flutter 注册头只供 generated registrant 使用，不进入纯原生七头安装合同。
-install(DIRECTORY include/citizen_sdk DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+install(DIRECTORY citizen_sdk DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
   PATTERN "citizen_sdk_plugin.h" EXCLUDE)
 install(FILES "${CITIZENSDK_ASSET_DIR}/manifest.json" "${CITIZENSDK_ASSET_DIR}/chainspec.json"
-  "${CITIZENSDK_ASSET_DIR}/light_sync_state.json" DESTINATION "${CMAKE_INSTALL_DATADIR}/citizensdk/citizenchain")
+  "${CITIZENSDK_ASSET_DIR}/light_sync_state.json" DESTINATION "${CMAKE_INSTALL_DATADIR}/citizensdk/chain")
 set(CITIZENSDK_PACKAGE_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/Windows/cmake/CitizenSDK")
 configure_package_config_file(cmake/CitizenSDKConfig.cmake.in
   "${CMAKE_CURRENT_BINARY_DIR}/CitizenSDKConfig.cmake"

@@ -39,7 +39,7 @@ export const workflowSteps = Object.freeze({
   },
   "8": {
     "shell": "bash",
-    "source": "flutter pub get --enforce-lockfile\n"
+    "source": "set -euo pipefail\nwork=\"$RUNNER_TEMP/citizenapp-check-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT\"\nmkdir -p \"$work\"\nwork=\"$(cd \"$work\" && pwd -P)\"\nproject=\"$(node \"$GITHUB_WORKSPACE/citizenapp/scripts/citizenapp-view.mjs\" create --source-root \"$GITHUB_WORKSPACE/citizenapp\" --work-root \"$work\")\"\n(cd \"$project\" && flutter pub get --enforce-lockfile)\n{\n  printf 'CITIZENAPP_TEST_WORK_DIR=%s\\n' \"$work\"\n  printf 'CITIZENAPP_TEST_PROJECT_ROOT=%s\\n' \"$project\"\n} >> \"$GITHUB_ENV\"\n"
   },
   "9": {
     "shell": "bash",

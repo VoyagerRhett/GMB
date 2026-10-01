@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:citizenapp/log/app_log.dart';
+import 'package:citizenapp/app_log.dart';
 import 'package:citizenapp/notifications/app_push_service.dart';
 import 'package:citizenapp/notifications/app_push_token.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';

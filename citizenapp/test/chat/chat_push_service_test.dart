@@ -78,7 +78,7 @@ void main() {
 
   test('CitizenApp 双端只展示并清理固定聊天通知', () {
     final android = File(
-      'android/app/src/main/kotlin/com/crcfrcn/citizenapp/MainActivity.kt',
+      'android/app/src/main/MainActivity.kt',
     ).readAsStringSync();
     final appPush = File(
       'lib/notifications/app_push_service.dart',

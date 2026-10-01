@@ -107,10 +107,13 @@ CHECK_OUTPUTS
   export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$DEPENDENCY_WORK_DIR/flutter-config}"
   export PUB_CACHE="${PUB_CACHE:-$DEPENDENCY_WORK_DIR/pub}"
   export GRADLE_USER_HOME="$DEPENDENCY_WORK_DIR/gradle"
-  GRADLE_EXECUTABLE="${CITIZENAPP_GRADLE:-$APP_ROOT/android/gradlew}"
-  [[ "$GRADLE_EXECUTABLE" == /* && -f "$GRADLE_EXECUTABLE" && ! -L "$GRADLE_EXECUTABLE"
-      && -x "$GRADLE_EXECUTABLE" ]] \
-    || { echo 'CitizenApp Gradle执行器必须是绝对普通可执行文件' >&2; exit 1; }
+  # 只有 Android 使用 Gradle；iOS 工程不装配 Wrapper，也不依赖 Android 工具。
+  if [[ "$PLATFORM" == android ]]; then
+    GRADLE_EXECUTABLE="${CITIZENAPP_GRADLE:-$CITIZENAPP_PROJECT_ROOT/android/gradlew}"
+    [[ "$GRADLE_EXECUTABLE" == /* && -f "$GRADLE_EXECUTABLE" && ! -L "$GRADLE_EXECUTABLE"
+        && -x "$GRADLE_EXECUTABLE" ]] \
+      || { echo 'CitizenApp Gradle执行器必须是绝对普通可执行文件' >&2; exit 1; }
+  fi
   export CP_HOME_DIR="$DEPENDENCY_WORK_DIR/cocoapods"
   export TMPDIR="$CITIZENAPP_WORK_DIR/tmp/"
   export FLUTTER_SUPPRESS_ANALYTICS=true COCOAPODS_DISABLE_STATS=true

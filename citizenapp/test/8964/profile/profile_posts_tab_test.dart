@@ -1,3 +1,6 @@
+import 'package:citizenapp/isar/user_isar.dart';
+import 'package:citizenapp/isar/social_isar.dart';
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -6,7 +9,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/square_models.dart';
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/8964/profile/user_profile_page.dart';
 import 'package:citizenapp/my/membership/subscription_service.dart';
@@ -14,11 +17,12 @@ import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/8964/services/square_post_store.dart';
 
 import 'fake_profile.dart';
+import '../../support/isar_test_env.dart';
 
 Widget _page(
   FakeProfileApi api, {
   bool withSession = true,
-  bool isSelf = true,
+  bool isSelf = false,
   SquareSessionProvider? sessionProvider,
 }) => MaterialApp(
   home: UserProfilePage(
@@ -163,6 +167,13 @@ SquareLocalPost _localPost({
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  useIsolatedIsar();
+  // Isar使用真实异步IO；在Widget虚拟时钟启动前打开数据库，避免把未完成的打开任务带入tearDown。
+  setUp(() async {
+    await UserIsar.instance.db();
+    await SocialIsar.instance.db();
+  });
   testWidgets('主页帖子未返回时直接显示内容区域且不使用整页转圈', (tester) async {
     final api = _PendingAuthorPostsApi();
     await tester.pumpWidget(_page(api, isSelf: false));
@@ -313,18 +324,24 @@ void main() {
     expect(find.text('还没有公文'), findsOneWidget);
   });
 
-  testWidgets('本人主页远端失败时仍展示本地正文并明确提示媒体已清理', (tester) async {
+  testWidgets('本人主页只读本地正文，缺失媒体不推断云端删除', (tester) async {
     final api = FakeProfileApi(
       sampleProfile(),
       localPosts: [_localPost()],
       throwOnAuthorPosts: true,
     );
 
-    await tester.pumpWidget(_page(api));
+    await tester.pumpWidget(_page(api, isSelf: true));
     await tester.pumpAndSettle();
+    for (var i = 0; i < 30 && find.text('本地尚未保存媒体').evaluate().isEmpty; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump();
+    }
 
     expect(find.text('本机保留的正文'), findsOneWidget);
-    expect(find.text('媒体已从云端清理，本机仅保留正文'), findsOneWidget);
+    expect(find.text('本地尚未保存媒体'), findsOneWidget);
     expect(find.text('加载失败，下拉重试'), findsNothing);
   });
 
@@ -335,12 +352,18 @@ void main() {
       throwOnAuthorPosts: true,
     );
 
-    await tester.pumpWidget(_page(api, withSession: false));
+    await tester.pumpWidget(_page(api, withSession: false, isSelf: true));
     await tester.pumpAndSettle();
+    for (var i = 0; i < 30 && find.text('本地尚未保存媒体').evaluate().isEmpty; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump();
+    }
 
     expect(api.localPostCalls, 1);
     expect(find.text('本机保留的正文'), findsOneWidget);
-    expect(find.text('媒体已从云端清理，本机仅保留正文'), findsOneWidget);
+    expect(find.text('本地尚未保存媒体'), findsOneWidget);
     expect(find.text('加载失败，下拉重试'), findsNothing);
     expect(find.byType(CircularProgressIndicator), findsNothing);
   });
@@ -421,17 +444,18 @@ void main() {
     expect(find.text('加载失败，下拉重试'), findsNothing);
   });
 
-  testWidgets('同一 post_id 的 Worker 内容覆盖本地展示内容', (tester) async {
+  testWidgets('本人页面普通进入不调用Worker覆盖本地展示', (tester) async {
     final api = FakeProfileApi(
       sampleProfile(),
       localPosts: [_localPost(text: '本地旧展示')],
       authorPosts: [samplePost(id: 'local-1', text: 'Worker 最新展示')],
     );
 
-    await tester.pumpWidget(_page(api));
+    await tester.pumpWidget(_page(api, isSelf: true));
     await tester.pumpAndSettle();
 
-    expect(find.text('Worker 最新展示'), findsOneWidget);
-    expect(find.text('本地旧展示'), findsNothing);
+    expect(api.authorPostCalls, 0);
+    expect(find.text('Worker 最新展示'), findsNothing);
+    expect(find.text('本地旧展示'), findsOneWidget);
   });
 }

@@ -96,7 +96,7 @@ Config FlutterEnvironment::resolve(const NativeEnvironmentInputs &inputs, uint32
           "CitizenSDK requires a valid native GApplication identifier");
   const auto assets = inputs.executable.parent_path() / "data" /
                       "flutter_assets" / "packages" / "citizen_sdk" /
-                      "assets" / "citizenchain";
+                      "chain";
 
   // 未选择链模块时不探测链资产；真正启用链时保留原来的严格预检。
   if ((modules & CITIZENSDK_MODULE_CHAIN) != 0) preflight_assets(assets);

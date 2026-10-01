@@ -97,8 +97,10 @@ void main() {
     );
     expect(platform.calls.where((call) => call[0] == 'qrEncode'), isEmpty);
     await review.release();
-    expect(platform.calls.where((call) => call[0] == 'releaseQrReview').single[1],
-      <Object?>[2, 'session-1', 5, 'review-owned']);
+    expect(
+      platform.calls.where((call) => call[0] == 'releaseQrReview').single[1],
+      <Object?>[2, 'session-1', 5, 'review-owned'],
+    );
     await sdk.close();
   });
 
@@ -119,14 +121,28 @@ void main() {
       'CitizenApi_items',
       Uint8List(0),
     );
-    final key = await sdk.wallet.deriveApplicationKey(
-      accountId: '0x${'22' * 32}',
-      salt: Uint8List(32),
-      info: Uint8List.fromList(<int>[1]),
-    ).result;
+    final key = await sdk.wallet
+        .deriveApplicationKey(
+          accountId: '0x${'22' * 32}',
+          salt: Uint8List(32),
+          info: Uint8List.fromList(<int>[1]),
+        )
+        .result;
+    final batch = await (sdk.wallet as CitizenSdkWalletBatch)
+        .deriveApplicationKeys(
+          accountId: '0x${'22' * 32}',
+          salt: Uint8List(32),
+          infos: <Uint8List>[
+            Uint8List.fromList(<int>[1]),
+            Uint8List.fromList(<int>[2]),
+          ],
+        )
+        .result;
     expect(keys, hasLength(2));
     expect(runtime, <int>[7, 8]);
     expect(key, hasLength(32));
+    expect(batch, hasLength(2));
+    expect(batch.every((value) => value.length == 32), isTrue);
     await sdk.close();
   });
 }
@@ -171,15 +187,32 @@ final class _FacadePlatform implements CitizenSdkPlatform {
         ],
       ],
       'reviewQrRequest' => <Object?>[
-        2, 'session-1', arguments[2],
-        <Object?>['review-owned', jsonEncode(<String, Object?>{
-          'kind': 1, 'scan_purpose_mask': 16, 'canonical_text': 'request',
-          'request_id': 'request-identifier', 'expires_at': 1700000000,
-          'action': 1, 'signer_account_id': _qrAccount, 'review_payload': '0x01',
-          'pallet_name': 'Synthetic', 'call_name': 'call', 'call_arguments': '{}',
-          'genesis_hash': _qrAccount, 'spec_version': 1, 'transaction_version': 1,
-          'era': 'immortal', 'nonce': '0', 'tip': '0', 'block_hash': _qrAccount,
-        })],
+        2,
+        'session-1',
+        arguments[2],
+        <Object?>[
+          'review-owned',
+          jsonEncode(<String, Object?>{
+            'kind': 1,
+            'scan_purpose_mask': 16,
+            'canonical_text': 'request',
+            'request_id': 'request-identifier',
+            'expires_at': 1700000000,
+            'action': 1,
+            'signer_account_id': _qrAccount,
+            'review_payload': '0x01',
+            'pallet_name': 'Synthetic',
+            'call_name': 'call',
+            'call_arguments': '{}',
+            'genesis_hash': _qrAccount,
+            'spec_version': 1,
+            'transaction_version': 1,
+            'era': 'immortal',
+            'nonce': '0',
+            'tip': '0',
+            'block_hash': _qrAccount,
+          }),
+        ],
       ],
       'releaseQrReview' => <Object?>[2, 'session-1', arguments[2], <Object?>[]],
       'signQrRequest' => <Object?>[
@@ -199,7 +232,9 @@ final class _FacadePlatform implements CitizenSdkPlatform {
             'current_account_id': null,
             'current_account_signature': null,
           }),
-          2, 2, Uint8List.fromList(<int>[0, 255, 255, 0]),
+          2,
+          2,
+          Uint8List.fromList(<int>[0, 255, 255, 0]),
         ],
       ],
       'qrConsumeSignResponse' => <Object?>[
@@ -233,13 +268,23 @@ final class _FacadePlatform implements CitizenSdkPlatform {
         2,
         'session-1',
         arguments[2],
-        <Object?>[Uint8List.fromList(<int>[7, 8])],
+        <Object?>[
+          Uint8List.fromList(<int>[7, 8]),
+        ],
       ],
       'deriveApplicationKey' => <Object?>[
         2,
         'session-1',
         arguments[2],
         <Object?>[Uint8List(32)],
+      ],
+      'deriveApplicationKeys' => <Object?>[
+        2,
+        'session-1',
+        arguments[2],
+        <Object?>[
+          <Uint8List>[Uint8List(32), Uint8List(32)],
+        ],
       ],
       _ => throw StateError('未预期 method：$method'),
     };

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/square_models.dart';
 import 'package:citizenapp/8964/widgets/square_media_grid.dart';
 import 'package:citizenapp/8964/widgets/square_post_actions.dart';
 import 'package:citizenapp/8964/widgets/square_post_header.dart';

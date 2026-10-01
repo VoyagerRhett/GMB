@@ -92,6 +92,17 @@ if (stagedAndroidAbiValue != null && !stagedAndroidAbiValue.trim().isEmpty()) {
     }
 }
 
+// 只把唯一chain三文件投影到本模块当前构建目录；Android标准assets容器保留chain层级，
+// 禁止把整个SDK源码根作为资产源，也不在源码中恢复assets包装目录。
+def chainAssetDirectory = layout.buildDirectory.dir('generated/chain-assets')
+def prepareChainAssets = tasks.register('prepareCitizenSdkChainAssets', Sync) {
+    from(sdkProductRoot) {
+        include 'chain/manifest.json', 'chain/chainspec.json', 'chain/light_sync_state.json'
+    }
+    into(chainAssetDirectory)
+}
+tasks.matching { it.name == 'preBuild' }.configureEach { dependsOn(prepareChainAssets) }
+
 android {
     namespace = 'org.citizen.sdk'
     compileSdk = 36
@@ -101,14 +112,15 @@ android {
         all { sourceSet ->
             def sourceRoot = new File(androidSourceRoot, "src/${sourceSet.name}")
             sourceSet.setRoot(sourceRoot.path)
-            sourceSet.kotlin.srcDirs = [new File(sourceRoot, 'kotlin')]
+            // 包名由源码的 package 声明决定；测试源码直接位于源集根，禁止单子目录包装层。
+            sourceSet.kotlin.srcDirs = [sourceSet.name == 'test' ? sourceRoot : new File(sourceRoot, 'kotlin')]
         }
         main {
             // The Flutter plugin compiles the exact same public Android facade
             // as the native/AAR surface. There is no nested AAR or second adapter.
             // 内置Kotlin只识别Kotlin源集，不能再借Java源集加入共享门面。
             kotlin.srcDir(sharedFacadeSource)
-            assets.srcDirs = [new File(sdkProductRoot, 'assets')]
+            assets.srcDirs = [chainAssetDirectory.get().asFile]
             // Android's jniLibs root is the parent of the fixed arm64-v8a leaf.
             jniLibs.srcDirs = [selectedAndroidAbiDirectory.parentFile]
         }

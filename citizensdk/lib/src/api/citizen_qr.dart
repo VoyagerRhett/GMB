@@ -1,6 +1,6 @@
 import 'dart:typed_data';
 import 'dart:convert';
-import '../crypto/account_codec.dart';
+import '../account_codec.dart';
 import 'citizen_sdk_error.dart';
 
 /// QR_V1已有动作数字常量；不携带UI标签，不决定业务资格或允许签名。

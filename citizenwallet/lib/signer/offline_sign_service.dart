@@ -1,6 +1,6 @@
 import 'dart:typed_data';
 
-import '../chain/chain_constants.dart';
+import '../chain_constants.dart';
 import '../qr/qr_protocols.dart';
 import '../qr/envelope.dart';
 import '../qr/bodies/account_data_key_response_body.dart';

@@ -798,7 +798,7 @@ pub fn new_full(
 }
 
 #[cfg(test)]
-#[path = "service/p2p_bad_block_tests.rs"]
+#[path = "p2p_bad_block_tests.rs"]
 mod p2p_bad_block_tests;
 
 #[cfg(test)]

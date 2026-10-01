@@ -12,6 +12,10 @@ publish = false
 [lints]
 workspace = true
 
+# 单文件库入口直接归属 crate 根，保留原公开 crate 名称。
+[lib]
+path = "lib.rs"
+
 [dependencies]
 citizenchain = { workspace = true, default-features = true }
 codec = { workspace = true, default-features = true }

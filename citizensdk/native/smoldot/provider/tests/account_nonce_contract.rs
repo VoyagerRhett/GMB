@@ -5,7 +5,7 @@ use citizen_sdk_contracts::{
 };
 use citizen_sdk_smoldot_provider::{SmoldotProviderConfig, SmoldotVerifiedChainClient};
 
-const CHAIN_SPEC: &str = include_str!("../../../../assets/citizenchain/chainspec.json");
+const CHAIN_SPEC: &str = include_str!("../../../../chain/chainspec.json");
 
 fn require_ok<T, E>(result: Result<T, E>, context: &str) -> T {
     match result {

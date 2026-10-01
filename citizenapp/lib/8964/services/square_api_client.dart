@@ -1,4 +1,5 @@
 import 'package:citizen_sdk/citizen_sdk.dart';
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -6,7 +7,7 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/square_models.dart';
 import 'package:citizenapp/8964/profile/models/citizen_profile.dart';
 import 'package:citizenapp/8964/services/square_post_store.dart';
 import 'package:citizenapp/security/device_subkey.dart' show hexToBytes;
@@ -503,6 +504,9 @@ abstract class SquareFeedSource {
 }
 
 abstract class SquarePublicationConfirmer {
+  /// 仅查询已发布事实；未知结果必须保留本机恢复记录，不得重新发交易。
+  Future<({SquarePost post, String blockHash, String transactionHash})>
+  readPublishedProof({required SquareSession session, required String postId});
   Future<SquarePost> confirmPublishedPost({
     required SquareSession session,
     required String postId,
@@ -540,11 +544,14 @@ class SquareLoginContext {
 /// 广场/Chat 登录签名器：CID 由 Worker 的 finalized 用户投影随挑战下发，调用方
 /// 不得在登录前读取链。签名器只用该 CID 选择本机 P-256 设备子钥，并对客户端钉死
 /// op_tag 后得到的 32 字节摘要签名。
-typedef SquareLoginSigner =
-    Future<String> Function(SquareLoginContext context, Uint8List loginMessage);
+typedef SquareLoginSigner = Future<String> Function(
+  SquareLoginContext context,
+  Uint8List loginMessage,
+);
 
-typedef SquareMissingDeviceHandler =
-    Future<void> Function(SquareLoginContext context);
+typedef SquareMissingDeviceHandler = Future<void> Function(
+  SquareLoginContext context,
+);
 
 /// 账户敏感动作（注销/退订）签名器：对 `signing_message(OP_SIGN_SQUARE_ACTION)`
 /// 的 32 字节摘要用 sr25519 **主钥**签名，返回 `0x` hex 签名（动钱动权，弹生物识别）。
@@ -738,10 +745,12 @@ class SquareApiClient
 
     // 客户端钉死 op_tag（登录 = OP_SIGN_SQUARE_LOGIN），只对 worker 下发的 SCALE
     // payload 重算 signing_message 摘要后签名，杜绝服务端诱导跨域签名。
-    final loginMessage = await CitizenSigning.encodePayload(CitizenSigningPayload.message(
-      opTag: kOpSignSquareLogin,
-      scalePayload: hexToBytes(signingPayloadHex),
-    ));
+    final loginMessage = await CitizenSigning.encodePayload(
+      CitizenSigningPayload.message(
+        opTag: kOpSignSquareLogin,
+        scalePayload: hexToBytes(signingPayloadHex),
+      ),
+    );
     final signature = await signLoginPayload(loginContext, loginMessage);
     final session = await _postJson('/square/auth/session', {
       'challenge_id': challengeId,
@@ -821,10 +830,12 @@ class SquareApiClient
     if (signingPayloadHex is! String || challengeId is! String) {
       throw const SquareApiException('动作挑战响应不完整');
     }
-    final message = await CitizenSigning.encodePayload(CitizenSigningPayload.message(
-      opTag: kOpSignSquareAction,
-      scalePayload: hexToBytes(signingPayloadHex),
-    ));
+    final message = await CitizenSigning.encodePayload(
+      CitizenSigningPayload.message(
+        opTag: kOpSignSquareAction,
+        scalePayload: hexToBytes(signingPayloadHex),
+      ),
+    );
     final signature = await signAction(message);
     await _postJson(confirmPath, {
       'account_id': accountId,
@@ -1280,6 +1291,82 @@ class SquareApiClient
       throw const SquareApiException('内容详情响应缺少内容数据');
     }
     return _parsePost(post, isDetail: true, fallbackAuthor: summary.author);
+  }
+
+  /// 显式恢复读取服务器已确认的发布证明，不签名、不重新提交交易。
+  @override
+  Future<({SquarePost post, String blockHash, String transactionHash})>
+  readPublishedProof({
+    required SquareSession session,
+    required String postId,
+  }) async {
+    final data = await _getJson(
+      '/square/posts/${Uri.encodeComponent(postId)}',
+      session: session,
+    );
+    final raw = data['post'];
+    if (raw is! Map<String, dynamic> ||
+        raw['post_id'] != postId ||
+        raw['cid_number'] != session.cidNumber ||
+        raw['post_state'] != 'published') {
+      throw const SquareApiException('发布证明归属或状态不一致');
+    }
+    final block = raw['chain_block_hash'];
+    final tx = raw['tx_hash'];
+    if (block is! String ||
+        tx is! String ||
+        !RegExp(r'^0x[0-9a-f]{64}$').hasMatch(block) ||
+        !RegExp(r'^0x[0-9a-f]{64}$').hasMatch(tx)) {
+      throw const SquareApiException('发布证明缺少区块或交易哈希');
+    }
+    return (
+      post: _parsePost(raw, isDetail: true),
+      blockHash: block,
+      transactionHash: tx,
+    );
+  }
+
+  /// 正文已由原始manifest验真；详情只提供下载位置，媒体声明仍必须逐项匹配manifest。
+  Future<List<Map<String, dynamic>>> fetchPostMedia({
+    required SquareSession session,
+    required SquareLocalPost post,
+  }) async {
+    final data = await _getJson(
+      '/square/posts/${Uri.encodeComponent(post.postId)}',
+      session: session,
+    );
+    final raw = data['post'];
+    if (raw is! Map<String, dynamic> ||
+        raw['post_id'] != post.postId ||
+        raw['cid_number'] != post.cidNumber ||
+        raw['content_hash'] != post.contentHash ||
+        raw['media_items'] is! List) {
+      throw const SquareApiException('媒体详情与本人发布事实不一致');
+    }
+    return (raw['media_items'] as List)
+        .map((item) {
+          if (item is! Map<String, dynamic>) {
+            throw const SquareApiException('媒体详情条目损坏');
+          }
+          return item;
+        })
+        .toList(growable: false);
+  }
+
+  /// 公开帖子媒体流不携带会话凭据，拒绝重定向及非HTTPS地址。
+  Future<http.StreamedResponse> openPostMedia(String url) async {
+    final uri = Uri.parse(url);
+    if (uri.scheme != 'https' || uri.host.isEmpty || uri.userInfo.isNotEmpty) {
+      throw const SquareApiException('媒体地址必须使用HTTPS');
+    }
+    final response = await _http
+        .send(http.Request('GET', uri)..followRedirects = false)
+        .timeout(const Duration(seconds: 30));
+    if (response.statusCode != 200) {
+      await response.stream.listen(null).cancel();
+      throw SquareApiException('媒体读取失败', statusCode: response.statusCode);
+    }
+    return response;
   }
 
   @override

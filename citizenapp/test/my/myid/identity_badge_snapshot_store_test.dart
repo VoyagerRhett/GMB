@@ -31,6 +31,8 @@ void main() {
       identity: snapshot(0xaa, 1),
       isCurrent: () => true,
     );
+    // 真正关闭后重开数据库，不能只用新服务实例证明持久保存。
+    await (await UserIsar.instance.db()).close();
     final reopened = IdentityBadgeSnapshotStore();
     expect((await reopened.readForAccountId(a))?.identity?.cidNumber, cidA);
     await store.writeVerified(

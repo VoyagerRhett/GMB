@@ -1190,6 +1190,49 @@ jlong native_derive_application_key(JNIEnv *env, jobject, jlong raw,
   });
 }
 
+jlong native_derive_application_keys(JNIEnv *env, jobject, jlong raw,
+                                     jbyteArray account_bytes,
+                                     jbyteArray salt_bytes,
+                                     jobjectArray info_arrays) {
+  auto bridge = bridge_from(env, raw);
+  citizensdk_account_id_t account_id{};
+  SensitiveBytes salt;
+  if (bridge == nullptr || !account(env, account_bytes, &account_id) ||
+      !take_wallet_secret(env, salt_bytes, salt.out()) || salt.value().size() != 32 ||
+      info_arrays == nullptr) {
+    if (!env->ExceptionCheck()) throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                                         "application key batch is invalid");
+    return 0;
+  }
+  const jsize count = env->GetArrayLength(info_arrays);
+  if (env->ExceptionCheck() || count < 1 || count > 16) {
+    if (!env->ExceptionCheck()) throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                                         "application key batch size is invalid");
+    return 0;
+  }
+  std::vector<std::unique_ptr<SensitiveBytes>> owned;
+  std::vector<citizensdk_bytes_view_t> views;
+  owned.reserve(static_cast<size_t>(count));
+  views.reserve(static_cast<size_t>(count));
+  for (jsize index = 0; index < count; ++index) {
+    auto item = static_cast<jbyteArray>(env->GetObjectArrayElement(info_arrays, index));
+    auto bytes = std::make_unique<SensitiveBytes>();
+    const bool copied = item != nullptr && take_wallet_secret(env, item, bytes->out());
+    if (item != nullptr) env->DeleteLocalRef(item);
+    if (!copied || bytes->value().empty() || bytes->value().size() > 256) {
+      if (!env->ExceptionCheck()) throw_sdk(env, CITIZENSDK_ERROR_INVALID_ARGUMENT,
+                                           "application key info is invalid");
+      return 0;
+    }
+    views.push_back(view(bytes->value()));
+    owned.push_back(std::move(bytes));
+  }
+  return begin_request(env, bridge, [&account_id, &salt, &views](auto handle, auto *out) {
+    return citizensdk_derive_application_keys(handle, &account_id, view(salt.value()),
+        views.data(), static_cast<uint32_t>(views.size()), out);
+  });
+}
+
 // Generic signing deliberately treats payload/domain/action as application-owned
 // opaque values. Core alone selects hot Vault signing or a cold external session.
 jlong native_begin_signing(JNIEnv *env, jobject, jlong raw,
@@ -1942,6 +1985,7 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char *>("nativeReconcileWalletCleanup"), const_cast<char *>("(J)J"), reinterpret_cast<void *>(native_reconcile)},
     {const_cast<char *>("nativeSignWalletPayload"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_sign)},
     {const_cast<char *>("nativeDeriveApplicationKey"), const_cast<char *>("(J[B[B[B)J"), reinterpret_cast<void *>(native_derive_application_key)},
+    {const_cast<char *>("nativeDeriveApplicationKeys"), const_cast<char *>("(J[B[B[[B)J"), reinterpret_cast<void *>(native_derive_application_keys)},
     {const_cast<char *>("nativeBeginSigning"), const_cast<char *>("(J[B[BI[BIIJ)J"), reinterpret_cast<void *>(native_begin_signing)},
     {const_cast<char *>("nativeConsumeExternalSignature"), const_cast<char *>("(J[B[B)J"), reinterpret_cast<void *>(native_consume_external_signature)},
     {const_cast<char *>("nativeCancelSigningSession"), const_cast<char *>("(J[B)Z"), reinterpret_cast<void *>(native_cancel_signing_session)},
@@ -2273,6 +2317,18 @@ bool encode_result(citizensdk_result_handle_t result, uint64_t prepared_token,
       valid = citizensdk_result_get_application_key(result, key) == kOk;
       if (valid) payload.fixed(key, sizeof(key));
       std::memset(key, 0, sizeof(key));
+      break;
+    }
+    case CITIZENSDK_RESULT_APPLICATION_KEYS: {
+      const uint32_t count = static_cast<uint32_t>(info.payload_len / 32);
+      valid = info.payload_len % 32 == 0 && count >= 1 && count <= 16;
+      if (valid) payload.u32(count);
+      for (uint32_t index = 0; valid && index < count; ++index) {
+        uint8_t key[32]{};
+        valid = citizensdk_result_get_application_key_at(result, index, key) == kOk;
+        if (valid) payload.fixed(key, sizeof(key));
+        std::memset(key, 0, sizeof(key));
+      }
       break;
     }
     case CITIZENSDK_RESULT_PREPARED_WALLET: {

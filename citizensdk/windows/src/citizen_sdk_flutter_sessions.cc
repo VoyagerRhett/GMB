@@ -384,6 +384,15 @@ class HostTransport final : public NativeTransport, public std::enable_shared_fr
         return citizensdk_derive_application_key(
             sdk, &r.account_id, view(r.application_key_salt),
             view(r.application_key_info), out);
+      case Method::derive_application_keys: {
+        // 一批 info 只交给 Core 一次，设备金库由同一请求认证和解封。
+        std::vector<citizensdk_bytes_view_t> infos;
+        infos.reserve(r.application_key_infos.size());
+        for (const auto &info : r.application_key_infos) infos.push_back(view(info));
+        return citizensdk_derive_application_keys(
+            sdk, &r.account_id, view(r.application_key_salt), infos.data(),
+            static_cast<uint32_t>(infos.size()), out);
+      }
       case Method::begin_signing:
         return citizensdk_begin_signing(
             sdk, &r.account_id, view(r.payload), r.signing_transform,

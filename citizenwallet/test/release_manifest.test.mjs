@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -10,11 +10,11 @@ const settings = readFileSync(new URL('../android/settings.gradle.kts', import.m
 const root = readFileSync(new URL('../android/build.gradle.kts', import.meta.url), 'utf8');
 const application = readFileSync(new URL('../android/app/build.gradle.kts', import.meta.url), 'utf8');
 const properties = readFileSync(new URL('../android/gradle.properties', import.meta.url), 'utf8');
-const wrapper = readFileSync(new URL('../android/gradle/wrapper/gradle-wrapper.properties', import.meta.url), 'utf8');
+const wrapper = readFileSync(new URL('../android/gradle-wrapper.properties', import.meta.url), 'utf8');
 const runner = readFileSync(new URL('../scripts/citizenwallet-run.sh', import.meta.url), 'utf8');
 const signerPodspec = readFileSync(new URL('../ios/signer/citizenwallet_signer.podspec', import.meta.url), 'utf8');
 const iosProject = readFileSync(new URL('../ios/Runner.xcodeproj/project.pbxproj', import.meta.url), 'utf8');
-const iosScheme = readFileSync(new URL('../ios/Runner.xcodeproj/xcshareddata/xcschemes/Runner.xcscheme', import.meta.url), 'utf8');
+const iosScheme = readFileSync(new URL('../ios/Runner.xcscheme', import.meta.url), 'utf8');
 const iosUiTestPlan = JSON.parse(readFileSync(new URL('../ios/RunnerUITests/RunnerUITests.xctestplan', import.meta.url), 'utf8'));
 const createUiTest = readFileSync(new URL('../ios/RunnerUITests/CreateWalletUITests.swift', import.meta.url), 'utf8');
 const importUiTest = readFileSync(new URL('../ios/RunnerUITests/ImportWalletUITests.swift', import.meta.url), 'utf8');
@@ -107,7 +107,7 @@ test('Android从真实产品源码根启动Gradle并把可写状态放入外部�
   assert.match(root, /System\.getenv\("CITIZENWALLET_BUILD_DIR"\)/u);
   assert.match(root, /System\.getProperty\("java\.io\.tmpdir"\)/u);
   assert.match(application, /import java\.util\.Properties/u);
-  assert.doesNotMatch(application, /java\.util\.Properties\(\)|setSrcDirs\(/u);
+  assert.doesNotMatch(application, /java\.util\.Properties\(\)/u);
   assert.match(application, /compileSdk = 36/u);
   assert.match(application, /ndkVersion = "28\.2\.13676358"/u);
   assert.match(application, /minSdk = 24/u);
@@ -196,4 +196,63 @@ test('iOS签名库由外部构建路径强制链接且保留全部FFI符号', ()
   ]) {
     assert.ok(signerPodspec.includes(`-Wl,-u,_${symbol}`), `缺少链接符号 ${symbol}`);
   }
+});
+
+// 执行真实装配入口，不启动 Flutter、相机或密钥操作。
+test('钱包平台装配读取唯一扁平来源并拒绝重复目标', () => {
+  const work = realpathSync(mkdtempSync(join(tmpdir(), 'citizenwallet-platform-')));
+  const script = fileURLToPath(new URL('../scripts/citizenwallet-run.sh', import.meta.url));
+  const source = fileURLToPath(new URL('..', import.meta.url));
+  try {
+    // 工具原件用独立夹具提供，避免继承宿主环境或读取已删除的产品副本。
+    const flutter = join(work, 'flutter');
+    const names = ['gradlew', 'gradlew.bat', 'gradle/wrapper/gradle-wrapper.jar'];
+    for (const name of names) {
+      const path = join(flutter, 'bin/cache/artifacts/gradle_wrapper', name);
+      mkdirSync(join(path, '..'), { recursive: true });
+      writeFileSync(path, 'synthetic wrapper ' + name);
+    }
+    for (const platform of ['android', 'ios']) {
+      const env = { ...process.env, FLUTTER_ROOT: flutter,
+        CITIZENWALLET_WORK_DIR: join(work, platform) };
+      delete env.CITIZENWALLET_PROJECT_ROOT;
+      const run = () => spawnSync('/bin/bash', [script, `prepare-${platform}`], { env, encoding: 'utf8' });
+      const prepared = run();
+      assert.equal(prepared.status, 0, prepared.stderr);
+      const project = prepared.stdout.trim();
+      const target = platform === 'ios' ? 'ios/Runner.xcodeproj/xcshareddata/xcschemes/Runner.xcscheme'
+        : 'android/gradle/wrapper/gradle-wrapper.properties';
+      const original = platform === 'ios' ? 'ios/Runner.xcscheme' : 'android/gradle-wrapper.properties';
+      assert.deepEqual(readFileSync(join(project, target)), readFileSync(join(source, original)));
+      assert.equal(lstatSync(join(project, target)).isSymbolicLink(), false);
+      assert.notEqual(run().status, 0, '重复目标不能覆盖已有工程');
+      for (const name of names) {
+        const output = join(project, 'android', name);
+        const original = join(flutter, 'bin/cache/artifacts/gradle_wrapper', name);
+        if (platform === 'android') {
+          assert.equal(lstatSync(output).isSymbolicLink(), false);
+          assert.deepEqual(readFileSync(output), readFileSync(original));
+        } else {
+          assert.equal(existsSync(output), false);
+        }
+        assert.equal(readFileSync(original, 'utf8'), 'synthetic wrapper ' + name);
+      }
+      if (platform === 'android') assert.ok(lstatSync(join(project, 'android/gradlew')).mode & 0o100);
+    }
+  } finally { rmSync(work, { recursive: true }); }
+});
+
+// 防止 AGP 9 只登记 Java 源集而漏编 Kotlin：APK 可构建成功，但真机找不到 MainActivity。
+test('Android入口及测试显式登记独立Kotlin源集', () => {
+  assert.ok(application.includes('sourceSets.getByName("main").kotlin.directories.apply { clear(); add("src") }'));
+  assert.ok(application.includes('sourceSets.getByName("test").kotlin.directories.clear()'));
+  assert.ok(application.includes('if (name.endsWith("UnitTestKotlin"))'));
+  assert.ok(application.includes('source(layout.projectDirectory.file("HardwareSecretvaultPluginTest.kt"))'));
+  assert.doesNotMatch(application, /setSrcDirs|include\("HardwareSecretvaultPluginTest/u);
+});
+
+test('Android插件注册表来自本轮外部Flutter工程', () => {
+  const javaSources = application.slice(application.indexOf('sourceSets.getByName("main").java.directories.apply'),
+    application.indexOf('sourceSets.getByName("main").java.directories.apply') + 260);
+  assert.ok(javaSources.includes('add(flutterProductRoot.resolve("android/app/src/main/java").absolutePath)'));
 });

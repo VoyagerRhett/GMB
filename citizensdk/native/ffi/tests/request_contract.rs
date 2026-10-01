@@ -15,9 +15,9 @@ use citizensdk::{
     CitizenSdkErrorCode, CitizenSdkEvent, CitizenSdkLifecycle, CITIZENSDK_ABI_VERSION,
 };
 
-const MANIFEST: &[u8] = include_bytes!("../../../assets/citizenchain/manifest.json");
-const CHAIN_SPEC: &[u8] = include_bytes!("../../../assets/citizenchain/chainspec.json");
-const LIGHT_STATE: &[u8] = include_bytes!("../../../assets/citizenchain/light_sync_state.json");
+const MANIFEST: &[u8] = include_bytes!("../../../chain/manifest.json");
+const CHAIN_SPEC: &[u8] = include_bytes!("../../../chain/chainspec.json");
+const LIGHT_STATE: &[u8] = include_bytes!("../../../chain/light_sync_state.json");
 static HANDLE: AtomicU64 = AtomicU64::new(0);
 static DESTROY_CODE: AtomicI32 = AtomicI32::new(-1);
 

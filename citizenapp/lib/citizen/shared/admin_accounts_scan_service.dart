@@ -11,7 +11,7 @@
 
 import 'package:flutter/foundation.dart';
 import 'package:citizen_sdk/citizen_sdk.dart';
-import 'package:citizenapp/log/app_log.dart';
+import 'package:citizenapp/app_log.dart';
 import 'package:polkadart/polkadart.dart' show Hasher;
 import 'package:citizenapp/citizen/proposal/admins-change/models/admin_account.dart';
 import 'package:citizenapp/citizen/shared/admin_account_storage_codec.dart';

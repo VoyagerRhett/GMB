@@ -1,5 +1,6 @@
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/square_models.dart';
 import 'package:citizenapp/8964/profile/models/citizen_profile.dart';
+import 'package:citizenapp/8964/profile/services/citizen_profile_cache.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
 import 'package:citizenapp/8964/services/square_post_store.dart';
 
@@ -8,11 +9,74 @@ import 'package:citizenapp/8964/services/square_post_store.dart';
 /// 网络细节（登录态、解析、Worker 地址）复用 [SquareApiClient]，本类只做语义聚合。
 class CitizenProfileApi {
   CitizenProfileApi({SquareApiClient? client, SquarePostStore? localPostStore})
-      : _client = client ?? SquareApiClient(),
-        _localPostStore = localPostStore ?? const SquarePostStore();
+    : _client = client ?? SquareApiClient(),
+      _localPostStore = localPostStore ?? const SquarePostStore();
 
   final SquareApiClient _client;
   final SquarePostStore _localPostStore;
+  static final Map<String, Future<CitizenProfile>> _refreshes = {};
+  static final Map<String, String> _refreshBindings = {};
+
+  /// 页面显式刷新专用；普通页面读取只调用本地仓库。跨实例合并同CID、同绑定请求。
+  Future<CitizenProfile> refreshProfile(
+    String cidNumber, {
+    required SquareSession session,
+    required bool userInitiated,
+    bool Function()? isCurrent,
+  }) {
+    if (!userInitiated) throw StateError('普通加载不得刷新远端资料');
+    final binding =
+        '${session.cidNumber}:${session.accountId}:${session.bindingRevision}';
+    void check() {
+      if (!session.isUsable || !(isCurrent?.call() ?? true)) {
+        throw StateError('资料刷新身份已变化');
+      }
+    }
+
+    check();
+    final running = _refreshes[cidNumber];
+    if (running != null) {
+      if (_refreshBindings[cidNumber] != binding) {
+        throw StateError('不能共用旧身份的资料刷新');
+      }
+      return running;
+    }
+    _refreshBindings[cidNumber] = binding;
+    late final Future<CitizenProfile> task;
+    task = Future<CitizenProfile>.microtask(() async {
+      try {
+        final profile = await fetchProfile(cidNumber, session: session);
+        check();
+        if (profile.cidNumber != cidNumber) throw StateError('远端资料归属不一致');
+        await CitizenProfileMediaCache().refresh(
+          profile: profile,
+          avatarUrl: profile.avatarObjectKey == null
+              ? null
+              : mediaUrl(
+                  profile.avatarObjectKey!,
+                  updatedAt: profile.updatedAt,
+                ),
+          bannerUrl: profile.bannerObjectKey == null
+              ? null
+              : mediaUrl(
+                  profile.bannerObjectKey!,
+                  updatedAt: profile.updatedAt,
+                ),
+          headers: {'authorization': 'Bearer ${session.sessionToken}'},
+        );
+        check();
+        await const CitizenProfileCache().write(profile);
+        return profile;
+      } finally {
+        if (identical(_refreshes[cidNumber], task)) {
+          _refreshes.remove(cidNumber);
+          _refreshBindings.remove(cidNumber);
+        }
+      }
+    });
+    _refreshes[cidNumber] = task;
+    return task;
+  }
 
   /// R2 object_key → 钱包 session 保护的资料媒体 URL。
   String mediaUrl(String objectKey, {int? updatedAt}) =>

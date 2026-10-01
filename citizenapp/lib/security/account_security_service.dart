@@ -45,7 +45,8 @@ typedef AccountSubkeyRegistrar = Future<void> Function({
     required Uint8List signingMessage,
     required String devicePublicKey,
     required int issuedAtMillis,
-  }) signBinding,
+  })
+  signBinding,
 });
 
 typedef ColdDeviceBindingSigner = Future<String> Function({
@@ -67,6 +68,11 @@ typedef AccountDataKeyDerive = Future<Uint8List> Function({
   required LocalKeyPurpose purpose,
   String? context,
 });
+typedef AccountDataKeyDeriveBatch = Future<List<Uint8List>> Function({
+  required CitizenSdkWallet wallet,
+  required AccountDataBinding binding,
+  required List<DataKeyRequest> requests,
+});
 
 /// CitizenApp 的 CID 绑定、P-256 设备子钥与用途钥业务。
 ///
@@ -83,16 +89,22 @@ interface class AccountSecurityService {
     DeviceSubkey? deviceSubkey,
     DeviceDataKeyVault? deviceDataKeyVault,
     AccountDataKeyDerive? deriveApplicationKey,
-  })  : _wallet = wallet,
-        _signing = signing,
-        _subkeyRegistrar = subkeyRegistrar,
-        _coldDeviceBindingSigner = coldDeviceBindingSigner,
-        _coldAccountDataKeyProvider = coldAccountDataKeyProvider,
-        _blobStore = blobStore ?? SecureStorageLocalKeyBlobStore(),
-        _deviceSubkey = deviceSubkey ?? DeviceSubkey(),
-        _deviceDataKeyVault = deviceDataKeyVault ?? DeviceDataKeyVault(),
-        _deriveApplicationKey =
-            deriveApplicationKey ?? AccountDataKeyDeriver.derive {
+    AccountDataKeyDeriveBatch? deriveApplicationKeys,
+  }) : _wallet = wallet,
+       _signing = signing,
+       _subkeyRegistrar = subkeyRegistrar,
+       _coldDeviceBindingSigner = coldDeviceBindingSigner,
+       _coldAccountDataKeyProvider = coldAccountDataKeyProvider,
+       _blobStore = blobStore ?? SecureStorageLocalKeyBlobStore(),
+       _deviceSubkey = deviceSubkey ?? DeviceSubkey(),
+       _deviceDataKeyVault = deviceDataKeyVault ?? DeviceDataKeyVault(),
+       _deriveApplicationKey =
+           deriveApplicationKey ?? AccountDataKeyDeriver.derive,
+       _deriveApplicationKeys =
+           deriveApplicationKeys ??
+           (deriveApplicationKey == null
+               ? AccountDataKeyDeriver.deriveBatch
+               : null) {
     _bindingStore = AccountDataBindingStore(_blobStore);
   }
 
@@ -105,6 +117,7 @@ interface class AccountSecurityService {
   final DeviceSubkey _deviceSubkey;
   final DeviceDataKeyVault _deviceDataKeyVault;
   final AccountDataKeyDerive _deriveApplicationKey;
+  final AccountDataKeyDeriveBatch? _deriveApplicationKeys;
   late final AccountDataBindingStore _bindingStore;
 
   final ValueNotifier<int> revision = ValueNotifier<int>(0);
@@ -132,13 +145,10 @@ interface class AccountSecurityService {
     String accountId,
   ) async {
     final binding = await _requireBinding(accountId);
-    final keys = await readDataKeysForBinding(
-      binding,
-      const <DataKeyRequest>[
-        (purpose: LocalKeyPurpose.contactsCloud, context: 'encryption'),
-        (purpose: LocalKeyPurpose.contactsCloud, context: 'index'),
-      ],
-    );
+    final keys = await readDataKeysForBinding(binding, const <DataKeyRequest>[
+      (purpose: LocalKeyPurpose.contactsCloud, context: 'encryption'),
+      (purpose: LocalKeyPurpose.contactsCloud, context: 'index'),
+    ]);
     return ContactKeyMaterial(encryptionKey: keys[0], indexKey: keys[1]);
   }
 
@@ -179,12 +189,10 @@ interface class AccountSecurityService {
     String accountId,
     LocalKeyPurpose purpose, {
     String? context,
-  }) async =>
-      (await readDataKeysForBinding(
-        await _requireBinding(accountId),
-        <DataKeyRequest>[(purpose: purpose, context: context)],
-      ))
-          .single;
+  }) async => (await readDataKeysForBinding(
+    await _requireBinding(accountId),
+    <DataKeyRequest>[(purpose: purpose, context: context)],
+  )).single;
 
   Future<List<Uint8List>> readDataKeysForBinding(
     AccountDataBinding binding,
@@ -194,14 +202,15 @@ interface class AccountSecurityService {
     if (requests.isEmpty) {
       throw ArgumentError('私有数据用途列表不能为空');
     }
+    // 查看聊天或通讯录只允许静默读取。首次派生属于单独的授权动作，不能由
+    // 缺失密文或损坏密文触发钱包私钥金库的生物识别。
     if (!await _hasDeviceDataKeyBlobs(binding, requests)) {
-      await ensureDeviceDataKeysForBinding(binding);
+      throw const AccountSecurityException('设备用途钥尚未准备，请先完成用途钥授权');
     }
     try {
       return await _openDeviceDataKeys(binding, requests);
-    } on DeviceDataKeyVaultException {
-      await ensureDeviceDataKeysForBinding(binding, rebuildAll: true);
-      return _openDeviceDataKeys(binding, requests);
+    } on DeviceDataKeyVaultException catch (error) {
+      throw AccountSecurityException('设备用途钥无法静默读取，请重新授权准备：${error.message}');
     }
   }
 
@@ -229,12 +238,12 @@ interface class AccountSecurityService {
     final existing = _dataKeyFlights[key];
     if (existing != null) return existing;
     late final Future<void> created;
-    created = _ensureDeviceDataKeysForBinding(
-      binding,
-      rebuildAll: rebuildAll,
-    ).whenComplete(() {
-      if (identical(_dataKeyFlights[key], created)) _dataKeyFlights.remove(key);
-    });
+    created = _ensureDeviceDataKeysForBinding(binding, rebuildAll: rebuildAll)
+        .whenComplete(() {
+          if (identical(_dataKeyFlights[key], created)) {
+            _dataKeyFlights.remove(key);
+          }
+        });
     _dataKeyFlights[key] = created;
     return created;
   }
@@ -290,19 +299,31 @@ interface class AccountSecurityService {
     final keys = <Uint8List>[];
     try {
       if (account.signMode == CitizenWalletSignMode.hot) {
-        for (final request in requests) {
-          keys.add(await _deriveApplicationKey(
-            wallet: _wallet,
-            binding: binding,
-            purpose: request.purpose,
-            context: request.context,
-          ));
+        final batch = _deriveApplicationKeys;
+        if (batch != null) {
+          keys.addAll(
+            await batch(wallet: _wallet, binding: binding, requests: requests),
+          );
+        } else {
+          // 仅为显式注入旧单项派生测试替身保留；正式运行始终使用批量 SDK。
+          for (final request in requests) {
+            keys.add(
+              await _deriveApplicationKey(
+                wallet: _wallet,
+                binding: binding,
+                purpose: request.purpose,
+                context: request.context,
+              ),
+            );
+          }
         }
       } else {
-        keys.addAll(await _coldAccountDataKeyProvider(
-          binding: binding,
-          requests: List<DataKeyRequest>.unmodifiable(requests),
-        ));
+        keys.addAll(
+          await _coldAccountDataKeyProvider(
+            binding: binding,
+            requests: List<DataKeyRequest>.unmodifiable(requests),
+          ),
+        );
       }
       if (keys.length != requests.length ||
           keys.any((key) => key.length != 32)) {
@@ -354,9 +375,7 @@ interface class AccountSecurityService {
     }
   }
 
-  Future<void> registerDeviceSubkeyForBinding(
-    AccountDataBinding binding,
-  ) {
+  Future<void> registerDeviceSubkeyForBinding(AccountDataBinding binding) {
     binding.validate();
     final key = _flightKey(binding);
     final existing = _subkeyFlights[key];
@@ -381,71 +400,65 @@ interface class AccountSecurityService {
       cidNumber: binding.cidNumber,
       bindingRevision: binding.bindingRevision,
       accountId: binding.accountId,
-      signBinding: ({
-        required payload,
-        required signingMessage,
-        required devicePublicKey,
-        required issuedAtMillis,
-      }) async {
-        if (account.signMode == CitizenWalletSignMode.hot) {
-          final signature = await _signing.sign(
-            accountId: binding.accountId,
-            payload: signingMessage,
-          ).result;
-          return '0x${_hex(signature.bytes)}';
-        }
-        return _coldDeviceBindingSigner(
-          binding: binding,
-          payload: payload,
-          signingMessage: signingMessage,
-          devicePublicKey: devicePublicKey,
-          issuedAtMillis: issuedAtMillis,
-        );
-      },
+      signBinding:
+          ({
+            required payload,
+            required signingMessage,
+            required devicePublicKey,
+            required issuedAtMillis,
+          }) async {
+            if (account.signMode == CitizenWalletSignMode.hot) {
+              final signature = await _signing
+                  .sign(accountId: binding.accountId, payload: signingMessage)
+                  .result;
+              return '0x${_hex(signature.bytes)}';
+            }
+            return _coldDeviceBindingSigner(
+              binding: binding,
+              payload: payload,
+              signingMessage: signingMessage,
+              devicePublicKey: devicePublicKey,
+              issuedAtMillis: issuedAtMillis,
+            );
+          },
     );
     await _bindingStore.activate(binding);
     await _recordDeviceKeyMaterialIndex(account.walletIndex, binding);
   }
 
-  Future<AccountDataBinding?> readAccountDataBindingForCid(
-    String cidNumber,
-  ) =>
+  Future<AccountDataBinding?> readAccountDataBindingForCid(String cidNumber) =>
       _bindingStore.readForCid(cidNumber);
 
   Future<AccountDataBinding?> readAccountDataBindingForAccountId(
     String accountId,
-  ) =>
-      _bindingStore.readForAccountId(accountId);
+  ) => _bindingStore.readForAccountId(accountId);
 
-  Future<AccountDataBinding> accountDataBindingForAccountId(
-    String accountId,
-  ) =>
+  Future<AccountDataBinding> accountDataBindingForAccountId(String accountId) =>
       _requireBinding(accountId);
 
   Future<void> recordPendingAccountDataHandover({
     required AccountDataBinding source,
     required AccountDataBinding target,
-  }) =>
-      _bindingStore.writePendingHandover(source: source, target: target);
+  }) => _bindingStore.writePendingHandover(source: source, target: target);
 
   Future<void> markPendingAccountDataHandoverReady({
     required AccountDataBinding source,
     required AccountDataBinding target,
-  }) =>
-      _bindingStore.markPendingHandoverReady(source: source, target: target);
+  }) => _bindingStore.markPendingHandoverReady(source: source, target: target);
 
-  Future<({
-    AccountDataBinding source,
-    AccountDataBinding target,
-    AccountDataHandoverState state,
-  })?> readPendingAccountDataHandover() =>
-      _bindingStore.readPendingHandover();
+  Future<
+    ({
+      AccountDataBinding source,
+      AccountDataBinding target,
+      AccountDataHandoverState state,
+    })?
+  >
+  readPendingAccountDataHandover() => _bindingStore.readPendingHandover();
 
   Future<void> clearPendingAccountDataHandover({
     required AccountDataBinding source,
     required AccountDataBinding target,
-  }) =>
-      _bindingStore.clearPendingHandover(source: source, target: target);
+  }) => _bindingStore.clearPendingHandover(source: source, target: target);
 
   /// 在 SDK 钱包事实删除前保存 App 设备材料的精确清理意图。
   Future<void> prepareAccountCleanup({
@@ -470,7 +483,8 @@ interface class AccountSecurityService {
   }
 
   /// 原清理提示只读既有意图的存在事实，不在页面刷新中执行或撤销清理。
-  Future<bool> get hasPendingAccountCleanup async => await _blobStore.read(_pendingCleanupKey) != null;
+  Future<bool> get hasPendingAccountCleanup async =>
+      await _blobStore.read(_pendingCleanupKey) != null;
 
   /// SDK安全清理完成后调用原关联清理能力；全部成功才清除同一持久意图。
   Future<void> reconcileAccountCleanup() async {
@@ -483,20 +497,28 @@ interface class AccountSecurityService {
     final ids = decoded['account_ids'];
     final indexes = decoded['wallet_indices'];
     final deleteWide = decoded['delete_wallet_wide_key'];
-    if (ids is! List || indexes is! List || deleteWide is! bool ||
+    if (ids is! List ||
+        indexes is! List ||
+        deleteWide is! bool ||
         ids.any((value) => value is! String) ||
         indexes.any((value) => value is! int)) {
       throw const AccountSecurityException('账户安全清理意图字段损坏');
     }
     final accountIds = ids.cast<String>().toSet();
     final state = await _wallet.getState().result;
-    if (state.accounts.any((account) => accountIds.contains(account.accountId)) ||
-        state.diagnostics.any((record) => indexes.contains(record.walletIndex))) {
+    if (state.accounts.any(
+          (account) => accountIds.contains(account.accountId),
+        ) ||
+        state.diagnostics.any(
+          (record) => indexes.contains(record.walletIndex),
+        )) {
       // 存在事实时保留意图；普通刷新不能撤销另一条已接纳删除的准备记录。
       throw const AccountSecurityException('钱包事实仍存在，尚不能执行后续清理');
     }
     // 诊断仍在即事实未删；Core安全清理未完成时保留原意图，不能先清关联设备材料。
-    if (state.cleanupPending) throw const AccountSecurityException('钱包安全清理尚未完成');
+    if (state.cleanupPending) {
+      throw const AccountSecurityException('钱包安全清理尚未完成');
+    }
     final bindings = await _bindingStore.readAll();
     for (final binding in bindings.where(
       (binding) => accountIds.contains(binding.accountId),
@@ -573,7 +595,9 @@ interface class AccountSecurityService {
     List<DataKeyRequest> requests,
   ) async {
     for (final request in requests) {
-      final blob = await _blobStore.read(_deviceDataKeyBlobName(binding, request));
+      final blob = await _blobStore.read(
+        _deviceDataKeyBlobName(binding, request),
+      );
       if (blob == null || blob.isEmpty) return false;
     }
     return true;
@@ -584,7 +608,9 @@ interface class AccountSecurityService {
   ) async {
     final missing = <DataKeyRequest>[];
     for (final request in _deviceDataKeyRequests) {
-      final blob = await _blobStore.read(_deviceDataKeyBlobName(binding, request));
+      final blob = await _blobStore.read(
+        _deviceDataKeyBlobName(binding, request),
+      );
       if (blob == null || blob.isEmpty) missing.add(request);
     }
     return missing;
@@ -607,13 +633,14 @@ interface class AccountSecurityService {
     AccountDataBinding binding,
     int walletIndex,
     DataKeyRequest request,
-  ) =>
-      Uint8List.fromList(utf8.encode(
-        'wallet_index=$walletIndex|genesis_hash=${binding.genesisHash}|'
-        'cid_number=${binding.cidNumber}|binding_revision=${binding.bindingRevision}|'
-        'account_id=${binding.accountId}|purpose=${request.purpose.domain}|'
-        'context=${request.context ?? ''}',
-      ));
+  ) => Uint8List.fromList(
+    utf8.encode(
+      'wallet_index=$walletIndex|genesis_hash=${binding.genesisHash}|'
+      'cid_number=${binding.cidNumber}|binding_revision=${binding.bindingRevision}|'
+      'account_id=${binding.accountId}|purpose=${request.purpose.domain}|'
+      'context=${request.context ?? ''}',
+    ),
+  );
 
   static String _deviceKeyMaterialIndexName(int walletIndex) =>
       'citizenapp_device_key_material_index_$walletIndex';
@@ -684,9 +711,8 @@ interface class AccountSecurityService {
     }
   }
 
-  static String _hex(List<int> bytes) => bytes
-      .map((value) => value.toRadixString(16).padLeft(2, '0'))
-      .join();
+  static String _hex(List<int> bytes) =>
+      bytes.map((value) => value.toRadixString(16).padLeft(2, '0')).join();
 
   void dispose() => revision.dispose();
 }

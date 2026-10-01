@@ -5,8 +5,8 @@ import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:polkadart/scale_codec.dart' show CompactBigIntCodec;
 
-import 'package:citizenapp/8964/chain/square_chain_service.dart';
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/services/square_chain_service.dart';
+import 'package:citizenapp/8964/square_models.dart';
 import 'package:citizenapp/my/myid/citizen_identity_chain_reader.dart';
 import '../support/fake_citizen_sdk.dart';
 

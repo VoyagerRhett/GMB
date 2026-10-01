@@ -90,6 +90,7 @@ class _ContactBookPageState extends State<ContactBookPage> {
       widget.profileMediaCache ?? CitizenProfileMediaCache();
   late final SquareSessionProvider _sessionProvider;
   late final CurrentUserContext _currentUserContext;
+  AccountSecurityService? _accountSecurity;
   Listenable? _identityRevision;
   bool _dependenciesReady = false;
   final TextEditingController _searchController = TextEditingController();
@@ -107,6 +108,10 @@ class _ContactBookPageState extends State<ContactBookPage> {
     phase: ContactSyncPhase.idle,
   );
   bool _loading = true;
+  bool _needsDataKeys = false;
+  bool _needsDeviceRegistration = false;
+  bool _preparingDataKeys = false;
+  bool _registeringDevice = false;
 
   /// 当前钱包未注册 CID(合法状态,非故障)。置真时整页显示统一注册引导,
   /// 且**不读通讯录**——通讯录属主就是 CID,没有 CID 连读都不该读。
@@ -143,6 +148,7 @@ class _ContactBookPageState extends State<ContactBookPage> {
       return;
     }
     final accountSecurity = context.read<AccountSecurityService>();
+    _accountSecurity = accountSecurity;
     _sessionProvider =
         widget.sessionProvider ?? context.read<SquareSessionProvider>();
     _currentUserContext =
@@ -204,6 +210,8 @@ class _ContactBookPageState extends State<ContactBookPage> {
 
   Future<void> _load() async {
     final generation = ++_loadGeneration;
+    _needsDataKeys = false;
+    _needsDeviceRegistration = false;
     try {
       // 未注册 CID 必须在此短路:通讯录属主 = CID,`getContacts()` 第一步
       // `_requireIdentityOwner()` 对未注册身份必抛 AccountSecurityException,catch 后
@@ -264,11 +272,65 @@ class _ContactBookPageState extends State<ContactBookPage> {
       if (!mounted || generation != _loadGeneration) return;
       setState(() {
         _loading = false;
+        _needsDataKeys =
+            error is AccountSecurityException &&
+            error.message.startsWith('设备用途钥');
+        _needsDeviceRegistration =
+            error is SquareApiException &&
+            (error.errorCode == 'device_not_registered' ||
+                error.errorCode == 'invalid_signature');
         _syncState = ContactSyncState(
           phase: ContactSyncPhase.failed,
           message: error.toString(),
         );
       });
+    }
+  }
+
+  Future<void> _registerCurrentDevice() async {
+    if (_registeringDevice) return;
+    setState(() => _registeringDevice = true);
+    try {
+      await _sessionProvider.registerCurrentDevice();
+      if (mounted) await _load();
+    } on Exception catch (error) {
+      if (mounted) {
+        setState(
+          () => _syncState = ContactSyncState(
+            phase: ContactSyncPhase.failed,
+            message: '$error',
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _registeringDevice = false);
+    }
+  }
+
+  /// 通讯录查看只静默读钥；首次派生必须由用户明确点击一次授权入口。
+  Future<void> _prepareDataKeys() async {
+    final security = _accountSecurity;
+    if (security == null || _preparingDataKeys) return;
+    final current = await _currentUserContext.resolve();
+    if (current == null) return;
+    setState(() => _preparingDataKeys = true);
+    try {
+      final binding = await security.accountDataBindingForAccountId(
+        current.accountId,
+      );
+      await security.ensureDeviceDataKeysForBinding(binding, rebuildAll: true);
+      if (mounted) await _load();
+    } on Exception catch (error) {
+      if (mounted) {
+        setState(
+          () => _syncState = ContactSyncState(
+            phase: ContactSyncPhase.failed,
+            message: '$error',
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _preparingDataKeys = false);
     }
   }
 
@@ -412,9 +474,8 @@ class _ContactBookPageState extends State<ContactBookPage> {
       current = await _service.resolveCurrentContact(contact.cidNumber);
     } on Exception catch (error) {
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('无法确认联系人当前钱包：$error')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('无法确认联系人当前钱包：$error')));
       }
       return;
     }
@@ -444,9 +505,8 @@ class _ContactBookPageState extends State<ContactBookPage> {
 
   Future<void> _message(UserContact contact) async {
     final profile = _profileOf(contact);
-    final title = ProfilePresentation.forIdentityKey(
-      contact.cidNumber,
-    ).resolveDisplayName(publicName: profile?.displayName);
+    final title = ProfilePresentation.forIdentityKey(contact.cidNumber)
+        .resolveDisplayName(publicName: profile?.displayName);
     final opener = widget.directChatOpener ?? openDirectChat;
     await opener(context, peerUserId: contact.cidNumber, title: title);
   }
@@ -579,7 +639,23 @@ class _ContactBookPageState extends State<ContactBookPage> {
             ),
             SizedBox(height: AppLayout.scaledValue(10)),
           ],
-          _SyncBanner(state: _syncState, onRetry: _sync),
+          _SyncBanner(state: _syncState, onRetry: _load),
+          if (_needsDataKeys) ...[
+            FilledButton(
+              key: const ValueKey('contacts-prepare-data-keys'),
+              onPressed: _preparingDataKeys ? null : _prepareDataKeys,
+              child: const Text('验证并准备聊天与通讯录密钥'),
+            ),
+            SizedBox(height: AppLayout.scaledValue(10)),
+          ],
+          if (_needsDeviceRegistration) ...[
+            FilledButton(
+              key: const ValueKey('contacts-register-device'),
+              onPressed: _registeringDevice ? null : _registerCurrentDevice,
+              child: const Text('验证并登记本机设备'),
+            ),
+            SizedBox(height: AppLayout.scaledValue(10)),
+          ],
           SizedBox(height: AppLayout.scaledValue(10)),
           TextField(
             key: const ValueKey('contact-search'),
@@ -656,9 +732,8 @@ class _ContactBookPageState extends State<ContactBookPage> {
 
   String _contactDisplayName(UserContact contact) {
     final profile = _profileOf(contact);
-    return ProfilePresentation.forIdentityKey(
-      contact.cidNumber,
-    ).resolveDisplayName(publicName: profile?.displayName);
+    return ProfilePresentation.forIdentityKey(contact.cidNumber)
+        .resolveDisplayName(publicName: profile?.displayName);
   }
 }
 
@@ -695,9 +770,8 @@ class _ContactCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final publicName = ProfilePresentation.forIdentityKey(
-      contact.cidNumber,
-    ).resolveDisplayName(publicName: profile?.displayName);
+    final publicName = ProfilePresentation.forIdentityKey(contact.cidNumber)
+        .resolveDisplayName(publicName: profile?.displayName);
     final remark = contact.contactRemark;
     return Material(
       key: ValueKey('contact-card-${contact.cidNumber}'),

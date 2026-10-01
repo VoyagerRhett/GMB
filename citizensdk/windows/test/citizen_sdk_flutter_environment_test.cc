@@ -38,7 +38,7 @@ int main() {
   const auto bundle = temporary.path() / L"bundle";
   const auto executable = bundle / L"fixture.exe";
   const auto assets = bundle / L"data" / L"flutter_assets" / L"packages" /
-      L"citizen_sdk" / L"assets" / L"citizenchain";
+      L"citizen_sdk" / L"chain";
   const auto user_data = temporary.path() / L"user-data";
   std::filesystem::create_directories(assets);
   std::filesystem::create_directory(user_data);

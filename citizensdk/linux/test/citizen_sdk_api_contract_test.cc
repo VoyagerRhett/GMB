@@ -372,7 +372,7 @@ int main() {
 
   const std::string header_path =
       std::string(CITIZENSDK_LINUX_TEST_SOURCE_DIR) +
-      "/include/citizen_sdk/citizensdk_host.h";
+      "/citizen_sdk/citizensdk_host.h";
   std::ifstream stream(header_path, std::ios::binary);
   assert(stream.good());
   const std::string header((std::istreambuf_iterator<char>(stream)),

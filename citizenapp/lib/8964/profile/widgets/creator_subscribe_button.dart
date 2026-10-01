@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
-import 'package:citizenapp/8964/subscribe/creator_subscribe_service.dart';
+import 'package:citizenapp/8964/services/creator_subscribe_service.dart';
 import 'package:citizenapp/my/creator/creator_api.dart';
 import 'package:citizenapp/my/creator/creator_money.dart';
 import 'package:citizenapp/my/creator/models/creator_plan.dart';

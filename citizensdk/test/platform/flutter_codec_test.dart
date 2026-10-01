@@ -4,7 +4,7 @@ import 'package:citizen_sdk/src/api/citizen_sdk_error.dart';
 import 'package:citizen_sdk/src/api/citizen_qr.dart';
 import 'package:citizen_sdk/src/models/citizen_signing.dart';
 import 'package:citizen_sdk/src/api/citizen_sdk_events.dart';
-import 'package:citizen_sdk/src/crypto/account_codec.dart';
+import 'package:citizen_sdk/src/account_codec.dart';
 import 'package:citizen_sdk/src/models/citizen_capability.dart';
 import 'package:citizen_sdk/src/models/citizen_chain_state.dart';
 import 'package:citizen_sdk/src/models/citizen_transaction.dart';
@@ -17,131 +17,379 @@ void main() {
   const codec = CitizenSdkFlutterCodec();
 
   test('钱包元数据请求严格绑定修订和u32索引，不携带签名或默认顺序', () {
-    expect(codec.encodeRequest(method: 'setActiveWallet', sessionId: 's', requestSequence: 1,
-      fields: ['18446744073709551615', 0xffffffff]), [2, 's', 1, '18446744073709551615', 0xffffffff]);
-    expect(codec.encodeRequest(method: 'renameWallet', sessionId: 's', requestSequence: 2,
-      fields: ['1', 0, '独立钱包名']), [2, 's', 2, '1', 0, '独立钱包名']);
-    for (final fields in <List<Object?>>[['01', 0], ['18446744073709551616', 0], ['1', -1],
-      ['1', 0x100000000], ['1', 0, 'unexpected']]) {
-      expect(() => codec.encodeRequest(method: 'setActiveWallet', sessionId: 's', requestSequence: 3,
-        fields: fields), throwsA(isA<CitizenSdkException>()));
+    expect(
+      codec.encodeRequest(
+        method: 'setActiveWallet',
+        sessionId: 's',
+        requestSequence: 1,
+        fields: ['18446744073709551615', 0xffffffff],
+      ),
+      [2, 's', 1, '18446744073709551615', 0xffffffff],
+    );
+    expect(
+      codec.encodeRequest(
+        method: 'renameWallet',
+        sessionId: 's',
+        requestSequence: 2,
+        fields: ['1', 0, '独立钱包名'],
+      ),
+      [2, 's', 2, '1', 0, '独立钱包名'],
+    );
+    for (final fields in <List<Object?>>[
+      ['01', 0],
+      ['18446744073709551616', 0],
+      ['1', -1],
+      ['1', 0x100000000],
+      ['1', 0, 'unexpected'],
+    ]) {
+      expect(
+        () => codec.encodeRequest(
+          method: 'setActiveWallet',
+          sessionId: 's',
+          requestSequence: 3,
+          fields: fields,
+        ),
+        throwsA(isA<CitizenSdkException>()),
+      );
     }
     for (final name in ['', '未修剪 ', '名' * 31, '坏\u0085名']) {
-      expect(() => codec.encodeRequest(method: 'renameWallet', sessionId: 's', requestSequence: 4,
-        fields: ['1', 0, name]), throwsA(isA<CitizenSdkException>()));
+      expect(
+        () => codec.encodeRequest(
+          method: 'renameWallet',
+          sessionId: 's',
+          requestSequence: 4,
+          fields: ['1', 0, name],
+        ),
+        throwsA(isA<CitizenSdkException>()),
+      );
     }
   });
 
   test('新profile和state只接受完整新元组，名称与选择分别保持', () {
     final id = _account(1);
     final address = citizenSs58FromAccountId(id);
-    final profile = <Object?>[0, 'created', '1', id, id,
-      <Object?>[<Object?>[0, id, address, '账户名称', '1', true]], '钱包名称'];
-    final state = <Object?>['7', profile,
-      <Object?>[<Object?>['hot', 0, 0, id, address, '账户名称', '1', true]], 1, false, 0, <Object?>[]];
+    final profile = <Object?>[
+      0,
+      'created',
+      '1',
+      id,
+      id,
+      <Object?>[
+        <Object?>[0, id, address, '账户名称', '1', true],
+      ],
+      '钱包名称',
+    ];
+    final state = <Object?>[
+      '7',
+      profile,
+      <Object?>[
+        <Object?>['hot', 0, 0, id, address, '账户名称', '1', true],
+      ],
+      1,
+      false,
+      0,
+      <Object?>[],
+    ];
     final decoded = codec.decodeWalletState(state);
     expect(decoded.hotProfile!.walletName, '钱包名称');
     expect(decoded.accounts.single.name, '账户名称');
     expect(decoded.activeWalletIndex, 0);
-    expect(codec.decodeWalletState([...state.take(5), null, <Object?>[]]).activeWalletIndex, isNull);
-    expect(() => codec.decodeWalletProfile(profile.take(6).toList()), throwsA(isA<CitizenSdkException>()));
-    expect(() => codec.decodeWalletState(state.take(5).toList()), throwsA(isA<CitizenSdkException>()));
-    expect(() => codec.decodeWalletState([...state.take(5), 1, <Object?>[]]), throwsA(isA<CitizenSdkException>()));
-    expect(() => codec.decodeWalletProfile([...profile.take(6), '']), throwsA(isA<CitizenSdkException>()));
+    expect(
+      codec.decodeWalletState([
+        ...state.take(5),
+        null,
+        <Object?>[],
+      ]).activeWalletIndex,
+      isNull,
+    );
+    expect(
+      () => codec.decodeWalletProfile(profile.take(6).toList()),
+      throwsA(isA<CitizenSdkException>()),
+    );
+    expect(
+      () => codec.decodeWalletState(state.take(5).toList()),
+      throwsA(isA<CitizenSdkException>()),
+    );
+    expect(
+      () => codec.decodeWalletState([...state.take(5), 1, <Object?>[]]),
+      throwsA(isA<CitizenSdkException>()),
+    );
+    expect(
+      () => codec.decodeWalletProfile([...profile.take(6), '']),
+      throwsA(isA<CitizenSdkException>()),
+    );
     final mismatched = <Object?>[...state];
-    mismatched[2] = <Object?>[<Object?>['hot', 0, 0, id, address, '另一个名称', '1', true]];
-    expect(() => codec.decodeWalletState(mismatched), throwsA(isA<CitizenSdkException>()));
+    mismatched[2] = <Object?>[
+      <Object?>['hot', 0, 0, id, address, '另一个名称', '1', true],
+    ];
+    expect(
+      () => codec.decodeWalletState(mismatched),
+      throwsA(isA<CitizenSdkException>()),
+    );
   });
 
   test('异常钱包不是空目录或可签名账户，原模式和可信清理目标严格投影', () {
     final id = _account(1);
-    List<Object?> diagnostic() => [0, '原钱包', id, null, 3, 'hot', [[id, _account(2)], true]];
-    List<Object?> snapshot(Object? value) => ['7', null, <Object?>[], 1, false, 0, [value]];
+    List<Object?> diagnostic() => [
+      0,
+      '原钱包',
+      id,
+      null,
+      3,
+      'hot',
+      [
+        [id, _account(2)],
+        true,
+      ],
+    ];
+    List<Object?> snapshot(Object? value) => [
+      '7',
+      null,
+      <Object?>[],
+      1,
+      false,
+      0,
+      [value],
+    ];
     final state = codec.decodeWalletState(snapshot(diagnostic()));
-    expect(state.accounts, isEmpty); expect(state.defaultAccount, isNull); expect(state.activeWalletAccount, isNull);
+    expect(state.accounts, isEmpty);
+    expect(state.defaultAccount, isNull);
+    expect(state.activeWalletAccount, isNull);
     expect(state.initializationState, CitizenWalletInitializationState.ready);
     expect(state.diagnostics.single.signMode, CitizenWalletSignMode.hot);
     expect(state.diagnostics.single.ss58Address, isNull);
-    expect(state.diagnostics.single.cleanupTargets!.accountIds, [id, _account(2)]);
+    expect(state.diagnostics.single.cleanupTargets!.accountIds, [
+      id,
+      _account(2),
+    ]);
     expect(() => state.diagnostics.clear(), throwsUnsupportedError);
-    expect(() => state.diagnostics.single.cleanupTargets!.accountIds.clear(), throwsUnsupportedError);
-    final unknown = diagnostic(); unknown[5] = null; unknown[6] = null;
-    expect(codec.decodeWalletState(snapshot(unknown)).diagnostics.single.cleanupTargets, isNull);
+    expect(
+      () => state.diagnostics.single.cleanupTargets!.accountIds.clear(),
+      throwsUnsupportedError,
+    );
+    final unknown = diagnostic();
+    unknown[5] = null;
+    unknown[6] = null;
+    expect(
+      codec
+          .decodeWalletState(snapshot(unknown))
+          .diagnostics
+          .single
+          .cleanupTargets,
+      isNull,
+    );
     for (final change in <void Function(List<Object?>)>[
-      (v) => v.removeLast(), (v) => v.add(1), (v) => v[4] = 0, (v) => v[4] = 4,
-      (v) => v[5] = 'legacy', (v) => v[3] = 'a' * 129, (v) => v[6] = [[], false],
-      (v) => v[6] = [[id, id], true], (v) => v[6] = [[_account(2), id], true],
-      (v) => v[6] = [[id], 1],
+      (v) => v.removeLast(),
+      (v) => v.add(1),
+      (v) => v[4] = 0,
+      (v) => v[4] = 4,
+      (v) => v[5] = 'legacy',
+      (v) => v[3] = 'a' * 129,
+      (v) => v[6] = [[], false],
+      (v) => v[6] = [
+        [id, id],
+        true,
+      ],
+      (v) => v[6] = [
+        [_account(2), id],
+        true,
+      ],
+      (v) => v[6] = [
+        [id],
+        1,
+      ],
     ]) {
-      final value = diagnostic(); change(value);
-      expect(() => codec.decodeWalletState(snapshot(value)), throwsA(isA<CitizenSdkException>()));
+      final value = diagnostic();
+      change(value);
+      expect(
+        () => codec.decodeWalletState(snapshot(value)),
+        throwsA(isA<CitizenSdkException>()),
+      );
     }
-    for (final method in ['repairHotWallet', 'deleteDiagnosticWallet', 'renameDiagnosticWallet']) {
-      final fields = <Object?>['inspection-owned', 0, if (method == 'renameDiagnosticWallet') '名字'];
-      expect(codec.encodeRequest(method: method, sessionId: 's', requestSequence: 1, fields: fields).sublist(3), fields);
-      expect(() => codec.encodeRequest(method: method, sessionId: 's', requestSequence: 2,
-        fields: [...fields, true]), throwsA(isA<CitizenSdkException>()));
+    for (final method in [
+      'repairHotWallet',
+      'deleteDiagnosticWallet',
+      'renameDiagnosticWallet',
+    ]) {
+      final fields = <Object?>[
+        'inspection-owned',
+        0,
+        if (method == 'renameDiagnosticWallet') '名字',
+      ];
+      expect(
+        codec
+            .encodeRequest(
+              method: method,
+              sessionId: 's',
+              requestSequence: 1,
+              fields: fields,
+            )
+            .sublist(3),
+        fields,
+      );
+      expect(
+        () => codec.encodeRequest(
+          method: method,
+          sessionId: 's',
+          requestSequence: 2,
+          fields: [...fields, true],
+        ),
+        throwsA(isA<CitizenSdkException>()),
+      );
     }
   });
 
   test('非消费验签只传会话与响应，不接受宿主时间或transform', () {
-    expect(codec.encodeRequest(method: 'qrValidateSignResponse', sessionId: 'sdk', requestSequence: 1,
-      fields: ['request', '{}']), [2, 'sdk', 1, 'request', '{}']);
-    for (final fields in <List<Object?>>[[], ['request'], ['', '{}'], ['x' * 129, '{}'], ['request', '{}', 1]]) {
-      expect(() => codec.encodeRequest(method: 'qrValidateSignResponse', sessionId: 'sdk',
-        requestSequence: 2, fields: fields), throwsA(isA<CitizenSdkException>()));
+    expect(
+      codec.encodeRequest(
+        method: 'qrValidateSignResponse',
+        sessionId: 'sdk',
+        requestSequence: 1,
+        fields: ['request', '{}'],
+      ),
+      [2, 'sdk', 1, 'request', '{}'],
+    );
+    for (final fields in <List<Object?>>[
+      [],
+      ['request'],
+      ['', '{}'],
+      ['x' * 129, '{}'],
+      ['request', '{}', 1],
+    ]) {
+      expect(
+        () => codec.encodeRequest(
+          method: 'qrValidateSignResponse',
+          sessionId: 'sdk',
+          requestSequence: 2,
+          fields: fields,
+        ),
+        throwsA(isA<CitizenSdkException>()),
+      );
     }
   });
 
   test('编码输入只是规范字段，纯载荷编码不建立session或复制算法', () {
-    final contact = CitizenQrContent.userContact(cidNumber: 'CID-7', accountId: _account(7));
-    expect(jsonDecode(contact.inputJson), {'kind': 3, 'cid_number': 'CID-7', 'account_id': _account(7)});
-    expect(codec.encodeRequest(method: 'qrEncodeDocument', sessionId: 's', requestSequence: 1,
-      fields: [contact.inputJson]), [2, 's', 1, contact.inputJson]);
-    final payload = CitizenSigningPayload.message(opTag: 16, scalePayload: Uint8List(0));
+    final contact = CitizenQrContent.userContact(
+      cidNumber: 'CID-7',
+      accountId: _account(7),
+    );
+    expect(jsonDecode(contact.inputJson), {
+      'kind': 3,
+      'cid_number': 'CID-7',
+      'account_id': _account(7),
+    });
+    expect(
+      codec.encodeRequest(
+        method: 'qrEncodeDocument',
+        sessionId: 's',
+        requestSequence: 1,
+        fields: [contact.inputJson],
+      ),
+      [2, 's', 1, contact.inputJson],
+    );
+    final payload = CitizenSigningPayload.message(
+      opTag: 16,
+      scalePayload: Uint8List(0),
+    );
     final fields = codec.encodeSigningPayload(payload);
-    expect(fields[0], 2); expect(fields[1], 1);
+    expect(fields[0], 2);
+    expect(fields[1], 1);
     expect(jsonDecode(fields[2]! as String), {'op_tag': 16});
     expect(fields[3], isEmpty);
     expect(codec.decodeSigningPayload([2, Uint8List(32)], 1), hasLength(32));
-    expect(() => codec.decodeSigningPayload([2, Uint8List(31)], 1), throwsA(isA<CitizenSdkException>()));
-    expect(() => codec.decodeSigningPayload([1, Uint8List(32)], 1), throwsA(isA<CitizenSdkException>()));
-    expect(() => codec.encodeRequest(method: 'encodeSigningPayload', sessionId: 's', requestSequence: 1),
-      throwsA(isA<CitizenSdkException>()));
+    expect(
+      () => codec.decodeSigningPayload([2, Uint8List(31)], 1),
+      throwsA(isA<CitizenSdkException>()),
+    );
+    expect(
+      () => codec.decodeSigningPayload([1, Uint8List(32)], 1),
+      throwsA(isA<CitizenSdkException>()),
+    );
+    expect(
+      () => codec.encodeRequest(
+        method: 'encodeSigningPayload',
+        sessionId: 's',
+        requestSequence: 1,
+      ),
+      throwsA(isA<CitizenSdkException>()),
+    );
   });
 
   test('授权准备只读事实支持完整u64，拒绝无效原因和假成功字段', () {
-    final value = <String, Object?>{'reason': 0, 'genesis_hash': _account(7), 'cid_number': 'CID',
-      'current_account_id': null, 'expected_binding_revision': '18446744073709551615',
-      'expires_at': '100', 'materialized_payload': '0x0102'};
+    final value = <String, Object?>{
+      'reason': 0,
+      'genesis_hash': _account(7),
+      'cid_number': 'CID',
+      'current_account_id': null,
+      'expected_binding_revision': '18446744073709551615',
+      'expires_at': '100',
+      'materialized_payload': '0x0102',
+    };
     final result = codec.decodeQrAuthorization(jsonEncode(value));
-    expect(result.expectedBindingRevision, BigInt.parse('18446744073709551615'));
+    expect(
+      result.expectedBindingRevision,
+      BigInt.parse('18446744073709551615'),
+    );
     expect(result.materializedPayload, [1, 2]);
     expect(() => result.materializedPayload![0] = 7, throwsUnsupportedError);
     // 每一个成功字段独立污染失败结果时都必须拒绝，不能依赖JSON字段顺序。
     for (final key in value.keys.where((key) => key != 'reason')) {
-      final invalid = <String, Object?>{for (final field in value.keys) field: null};
+      final invalid = <String, Object?>{
+        for (final field in value.keys) field: null,
+      };
       invalid['reason'] = 2;
       invalid[key] = value[key] ?? '0x${'11' * 32}';
-      expect(() => codec.decodeQrAuthorization(jsonEncode(invalid)),
-        throwsA(isA<CitizenSdkException>()), reason: key);
+      expect(
+        () => codec.decodeQrAuthorization(jsonEncode(invalid)),
+        throwsA(isA<CitizenSdkException>()),
+        reason: key,
+      );
     }
-    expect(() => codec.decodeQrAuthorization(jsonEncode({...value, 'reason': 4})), throwsA(isA<CitizenSdkException>()));
-    final rejected = codec.decodeQrAuthorization(jsonEncode({for (final key in value.keys) key: key == 'reason' ? 2 : null}));
+    expect(
+      () => codec.decodeQrAuthorization(jsonEncode({...value, 'reason': 4})),
+      throwsA(isA<CitizenSdkException>()),
+    );
+    final rejected = codec.decodeQrAuthorization(
+      jsonEncode({
+        for (final key in value.keys) key: key == 'reason' ? 2 : null,
+      }),
+    );
     expect(rejected.reason, CitizenQrAuthorizationReason.invalidAccountId);
   });
 
   test('匿名请求不伪造账户，附加当前账户证明必须成对', () {
-    final request = <String, Object?>{'kind': 1, 'canonical_text': 'core-request', 'scan_purpose_mask': 80,
-      'request_id': '0123456789abcdef', 'expires_at': 100, 'action': 10,
-      'signer_account_id': null, 'review_payload': '0x01'};
+    final request = <String, Object?>{
+      'kind': 1,
+      'canonical_text': 'core-request',
+      'scan_purpose_mask': 80,
+      'request_id': '0123456789abcdef',
+      'expires_at': 100,
+      'action': 10,
+      'signer_account_id': null,
+      'review_payload': '0x01',
+    };
     expect(codec.decodeQrDocument(jsonEncode(request)).signerAccountId, isNull);
-    final response = <String, Object?>{'kind': 2, 'canonical_text': 'core-response', 'scan_purpose_mask': 8,
-      'request_id': '0123456789abcdef', 'expires_at': 100, 'signer_account_id': _account(7),
-      'signature': '0x${'08' * 64}', 'current_account_id': _account(9), 'current_account_signature': '0x${'0a' * 64}'};
-    expect(codec.decodeQrDocument(jsonEncode(response)).currentAccountId, _account(9));
-    expect(() => codec.decodeQrDocument(jsonEncode({...response, 'current_account_signature': null})),
-      throwsA(isA<CitizenSdkException>()));
+    final response = <String, Object?>{
+      'kind': 2,
+      'canonical_text': 'core-response',
+      'scan_purpose_mask': 8,
+      'request_id': '0123456789abcdef',
+      'expires_at': 100,
+      'signer_account_id': _account(7),
+      'signature': '0x${'08' * 64}',
+      'current_account_id': _account(9),
+      'current_account_signature': '0x${'0a' * 64}',
+    };
+    expect(
+      codec.decodeQrDocument(jsonEncode(response)).currentAccountId,
+      _account(9),
+    );
+    expect(
+      () => codec.decodeQrDocument(
+        jsonEncode({...response, 'current_account_signature': null}),
+      ),
+      throwsA(isA<CitizenSdkException>()),
+    );
   });
 
   test('QR公开文档严格闭集，拒绝旧now tuple、外部签名拼装和非法结果', () {
@@ -330,6 +578,7 @@ void main() {
       'reconcileWalletCleanup',
       'signWalletPayload',
       'deriveApplicationKey',
+      'deriveApplicationKeys',
       'beginSigning',
       'consumeExternalSignature',
       'cancelSigning',
@@ -456,7 +705,11 @@ void main() {
       'respondCredential': <Object?>['1', Uint8List(12)],
       'cancelCredential': <Object?>['1'],
       'importWallet': <Object?>['synthetic', ''],
-      'addWalletAccounts': <Object?>['synthetic', '', <int>[1, 7]],
+      'addWalletAccounts': <Object?>[
+        'synthetic',
+        '',
+        <int>[1, 7],
+      ],
       'addNextWalletAccount': <Object?>['synthetic', ''],
       'importColdAccountCode': <Object?>['{}', ''],
       'setActiveWallet': <Object?>['7', 1],
@@ -482,6 +735,14 @@ void main() {
         account,
         Uint8List(32),
         Uint8List.fromList(<int>[1]),
+      ],
+      'deriveApplicationKeys': <Object?>[
+        account,
+        Uint8List(32),
+        <Uint8List>[
+          Uint8List.fromList(<int>[1]),
+          Uint8List.fromList(<int>[2]),
+        ],
       ],
       'beginSigning': <Object?>[
         account,
@@ -856,7 +1117,10 @@ void main() {
           false,
         ],
       ],
-      1, false, 0, <Object?>[],
+      1,
+      false,
+      0,
+      <Object?>[],
     ];
     final decoded = codec.decodeWalletState(state);
     expect(decoded.revision, BigInt.from(9));
@@ -871,7 +1135,10 @@ void main() {
         state[0],
         state[1],
         <Object?>[(state[2]! as List<Object?>)[0], invalidCold],
-        1, false, 0, <Object?>[],
+        1,
+        false,
+        0,
+        <Object?>[],
       ]),
       throwsA(isA<CitizenSdkException>()),
     );
@@ -1200,15 +1467,7 @@ void main() {
     final exception = codec.decodePlatformException(
       PlatformException(
         code: 'citizensdk.authenticationCancelled',
-        details: <Object?>[
-          2,
-          'session-a',
-          8,
-          10,
-          3,
-          'beginSigning',
-          '用户取消',
-        ],
+        details: <Object?>[2, 'session-a', 8, 10, 3, 'beginSigning', '用户取消'],
       ),
     );
     expect(exception.code, CitizenSdkErrorCode.authenticationCancelled);
@@ -1312,7 +1571,8 @@ void main() {
         sessionId: 'session-a',
         requestSequence: 1,
         fields: <Object?>[
-          'synthetic', '',
+          'synthetic',
+          '',
           List<int>.filled(
             CitizenSdkFlutterCodec.maximumAdditionalWalletAccounts + 1,
             1,
@@ -1368,7 +1628,9 @@ void main() {
         sessionId: 'session-a',
         requestSequence: 1,
         fields: const <Object?>[
-          'synthetic', '', <int>[0],
+          'synthetic',
+          '',
+          <int>[0],
         ],
       ),
       throwsA(isA<CitizenSdkException>()),

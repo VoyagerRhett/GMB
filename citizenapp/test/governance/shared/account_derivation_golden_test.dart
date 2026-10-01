@@ -16,7 +16,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 
 const _fixturePath =
-    'test/governance/shared/fixtures/account_derive_vectors.json';
+    'test/governance/shared/account_derive_vectors.json';
 
 void main() {
   final file = File(_fixturePath);

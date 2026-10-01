@@ -4,7 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:citizen_sdk/citizen_sdk.dart';
 import '../support/fake_citizen_sdk.dart';
-import 'package:citizenapp/transaction/offchain-transaction/models/payment_intent.dart';
+import 'package:citizenapp/transaction/offchain-transaction/payment_intent.dart';
 
 /// 扫码支付跨端 golden vectors。
 ///

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:citizenapp/8964/profile/models/citizen_profile.dart';
+import 'package:citizenapp/8964/profile/services/citizen_profile_cache.dart';
 
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/square_models.dart';
 import 'package:citizenapp/8964/profile/widgets/profile_avatar.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/app_layout.dart';
@@ -9,7 +11,7 @@ import 'package:citizenapp/ui/app_layout.dart';
 /// 竞选药丸（仅竞选公民）、竞选岗位/时间、右上角更多按钮。
 ///
 /// 图片/视频/文章及其竞选变体共用同一头部，保证身份表达一致。
-class SquarePostHeader extends StatelessWidget {
+class SquarePostHeader extends StatefulWidget {
   const SquarePostHeader({
     super.key,
     required this.post,
@@ -28,13 +30,73 @@ class SquarePostHeader extends StatelessWidget {
   final VoidCallback? onMore;
 
   /// 作者头像已解析的可读地址（由页面据 avatarObjectKey + session 生成）；
-  /// 缺失或读取失败时使用统一的本地默认照片。
+  /// 用户已设置但缺失时保留占位，只有从未设置才显示稳定默认照片。
   final String? avatarUrl;
 
   /// 头像 `Image.network` 的鉴权头（钱包 session Bearer）。
   final Map<String, String>? avatarHeaders;
 
+  @override
+  State<SquarePostHeader> createState() => _SquarePostHeaderState();
+}
+
+class _SquarePostHeaderState extends State<SquarePostHeader> {
+  CitizenProfile? _profile;
+  CitizenProfileMediaSnapshot _media = const CitizenProfileMediaSnapshot();
+  int _generation = 0;
+  SquarePost get post => widget.post;
   bool get _isCampaign => post.postCategory == SquarePostCategory.campaign;
+
+  @override
+  void initState() {
+    super.initState();
+    CitizenProfileCache.revision.addListener(_changed);
+    _readLocal();
+  }
+
+  void _changed() {
+    if (CitizenProfileCache.revision.value?.cidNumber == post.author.cidNumber) {
+      _readLocal();
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant SquarePostHeader oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.post.isLocal != post.isLocal ||
+        oldWidget.post.author.cidNumber != post.author.cidNumber) {
+      _profile = null;
+      _media = const CitizenProfileMediaSnapshot();
+      _readLocal();
+    }
+  }
+
+  /// 本人帖子作者资料复用UserIsar入口；头部更新不获取会话或远端图片。
+  Future<void> _readLocal() async {
+    final generation = ++_generation;
+    final cid = post.author.cidNumber;
+    if (!post.isLocal || cid == null) return;
+    try {
+      final profile = await const CitizenProfileCache().read(cid);
+      if (profile?.cidNumber != cid) return;
+      final media = await CitizenProfileMediaCache().read(profile!);
+      if (mounted && generation == _generation) {
+        setState(() {
+          _profile = profile;
+          _media = media;
+        });
+      }
+    } catch (_) {
+      /* 保留既有显示，不下载或写入第二套资料。 */
+    }
+  }
+
+  @override
+  void dispose() {
+    _generation++;
+    CitizenProfileCache.revision.removeListener(_changed);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -45,7 +107,7 @@ class SquarePostHeader extends StatelessWidget {
       children: [
         Expanded(
           child: GestureDetector(
-            onTap: onAuthorTap,
+            onTap: widget.onAuthorTap,
             behavior: HitTestBehavior.opaque,
             child: Row(
               children: [
@@ -54,11 +116,19 @@ class SquarePostHeader extends StatelessWidget {
                   // cid 缺失（本地草稿等）回落当前账户。
                   seed: author.cidNumber ?? author.accountId,
                   size: AppLayout.scaled(context, 40),
-                  imageUrl: avatarUrl,
-                  imageHeaders: avatarHeaders,
-                  identityLevel: author.identityLevel,
-                  membershipLevel: author.membershipLevel,
-                  membershipActive: author.membershipActive,
+                  imagePath: _media.avatarPath,
+                  imageUrl: post.isLocal ? null : widget.avatarUrl,
+                  imageHeaders: widget.avatarHeaders,
+                  userImageSet:
+                      (_profile?.avatarObjectKey ?? author.avatarObjectKey)
+                          ?.isNotEmpty ==
+                      true,
+                  identityLevel:
+                      _profile?.identityLevel ?? author.identityLevel,
+                  membershipLevel:
+                      _profile?.membershipLevel ?? author.membershipLevel,
+                  membershipActive:
+                      _profile?.membershipActive ?? author.membershipActive,
                   borderRadius: 12,
                 ),
                 SizedBox(width: AppLayout.scaled(context, 11)),
@@ -70,7 +140,9 @@ class SquarePostHeader extends StatelessWidget {
                         children: [
                           Flexible(
                             child: Text(
-                              author.title,
+                              _profile?.displayName.trim().isNotEmpty == true
+                                  ? _profile!.displayName
+                                  : author.title,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
                                 color: AppTheme.textPrimary,
@@ -104,14 +176,17 @@ class SquarePostHeader extends StatelessWidget {
           ),
         ),
         IconButton(
-          onPressed: onMore,
-          icon: Icon(Icons.more_horiz,
-              size: AppLayout.scaled(context, 20),
-              color: AppTheme.textTertiary),
+          onPressed: widget.onMore,
+          icon: Icon(
+            Icons.more_horiz,
+            size: AppLayout.scaled(context, 20),
+            color: AppTheme.textTertiary,
+          ),
           padding: EdgeInsets.zero,
           constraints: BoxConstraints(
-              minWidth: AppLayout.scaled(context, 28),
-              minHeight: AppLayout.scaled(context, 20)),
+            minWidth: AppLayout.scaled(context, 28),
+            minHeight: AppLayout.scaled(context, 20),
+          ),
           visualDensity: VisualDensity.compact,
           tooltip: '更多',
         ),
@@ -146,7 +221,9 @@ class _CampaignPill extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       padding: EdgeInsets.symmetric(
-          horizontal: AppLayout.scaled(context, 7), vertical: 1),
+        horizontal: AppLayout.scaled(context, 7),
+        vertical: 1,
+      ),
       decoration: BoxDecoration(
         color: AppTheme.danger.withAlpha(0x1F),
         borderRadius: BorderRadius.circular(AppLayout.scaledValue(20)),

@@ -18,6 +18,11 @@ SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd -P)"
 CITIZENWALLET_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PLATFORM="${1:?缺少目标平台，用法：$0 <ios|android>}"
+PREPARE_ONLY=false
+if [[ "$PLATFORM" == prepare-ios || "$PLATFORM" == prepare-android ]]; then
+  PREPARE_ONLY=true
+  PLATFORM="${PLATFORM#prepare-}"
+fi
 [[ "$PLATFORM" == ios || "$PLATFORM" == android ]] \
   || { echo "本机目标平台只接受 ios 或 android：$PLATFORM" >&2; exit 1; }
 
@@ -27,6 +32,31 @@ CITIZENWALLET_WORK_DIR="${CITIZENWALLET_WORK_DIR:-${TMPDIR:-/tmp}/citizenwallet/
   echo "citizenwallet本机Build源码身份无效：$CITIZENWALLET_DIR" >&2
   exit 1
 }
+# 远端准备模式仅组装源码外工程；本机仍使用调用方登记的产品工程。
+if [[ "$PREPARE_ONLY" == true && -z "${CITIZENWALLET_PROJECT_ROOT:-}" ]]; then
+  export CITIZENWALLET_PROJECT_ROOT="$CITIZENWALLET_WORK_DIR/source-view"
+  python3 - "$CITIZENWALLET_DIR" "$CITIZENWALLET_PROJECT_ROOT" <<'CREATE_VIEW'
+from pathlib import Path
+import sys
+source = Path(sys.argv[1]).resolve(strict=True)
+target = Path(sys.argv[2])
+if not target.is_absolute() or source == target.resolve() or source in target.resolve().parents or target.exists() or target.is_symlink():
+    raise SystemExit('CitizenWallet新工程必须是源码外空目标')
+excluded = {'.git', '.dart_tool', '.gradle', '.symlinks', 'Pods', 'build', 'target', 'node_modules', 'ephemeral', '.DS_Store', 'swiftpm'}
+generated = {'local.properties', 'Generated.xcconfig', 'flutter_export_environment.sh', '.flutter-plugins-dependencies', 'GeneratedPluginRegistrant.java', 'GeneratedPluginRegistrant.h', 'GeneratedPluginRegistrant.m', 'GeneratedPluginRegistrant.swift'}
+def visit(src, dst):
+    dst.mkdir(parents=True)
+    for child in sorted(src.iterdir()):
+        if child.name in excluded or child.name in generated:
+            continue
+        output = dst / child.name
+        if child.is_dir() and not child.is_symlink():
+            visit(child, output)
+        else:
+            output.symlink_to(child)
+visit(source, target)
+CREATE_VIEW
+fi
 export CITIZENWALLET_PROJECT_ROOT="${CITIZENWALLET_PROJECT_ROOT:?必须提供源码外CitizenWallet Flutter工程根}"
 [[ -d "$CITIZENWALLET_PROJECT_ROOT" && -f "$CITIZENWALLET_PROJECT_ROOT/pubspec.yaml" ]] \
   || { echo 'CitizenWallet Flutter 产品目录无效' >&2; exit 1; }
@@ -46,6 +76,62 @@ for value in sys.argv[2:]:
     if not raw.is_absolute() or target == source or source in target.parents:
         raise SystemExit(f'CitizenWallet可写目录必须是源码外绝对路径：{value}')
 CHECK_OUTPUTS
+# 固定平台布局只装配到本轮工程；逐层拒绝目录链接，禁止生成物回写源目录。
+python3 - "$CITIZENWALLET_DIR" "$CITIZENWALLET_PROJECT_ROOT" "$PLATFORM" "$PREPARE_ONLY" <<'PREPARE_PLATFORM'
+from pathlib import Path
+import os
+import shutil
+import sys
+source = Path(sys.argv[1]).resolve(strict=True)
+project = Path(sys.argv[2])
+if project.resolve() == source or source in project.resolve().parents:
+    raise SystemExit('平台工程不得位于源码中')
+pairs = [('ios/Runner.xcscheme', 'ios/Runner.xcodeproj/xcshareddata/xcschemes/Runner.xcscheme')] if sys.argv[3] == 'ios' else [
+    ('android/gradle-wrapper.properties', 'android/gradle/wrapper/gradle-wrapper.properties'),
+    ('android/settings.gradle.kts', 'android/settings.gradle.kts')]
+# 先完成所有输入验真，避免缺少工具时留下半套平台入口。
+inputs = [(source / origin, destination) for origin, destination in pairs]
+for relative in ('android/gradlew', 'android/gradlew.bat', 'android/gradle'):
+    if (source / relative).exists() or (source / relative).is_symlink():
+        raise SystemExit('产品源码残留Wrapper副本：' + relative)
+if sys.argv[3] == 'android' and sys.argv[4] == 'true':
+    # 远端直接运行Wrapper；原件来自该流程已安装的Flutter，不从产品取得或下载。
+    raw = os.environ.get('FLUTTER_ROOT', '')
+    flutter = Path(raw)
+    if not raw or not flutter.is_absolute() or not flutter.is_dir() or flutter.resolve() != flutter:
+        raise SystemExit('必须提供无链接的Flutter工具根')
+    for name in ('gradlew', 'gradlew.bat', 'gradle/wrapper/gradle-wrapper.jar'):
+        src = flutter / 'bin/cache/artifacts/gradle_wrapper' / name
+        if src.resolve() != src or not src.is_file() or src.stat().st_size == 0:
+            raise SystemExit('Flutter Wrapper原件缺失或为链接：' + name)
+        inputs.append((src, 'android/' + name))
+for src, destination in inputs:
+    dst = project / destination
+    origin = str(src)
+    if not src.is_file() or src.is_symlink():
+        raise SystemExit('缺少普通平台输入：' + origin)
+    parent = dst.parent
+    while parent != project:
+        if parent.is_symlink():
+            raise SystemExit('平台目标祖先不得为链接：' + destination)
+        parent = parent.parent
+    if dst.is_symlink():
+        if dst.resolve(strict=True) != src:
+            raise SystemExit('平台入口来源不符：' + destination)
+        dst.unlink()
+    elif dst.exists():
+        if not dst.is_file() or dst.read_bytes() != src.read_bytes():
+            raise SystemExit('平台入口重复或内容漂移：' + destination)
+        continue
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    if destination == 'android/gradlew':
+        dst.chmod(0o755)
+PREPARE_PLATFORM
+if [[ "$PREPARE_ONLY" == true ]]; then
+  printf '%s\n' "$CITIZENWALLET_PROJECT_ROOT"
+  exit 0
+fi
 # CocoaPods 会改写工程锁文件；先确认工程与工作目录均在源码外，再把
 # 指向源码的锁文件链接原子替换为工程普通文件，禁止本机 Build 回写源码。
 if [[ "$PLATFORM" == ios ]]; then
@@ -140,7 +226,7 @@ build_android_release() {
   java_home="${JAVA_HOME:-/Applications/Android Studio.app/Contents/jbr/Contents/Home}"
   # Wrapper属性仍是产品的Gradle版本真源；调用方给出的工具必须与它完全一致。
   expected_gradle_version="$(sed -nE 's@^distributionUrl=.*gradle-([0-9][0-9.]*)-bin\.zip$@\1@p' \
-    "$CITIZENWALLET_DIR/android/gradle/wrapper/gradle-wrapper.properties")"
+    "$CITIZENWALLET_DIR/android/gradle-wrapper.properties")"
   [[ -n "$expected_gradle_version" ]] || { echo 'Android Gradle版本声明无效' >&2; return 1; }
   actual_gradle_version="$(JAVA_HOME="$java_home" "$gradle_bin" --version | sed -n 's/^Gradle //p' | head -n 1)"
   [[ "$actual_gradle_version" == "$expected_gradle_version" ]] \

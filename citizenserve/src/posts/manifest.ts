@@ -2,7 +2,7 @@ import { resourceLimit } from '../limits/catalog';
 import { HttpError } from '../shared/http';
 import { isSha256Hex, sha256Hex } from '../shared/hash';
 import type { ArticleContentSection, Env, PostType, PreparedUploadRow } from '../types';
-import { manifestObjectKey } from '../storage/r2_keys';
+import { manifestObjectKey } from '../r2_keys';
 
 export interface SquareManifestMediaItem {
   media_kind: 'image' | 'video';

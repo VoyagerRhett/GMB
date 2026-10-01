@@ -4,10 +4,11 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/square_models.dart';
 import 'package:citizenapp/8964/services/square_local_post_presenter.dart';
 import 'package:citizenapp/8964/services/square_post_store.dart';
 import 'package:citizenapp/isar/social_isar.dart';
+import 'package:citizenapp/8964/services/square_media_store.dart';
 
 import '../support/isar_test_env.dart';
 
@@ -36,8 +37,7 @@ Uint8List _manifest({
             'file_name': 'photo.jpg',
             'content_type': 'image/jpeg',
             'byte_size': 1234,
-            'sha256':
-                'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+            'sha256': 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
           },
         ],
       }),
@@ -58,11 +58,8 @@ SquareLocalPost _post({
   int createdAt = 1000,
   String postState = SquarePostStore.publishedState,
 }) {
-  final bytes = manifestBytes ??
-      _manifest(
-        cidNumber: cidNumber,
-        postType: postType,
-      );
+  final bytes =
+      manifestBytes ?? _manifest(cidNumber: cidNumber, postType: postType);
   return SquareLocalPost(
     postId: postId,
     cidNumber: cidNumber,
@@ -84,22 +81,258 @@ void main() {
 
   const store = SquarePostStore();
 
+  test('持久写入、单条及用户删除后按CID通知，失败写入不通知', () async {
+    final notices = <String>[];
+    void listener() => notices.add(SquarePostStore.revision.value!.cidNumber);
+    SquarePostStore.revision.addListener(listener);
+    try {
+      await store.save(_post());
+      await store.save(
+        _post(postId: 'other', cidNumber: _cidB, accountId: _accountB),
+      );
+      await store.delete(cidNumber: _cidA, postId: 'sqp_a');
+      await store.deleteAllByCid(_cidB);
+      expect(notices, [_cidA, _cidB, _cidA, _cidB]);
+      await expectLater(
+        store.save(_post(contentHash: 'invalid')),
+        throwsA(isA<SquarePostStoreException>()),
+      );
+      expect(notices.length, 4);
+    } finally {
+      SquarePostStore.revision.removeListener(listener);
+    }
+  });
+
+  test('删除确认持久保存，晚到同步和重复保存不能复活正文', () async {
+    final post = _post();
+    await store.save(post);
+    await store.recordDeletion(_cidA, post.postId, confirmed: true);
+    await store.delete(cidNumber: _cidA, postId: post.postId);
+    await (await SocialIsar.instance.db()).close();
+    await store.save(post);
+    await store.saveSyncedPage([post], {post.postId: []});
+    expect(await store.listByCid(_cidA), isEmpty);
+    expect(
+      (await store.readDeletion(_cidA, post.postId))!.operationState,
+      'confirmed',
+    );
+  });
+
+  test('帖子删除原子解绑媒体，共享原件保留到最后引用删除', () async {
+    const media = SquareMediaStore();
+    final bytes = Uint8List.fromList([1, 2, 3]);
+    final hash = sha256.convert(bytes).toString();
+    await media.saveStream(
+      SquareStoredMedia(
+        cidNumber: _cidA,
+        mediaId: hash,
+        mediaKind: 'image',
+        contentType: 'image/png',
+        byteSize: bytes.length,
+        sha256: hash,
+      ),
+      Stream.value(bytes),
+    );
+    for (final id in ['first', 'second']) {
+      await store.save(_post(postId: id));
+      await SocialIsar.instance.writeTxn(
+        (db) => SquareMediaStore.replaceReferencesInTransaction(
+          db,
+          cidNumber: _cidA,
+          contentKind: 'post',
+          contentId: id,
+          references: [
+            SquareMediaReference(
+              cidNumber: _cidA,
+              mediaId: hash,
+              contentKind: 'post',
+              contentId: id,
+              mediaIndex: 0,
+              mediaRole: 'main',
+            ),
+          ],
+        ),
+      );
+    }
+    await store.delete(cidNumber: _cidA, postId: 'first');
+    expect(await media.get(cidNumber: _cidA, mediaId: hash), isNotNull);
+    await store.delete(cidNumber: _cidA, postId: 'second');
+    expect(await media.get(cidNumber: _cidA, mediaId: hash), isNull);
+  });
+
+  for (final damage in [false, true]) {
+    test('发布收尾事务${damage ? '失败时保留草稿与恢复事实' : '保存正文与媒体后删除草稿'}', () async {
+      const mediaStore = SquareMediaStore();
+      final content = Uint8List.fromList([1, 2, 3, 4]);
+      final thumb = Uint8List.fromList([5, 6]);
+      Future<String> saveBytes(Uint8List bytes) async {
+        final hash = sha256.convert(bytes).toString();
+        await mediaStore.saveStream(
+          SquareStoredMedia(
+            cidNumber: _cidA,
+            mediaId: hash,
+            mediaKind: 'image',
+            contentType: 'image/webp',
+            byteSize: bytes.length,
+            sha256: hash,
+          ),
+          Stream.value(bytes),
+        );
+        return hash;
+      }
+
+      final mainId = await saveBytes(content);
+      final thumbId = await saveBytes(thumb);
+      final manifest = Uint8List.fromList(
+        utf8.encode(
+          jsonEncode({
+            'schema': SquarePostStore.manifestSchema,
+            'cid_number': _cidA,
+            'post_type': 'document',
+            'text': '已发布正文',
+            'media_items': [
+              {
+                'media_kind': 'image',
+                'content_type': 'image/webp',
+                'byte_size': content.length,
+                'sha256': mainId,
+                'file_name': 'synthetic.webp',
+              },
+            ],
+          }),
+        ),
+      );
+      await SocialIsar.instance.writeTxn((db) async {
+        await db.squareComposeDraftEntitys.put(
+          SquareComposeDraftEntity()
+            ..draftKey =
+                '${_cidA.length}:$_cidA'
+                'draft-publish'
+            ..cidNumber = _cidA
+            ..draftId = 'draft-publish'
+            ..postType = 'document'
+            ..text = '未完成前保留'
+            ..mediaJson = '[]'
+            ..updatedAtMillis = 1000,
+        );
+      });
+      final row = SquarePublicationEntity()
+        ..cidNumber = _cidA
+        ..draftId = 'draft-publish'
+        ..accountId = _accountA
+        ..postId = 'post-published'
+        ..postType = 'document'
+        ..contentHash = sha256.convert(manifest).toString()
+        ..manifestBytes = manifest
+        ..storageReceiptId = 'receipt'
+        ..uploadId = 'upload'
+        ..publicationState = 'prepared';
+      await store.savePublication(
+        row,
+        references: [
+          SquareMediaReference(
+            cidNumber: _cidA,
+            mediaId: mainId,
+            contentKind: 'publication',
+            contentId: row.postId,
+            mediaIndex: 0,
+            mediaRole: 'main',
+          ),
+          SquareMediaReference(
+            cidNumber: _cidA,
+            mediaId: thumbId,
+            contentKind: 'publication',
+            contentId: row.postId,
+            mediaIndex: 0,
+            mediaRole: 'thumbnail',
+          ),
+        ],
+      );
+      row.publicationState = 'submitting';
+      await store.savePublication(row);
+      row
+        ..publicationState = 'finalized'
+        ..transactionHash = 'synthetic-transaction'
+        ..blockHash = 'synthetic-block';
+      await store.savePublication(row);
+      row
+        ..publicationState = 'confirmed'
+        ..postCategory = 'normal'
+        ..createdAt = 1001
+        ..chainBlock = 1;
+      await store.savePublication(row);
+      if (damage) {
+        await SocialIsar.instance.writeTxn(
+          (db) =>
+              db.squareMediaEntitys.deleteByCidNumberMediaId(_cidA, thumbId),
+        );
+        await expectLater(
+          store.save(
+            SquarePostStore.confirmedPublication(row),
+            draftId: row.draftId,
+          ),
+          throwsA(isA<SquarePostStoreException>()),
+        );
+        expect(await store.read(cidNumber: _cidA, postId: row.postId), isNull);
+        expect(
+          (await store.readPublication(_cidA, row.draftId))!.publicationState,
+          'confirmed',
+        );
+      } else {
+        await store.save(
+          SquarePostStore.confirmedPublication(row),
+          draftId: row.draftId,
+        );
+        await (await SocialIsar.instance.db()).close();
+        expect(
+          (await store.read(
+            cidNumber: _cidA,
+            postId: row.postId,
+          ))!.manifestBytes,
+          manifest,
+        );
+        expect(
+          await mediaStore.readRange(
+            cidNumber: _cidA,
+            mediaId: mainId,
+            offset: 0,
+            length: 4,
+          ),
+          content,
+        );
+        expect(await store.readPublication(_cidA, row.draftId), isNull);
+        expect(
+          await mediaStore.referencesForContent(
+            cidNumber: _cidA,
+            contentKind: 'post',
+            contentId: row.postId,
+          ),
+          hasLength(2),
+        );
+      }
+      final draft = await SocialIsar.instance.read(
+        (db) => db.squareComposeDraftEntitys.getByDraftKey(
+          '${_cidA.length}:$_cidA'
+          'draft-publish',
+        ),
+      );
+      expect(draft, damage ? isNotNull : isNull);
+    });
+  }
+
   test('展示转换器只解析正文与媒体声明，不伪造本地媒体 URL', () {
     const presenter = SquareLocalPostPresenter();
-    final presentation = presenter.present(
-      _post(createdAt: 1700000000123),
-    );
+    final presentation = presenter.present(_post(createdAt: 1700000000123));
 
     expect(presentation.post.text, '本人发布的正文');
-    expect(presentation.post.mediaItems, isEmpty);
+    expect(presentation.post.isLocal, isTrue);
     expect(
-      presentation.unavailableMediaKinds,
-      {SquareMediaKind.image},
+      presentation.post.mediaItems.single.mediaKind,
+      SquareMediaKind.image,
     );
-    expect(
-      presentation.post.createdAt.millisecondsSinceEpoch,
-      1700000000123,
-    );
+    expect(presentation.post.mediaItems.single.cidNumber, _cidA);
+    expect(presentation.post.mediaItems.single.url, isEmpty);
+    expect(presentation.post.createdAt.millisecondsSinceEpoch, 1700000000123);
   });
 
   test('展示转换器拒绝缺少首图声明的本地文章', () {
@@ -138,11 +371,7 @@ void main() {
   test('原始 manifest 字节逐字节持久化，Worker 时间和链锚不被改写', () async {
     final bytes = _manifest(text: '含中文与 emoji 🧭');
     await store.save(
-      _post(
-        manifestBytes: bytes,
-        createdAt: 1700000000123,
-        chainBlock: 456,
-      ),
+      _post(manifestBytes: bytes, createdAt: 1700000000123, chainBlock: 456),
     );
 
     final saved = await store.read(cidNumber: _cidA, postId: 'sqp_a');
@@ -193,10 +422,7 @@ void main() {
     final own = await store.listByCid(_cidA);
     expect(own.map((post) => post.postId), ['sqp_a']);
     expect(own.single.manifestBytes, orderedEquals(original.manifestBytes));
-    expect(
-      await store.read(cidNumber: _cidB, postId: 'sqp_a'),
-      isNull,
-    );
+    expect(await store.read(cidNumber: _cidB, postId: 'sqp_a'), isNull);
   });
 
   test('列表只用 Worker created_at 排序，同毫秒按 post_id 稳定排序', () async {
@@ -270,11 +496,7 @@ void main() {
       throwsA(isA<SquarePostStoreException>()),
     );
     expect(
-      () => store.save(
-        _post(
-          manifestBytes: Uint8List.fromList([0xff, 0xfe]),
-        ),
-      ),
+      () => store.save(_post(manifestBytes: Uint8List.fromList([0xff, 0xfe]))),
       throwsA(isA<SquarePostStoreException>()),
     );
     final incomplete = Uint8List.fromList(
@@ -321,14 +543,8 @@ void main() {
       ),
     );
 
-    expect(
-      await store.delete(cidNumber: _cidB, postId: 'sqp_a'),
-      isFalse,
-    );
-    expect(
-      await store.delete(cidNumber: _cidA, postId: 'sqp_a'),
-      isTrue,
-    );
+    expect(await store.delete(cidNumber: _cidB, postId: 'sqp_a'), isFalse);
+    expect(await store.delete(cidNumber: _cidA, postId: 'sqp_a'), isTrue);
     expect(await store.deleteAllByCid(_cidA), 1);
     expect(await store.listByCid(_cidA), isEmpty);
     expect((await store.listByCid(_cidB)).single.postId, 'sqp_other');
@@ -345,12 +561,9 @@ void main() {
     expect(entity!.manifestBytes, isNotEmpty);
     expect(
       SquareLocalPostEntitySchema.properties.keys,
-      isNot(containsAll(<String>[
-        'mediaPath',
-        'mediaUrl',
-        'coverUrl',
-        'cachedAt',
-      ])),
+      isNot(
+        containsAll(<String>['mediaPath', 'mediaUrl', 'coverUrl', 'cachedAt']),
+      ),
     );
   });
 }

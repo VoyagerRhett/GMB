@@ -457,6 +457,10 @@ class _ChatTabState extends State<ChatTab> {
   String _accountId = '';
   bool _loading = true;
   String? _error;
+  bool _needsDataKeys = false;
+  bool _needsDeviceRegistration = false;
+  bool _preparingDataKeys = false;
+  bool _registeringDevice = false;
 
   late final ChatConversationListController _listController;
 
@@ -610,6 +614,8 @@ class _ChatTabState extends State<ChatTab> {
     setState(() {
       _loading = true;
       _error = null;
+      _needsDataKeys = false;
+      _needsDeviceRegistration = false;
     });
     String? serviceAccountId;
     String? serviceCidNumber;
@@ -661,7 +667,12 @@ class _ChatTabState extends State<ChatTab> {
     } catch (error) {
       if (mounted && generation == _reloadGeneration) {
         setState(() {
-          _error = chatUserErrorMessage(error);
+          _needsDataKeys =
+              error is AccountSecurityException &&
+              error.message.startsWith('设备用途钥');
+          _error = _needsDataKeys
+              ? '聊天与通讯录密钥需要首次授权准备'
+              : chatUserErrorMessage(error);
         });
       }
     } finally {
@@ -678,6 +689,22 @@ class _ChatTabState extends State<ChatTab> {
         // 二级页返回只需恢复既有轮询/Realtime，不重复执行首次补发链。
         _configurePolling(serviceAccountId);
       }
+    }
+  }
+
+  /// 仅由明确按钮触发首次用途钥批量派生；页面读取和后台同步绝不进入钱包鉴权。
+  Future<void> _prepareDataKeys() async {
+    final security = _accountSecurity;
+    if (security == null || _accountId.isEmpty || _preparingDataKeys) return;
+    setState(() => _preparingDataKeys = true);
+    try {
+      final binding = await security.accountDataBindingForAccountId(_accountId);
+      await security.ensureDeviceDataKeysForBinding(binding, rebuildAll: true);
+      if (mounted) _requestCoordinate();
+    } on Exception catch (error) {
+      if (mounted) setState(() => _error = '$error');
+    } finally {
+      if (mounted) setState(() => _preparingDataKeys = false);
     }
   }
 
@@ -704,14 +731,35 @@ class _ChatTabState extends State<ChatTab> {
       if (session == null || session.cidNumber.trim() != cidNumber) return;
       _profileSession = session;
       await subscriptionService.authorizeMembership(session);
-    } on Exception {
+    } on Exception catch (error) {
       // 展示仍可复用本地快照，但发送授权必须由本次会话的 CitizenServe 结果确认。
       SubscriptionService.markChatAuthorizationUnavailable(cidNumber);
+      if (error is SquareApiException &&
+          (error.errorCode == 'device_not_registered' ||
+              error.errorCode == 'invalid_signature') &&
+          mounted &&
+          reloadGeneration == _reloadGeneration) {
+        setState(() => _needsDeviceRegistration = true);
+      }
     }
     if (mounted &&
         reloadGeneration == _reloadGeneration &&
         cidNumber == _cidNumber) {
       setState(() {});
+    }
+  }
+
+  Future<void> _registerCurrentDevice() async {
+    final provider = _sessionProvider;
+    if (provider == null || _registeringDevice) return;
+    setState(() => _registeringDevice = true);
+    try {
+      await provider.registerCurrentDevice();
+      if (mounted) _requestCoordinate();
+    } on Exception catch (error) {
+      if (mounted) setState(() => _error = chatUserErrorMessage(error));
+    } finally {
+      if (mounted) setState(() => _registeringDevice = false);
     }
   }
 
@@ -1238,31 +1286,57 @@ class _ChatTabState extends State<ChatTab> {
             description: '注册后即可使用聊天与通讯录。',
             onRegistered: _requestCoordinate,
           )
+        : _needsDataKeys
+        ? Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('聊天与通讯录密钥需要首次授权准备'),
+                const SizedBox(height: 12),
+                FilledButton(
+                  key: const ValueKey('chat-prepare-data-keys'),
+                  onPressed: _preparingDataKeys ? null : _prepareDataKeys,
+                  child: const Text('验证并准备数据密钥'),
+                ),
+              ],
+            ),
+          )
         : null;
     return ChatConversationOverview(
-      header: ChatSectionHeader<_ChatEntryAction>(
-        onAction: _onEntryAction,
-        style: style,
-        actions: [
-          for (final item in _chatEntryItems)
-            ChatHeaderAction<_ChatEntryAction>(
-              value: item.action,
-              label: item.label,
-              icon: item.asset != null
-                  ? SvgPicture.asset(
-                      item.asset!,
-                      width: AppLayout.scaled(context, 18),
-                      height: AppLayout.scaled(context, 18),
-                      colorFilter: const ColorFilter.mode(
-                        Colors.white,
-                        BlendMode.srcIn,
-                      ),
-                    )
-                  : Icon(
-                      item.icon,
-                      size: AppLayout.scaled(context, 20),
-                      color: Colors.white,
-                    ),
+      header: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ChatSectionHeader<_ChatEntryAction>(
+            onAction: _onEntryAction,
+            style: style,
+            actions: [
+              for (final item in _chatEntryItems)
+                ChatHeaderAction<_ChatEntryAction>(
+                  value: item.action,
+                  label: item.label,
+                  icon: item.asset != null
+                      ? SvgPicture.asset(
+                          item.asset!,
+                          width: AppLayout.scaled(context, 18),
+                          height: AppLayout.scaled(context, 18),
+                          colorFilter: const ColorFilter.mode(
+                            Colors.white,
+                            BlendMode.srcIn,
+                          ),
+                        )
+                      : Icon(
+                          item.icon,
+                          size: AppLayout.scaled(context, 20),
+                          color: Colors.white,
+                        ),
+                ),
+            ],
+          ),
+          if (_needsDeviceRegistration)
+            FilledButton(
+              key: const ValueKey('chat-register-device'),
+              onPressed: _registeringDevice ? null : _registerCurrentDevice,
+              child: const Text('验证并登记本机设备'),
             ),
         ],
       ),

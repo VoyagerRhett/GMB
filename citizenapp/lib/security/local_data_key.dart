@@ -76,11 +76,11 @@ class AccountDataBinding {
   }
 
   Map<String, Object> toJson() => <String, Object>{
-        'genesis_hash': genesisHash,
-        'cid_number': cidNumber,
-        'binding_revision': bindingRevision,
-        'account_id': accountId,
-      };
+    'genesis_hash': genesisHash,
+    'cid_number': cidNumber,
+    'binding_revision': bindingRevision,
+    'account_id': accountId,
+  };
 
   static AccountDataBinding? fromJson(String raw) {
     try {
@@ -265,11 +265,13 @@ class AccountDataBindingStore {
   }
 
   Future<
-      ({
-        AccountDataBinding source,
-        AccountDataBinding target,
-        AccountDataHandoverState state,
-      })?> readPendingHandover() async {
+    ({
+      AccountDataBinding source,
+      AccountDataBinding target,
+      AccountDataHandoverState state,
+    })?
+  >
+  readPendingHandover() async {
     final raw = await _store.read(pendingHandoverKey);
     if (raw == null || raw.isEmpty) return null;
     return _decodePendingHandover(raw);
@@ -301,18 +303,18 @@ class AccountDataBindingStore {
     required AccountDataBinding source,
     required AccountDataBinding target,
     required AccountDataHandoverState state,
-  }) =>
-      jsonEncode(<String, Object>{
-        'state': state.name,
-        'source': source.toJson(),
-        'target': target.toJson(),
-      });
+  }) => jsonEncode(<String, Object>{
+    'state': state.name,
+    'source': source.toJson(),
+    'target': target.toJson(),
+  });
 
   static ({
     AccountDataBinding source,
     AccountDataBinding target,
     AccountDataHandoverState state,
-  }) _decodePendingHandover(String raw) {
+  })
+  _decodePendingHandover(String raw) {
     try {
       final value = jsonDecode(raw);
       if (value is! Map<String, dynamic> ||
@@ -353,10 +355,7 @@ class AccountDataBindingStore {
     }
   }
 
-  static bool _sameBinding(
-    AccountDataBinding left,
-    AccountDataBinding right,
-  ) =>
+  static bool _sameBinding(AccountDataBinding left, AccountDataBinding right) =>
       left.genesisHash == right.genesisHash &&
       left.cidNumber == right.cidNumber &&
       left.bindingRevision == right.bindingRevision &&
@@ -414,6 +413,66 @@ class AccountDataBindingStore {
 /// App 只计算公开 salt/info；账户 secret 与 HKDF-SHA256 始终留在 CitizenSDK 金库。
 /// 创世、CID、绑定版本、`account_id` 和用途继续逐字节保持原有业务合同。
 abstract final class AccountDataKeyDeriver {
+  /// 一次 CitizenSDK 金库认证派生缺失用途；每项 salt/info 与单项入口逐字节一致。
+  static Future<List<Uint8List>> deriveBatch({
+    required CitizenSdkWallet wallet,
+    required AccountDataBinding binding,
+    required List<({LocalKeyPurpose purpose, String? context})> requests,
+  }) async {
+    binding.validate();
+    if (requests.isEmpty || requests.length > 16) {
+      throw const AccountDataKeyException('用途钥批次必须包含 1..16 项');
+    }
+    if (wallet is! CitizenSdkWalletBatch) {
+      throw const AccountDataKeyException('CitizenSDK 不支持一次认证批量派生');
+    }
+    final salt = Uint8List.fromList(
+      sha256
+          .convert(
+            utf8.encode(
+              'citizenapp.account-data/binding|${binding.genesisHash}|'
+              '${binding.cidNumber}|${binding.bindingRevision}|${binding.accountId}',
+            ),
+          )
+          .bytes,
+    );
+    final infos = requests
+        .map(
+          (request) => Uint8List.fromList(
+            utf8.encode(
+              request.context == null || request.context!.isEmpty
+                  ? request.purpose.domain
+                  : '${request.purpose.domain}/${request.context}',
+            ),
+          ),
+        )
+        .toList(growable: false);
+    try {
+      final keys = await (wallet as CitizenSdkWalletBatch)
+          .deriveApplicationKeys(
+            accountId: binding.accountId,
+            salt: salt,
+            infos: infos,
+          )
+          .result;
+      if (keys.length != requests.length ||
+          keys.any((key) => key.length != 32)) {
+        for (final key in keys) {
+          key.fillRange(0, key.length, 0);
+        }
+        throw const AccountDataKeyException('批量用途钥结果无效');
+      }
+      return keys;
+    } on CitizenSdkException catch (error) {
+      throw AccountDataKeyException(error.message);
+    } finally {
+      salt.fillRange(0, salt.length, 0);
+      for (final info in infos) {
+        info.fillRange(0, info.length, 0);
+      }
+    }
+  }
+
   static Future<Uint8List> derive({
     required CitizenSdkWallet wallet,
     required AccountDataBinding binding,
@@ -427,16 +486,20 @@ abstract final class AccountDataKeyDeriver {
     );
     final salt = Uint8List.fromList(sha256.convert(saltMaterial).bytes);
     final info = Uint8List.fromList(
-      utf8.encode(context == null || context.isEmpty
-          ? purpose.domain
-          : '${purpose.domain}/$context'),
+      utf8.encode(
+        context == null || context.isEmpty
+            ? purpose.domain
+            : '${purpose.domain}/$context',
+      ),
     );
     try {
-      return await wallet.deriveApplicationKey(
-        accountId: binding.accountId,
-        salt: salt,
-        info: info,
-      ).result;
+      return await wallet
+          .deriveApplicationKey(
+            accountId: binding.accountId,
+            salt: salt,
+            info: info,
+          )
+          .result;
     } on CitizenSdkException catch (error) {
       throw AccountDataKeyException(error.message);
     } finally {
@@ -473,7 +536,7 @@ abstract interface class LocalKeyBlobStore {
 /// 旧 WalletIsar 记录不会被读取或转换。
 final class SecureStorageLocalKeyBlobStore implements LocalKeyBlobStore {
   SecureStorageLocalKeyBlobStore([FlutterSecureStorage? storage])
-      : _storage = storage ?? appSecureStorage;
+    : _storage = storage ?? appSecureStorage;
 
   final FlutterSecureStorage _storage;
   static Future<void> _tail = Future<void>.value();

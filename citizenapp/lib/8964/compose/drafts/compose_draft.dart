@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/square_models.dart';
 
 /// 广场草稿箱的一条草稿；发布类型在创建时固定为公文、文章或视频。
 ///
@@ -64,15 +64,15 @@ class SquareComposeDraft {
   }
 
   Map<String, Object?> toJson() => {
-        'draft_id': draftId,
-        'cid_number': cidNumber,
-        'post_type': postType.workerValue,
-        if (title != null) 'title': title,
-        'text': text,
-        'media': media.map(_mediaToJson).toList(),
-        if (contentSections != null) 'content_sections': contentSections,
-        'updated_at': updatedAtMillis,
-      };
+    'draft_id': draftId,
+    'cid_number': cidNumber,
+    'post_type': postType.workerValue,
+    if (title != null) 'title': title,
+    'text': text,
+    'media': media.map(_mediaToJson).toList(),
+    if (contentSections != null) 'content_sections': contentSections,
+    'updated_at': updatedAtMillis,
+  };
 
   String toJsonString() => jsonEncode(toJson());
 
@@ -95,7 +95,11 @@ class SquareComposeDraft {
     final updatedAt = json['updated_at'] is int
         ? json['updated_at'] as int
         : int.tryParse(json['updated_at']?.toString() ?? '') ?? 0;
-    if (draftId.isEmpty || cidNumber.isEmpty || updatedAt <= 0) {
+    if (draftId.isEmpty ||
+        cidNumber.isEmpty ||
+        updatedAt <= 0 ||
+        rawMedia is! List ||
+        (rawSections != null && rawSections is! List)) {
       throw const FormatException('草稿主键或时间不合法');
     }
     return SquareComposeDraft(
@@ -104,17 +108,17 @@ class SquareComposeDraft {
       postType: _postTypeFromJson(json['post_type']),
       title: json['title']?.toString(),
       text: json['text']?.toString() ?? '',
-      media: rawMedia is List
-          ? rawMedia
-              .whereType<Map<String, dynamic>>()
-              .map(_mediaFromJson)
-              .toList()
-          : const <SquareLocalMediaDraft>[],
+      media: rawMedia.map((item) {
+        if (item is! Map<String, dynamic>) {
+          throw const FormatException('草稿媒体条目损坏');
+        }
+        return _mediaFromJson(item);
+      }).toList(),
       contentSections: rawSections is List
-          ? rawSections
-              .whereType<Map>()
-              .map((e) => e.map((k, v) => MapEntry(k.toString(), v)))
-              .toList()
+          ? rawSections.map((e) {
+              if (e is! Map) throw const FormatException('草稿文章条目损坏');
+              return e.map((k, v) => MapEntry(k.toString(), v));
+            }).toList()
           : null,
       updatedAtMillis: updatedAt,
     );
@@ -128,16 +132,18 @@ class SquareComposeDraft {
   }
 
   static Map<String, Object?> _mediaToJson(SquareLocalMediaDraft draft) => {
-        'media_kind': draft.mediaKind.workerValue,
-        'path': draft.path,
-        'file_name': draft.fileName,
-        'content_type': draft.contentType,
-        'byte_size': draft.byteSize,
-        if (draft.photoManagerAssetId != null)
-          'photo_manager_asset_id': draft.photoManagerAssetId,
-        if (draft.durationSeconds != null)
-          'duration_seconds': draft.durationSeconds,
-      };
+    'media_kind': draft.mediaKind.workerValue,
+    'media_id': draft.mediaId ?? (throw const FormatException('草稿媒体尚未入库')),
+    'file_name': draft.fileName,
+    'content_type': draft.contentType,
+    'byte_size': draft.byteSize,
+    if (draft.width != null) 'width': draft.width,
+    if (draft.height != null) 'height': draft.height,
+    if (draft.photoManagerAssetId != null)
+      'photo_manager_asset_id': draft.photoManagerAssetId,
+    if (draft.durationSeconds != null)
+      'duration_seconds': draft.durationSeconds,
+  };
 
   static SquareLocalMediaDraft _mediaFromJson(Map<String, dynamic> json) {
     final mediaKind = switch (json['media_kind']) {
@@ -147,7 +153,11 @@ class SquareComposeDraft {
     };
     return SquareLocalMediaDraft(
       mediaKind: mediaKind,
-      path: json['path']?.toString() ?? '',
+      // 旧文件草稿仅供用户恢复时核验入库；新写入永不保存 path。
+      path: json['media_id'] == null ? json['path']?.toString() ?? '' : '',
+      mediaId: json['media_id'] as String?,
+      width: json['width'] as int?,
+      height: json['height'] as int?,
       fileName: json['file_name']?.toString() ?? '',
       contentType: json['content_type']?.toString() ?? '',
       byteSize: json['byte_size'] is int
@@ -158,8 +168,8 @@ class SquareComposeDraft {
           : int.tryParse(json['duration_seconds']?.toString() ?? ''),
       photoManagerAssetId:
           json['photo_manager_asset_id']?.toString().trim().isEmpty == false
-              ? json['photo_manager_asset_id']?.toString()
-              : null,
+          ? json['photo_manager_asset_id']?.toString()
+          : null,
     );
   }
 }

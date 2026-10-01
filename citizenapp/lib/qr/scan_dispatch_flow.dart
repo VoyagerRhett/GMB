@@ -348,8 +348,8 @@ Future<void> _completeRegistryHandover({
           current: target,
           previous: previous,
         );
-        // finalized 只完成公开绑定与数据交接；设备数据钥按真实数据缺钥生成，P-256
-        // 子钥只在 Worker 明确报告未登记时登记，禁止在此额外读取目标账户 child。
+        // finalized 只完成公开绑定与数据交接；设备数据钥及 P-256 子钥在明确授权的
+        // 后续动作中准备，禁止在此额外读取目标账户 child。
         await handover.completeFinalizedBinding(target);
         accountSecurity.notifyIdentityBindingChanged();
         return;

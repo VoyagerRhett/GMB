@@ -37,35 +37,51 @@ use crate::{
     validate_output_versioned, wrong_result, MAX_ABI_INPUT_BYTES,
 };
 
-
 /// 载荷字段采用明确struct而不是Value覆盖：serde自动拒绝重复键、缺字段和未知字段。
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PayloadTagFields { op_tag: u8 }
+struct PayloadTagFields {
+    op_tag: u8,
+}
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PayloadActivationFields {
-    cid_number: String, institution_code: String, kind: u8,
-    signer_public_key: String, timestamp: String, nonce: String,
+    cid_number: String,
+    institution_code: String,
+    kind: u8,
+    signer_public_key: String,
+    timestamp: String,
+    nonce: String,
 }
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PayloadDecryptionFields {
-    cid_number: String, signer_public_key: String, timestamp: String, nonce: String,
+    cid_number: String,
+    signer_public_key: String,
+    timestamp: String,
+    nonce: String,
 }
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PayloadEmptyFields {}
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PayloadU64Fields { value: String }
+struct PayloadU64Fields {
+    value: String,
+}
 
 fn payload_fields<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> FfiResult<T> {
     serde_json::from_slice(bytes).map_err(|_| FfiError::invalid("载荷字段结构无效"))
 }
 fn payload_hex<const N: usize>(text: &str) -> FfiResult<[u8; N]> {
-    let raw = text.strip_prefix("0x").ok_or_else(|| FfiError::invalid("载荷字节前缀无效"))?;
-    if raw.len() != N * 2 || !raw.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+    let raw = text
+        .strip_prefix("0x")
+        .ok_or_else(|| FfiError::invalid("载荷字节前缀无效"))?;
+    if raw.len() != N * 2
+        || !raw
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return Err(FfiError::invalid("载荷字节长度或编码无效"));
     }
     let mut result = [0; N];
@@ -76,11 +92,14 @@ fn payload_hex<const N: usize>(text: &str) -> FfiResult<[u8; N]> {
     Ok(result)
 }
 fn payload_u64(text: &str) -> FfiResult<u64> {
-    if text.is_empty() || (text.len() > 1 && text.starts_with('0')) ||
-        !text.bytes().all(|b| b.is_ascii_digit()) {
+    if text.is_empty()
+        || (text.len() > 1 && text.starts_with('0'))
+        || !text.bytes().all(|b| b.is_ascii_digit())
+    {
         return Err(FfiError::invalid("载荷整数必须是规范u64十进制"));
     }
-    text.parse().map_err(|_| FfiError::invalid("载荷整数超出u64"))
+    text.parse()
+        .map_err(|_| FfiError::invalid("载荷整数超出u64"))
 }
 
 fn encode_payload(kind: u32, fields: &[u8], payload: &[u8]) -> FfiResult<Vec<u8>> {
@@ -91,7 +110,10 @@ fn encode_payload(kind: u32, fields: &[u8], payload: &[u8]) -> FfiResult<Vec<u8>
     Ok(match kind {
         1 => {
             let f: PayloadTagFields = payload_fields(fields)?;
-            encode_signing_payload(SigningPayload::Message { op_tag: f.op_tag, scale_payload: payload })?
+            encode_signing_payload(SigningPayload::Message {
+                op_tag: f.op_tag,
+                scale_payload: payload,
+            })?
         }
         2 => {
             let f: PayloadTagFields = payload_fields(fields)?;
@@ -100,21 +122,27 @@ fn encode_payload(kind: u32, fields: &[u8], payload: &[u8]) -> FfiResult<Vec<u8>
         3 => {
             let f: PayloadActivationFields = payload_fields(fields)?;
             encode_signing_payload(SigningPayload::ActivateAdmin {
-                cid_number: &f.cid_number, institution_code: payload_hex(&f.institution_code)?,
-                kind: f.kind, signer_public_key: payload_hex(&f.signer_public_key)?,
-                timestamp: payload_u64(&f.timestamp)?, nonce: payload_hex(&f.nonce)?,
+                cid_number: &f.cid_number,
+                institution_code: payload_hex(&f.institution_code)?,
+                kind: f.kind,
+                signer_public_key: payload_hex(&f.signer_public_key)?,
+                timestamp: payload_u64(&f.timestamp)?,
+                nonce: payload_hex(&f.nonce)?,
             })?
         }
         4 => {
             let f: PayloadDecryptionFields = payload_fields(fields)?;
             encode_signing_payload(SigningPayload::DecryptAdmin {
-                cid_number: &f.cid_number, signer_public_key: payload_hex(&f.signer_public_key)?,
-                timestamp: payload_u64(&f.timestamp)?, nonce: payload_hex(&f.nonce)?,
+                cid_number: &f.cid_number,
+                signer_public_key: payload_hex(&f.signer_public_key)?,
+                timestamp: payload_u64(&f.timestamp)?,
+                nonce: payload_hex(&f.nonce)?,
             })?
         }
         5 => {
             let _: PayloadEmptyFields = payload_fields(fields)?;
-            let text = std::str::from_utf8(payload).map_err(|_| FfiError::invalid("SCALE字符串必须是UTF8"))?;
+            let text = std::str::from_utf8(payload)
+                .map_err(|_| FfiError::invalid("SCALE字符串必须是UTF8"))?;
             encode_signing_payload(SigningPayload::ScaleString(text))?
         }
         6 => {
@@ -130,8 +158,12 @@ fn encode_payload(kind: u32, fields: &[u8], payload: &[u8]) -> FfiResult<Vec<u8>
 /// 输入必须在同步调用期间可读；输出按capacity提供，out_required必须可写。
 #[no_mangle]
 pub unsafe extern "C" fn citizensdk_encode_signing_payload(
-    payload_kind: u32, fields_json: CitizenSdkBytesView, payload_bytes: CitizenSdkBytesView,
-    buffer: *mut u8, capacity: u64, out_required: *mut u64,
+    payload_kind: u32,
+    fields_json: CitizenSdkBytesView,
+    payload_bytes: CitizenSdkBytesView,
+    buffer: *mut u8,
+    capacity: u64,
+    out_required: *mut u64,
 ) -> i32 {
     ffi_status(|| {
         let fields = copy_view(fields_json, "payload fields", 4096)?;
@@ -154,18 +186,27 @@ unsafe fn accept_wallet_change_and_write<F>(
     operation: F,
 ) -> FfiResult<()>
 where
-    F: FnOnce(&Arc<NativeRuntime>, CitizenSdkRequestId, Option<crate::requests::RequestCancellation>)
-        -> FfiResult<ResultPayload> + Send + 'static,
+    F: FnOnce(
+            &Arc<NativeRuntime>,
+            CitizenSdkRequestId,
+            Option<crate::requests::RequestCancellation>,
+        ) -> FfiResult<ResultPayload>
+        + Send
+        + 'static,
 {
     require_output(out_request_id, "out_request_id")?;
     let notification = runtime.reserve_wallet_changed()?;
-    let request_id = crate::requests::accept(runtime, cancellable, move |runtime, request_id, cancellation| {
-        let outcome = operation(runtime, request_id, cancellation);
-        // 槽已预留，正常发送不会QueueFull；dispatcher损坏由既有生命周期处理。
-        // 通知错误不得把已经提交的业务结果改写成“未提交”，诱导宿主重复操作。
-        let _ = runtime.publish_wallet_changed(notification);
-        outcome
-    })?;
+    let request_id = crate::requests::accept(
+        runtime,
+        cancellable,
+        move |runtime, request_id, cancellation| {
+            let outcome = operation(runtime, request_id, cancellation);
+            // 槽已预留，正常发送不会QueueFull；dispatcher损坏由既有生命周期处理。
+            // 通知错误不得把已经提交的业务结果改写成“未提交”，诱导宿主重复操作。
+            let _ = runtime.publish_wallet_changed(notification);
+            outcome
+        },
+    )?;
     ptr::write(out_request_id, request_id);
     Ok(())
 }
@@ -173,12 +214,17 @@ where
 /// 取消必须排空已受理的金库回调；Core在认证后、保存边界重新检查，不能丢弃借用。
 /// 已经完成持久提交时保留成功结果，避免误报取消导致重复添加。
 async fn add_accounts_or_cancellation<F, T>(
-    operation: F, cancellation: Option<crate::requests::RequestCancellation>,
+    operation: F,
+    cancellation: Option<crate::requests::RequestCancellation>,
     cancelled: Arc<AtomicBool>,
 ) -> Result<T, EngineError>
-where F: std::future::Future<Output = Result<T, EngineError>> {
+where
+    F: std::future::Future<Output = Result<T, EngineError>>,
+{
     use futures_util::FutureExt;
-    let Some(cancellation) = cancellation else { return operation.await; };
+    let Some(cancellation) = cancellation else {
+        return operation.await;
+    };
     let operation = operation.fuse();
     let cancellation = cancellation.fuse();
     futures_util::pin_mut!(operation, cancellation);
@@ -236,21 +282,12 @@ mod private_key_view_tests {
         use std::mem::{offset_of, size_of};
         if size_of::<usize>() == 8 {
             assert_eq!(size_of::<CitizenSdkPrivateKeyReceiverV1>(), 40);
-            assert_eq!(
-                offset_of!(CitizenSdkPrivateKeyReceiverV1, struct_size),
-                0
-            );
-            assert_eq!(
-                offset_of!(CitizenSdkPrivateKeyReceiverV1, abi_version),
-                4
-            );
+            assert_eq!(offset_of!(CitizenSdkPrivateKeyReceiverV1, struct_size), 0);
+            assert_eq!(offset_of!(CitizenSdkPrivateKeyReceiverV1, abi_version), 4);
             assert_eq!(offset_of!(CitizenSdkPrivateKeyReceiverV1, context), 8);
             assert_eq!(offset_of!(CitizenSdkPrivateKeyReceiverV1, receive), 16);
             assert_eq!(offset_of!(CitizenSdkPrivateKeyReceiverV1, settled), 24);
-            assert_eq!(
-                offset_of!(CitizenSdkPrivateKeyReceiverV1, authorizing),
-                32
-            );
+            assert_eq!(offset_of!(CitizenSdkPrivateKeyReceiverV1, authorizing), 32);
         }
         let mut view_id = 91;
         let mut request_id = 92;
@@ -280,46 +317,22 @@ mod private_key_view_tests {
                 invalid
             );
             assert_eq!(
-                citizensdk_private_key_open(
-                    0,
-                    &account,
-                    &table,
-                    &mut view_id,
-                    &mut request_id
-                ),
+                citizensdk_private_key_open(0, &account, &table, &mut view_id, &mut request_id),
                 invalid
             );
             table.struct_size = size_of::<CitizenSdkPrivateKeyReceiverV1>() as u32;
             table.abi_version = 2;
             assert_eq!(
-                citizensdk_private_key_open(
-                    0,
-                    &account,
-                    &table,
-                    &mut view_id,
-                    &mut request_id
-                ),
+                citizensdk_private_key_open(0, &account, &table, &mut view_id, &mut request_id),
                 CitizenSdkErrorCode::Unsupported as i32
             );
             table.abi_version = 1;
             assert_eq!(
-                citizensdk_private_key_open(
-                    0,
-                    &account,
-                    &table,
-                    &mut view_id,
-                    &mut request_id
-                ),
+                citizensdk_private_key_open(0, &account, &table, &mut view_id, &mut request_id),
                 invalid
             );
             assert_eq!(
-                citizensdk_private_key_open(
-                    0,
-                    &account,
-                    &table,
-                    ptr::null_mut(),
-                    &mut request_id
-                ),
+                citizensdk_private_key_open(0, &account, &table, ptr::null_mut(), &mut request_id),
                 invalid
             );
         }
@@ -996,7 +1009,12 @@ pub unsafe extern "C" fn citizensdk_validate_wallet_input(
     #[cfg(not(feature = "wallet"))]
     {
         let _ = (input_kind, input, word_count, out_validation);
-        ffi_status(|| Err(FfiError::new(CitizenSdkErrorCode::Unsupported, "当前构建不包含钱包模块")))
+        ffi_status(|| {
+            Err(FfiError::new(
+                CitizenSdkErrorCode::Unsupported,
+                "当前构建不包含钱包模块",
+            ))
+        })
     }
     #[cfg(feature = "wallet")]
     {
@@ -1014,19 +1032,30 @@ pub unsafe extern "C" fn citizensdk_validate_wallet_input(
             let validation = if input.len > MAX_WALLET_SECRET_INPUT_BYTES as u64 {
                 WalletInputValidation::new(WalletInputReason::InputTooLong)
             } else {
-                let bytes = Zeroizing::new(copy_view(input, "wallet input", MAX_WALLET_SECRET_INPUT_BYTES)?);
+                let bytes = Zeroizing::new(copy_view(
+                    input,
+                    "wallet input",
+                    MAX_WALLET_SECRET_INPUT_BYTES,
+                )?);
                 match (std::str::from_utf8(&bytes), selected) {
-                    (Ok(text), Some(count)) => citizen_sdk_engine::wallet_mnemonic_validation(text, count),
+                    (Ok(text), Some(count)) => {
+                        citizen_sdk_engine::wallet_mnemonic_validation(text, count)
+                    }
                     (Ok(text), None) => citizen_sdk_engine::wallet_password_validation(text),
-                    (Err(_), Some(_)) => WalletInputValidation::new(WalletInputReason::MnemonicFormat),
+                    (Err(_), Some(_)) => {
+                        WalletInputValidation::new(WalletInputReason::MnemonicFormat)
+                    }
                     (Err(_), None) => WalletInputValidation::new(WalletInputReason::PasswordFormat),
                 }
             };
-            ptr::write(out_validation, CitizenSdkWalletInputValidationV1 {
-                reason: validation.reason as u32,
-                position: validation.position.map_or(u32::MAX, |index| index as u32),
-                ..CitizenSdkWalletInputValidationV1::default()
-            });
+            ptr::write(
+                out_validation,
+                CitizenSdkWalletInputValidationV1 {
+                    reason: validation.reason as u32,
+                    position: validation.position.map_or(u32::MAX, |index| index as u32),
+                    ..CitizenSdkWalletInputValidationV1::default()
+                },
+            );
             Ok(())
         })
     }
@@ -1243,32 +1272,48 @@ pub unsafe extern "C" fn citizensdk_reorder_wallet_accounts_without_default_chan
 /// # Safety
 /// out_request_id必须可写；返回接纳结果后由正常请求回调交付同次提交快照。
 pub unsafe extern "C" fn citizensdk_set_active_wallet(
-    handle: CitizenSdkHandle, expected_revision: u64, wallet_index: u32,
+    handle: CitizenSdkHandle,
+    expected_revision: u64,
+    wallet_index: u32,
     out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
     #[cfg(not(feature = "wallet"))]
-    { let _ = (handle, expected_revision, wallet_index, out_request_id); ffi_status(|| Err(module_unsupported("wallet"))) }
+    {
+        let _ = (handle, expected_revision, wallet_index, out_request_id);
+        ffi_status(|| Err(module_unsupported("wallet")))
+    }
     #[cfg(feature = "wallet")]
-    { ffi_status(|| {
-        let runtime = handles::get(handle)?;
-        accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
-            runtime.refresh_provider_capabilities()?;
-            let state = runtime.drive(runtime.engine().set_active_wallet(expected_revision, wallet_index))??;
-            Ok(ResultPayload::WalletState(Box::new(state)))
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let state = runtime.drive(
+                    runtime
+                        .engine()
+                        .set_active_wallet(expected_revision, wallet_index),
+                )??;
+                Ok(ResultPayload::WalletState(Box::new(state)))
+            })
         })
-    }) }
+    }
 }
 
 /// 只接受同实例真实成功快照；原记录在接纳前复制，后续释放不悬垂。
-fn inspected_record(owner: CitizenSdkHandle, result: CitizenSdkResultHandle, wallet_index: u32)
-    -> FfiResult<(u64, WalletRecord)>
-{
+fn inspected_record(
+    owner: CitizenSdkHandle,
+    result: CitizenSdkResultHandle,
+    wallet_index: u32,
+) -> FfiResult<(u64, WalletRecord)> {
     let owned = ownership::get(result)?;
     if owned.owner != owner || owned.code != CitizenSdkErrorCode::Ok {
         return Err(FfiError::invalid("检查资源不属于当前实例的成功快照"));
     }
-    let ResultPayload::WalletState(state) = owned.payload else { return Err(wrong_result("wallet state")); };
-    let record = state.diagnostic(wallet_index)
+    let ResultPayload::WalletState(state) = owned.payload else {
+        return Err(wrong_result("wallet state"));
+    };
+    let record = state
+        .diagnostic(wallet_index)
         .ok_or_else(|| FfiError::new(CitizenSdkErrorCode::NotFound, "检查快照中没有该异常钱包"))?;
     Ok((state.revision(), record.clone()))
 }
@@ -1278,21 +1323,29 @@ fn inspected_record(owner: CitizenSdkHandle, result: CitizenSdkResultHandle, wal
 /// # Safety
 /// out_request_id必须可写，inspection须是仍未释放的同实例结果。
 pub unsafe extern "C" fn citizensdk_repair_hot_wallet(
-    handle: CitizenSdkHandle, inspection: CitizenSdkResultHandle, wallet_index: u32,
+    handle: CitizenSdkHandle,
+    inspection: CitizenSdkResultHandle,
+    wallet_index: u32,
     out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
     #[cfg(not(feature = "wallet"))]
-    { let _ = (handle, inspection, wallet_index, out_request_id); ffi_status(|| Err(module_unsupported("wallet"))) }
+    {
+        let _ = (handle, inspection, wallet_index, out_request_id);
+        ffi_status(|| Err(module_unsupported("wallet")))
+    }
     #[cfg(feature = "wallet")]
-    { ffi_status(|| {
-        let runtime = handles::get(handle)?;
-        let (revision, record) = inspected_record(handle, inspection, wallet_index)?;
-        accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
-            runtime.refresh_provider_capabilities()?;
-            let state = runtime.drive(runtime.engine().repair_hot_wallet(revision, record))??;
-            Ok(ResultPayload::WalletState(Box::new(state)))
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            let (revision, record) = inspected_record(handle, inspection, wallet_index)?;
+            accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let state =
+                    runtime.drive(runtime.engine().repair_hot_wallet(revision, record))??;
+                Ok(ResultPayload::WalletState(Box::new(state)))
+            })
         })
-    }) }
+    }
 }
 
 #[no_mangle]
@@ -1300,22 +1353,34 @@ pub unsafe extern "C" fn citizensdk_repair_hot_wallet(
 /// # Safety
 /// name同步可读，out_request_id可写；inspection须在接纳期间有效。
 pub unsafe extern "C" fn citizensdk_rename_diagnostic_wallet(
-    handle: CitizenSdkHandle, inspection: CitizenSdkResultHandle, wallet_index: u32,
-    name: CitizenSdkBytesView, out_request_id: *mut CitizenSdkRequestId,
+    handle: CitizenSdkHandle,
+    inspection: CitizenSdkResultHandle,
+    wallet_index: u32,
+    name: CitizenSdkBytesView,
+    out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
     #[cfg(not(feature = "wallet"))]
-    { let _ = (handle, inspection, wallet_index, name, out_request_id); ffi_status(|| Err(module_unsupported("wallet"))) }
+    {
+        let _ = (handle, inspection, wallet_index, name, out_request_id);
+        ffi_status(|| Err(module_unsupported("wallet")))
+    }
     #[cfg(feature = "wallet")]
-    { ffi_status(|| {
-        let runtime = handles::get(handle)?;
-        let (revision, record) = inspected_record(handle, inspection, wallet_index)?;
-        let name = utf8(name, "wallet name", MAX_WALLET_NAME_BYTES)?;
-        accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
-            runtime.refresh_provider_capabilities()?;
-            let state = runtime.drive(runtime.engine().rename_diagnostic_wallet(revision, record, name))??;
-            Ok(ResultPayload::WalletState(Box::new(state)))
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            let (revision, record) = inspected_record(handle, inspection, wallet_index)?;
+            let name = utf8(name, "wallet name", MAX_WALLET_NAME_BYTES)?;
+            accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let state = runtime.drive(
+                    runtime
+                        .engine()
+                        .rename_diagnostic_wallet(revision, record, name),
+                )??;
+                Ok(ResultPayload::WalletState(Box::new(state)))
+            })
         })
-    }) }
+    }
 }
 
 #[no_mangle]
@@ -1323,21 +1388,29 @@ pub unsafe extern "C" fn citizensdk_rename_diagnostic_wallet(
 /// # Safety
 /// out_request_id可写，inspection在接纳期间有效。
 pub unsafe extern "C" fn citizensdk_delete_diagnostic_wallet(
-    handle: CitizenSdkHandle, inspection: CitizenSdkResultHandle, wallet_index: u32,
+    handle: CitizenSdkHandle,
+    inspection: CitizenSdkResultHandle,
+    wallet_index: u32,
     out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
     #[cfg(not(feature = "wallet"))]
-    { let _ = (handle, inspection, wallet_index, out_request_id); ffi_status(|| Err(module_unsupported("wallet"))) }
+    {
+        let _ = (handle, inspection, wallet_index, out_request_id);
+        ffi_status(|| Err(module_unsupported("wallet")))
+    }
     #[cfg(feature = "wallet")]
-    { ffi_status(|| {
-        let runtime = handles::get(handle)?;
-        let (revision, record) = inspected_record(handle, inspection, wallet_index)?;
-        accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
-            runtime.refresh_provider_capabilities()?;
-            let state = runtime.drive(runtime.engine().delete_diagnostic_wallet(revision, record))??;
-            Ok(ResultPayload::WalletState(Box::new(state)))
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            let (revision, record) = inspected_record(handle, inspection, wallet_index)?;
+            accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let state = runtime
+                    .drive(runtime.engine().delete_diagnostic_wallet(revision, record))??;
+                Ok(ResultPayload::WalletState(Box::new(state)))
+            })
         })
-    }) }
+    }
 }
 
 #[no_mangle]
@@ -1346,21 +1419,39 @@ pub unsafe extern "C" fn citizensdk_delete_diagnostic_wallet(
 /// # Safety
 /// name指向可读UTF8字节，out_request_id必须可写。
 pub unsafe extern "C" fn citizensdk_rename_wallet(
-    handle: CitizenSdkHandle, expected_revision: u64, wallet_index: u32,
-    name: CitizenSdkBytesView, out_request_id: *mut CitizenSdkRequestId,
+    handle: CitizenSdkHandle,
+    expected_revision: u64,
+    wallet_index: u32,
+    name: CitizenSdkBytesView,
+    out_request_id: *mut CitizenSdkRequestId,
 ) -> i32 {
     #[cfg(not(feature = "wallet"))]
-    { let _ = (handle, expected_revision, wallet_index, name, out_request_id); ffi_status(|| Err(module_unsupported("wallet"))) }
+    {
+        let _ = (
+            handle,
+            expected_revision,
+            wallet_index,
+            name,
+            out_request_id,
+        );
+        ffi_status(|| Err(module_unsupported("wallet")))
+    }
     #[cfg(feature = "wallet")]
-    { ffi_status(|| {
-        let runtime = handles::get(handle)?;
-        let name = utf8(name, "wallet name", MAX_WALLET_NAME_BYTES)?;
-        accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
-            runtime.refresh_provider_capabilities()?;
-            let state = runtime.drive(runtime.engine().rename_wallet(expected_revision, wallet_index, name))??;
-            Ok(ResultPayload::WalletState(Box::new(state)))
+    {
+        ffi_status(|| {
+            let runtime = handles::get(handle)?;
+            let name = utf8(name, "wallet name", MAX_WALLET_NAME_BYTES)?;
+            accept_wallet_change_and_write(runtime, out_request_id, false, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let state = runtime.drive(runtime.engine().rename_wallet(
+                    expected_revision,
+                    wallet_index,
+                    name,
+                ))??;
+                Ok(ResultPayload::WalletState(Box::new(state)))
+            })
         })
-    }) }
+    }
 }
 
 #[no_mangle]
@@ -1693,17 +1784,26 @@ pub unsafe extern "C" fn citizensdk_add_wallet_accounts(
                 secret_buffer(mnemonic, "wallet mnemonic", MAX_WALLET_SECRET_INPUT_BYTES)?;
             let password = secret_utf8(password, "wallet password", MAX_WALLET_SECRET_INPUT_BYTES)?;
             let indices = copy_indices(indices, index_count)?;
-            accept_wallet_change_and_write(runtime, out_request_id, true, move |runtime, request_id, cancellation| {
-                runtime.refresh_provider_capabilities()?;
-                let cancelled = runtime.request_cancellation_flag(request_id)?;
-                let profile = runtime.drive(add_accounts_or_cancellation(
-                    runtime
-                        .engine()
-                        .add_wallet_accounts(mnemonic, password, indices, Arc::clone(&cancelled)),
-                    cancellation, cancelled,
-                ))??;
-                Ok(ResultPayload::WalletProfile(Some(profile)))
-            })
+            accept_wallet_change_and_write(
+                runtime,
+                out_request_id,
+                true,
+                move |runtime, request_id, cancellation| {
+                    runtime.refresh_provider_capabilities()?;
+                    let cancelled = runtime.request_cancellation_flag(request_id)?;
+                    let profile = runtime.drive(add_accounts_or_cancellation(
+                        runtime.engine().add_wallet_accounts(
+                            mnemonic,
+                            password,
+                            indices,
+                            Arc::clone(&cancelled),
+                        ),
+                        cancellation,
+                        cancelled,
+                    ))??;
+                    Ok(ResultPayload::WalletProfile(Some(profile)))
+                },
+            )
         })
     }
 }
@@ -1728,14 +1828,28 @@ pub unsafe extern "C" fn citizensdk_add_next_wallet_account(
     {
         ffi_status(|| {
             let runtime = handles::get(handle)?;
-            let mnemonic = secret_buffer(mnemonic, "wallet mnemonic", MAX_WALLET_SECRET_INPUT_BYTES)?;
+            let mnemonic =
+                secret_buffer(mnemonic, "wallet mnemonic", MAX_WALLET_SECRET_INPUT_BYTES)?;
             let password = secret_utf8(password, "wallet password", MAX_WALLET_SECRET_INPUT_BYTES)?;
-            accept_wallet_change_and_write(runtime, out_request_id, true, move |runtime, request_id, cancellation| {
-                runtime.refresh_provider_capabilities()?;
-                let cancelled = runtime.request_cancellation_flag(request_id)?;
-                let profile = runtime.drive(add_accounts_or_cancellation(runtime.engine().add_next_wallet_account(mnemonic, password, Arc::clone(&cancelled)), cancellation, cancelled))??;
-                Ok(ResultPayload::WalletProfile(Some(profile)))
-            })
+            accept_wallet_change_and_write(
+                runtime,
+                out_request_id,
+                true,
+                move |runtime, request_id, cancellation| {
+                    runtime.refresh_provider_capabilities()?;
+                    let cancelled = runtime.request_cancellation_flag(request_id)?;
+                    let profile = runtime.drive(add_accounts_or_cancellation(
+                        runtime.engine().add_next_wallet_account(
+                            mnemonic,
+                            password,
+                            Arc::clone(&cancelled),
+                        ),
+                        cancellation,
+                        cancelled,
+                    ))??;
+                    Ok(ResultPayload::WalletProfile(Some(profile)))
+                },
+            )
         })
     }
 }
@@ -2014,6 +2128,65 @@ pub unsafe extern "C" fn citizensdk_derive_application_key(
                         .derive_application_key(account_id, salt, info),
                 )??;
                 Ok(ResultPayload::ApplicationKey(Arc::new(key)))
+            })
+        })
+    }
+}
+
+#[no_mangle]
+/// Derives 1..16 independent 32-byte application keys in one vault authorization.
+///
+/// # Safety
+/// `infos` must point to `info_count` valid views; all other pointers follow the ordinary ABI.
+pub unsafe extern "C" fn citizensdk_derive_application_keys(
+    handle: CitizenSdkHandle,
+    account_id: *const CitizenSdkAccountId,
+    salt: CitizenSdkBytesView,
+    infos: *const CitizenSdkBytesView,
+    info_count: u32,
+    out_request_id: *mut CitizenSdkRequestId,
+) -> i32 {
+    #[cfg(not(all(feature = "wallet", feature = "signing")))]
+    {
+        let _ = (handle, account_id, salt, infos, info_count, out_request_id);
+        ffi_status(|| {
+            Err(FfiError::new(
+                CitizenSdkErrorCode::Unsupported,
+                "当前构建不包含所需模块",
+            ))
+        })
+    }
+    #[cfg(all(feature = "wallet", feature = "signing"))]
+    {
+        ffi_status(|| {
+            if !(1..=16).contains(&info_count) || infos.is_null() {
+                return Err(FfiError::invalid(
+                    "application key info count must be 1..16",
+                ));
+            }
+            let runtime = handles::get(handle)?;
+            let account_id = account_id_from_pointer(account_id, "account_id")?;
+            let salt: [u8; 32] = copy_view(salt, "application key salt", 32)?
+                .try_into()
+                .map_err(|_| FfiError::invalid("application key salt must be 32 bytes"))?;
+            let mut copied = Vec::with_capacity(info_count as usize);
+            for view in std::slice::from_raw_parts(infos, info_count as usize) {
+                let info = copy_view(*view, "application key info", 256)?;
+                if info.is_empty() {
+                    return Err(FfiError::invalid(
+                        "application key info must contain 1..256 bytes",
+                    ));
+                }
+                copied.push(info);
+            }
+            accept_and_write(runtime, out_request_id, move |runtime, _, _| {
+                runtime.refresh_provider_capabilities()?;
+                let keys = runtime.drive(
+                    runtime
+                        .engine()
+                        .derive_application_keys(account_id, salt, copied),
+                )??;
+                Ok(ResultPayload::ApplicationKeys(Arc::new(keys)))
             })
         })
     }
@@ -2604,7 +2777,8 @@ pub unsafe extern "C" fn citizensdk_result_get_wallet_state(
 /// # Safety
 /// out_retained_result可写；错误不修改输出，输入结果在同步调用期间有效。
 pub unsafe extern "C" fn citizensdk_wallet_state_retain(
-    handle: CitizenSdkHandle, result: CitizenSdkResultHandle,
+    handle: CitizenSdkHandle,
+    result: CitizenSdkResultHandle,
     out_retained_result: *mut CitizenSdkResultHandle,
 ) -> i32 {
     ffi_status(|| {
@@ -2616,9 +2790,13 @@ pub unsafe extern "C" fn citizensdk_wallet_state_retain(
 }
 
 /// 投影只取成功WalletState，不用错误结果或另一类型伪造空目录。
-fn diagnostic_state(result: CitizenSdkResultHandle) -> FfiResult<Box<citizen_sdk_engine::WalletStateSnapshot>> {
+fn diagnostic_state(
+    result: CitizenSdkResultHandle,
+) -> FfiResult<Box<citizen_sdk_engine::WalletStateSnapshot>> {
     let owned = ownership::get(result)?;
-    if owned.code != CitizenSdkErrorCode::Ok { return Err(wrong_result("successful wallet state")); }
+    if owned.code != CitizenSdkErrorCode::Ok {
+        return Err(wrong_result("successful wallet state"));
+    }
     match owned.payload {
         ResultPayload::WalletState(state) => Ok(state),
         _ => Err(wrong_result("wallet state")),
@@ -2630,7 +2808,8 @@ fn diagnostic_state(result: CitizenSdkResultHandle) -> FfiResult<Box<citizen_sdk
 /// # Safety
 /// out_count可写，错误不修改输出。
 pub unsafe extern "C" fn citizensdk_wallet_state_get_diagnostic_count(
-    result: CitizenSdkResultHandle, out_count: *mut u32,
+    result: CitizenSdkResultHandle,
+    out_count: *mut u32,
 ) -> i32 {
     ffi_status(|| {
         require_output(out_count, "diagnostic count")?;
@@ -2646,29 +2825,41 @@ pub unsafe extern "C" fn citizensdk_wallet_state_get_diagnostic_count(
 /// # Safety
 /// out_info须预置完整size/version并可写；错误不部分写入。
 pub unsafe extern "C" fn citizensdk_wallet_state_get_diagnostic_at(
-    result: CitizenSdkResultHandle, index: u32, out_info: *mut CitizenSdkWalletDiagnosticInfoV1,
+    result: CitizenSdkResultHandle,
+    index: u32,
+    out_info: *mut CitizenSdkWalletDiagnosticInfoV1,
 ) -> i32 {
     ffi_status(|| {
         validate_output_versioned(out_info, "wallet diagnostic info")?;
         let state = diagnostic_state(result)?;
-        let record = state.diagnostics().get(index as usize)
+        let record = state
+            .diagnostics()
+            .get(index as usize)
             .ok_or_else(|| FfiError::invalid("异常记录索引越界"))?;
-        let reason = record.diagnostic_reason().ok_or_else(|| FfiError::internal("正常记录不能进入诊断"))?;
+        let reason = record
+            .diagnostic_reason()
+            .ok_or_else(|| FfiError::internal("正常记录不能进入诊断"))?;
         // 这里只容纳记录自身无法证明精确目标的情况；没有平台查询或被吞掉的宿主错误。
         let cleanup = record.cleanup_targets().ok();
-        ptr::write(out_info, CitizenSdkWalletDiagnosticInfoV1 {
-            wallet_index: record.wallet_index(), diagnostic_reason: reason as u32,
-            has_ss58_address: u32::from(record.ss58_address().is_some()),
-            sign_mode: match record.known_sign_mode() {
-                Some(WalletSignMode::Hot) => 1, Some(WalletSignMode::Cold) => 2, None => 0,
+        ptr::write(
+            out_info,
+            CitizenSdkWalletDiagnosticInfoV1 {
+                wallet_index: record.wallet_index(),
+                diagnostic_reason: reason as u32,
+                has_ss58_address: u32::from(record.ss58_address().is_some()),
+                sign_mode: match record.known_sign_mode() {
+                    Some(WalletSignMode::Hot) => 1,
+                    Some(WalletSignMode::Cold) => 2,
+                    None => 0,
+                },
+                account_id: account_id_to_abi(record.account_id()),
+                wallet_name_len: record.wallet_name().len() as u64,
+                ss58_address_len: record.ss58_address().map_or(0, str::len) as u64,
+                cleanup_account_count: cleanup.as_ref().map_or(0, |(ids, _)| ids.len() as u32),
+                delete_wallet_wide_key: cleanup.as_ref().map_or(0, |(_, wide)| u32::from(*wide)),
+                ..CitizenSdkWalletDiagnosticInfoV1::default()
             },
-            account_id: account_id_to_abi(record.account_id()),
-            wallet_name_len: record.wallet_name().len() as u64,
-            ss58_address_len: record.ss58_address().map_or(0, str::len) as u64,
-            cleanup_account_count: cleanup.as_ref().map_or(0, |(ids, _)| ids.len() as u32),
-            delete_wallet_wide_key: cleanup.as_ref().map_or(0, |(_, wide)| u32::from(*wide)),
-            ..CitizenSdkWalletDiagnosticInfoV1::default()
-        });
+        );
         Ok(())
     })
 }
@@ -2678,15 +2869,22 @@ pub unsafe extern "C" fn citizensdk_wallet_state_get_diagnostic_at(
 /// # Safety
 /// out_account_id可写；没有可信目标、越界、错类型和已释放结果均不改输出。
 pub unsafe extern "C" fn citizensdk_wallet_state_get_diagnostic_cleanup_account(
-    result: CitizenSdkResultHandle, index: u32, account_index: u32, out_account_id: *mut CitizenSdkAccountId,
+    result: CitizenSdkResultHandle,
+    index: u32,
+    account_index: u32,
+    out_account_id: *mut CitizenSdkAccountId,
 ) -> i32 {
     ffi_status(|| {
         require_output(out_account_id, "diagnostic cleanup account")?;
         let state = diagnostic_state(result)?;
-        let record = state.diagnostics().get(index as usize)
+        let record = state
+            .diagnostics()
+            .get(index as usize)
             .ok_or_else(|| FfiError::invalid("异常记录索引越界"))?;
         let (ids, _) = record.cleanup_targets()?;
-        let id = ids.get(account_index as usize).ok_or_else(|| FfiError::invalid("清理账户索引越界"))?;
+        let id = ids
+            .get(account_index as usize)
+            .ok_or_else(|| FfiError::invalid("清理账户索引越界"))?;
         ptr::write(out_account_id, account_id_to_abi(*id));
         Ok(())
     })
@@ -2697,13 +2895,19 @@ pub unsafe extern "C" fn citizensdk_wallet_state_get_diagnostic_cleanup_account(
 /// # Safety
 /// buffer/capacity遵守长度查询合同，out_required必须可写。
 pub unsafe extern "C" fn citizensdk_wallet_state_copy_diagnostic_text(
-    result: CitizenSdkResultHandle, index: u32, field: u32,
-    buffer: *mut u8, capacity: u64, out_required: *mut u64,
+    result: CitizenSdkResultHandle,
+    index: u32,
+    field: u32,
+    buffer: *mut u8,
+    capacity: u64,
+    out_required: *mut u64,
 ) -> i32 {
     ffi_status(|| {
         require_output(out_required, "diagnostic text required")?;
         let state = diagnostic_state(result)?;
-        let record = state.diagnostics().get(index as usize)
+        let record = state
+            .diagnostics()
+            .get(index as usize)
             .ok_or_else(|| FfiError::invalid("异常记录索引越界"))?;
         let bytes = match field {
             1 => record.wallet_name().as_bytes(),
@@ -2721,13 +2925,17 @@ pub unsafe extern "C" fn citizensdk_wallet_state_copy_diagnostic_text(
 /// # Safety
 /// 两个输出均可写，错误时不修改任何一个输出。
 pub unsafe extern "C" fn citizensdk_wallet_state_get_active_wallet(
-    result: CitizenSdkResultHandle, out_present: *mut u8, out_wallet_index: *mut u32,
+    result: CitizenSdkResultHandle,
+    out_present: *mut u8,
+    out_wallet_index: *mut u32,
 ) -> i32 {
     ffi_status(|| {
         require_output(out_present, "active wallet present")?;
         require_output(out_wallet_index, "active wallet index")?;
         let owned = ownership::get(result)?;
-        let ResultPayload::WalletState(state) = &owned.payload else { return Err(wrong_result("wallet state")); };
+        let ResultPayload::WalletState(state) = &owned.payload else {
+            return Err(wrong_result("wallet state"));
+        };
         let selection = state.active_wallet_index();
         ptr::write(out_present, u8::from(selection.is_some()));
         ptr::write(out_wallet_index, selection.unwrap_or_default());
@@ -2741,7 +2949,10 @@ pub unsafe extern "C" fn citizensdk_wallet_state_get_active_wallet(
 /// # Safety
 /// buffer/capacity遵守长度查询合同，out_required可写；输出不足时不写任何输出。
 pub unsafe extern "C" fn citizensdk_wallet_profile_copy_name(
-    result: CitizenSdkResultHandle, buffer: *mut u8, capacity: u64, out_required: *mut u64,
+    result: CitizenSdkResultHandle,
+    buffer: *mut u8,
+    capacity: u64,
+    out_required: *mut u64,
 ) -> i32 {
     ffi_status(|| {
         require_output(out_required, "wallet name required")?;
@@ -2774,7 +2985,10 @@ pub unsafe extern "C" fn citizensdk_wallet_state_get_initialization(
         let ResultPayload::WalletState(state) = &owned.payload else {
             return Err(wrong_result("wallet state"));
         };
-        ptr::write(out_initialization_state, state.initialization_state() as u32);
+        ptr::write(
+            out_initialization_state,
+            state.initialization_state() as u32,
+        );
         ptr::write(out_cleanup_pending, u8::from(state.cleanup_pending()));
         Ok(())
     })
@@ -3126,6 +3340,38 @@ pub unsafe extern "C" fn citizensdk_result_get_application_key(
                 ));
             }
             ptr::copy_nonoverlapping(bytes.as_ptr(), out_key_32, 32);
+            Ok(())
+        })
+    })
+}
+
+#[no_mangle]
+/// Copies exactly one indexed key from the zeroizing batch result.
+///
+/// # Safety
+/// `out_key_32` must be writable for 32 bytes; the caller clears its copy.
+pub unsafe extern "C" fn citizensdk_result_get_application_key_at(
+    result: CitizenSdkResultHandle,
+    index: u32,
+    out_key_32: *mut u8,
+) -> i32 {
+    ffi_status(|| {
+        require_output(out_key_32, "out_key_32")?;
+        let owned = ownership::get(result)?;
+        let ResultPayload::ApplicationKeys(keys) = owned.payload else {
+            return Err(wrong_result("application keys"));
+        };
+        keys.with_secret(|bytes| {
+            let start = (index as usize)
+                .checked_mul(32)
+                .ok_or_else(|| FfiError::invalid("application key index is invalid"))?;
+            let end = start
+                .checked_add(32)
+                .ok_or_else(|| FfiError::invalid("application key index is invalid"))?;
+            if bytes.len() % 32 != 0 || end > bytes.len() {
+                return Err(FfiError::invalid("application key index is invalid"));
+            }
+            ptr::copy_nonoverlapping(bytes[start..end].as_ptr(), out_key_32, 32);
             Ok(())
         })
     })

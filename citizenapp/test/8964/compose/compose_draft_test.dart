@@ -1,12 +1,13 @@
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:citizenapp/8964/compose/drafts/compose_draft.dart';
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/square_models.dart';
 
 SquareLocalMediaDraft _media(SquareMediaKind kind, String name) =>
     SquareLocalMediaDraft(
       mediaKind: kind,
-      path: '/drafts/$name',
+      path: '/temporary/$name',
+      mediaId: 'stored-$name',
       fileName: name,
       contentType: kind == SquareMediaKind.video ? 'video/mp4' : 'image/jpeg',
       byteSize: 100,
@@ -23,9 +24,10 @@ void main() {
         text: '正文',
         media: [
           _media(SquareMediaKind.image, 'cover.jpg'),
-          _media(SquareMediaKind.image, 'inline.jpg').copyWith(
-            photoManagerAssetId: 'ios-or-android-photo-asset-id',
-          ),
+          _media(
+            SquareMediaKind.image,
+            'inline.jpg',
+          ).copyWith(photoManagerAssetId: 'ios-or-android-photo-asset-id'),
         ],
         contentSections: const [
           {
@@ -44,6 +46,9 @@ void main() {
       expect(restored.title, '论社区自治');
       expect(restored.media.length, 2);
       expect(restored.media[1].fileName, 'inline.jpg');
+      expect(restored.media[1].mediaId, 'stored-inline.jpg');
+      expect(restored.media[1].path, isEmpty);
+      expect(draft.toJsonString(), isNot(contains('/temporary/')));
       expect(
         restored.media[1].photoManagerAssetId,
         'ios-or-android-photo-asset-id',
@@ -64,15 +69,14 @@ void main() {
       SquareComposeDraft draft({
         required SquarePostType postType,
         List<SquareLocalMediaDraft> media = const [],
-      }) =>
-          SquareComposeDraft(
-            draftId: 'd',
-            cidNumber: 'CN001-CTZN-100000001-2026',
-            postType: postType,
-            text: 't',
-            media: media,
-            updatedAtMillis: 1,
-          );
+      }) => SquareComposeDraft(
+        draftId: 'd',
+        cidNumber: 'CN001-CTZN-100000001-2026',
+        postType: postType,
+        text: 't',
+        media: media,
+        updatedAtMillis: 1,
+      );
 
       expect(
         draft(
@@ -88,12 +92,7 @@ void main() {
         ).typeLabel,
         '视频',
       );
-      expect(
-        draft(
-          postType: SquarePostType.article,
-        ).typeLabel,
-        '文章',
-      );
+      expect(draft(postType: SquarePostType.article).typeLabel, '文章');
     });
 
     test('文章摘要优先标题；空内容 isEmpty', () {

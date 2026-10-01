@@ -1,6 +1,7 @@
+import 'package:citizenapp/8964/widgets/square_media_grid.dart';
 import 'package:flutter/material.dart';
 
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/square_models.dart';
 import 'package:citizenapp/8964/widgets/square_post_actions.dart';
 import 'package:citizenapp/8964/widgets/square_post_header.dart';
 import 'package:citizenapp/ui/app_theme.dart';
@@ -76,24 +77,13 @@ class SquareArticleCard extends StatelessWidget {
                   ),
                 ),
               ],
-              if (cover != null && cover.url.isNotEmpty) ...[
+              if (cover != null && (cover.isLocal || cover.url.isNotEmpty)) ...[
                 SizedBox(height: AppLayout.scaled(context, 12)),
                 ClipRRect(
                   borderRadius: BorderRadius.circular(AppTheme.radiusMd),
                   child: AspectRatio(
                     aspectRatio: 16 / 9,
-                    child: Image.network(
-                      cover.url,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, _, _) => ColoredBox(
-                        color: AppTheme.surfaceElevated,
-                        child: Center(
-                          child: Icon(Icons.image_rounded,
-                              size: AppLayout.scaled(context, 42),
-                              color: AppTheme.textTertiary),
-                        ),
-                      ),
-                    ),
+                    child: SquareMediaImage(item: cover, preview: true),
                   ),
                 ),
               ],

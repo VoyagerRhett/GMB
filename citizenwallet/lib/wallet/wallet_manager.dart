@@ -7,7 +7,7 @@ import 'package:citizenwallet/wallet/wallet_mini_secret.dart';
 import 'package:isar_community/isar.dart';
 import 'package:polkadart_keyring/polkadart_keyring.dart';
 import 'package:citizenwallet/wallet/native_sr25519.dart';
-import 'package:citizenwallet/chain/chain_constants.dart';
+import 'package:citizenwallet/chain_constants.dart';
 import 'package:citizenwallet/isar/wallet_isar.dart';
 import 'package:citizenwallet/qr/qr_protocols.dart';
 import 'package:citizenwallet/security/account_data_key_provision.dart';

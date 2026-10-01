@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 import 'package:citizen_sdk/citizen_sdk.dart';
-import 'package:citizen_sdk/src/crypto/account_codec.dart';
+import 'package:citizen_sdk/src/account_codec.dart';
 import 'package:citizen_sdk/src/platform/citizen_sdk_flutter_codec.dart';
 import 'package:citizen_sdk/src/platform/citizen_sdk_platform.dart';
 import 'package:flutter_test/flutter_test.dart';

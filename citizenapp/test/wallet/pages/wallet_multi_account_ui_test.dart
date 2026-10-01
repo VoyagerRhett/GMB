@@ -10,6 +10,7 @@ import 'package:citizenapp/wallet/pages/account_detail_page.dart';
 import 'package:citizenapp/my/myid/current_user_context.dart';
 import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
 import 'package:citizenapp/my/myid/citizen_identity_chain_reader.dart';
+import 'package:citizenapp/my/myid/identity_badge_snapshot_store.dart';
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/qr/pages/qr_scan_page.dart';
 import 'package:citizenapp/qr/pages/qr_sign_session_page.dart';
@@ -66,7 +67,9 @@ class _Security implements AccountSecurityService {
 }
 
 // 只替身现有服务公开结果，不复制身份规则或建立聊天/广场运行态。
-class _CurrentUser extends Fake implements CurrentUserContext {}
+class _CurrentUser extends Fake implements CurrentUserContext {
+  @override Future<CurrentUser?> resolve() async => null;
+}
 class _Sessions extends Fake implements SquareSessionProvider {}
 class _Resolver extends Fake implements FinalizedIdentityResolver {
   @override Future<FinalizedIdentity?> resolve() async =>
@@ -144,14 +147,22 @@ void _disposeWidgetBeforeStores(WidgetTester tester) {
   addTearDown(() async {
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
-    // 沿历史测试的真实lease排空条件等待，不恢复旧ChainTxMonitor或固定sleep猜时机。
-    for (var i = 0; i < 50 && WalletIsar.instance.hasActiveOperation; i++) {
-      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
-      await tester.pump();
-    }
-    expect(WalletIsar.instance.hasActiveOperation, isFalse,
-      reason: '详情页面销毁后的原生查询和watch lease必须先排空再清隔离库');
+    await _drainStoreOperations(tester);
   });
+}
+
+Future<void> _drainStoreOperations(WidgetTester tester) async {
+  // 钱包余额与身份徽标分别读取 Wallet/User；页面销毁不能取消已进入原生库的查询。
+  // 同时推进原生 I/O 和 Widget 虚拟时钟，排空两域操作后才允许隔离夹具关闭数据库。
+  for (var i = 0; i < 50 &&
+      (WalletIsar.instance.hasActiveOperation || UserIsar.instance.hasActiveOperation); i++) {
+    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+    await tester.pump(const Duration(milliseconds: 20));
+  }
+  expect(WalletIsar.instance.hasActiveOperation, isFalse,
+    reason: '页面销毁后的钱包查询和 watch lease 必须先排空再清隔离库');
+  expect(UserIsar.instance.hasActiveOperation, isFalse,
+    reason: '页面销毁后的本地身份查询必须先排空再清隔离库');
 }
 
 Future<void> _pumpUntil(WidgetTester tester, bool Function() done) async {
@@ -188,15 +199,18 @@ void main() {
     await AppIsar.instance.db();
     _snapshotLoader = () async => _coldWalletSnapshot();
     var inspectionSequence = 0;
+    CitizenWalletState? inspectedSnapshot;
     _transport = TestCitizenSdkTransport({
       'inspectWallets': (_) async {
         final snapshot = await _snapshotLoader();
+        inspectedSnapshot = snapshot;
         return ['inspection-${++inspectionSequence}', _stateTuple(snapshot)];
       },
       'releaseWalletInspection': (_) => [],
       'qrEncode': (_) => [29, 29, Uint8List(29 * 29)..fillRange(0, 29 * 29, 255)],
       'getAccountBalance': (fields) => [[fields[0], ['0x${'00' * 32}', '1', 'finalized'], '100', '0', '100']],
-      'getWalletState': (_) async => [_stateTuple(await _snapshotLoader())],
+      // SDK普通状态读取复用已取得的目录事实，不能消费UI检查的下一次请求或并发闸门。
+      'getWalletState': (_) => [_stateTuple(inspectedSnapshot ?? _coldWalletSnapshot())],
       'getAccountBalances': (fields) => [
         [
           for (final id in fields[0] as List) [
@@ -211,6 +225,25 @@ void main() {
     await _sdk.close();
     await _transport.dispose();
     _security.revision.dispose();
+  });
+
+  testWidgets('页面退出排空仍在运行的本地身份查询，即使钱包库已空闲', (tester) async {
+    _disposeWidgetBeforeStores(tester);
+    final release = Completer<void>();
+    final pending = UserIsar.instance.read<void>((_) => release.future);
+    Timer? timer;
+    try {
+      // 队列可能先等待真实setUp区域的Future；不能把一次pump当作已经进入操作。
+      await _pumpUntil(tester, () => UserIsar.instance.hasActiveOperation);
+      expect(WalletIsar.instance.hasActiveOperation, isFalse);
+      timer = Timer(const Duration(milliseconds: 40), () => release.complete());
+      await _drainStoreOperations(tester);
+      await pending;
+    } finally {
+      timer?.cancel();
+      if (!release.isCompleted) release.complete();
+      await tester.pump();
+    }
   });
 
   for (final selectForTrade in [false, true]) {
@@ -380,6 +413,8 @@ void main() {
   testWidgets('签名删除已提交但SDK安全清理未完，保留原事实已移除提示', (tester) async {
       _disposeWidgetBeforeStores(tester);
     var state = _hotWalletSnapshot();
+    // 删除失败后的SDK回读必须看到已提交事实；与页面inspect的生命周期分开配置。
+    _transport.handlers['getWalletState'] = (_) => [_stateTuple(state)];
     _transport.handlers['signAndDeleteWallet'] = (_) {
       state = CitizenWalletState(revision: BigInt.two, hotProfile: null, accounts: const [],
         initializationState: CitizenWalletInitializationState.recovering, cleanupPending: true);
@@ -414,15 +449,21 @@ void main() {
       snapshot: CitizenIdentityChainSnapshot(cidNumber: 'GD-CTZN1-8F3A2B',
         accountId: Uint8List.fromList(List.filled(32, 1)), bindingRevision: 1,
         votingIdentity: bytes));
-    _identity = identity(null);
+    final badges = IdentityBadgeSnapshotStore();
+    Future<void> saveIdentity(CitizenIdentityChainSnapshot? snapshot) => badges.writeVerified(
+      accountId: account.accountId, identity: snapshot, isCurrent: () => true);
+    // 徽标读取User域已验真快照，不能再靠远端Resolver替身驱动普通页面展示。
+    await tester.runAsync(() => saveIdentity(identity(null).snapshot));
     await tester.pumpWidget(_walletTabHost(() async => state)); await _settleWallet(tester);
     await _pumpUntil(tester, () => _transport.calls.contains('getAccountBalances'));
     expect(find.text('身份钱包'), findsNothing);
-    _identity = identity(voting()); _security.revision.value++;
+    await tester.runAsync(() => saveIdentity(identity(voting()).snapshot));
+    _security.revision.value++;
     await _pumpUntil(tester, () => find.text('身份钱包').evaluate().length == 1);
     expect(find.text('身份钱包'), findsOneWidget);
-    _identity = null; _security.revision.value++;
-    await _settleWallet(tester);
+    await tester.runAsync(() => saveIdentity(null));
+    _security.revision.value++;
+    await _pumpUntil(tester, () => find.text('身份钱包').evaluate().isEmpty);
     expect(find.text('身份钱包'), findsNothing);
   });
 
@@ -921,6 +962,8 @@ void main() {
       accounts: [...hot.accounts, cold], activeWalletIndex: 0,
       initializationState: CitizenWalletInitializationState.ready, cleanupPending: false);
     _snapshotLoader = () async => current;
+    // setActiveWallet返回后，普通读取仍须反映同一SDK状态；不能返回上次检查前的选择。
+    _transport.handlers['getWalletState'] = (_) => [_stateTuple(current)];
     List<Object?>? submitted;
     _transport.handlers['setActiveWallet'] = (fields) {
       submitted = fields;

@@ -1,9 +1,13 @@
+import 'package:citizenapp/8964/services/square_post_store.dart';
+import 'package:citizenapp/8964/services/square_local_post_presenter.dart';
+import 'package:citizenapp/8964/services/square_post_sync_service.dart';
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/square_models.dart';
 import 'package:citizenapp/8964/compose/compose_page.dart';
 import 'package:citizenapp/8964/pages/square_post_detail_page.dart';
 import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
@@ -54,7 +58,8 @@ class _SquareArticleDetailPageState extends State<SquareArticleDetailPage> {
     super.initState();
     _post = widget.post;
     _api = widget.api ?? SquareApiClient();
-    _deletionCoordinator = widget.deletionCoordinator ??
+    _deletionCoordinator =
+        widget.deletionCoordinator ??
         SquarePostDeletionCoordinator(remoteDeletion: _api);
   }
 
@@ -68,7 +73,7 @@ class _SquareArticleDetailPageState extends State<SquareArticleDetailPage> {
     unawaited(_loadDetail());
   }
 
-  Future<void> _loadDetail() async {
+  Future<void> _loadDetail({bool refresh = false}) async {
     if (mounted) {
       setState(() {
         _loading = true;
@@ -76,6 +81,33 @@ class _SquareArticleDetailPageState extends State<SquareArticleDetailPage> {
       });
     }
     try {
+      if (_post.isLocal) {
+        final cid = _post.author.cidNumber!;
+        if (refresh) {
+          final session = await _sessionProvider.ensureSession();
+          if (session == null || session.cidNumber != cid) {
+            throw StateError('当前用户已变化');
+          }
+          await SquarePostSyncService().sync(
+            session,
+            userInitiated: true,
+            isCurrent: () => mounted,
+          );
+        }
+        final local = await const SquarePostStore().read(
+          cidNumber: cid,
+          postId: _post.postId,
+        );
+        if (local == null) throw StateError('本地尚未保存内容');
+        final presentation = const SquareLocalPostPresenter().present(local);
+        if (mounted) {
+          setState(() {
+            _post = presentation.post;
+            _loading = false;
+          });
+        }
+        return;
+      }
       final session = await _sessionProvider.ensureSession();
       if (session == null) throw const SquareApiException('请先选择默认钱包账户');
       final detail = await _api.fetchPostDetail(
@@ -89,8 +121,12 @@ class _SquareArticleDetailPageState extends State<SquareArticleDetailPage> {
       });
     } catch (error) {
       if (!mounted) return;
+      if (refresh) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('刷新失败，已保留本地内容')));
+      }
       setState(() {
-        _loadError = error;
+        _loadError = refresh ? null : error;
         _loading = false;
       });
     }
@@ -107,6 +143,11 @@ class _SquareArticleDetailPageState extends State<SquareArticleDetailPage> {
         title: const Text('文章'),
         centerTitle: true,
         actions: [
+          IconButton(
+            tooltip: '刷新',
+            icon: const Icon(Icons.refresh),
+            onPressed: _loading ? null : () => _loadDetail(refresh: true),
+          ),
           PopupMenuButton<_ArticleDetailAction>(
             enabled: !_deleting,
             onSelected: _handleAction,
@@ -132,45 +173,44 @@ class _SquareArticleDetailPageState extends State<SquareArticleDetailPage> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _loadError != null
-              ? _DetailLoadError(error: _loadError!, onRetry: _loadDetail)
-              : ListView(
-                  children: [
-                    if (cover != null && cover.url.isNotEmpty)
-                      Image.network(
-                        cover.url,
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, _, _) => const SizedBox.shrink(),
-                      ),
-                    Padding(
-                      padding: EdgeInsets.all(AppLayout.scaled(context, 16)),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          if (title != null && title.isNotEmpty)
-                            Text(
-                              title,
-                              style: TextStyle(
-                                color: AppTheme.textPrimary,
-                                fontSize: AppLayout.scaled(context, 22),
-                                fontWeight: FontWeight.w700,
-                                height: 1.35,
-                              ),
-                            ),
-                          SizedBox(height: AppLayout.scaled(context, 8)),
-                          Text(
-                            post.author.title,
-                            style: TextStyle(
-                              color: AppTheme.textTertiary,
-                              fontSize: AppLayout.scaled(context, 13),
-                            ),
+          ? _DetailLoadError(
+              error: _loadError!,
+              onRetry: () => _loadDetail(refresh: true),
+            )
+          : ListView(
+              children: [
+                if (cover != null && (cover.isLocal || cover.url.isNotEmpty))
+                  SquareMediaImage(item: cover),
+                Padding(
+                  padding: EdgeInsets.all(AppLayout.scaled(context, 16)),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (title != null && title.isNotEmpty)
+                        Text(
+                          title,
+                          style: TextStyle(
+                            color: AppTheme.textPrimary,
+                            fontSize: AppLayout.scaled(context, 22),
+                            fontWeight: FontWeight.w700,
+                            height: 1.35,
                           ),
-                          SizedBox(height: AppLayout.scaled(context, 16)),
-                          ..._buildBody(media),
-                        ],
+                        ),
+                      SizedBox(height: AppLayout.scaled(context, 8)),
+                      Text(
+                        post.author.title,
+                        style: TextStyle(
+                          color: AppTheme.textTertiary,
+                          fontSize: AppLayout.scaled(context, 13),
+                        ),
                       ),
-                    ),
-                  ],
+                      SizedBox(height: AppLayout.scaled(context, 16)),
+                      ..._buildBody(media),
+                    ],
+                  ),
                 ),
+              ],
+            ),
     );
   }
 
@@ -188,7 +228,7 @@ class _SquareArticleDetailPageState extends State<SquareArticleDetailPage> {
           if (mediaIndex >= 0 && mediaIndex < media.length) {
             final item = media[mediaIndex];
             if (item.mediaKind == SquareMediaKind.image &&
-                item.url.isNotEmpty) {
+                (item.isLocal || item.url.isNotEmpty)) {
               gallery.add(item);
             }
           }
@@ -204,38 +244,29 @@ class _SquareArticleDetailPageState extends State<SquareArticleDetailPage> {
   }
 
   Widget _bodyGallery(List<SquareMediaItem> items) => Padding(
-        padding: EdgeInsets.symmetric(vertical: AppLayout.scaledValue(8)),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(AppTheme.radiusMd),
-          child: SquareMediaCarousel(
-            children: [
-              for (final item in items)
-                Image.network(
-                  item.url,
-                  fit: BoxFit.cover,
-                  errorBuilder: (_, _, _) => const ColoredBox(
-                    color: AppTheme.surfaceElevated,
-                    child: Center(child: Icon(Icons.broken_image_outlined)),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      );
+    padding: EdgeInsets.symmetric(vertical: AppLayout.scaledValue(8)),
+    child: ClipRRect(
+      borderRadius: BorderRadius.circular(AppTheme.radiusMd),
+      child: SquareMediaCarousel(
+        children: [for (final item in items) SquareMediaImage(item: item)],
+      ),
+    ),
+  );
 
   Widget _bodyVideo(SquareMediaItem item) => Padding(
-        padding: EdgeInsets.symmetric(vertical: AppLayout.scaledValue(8)),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(AppTheme.radiusMd),
-          child: AspectRatio(
-            aspectRatio: 16 / 9,
-            child: SquareNetworkVideo(
-              url: item.url,
-              thumbnailUrl: item.coverUrl,
-            ),
-          ),
+    padding: EdgeInsets.symmetric(vertical: AppLayout.scaledValue(8)),
+    child: ClipRRect(
+      borderRadius: BorderRadius.circular(AppTheme.radiusMd),
+      child: AspectRatio(
+        aspectRatio: 16 / 9,
+        child: SquareVideo(
+          url: item.url,
+          thumbnailUrl: item.coverUrl,
+          item: item,
         ),
-      );
+      ),
+    ),
+  );
 
   Future<void> _handleAction(_ArticleDetailAction action) async {
     switch (action) {
@@ -268,7 +299,7 @@ class _SquareArticleDetailPageState extends State<SquareArticleDetailPage> {
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('删除文章'),
-        content: const Text('删除后将清理 Cloudflare 中的正文和媒体。链上发布记录保持不变。'),
+        content: const Text('删除后将清理本地及远端的正文和媒体。链上发布记录保持不变。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(false),
@@ -331,16 +362,16 @@ class _DetailLoadError extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text('文章加载失败：$error', textAlign: TextAlign.center),
-              const SizedBox(height: 12),
-              FilledButton(onPressed: onRetry, child: const Text('重试')),
-            ],
-          ),
-        ),
-      );
+    child: Padding(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text('文章加载失败：$error', textAlign: TextAlign.center),
+          const SizedBox(height: 12),
+          FilledButton(onPressed: onRetry, child: const Text('重试')),
+        ],
+      ),
+    ),
+  );
 }

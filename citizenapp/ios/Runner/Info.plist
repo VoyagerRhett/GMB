@@ -48,6 +48,18 @@
 	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- 仅供数据库视频交给本机播放器；外部连接继续使用默认ATS。 -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>127.0.0.1</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>公民 需要使用摄像头扫描二维码，以及在聊天中拍摄照片和视频。</string>
 	<key>NSFaceIDUsageDescription</key>

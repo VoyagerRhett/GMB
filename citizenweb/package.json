@@ -10,7 +10,7 @@
     "dev": "vite --config scripts/vite.config.ts",
     "build": "tsc -b scripts/tsconfig.json && vite build --config scripts/vite.config.ts",
     "lint": "eslint --config scripts/eslint.config.js .",
-    "test": "node --test test/*.test.mjs",
+    "test": "node --test scripts/release/check/release_manifest.test.mjs",
     "preview": "vite preview --config scripts/vite.config.ts"
   },
   "dependencies": {

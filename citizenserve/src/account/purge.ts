@@ -1,6 +1,6 @@
 import type { Env, MediaAssetRow } from '../types';
-import { manifestObjectKey } from '../storage/r2_keys';
-import { deleteR2MediaAssets } from '../media/service';
+import { manifestObjectKey } from '../r2_keys';
+import { deleteR2MediaAssets } from '../media';
 import { clearIdentitySessions } from '../auth/session_index';
 import { HttpError } from '../shared/http';
 

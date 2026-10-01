@@ -2,7 +2,7 @@ import 'package:citizen_sdk/citizen_sdk.dart';
 
 import 'package:flutter/material.dart';
 
-import 'package:citizenapp/citizen/cid/cid_generator.dart';
+import 'package:citizenapp/citizen/cid_generator.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizen_sdk/citizen_sdk.dart' show CitizenWalletStateAccount;
 import 'package:citizenapp/ui/app_layout.dart';

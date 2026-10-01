@@ -4,7 +4,7 @@
 // (kind=Personal,且管理员含本地钱包),反查发起人 / 账户名后 upsert
 // `PersonalAccountEntity`。机构账户登记与展示不走本服务。
 
-import 'package:citizenapp/log/app_log.dart';
+import 'package:citizenapp/app_log.dart';
 import 'package:isar_community/isar.dart';
 import 'package:citizenapp/citizen/shared/account_derivation.dart';
 import 'package:citizenapp/citizen/shared/admin_account_storage_codec.dart';

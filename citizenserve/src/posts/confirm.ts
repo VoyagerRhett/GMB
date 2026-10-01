@@ -25,7 +25,7 @@ import {
   decodeSquarePostPublishedEvents,
   type SquarePostPublishedEvent,
 } from '../chain/square_event';
-import { deleteR2MediaAssets, publicMediaUrl } from '../media/service';
+import { deleteR2MediaAssets, publicMediaUrl } from '../media';
 import { storedMediaReleaseStatements } from '../limits/usage';
 import { HttpError, jsonResponse, readJson, requireSession } from '../shared/http';
 import { bytesToHex, hexToBytes } from '../shared/signing_message';
@@ -37,7 +37,7 @@ import {
   assertManifestQuota,
   postCategoryForIdentity,
 } from '../uploads/quota';
-import { manifestObjectKey } from '../storage/r2_keys';
+import { manifestObjectKey } from '../r2_keys';
 import { readProfileDoc } from '../profiles/repository';
 import {
   manifestObjectKeyFromUpload,

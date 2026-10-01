@@ -2,7 +2,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:polkadart_keyring/polkadart_keyring.dart' show Keyring;
-import 'package:citizenwallet/chain/chain_constants.dart';
+import 'package:citizenwallet/chain_constants.dart';
 import 'package:citizenwallet/signer/action_labels.dart';
 import 'package:citizenwallet/signer/field_labels.dart';
 

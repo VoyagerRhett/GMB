@@ -4,7 +4,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as path;
 import 'package:video_player/video_player.dart';
 
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/square_models.dart';
 
 /// 媒体草稿构造器类型；发布编辑器可在测试中注入稳定实现，生产环境统一使用下方实现。
 typedef SquareMediaDraftBuilder =

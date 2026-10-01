@@ -94,7 +94,7 @@ int main() {
   const std::filesystem::path root(CITIZENSDK_LINUX_TEST_SOURCE_DIR);
   for (const char *path : {"src/citizen_sdk_wallet_flow.cc", "src/citizen_sdk_wallet_window.cc",
       "src/citizen_sdk_wallet_validation.cc", "src/citizen_sdk_qr_flow.cc",
-      "src/citizen_sdk_flutter_wallet_flow.cc", "include/citizen_sdk/citizen_sdk_wallet_flow.hpp"})
+      "src/citizen_sdk_flutter_wallet_flow.cc", "citizen_sdk/citizen_sdk_wallet_flow.hpp"})
     assert(!std::filesystem::exists(root / path));
   return 0;
 }

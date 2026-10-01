@@ -9,11 +9,11 @@ import { registerPushEndpoint } from "./auth/push_endpoint";
 import { chainBootstrapRoute, citizenSdkBootstrapRoute } from "./chain/bootstrap";
 import { constitutionRoute } from "./chain/constitution";
 import { relaySignedExtrinsicRoute } from "./chain/extrinsic_relay";
-import { deleteContactRoute, listContactsRoute, putContactRoute } from "./contacts/service";
+import { deleteContactRoute, listContactsRoute, putContactRoute } from "./contacts";
 import { feedRoute } from "./feeds/service";
 import { followRoute, setFollowNotifyRoute, unfollowRoute } from "./feeds/follows";
 import { getNotifyUnreadRoute, markNotifyReadRoute } from "./feeds/notify";
-import { mediaRoute } from "./media/service";
+import { mediaRoute } from "./media";
 import { platformSubscriptionConfirmRoute } from "./membership/citizen_coin";
 import { membershipRoute } from "./membership/service";
 import {
@@ -48,7 +48,7 @@ import {
   citizenchainPublicationRoute,
   isCitizenchainDownloadPath,
   isCitizenchainPublicationPath,
-} from "./downloads/citizenchain";
+} from "./citizenchain_download";
 
 export async function routeRequest(
   request: Request,

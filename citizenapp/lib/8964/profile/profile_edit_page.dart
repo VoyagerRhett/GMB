@@ -1,4 +1,6 @@
+import 'dart:io';
 import 'dart:typed_data';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -26,7 +28,6 @@ class CitizenProfileEditPage extends StatefulWidget {
     this.initialProfile,
     this.api,
     this.cache,
-    this.mediaCache,
     this.sessionProvider,
     this.assetService,
     this.imagePicker,
@@ -37,7 +38,6 @@ class CitizenProfileEditPage extends StatefulWidget {
   final CitizenProfile? initialProfile;
   final CitizenProfileApi? api;
   final CitizenProfileCache? cache;
-  final CitizenProfileMediaCache? mediaCache;
   final SquareSessionProvider? sessionProvider;
   final ProfileAssetService? assetService;
   final ImagePicker? imagePicker;
@@ -59,7 +59,6 @@ class _CitizenProfileEditPageState extends State<CitizenProfileEditPage> {
 
   late final CitizenProfileApi _api;
   late final CitizenProfileCache _cache;
-  late final CitizenProfileMediaCache _mediaCache;
   late final SquareSessionProvider _sessionProvider;
   late final ProfileAssetService _assetService;
   late final ImagePicker _imagePicker;
@@ -68,7 +67,8 @@ class _CitizenProfileEditPageState extends State<CitizenProfileEditPage> {
 
   _PendingImage? _pendingAvatar;
   _PendingImage? _pendingBanner;
-  SquareSession? _session;
+  CitizenProfileMediaSnapshot _media = const CitizenProfileMediaSnapshot();
+  CitizenProfile? _savedRemotely;
   bool _saving = false;
   bool _dependenciesReady = false;
 
@@ -77,14 +77,15 @@ class _CitizenProfileEditPageState extends State<CitizenProfileEditPage> {
     super.initState();
     _api = widget.api ?? CitizenProfileApi();
     _cache = widget.cache ?? const CitizenProfileCache();
-    _mediaCache = widget.mediaCache ?? CitizenProfileMediaCache();
     _assetService = widget.assetService ?? ProfileAssetService();
     _imagePicker = widget.imagePicker ?? ImagePicker();
     // 公开昵称只从资料真源预填；空资料使用稳定默认昵称，不读取本机钱包标签。
-    _nameController =
-        TextEditingController(text: widget.initialProfile?.displayName ?? '');
-    _bioController =
-        TextEditingController(text: widget.initialProfile?.bio ?? '');
+    _nameController = TextEditingController(
+      text: widget.initialProfile?.displayName ?? '',
+    );
+    _bioController = TextEditingController(
+      text: widget.initialProfile?.bio ?? '',
+    );
   }
 
   @override
@@ -94,16 +95,7 @@ class _CitizenProfileEditPageState extends State<CitizenProfileEditPage> {
     _sessionProvider =
         widget.sessionProvider ?? context.read<SquareSessionProvider>();
     _dependenciesReady = true;
-    _loadSession();
-  }
-
-  Future<void> _loadSession() async {
-    try {
-      final session = await _sessionProvider.ensureSession();
-      if (session != null && mounted) setState(() => _session = session);
-    } on Exception {
-      // 资料预览失败不阻塞本地编辑；保存时会再次获取 session 并给出明确错误。
-    }
+    _loadLocalMedia();
   }
 
   @override
@@ -113,11 +105,16 @@ class _CitizenProfileEditPageState extends State<CitizenProfileEditPage> {
     super.dispose();
   }
 
-  Map<String, String>? get _mediaHeaders => _session == null
-      ? null
-      : <String, String>{
-          'authorization': 'Bearer ${_session!.sessionToken}',
-        };
+  Future<void> _loadLocalMedia() async {
+    final profile = widget.initialProfile;
+    if (profile == null) return;
+    try {
+      final local = await CitizenProfileMediaCache().read(profile);
+      if (mounted) setState(() => _media = local);
+    } catch (_) {
+      /* 缺失时保持占位，编辑页不自动下载。 */
+    }
+  }
 
   Future<void> _pickImage(bool isAvatar) async {
     try {
@@ -149,9 +146,56 @@ class _CitizenProfileEditPageState extends State<CitizenProfileEditPage> {
     if (_saving) return;
     setState(() => _saving = true);
     try {
-      final session = _session ?? await _sessionProvider.ensureSession();
+      final pending = await _cache.readUpdate(widget.cidNumber);
+      if (pending?.operationState == 'confirmed') {
+        await _saveLocal();
+        return;
+      }
+      final session = await _sessionProvider.ensureSession();
       if (session == null) {
         _snack('请先在「我的 → 我的钱包」创建热钱包');
+        return;
+      }
+      if (session.cidNumber != widget.cidNumber || !session.isUsable) {
+        throw StateError('资料修改身份已变化');
+      }
+      if (pending != null) {
+        // 重启后先读取远端事实；未能证明成功时不自动重放PUT。
+        final remote = await _api.fetchProfile(
+          widget.cidNumber,
+          session: session,
+        );
+        if (_cache.updateMatches(pending, remote)) {
+          await _cache.confirmUpdate(remote);
+          await _saveLocal();
+          return;
+        }
+        if (!mounted) return;
+        final resume = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('恢复上次修改'),
+            content: const Text('远端资料与上次待保存内容不同，是否继续保存上次修改？'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('取消'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('继续保存'),
+              ),
+            ],
+          ),
+        );
+        if (resume != true) return;
+        final request = Map<String, String>.from(
+          jsonDecode(pending.requestJson) as Map,
+        );
+        final updated = await _sendUpdate(session, request);
+        await _cache.confirmUpdate(updated);
+        _savedRemotely = updated;
+        await _saveLocal();
         return;
       }
 
@@ -182,46 +226,61 @@ class _CitizenProfileEditPageState extends State<CitizenProfileEditPage> {
       }
 
       final nickname = _nameController.text.trim();
-      final updated = await _api.updateProfile(
-        session: session,
-        displayName: nickname,
-        bio: _bioController.text.trim(),
-        avatarObjectKey: avatarKey,
-        avatarContentHash: avatarHash,
-        bannerObjectKey: bannerKey,
-        bannerContentHash: bannerHash,
+      final request = <String, String>{
+        'display_name': nickname,
+        'bio': _bioController.text.trim(),
+        'avatar_object_key': ?avatarKey,
+        'avatar_content_hash': ?avatarHash,
+        'banner_object_key': ?bannerKey,
+        'banner_content_hash': ?bannerHash,
+      };
+      await _cache.prepareUpdate(
+        widget.cidNumber,
+        request: request,
+        avatarBytes: _pendingAvatar?.bytes,
+        bannerBytes: _pendingBanner?.bytes,
       );
+      final updated = await _sendUpdate(session, request);
 
-      // 服务端资料成功后，先把本次已经持有的图片字节和完整资料快照写入 User 域。
-      // MyTab 常驻 IndexedStack，会由缓存 revision 原地回刷，不再依赖重新建页或二次下载。
-      try {
-        await _mediaCache.rememberSelected(
-          profile: updated,
-          avatarBytes: _pendingAvatar?.bytes,
-          bannerBytes: _pendingBanner?.bytes,
-        );
-        await _cache.write(updated);
-      } on Exception {
-        // Worker/R2 已经提交成功；本机展示缓存失败不能把成功保存误报为失败。
-      }
-
-      if (!mounted) return;
-      Navigator.of(context).pop(updated);
+      // 远端成功后保留响应；本地失败时只重试本地事务，不再次上传或修改远端。
+      _savedRemotely = updated;
+      await _cache.confirmUpdate(updated);
+      await _saveLocal();
     } on SquareApiException catch (error) {
       if (!mounted) return;
       _snack(error.message);
-    } on Exception {
+    } catch (_) {
       if (!mounted) return;
-      _snack('保存失败，请重试');
+      _snack(
+        _savedRemotely == null ? '保存未完成，点击保存可恢复上次修改' : '远端已保存，本机收尾未完成，点击保存可恢复',
+      );
     } finally {
       if (mounted) setState(() => _saving = false);
     }
   }
 
+  /// 远端成功后的本地收尾只提交一次资料和图片，失败保持页面供重试。
+  Future<CitizenProfile> _sendUpdate(
+    SquareSession session,
+    Map<String, String> request,
+  ) => _api.updateProfile(
+    session: session,
+    displayName: request['display_name'],
+    bio: request['bio'],
+    avatarObjectKey: request['avatar_object_key'],
+    avatarContentHash: request['avatar_content_hash'],
+    bannerObjectKey: request['banner_object_key'],
+    bannerContentHash: request['banner_content_hash'],
+  );
+
+  Future<void> _saveLocal() async {
+    final profile = await _cache.finishUpdate(widget.cidNumber);
+    if (mounted) Navigator.of(context).pop(profile);
+  }
+
   void _snack(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   String _contentTypeForPath(String path) {
@@ -253,62 +312,55 @@ class _CitizenProfileEditPageState extends State<CitizenProfileEditPage> {
           ),
         ],
       ),
-      body: ListView(
-        padding: EdgeInsets.all(AppLayout.scaled(context, 16)),
-        children: [
-          _AssetRow(
-            label: '背景',
-            width: double.infinity,
-            height: AppLayout.scaled(context, 120),
-            radius: AppTheme.radiusMd,
-            preview: _pendingBanner?.bytes,
-            networkUrl: bannerKey == null
-                ? null
-                : _api.mediaUrl(
-                    bannerKey,
-                    updatedAt: widget.initialProfile?.updatedAt,
-                  ),
-            networkHeaders: _mediaHeaders,
-            fallbackAsset: defaults.bannerAsset,
-            onTap: () => _pickImage(false),
-          ),
-          SizedBox(height: AppLayout.scaled(context, 16)),
-          _AssetRow(
-            label: '头像',
-            width: AppLayout.scaled(context, 84),
-            height: AppLayout.scaled(context, 84),
-            radius: AppLayout.scaled(context, 16),
-            preview: _pendingAvatar?.bytes,
-            networkUrl: avatarKey == null
-                ? null
-                : _api.mediaUrl(
-                    avatarKey,
-                    updatedAt: widget.initialProfile?.updatedAt,
-                  ),
-            networkHeaders: _mediaHeaders,
-            fallbackAsset: defaults.avatarAsset,
-            onTap: () => _pickImage(true),
-          ),
-          SizedBox(height: AppLayout.scaled(context, 20)),
-          TextField(
-            controller: _nameController,
-            maxLength: _displayNameMax,
-            decoration: const InputDecoration(
-              labelText: '公开昵称',
-              hintText: '给自己起个名字',
+      body: IgnorePointer(
+        ignoring: _saving || _savedRemotely != null,
+        child: ListView(
+          padding: EdgeInsets.all(AppLayout.scaled(context, 16)),
+          children: [
+            _AssetRow(
+              label: '背景',
+              width: double.infinity,
+              height: AppLayout.scaled(context, 120),
+              radius: AppTheme.radiusMd,
+              preview: _pendingBanner?.bytes,
+              imagePath: _media.bannerPath,
+              userImageSet: bannerKey != null,
+              fallbackAsset: defaults.bannerAsset,
+              onTap: () => _pickImage(false),
             ),
-          ),
-          SizedBox(height: AppLayout.scaled(context, 16)),
-          TextField(
-            controller: _bioController,
-            maxLength: _bioMax,
-            maxLines: 4,
-            decoration: const InputDecoration(
-              labelText: '个性签名',
-              alignLabelWithHint: true,
+            SizedBox(height: AppLayout.scaled(context, 16)),
+            _AssetRow(
+              label: '头像',
+              width: AppLayout.scaled(context, 84),
+              height: AppLayout.scaled(context, 84),
+              radius: AppLayout.scaled(context, 16),
+              preview: _pendingAvatar?.bytes,
+              imagePath: _media.avatarPath,
+              userImageSet: avatarKey != null,
+              fallbackAsset: defaults.avatarAsset,
+              onTap: () => _pickImage(true),
             ),
-          ),
-        ],
+            SizedBox(height: AppLayout.scaled(context, 20)),
+            TextField(
+              controller: _nameController,
+              maxLength: _displayNameMax,
+              decoration: const InputDecoration(
+                labelText: '公开昵称',
+                hintText: '给自己起个名字',
+              ),
+            ),
+            SizedBox(height: AppLayout.scaled(context, 16)),
+            TextField(
+              controller: _bioController,
+              maxLength: _bioMax,
+              maxLines: 4,
+              decoration: const InputDecoration(
+                labelText: '个性签名',
+                alignLabelWithHint: true,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -321,8 +373,8 @@ class _AssetRow extends StatelessWidget {
     required this.height,
     required this.radius,
     required this.preview,
-    required this.networkUrl,
-    required this.networkHeaders,
+    required this.imagePath,
+    required this.userImageSet,
     required this.fallbackAsset,
     required this.onTap,
   });
@@ -332,8 +384,8 @@ class _AssetRow extends StatelessWidget {
   final double height;
   final double radius;
   final Uint8List? preview;
-  final String? networkUrl;
-  final Map<String, String>? networkHeaders;
+  final String? imagePath;
+  final bool userImageSet;
   final String fallbackAsset;
   final VoidCallback onTap;
 
@@ -344,8 +396,9 @@ class _AssetRow extends StatelessWidget {
         Text(
           label,
           style: TextStyle(
-              fontSize: AppLayout.scaled(context, 15),
-              color: AppTheme.textPrimary),
+            fontSize: AppLayout.scaled(context, 15),
+            color: AppTheme.textPrimary,
+          ),
         ),
         const Spacer(),
         InkWell(
@@ -372,15 +425,15 @@ class _AssetRow extends StatelessWidget {
     if (bytes != null) {
       return Image.memory(bytes, fit: BoxFit.cover);
     }
-    final url = networkUrl;
-    if (url != null) {
-      return Image.network(
-        url,
-        headers: networkHeaders,
+    final path = imagePath;
+    if (path != null && File(path).existsSync()) {
+      return Image.file(
+        File(path),
         fit: BoxFit.cover,
-        errorBuilder: (_, _, _) => _fallback(),
+        errorBuilder: (_, _, _) => const Center(child: Text('本地图片读取失败')),
       );
     }
+    if (userImageSet) return const Center(child: Text('本地尚未保存图片'));
     return _fallback();
   }
 

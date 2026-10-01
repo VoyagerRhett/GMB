@@ -7,7 +7,7 @@ import 'package:citizen_sdk/citizen_sdk.dart';
 import 'dart:async';
 import 'package:citizen_sdk/src/platform/citizen_sdk_platform.dart';
 import 'package:citizen_sdk/src/platform/citizen_sdk_flutter_codec.dart';
-import 'package:citizen_sdk/src/crypto/account_codec.dart';
+import 'package:citizen_sdk/src/account_codec.dart';
 
 /// 既有业务测试共用一次SDK接线；每用例重新打开/关闭独立会话，不复制编码算法。
 /// 默认只承接真实Core纯编码/QR；设备、钱包及像素替身必须由用例显式配置。

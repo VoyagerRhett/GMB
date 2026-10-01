@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:tatachat_sdk/tatachat_sdk.dart';
 
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/square_models.dart';
 import 'package:citizenapp/8964/pages/square_article_detail_page.dart';
 import 'package:citizenapp/8964/pages/square_post_detail_page.dart';
 import 'package:citizenapp/8964/profile/follows_list_page.dart';
@@ -26,6 +26,7 @@ import 'package:citizenapp/8964/profile/widgets/profile_kebab_menu.dart';
 import 'package:citizenapp/8964/profile/widgets/profile_posts_list.dart';
 import 'package:citizenapp/8964/services/square_account_deletion_service.dart';
 import 'package:citizenapp/8964/services/square_api_client.dart';
+import 'package:citizenapp/8964/services/square_post_sync_service.dart';
 import 'package:citizenapp/chat/chat_entry.dart';
 import 'package:citizenapp/my/myid/current_user_context.dart';
 import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
@@ -37,11 +38,11 @@ import 'package:citizenapp/security/device_subkey.dart' show bytesToHex;
 
 /// 推特式用户主页。
 ///
-/// 折叠虚化头部 + 圆角方形头像/背景（R2）+ 认证勾 + 展示名/地址/签名/计数 +
+/// 折叠虚化头部 + 圆角方形头像/背景 + 认证勾 + 展示名/地址/签名/计数 +
 /// 三图标（本人 通知/聊天/关注 · 他人 关注/消息）+ ⋮（用户码/编辑资料）+
 /// 公文/竞选/视频/文章四个互斥 Tab（“公文”底层仍为 posts）。身份主键 = CID 号
-/// （cid_number）；cache-first
-/// 加载，关注复用登录 session 静默签名，公开资料只进 R2、不上链。链上订阅/私信/
+/// （cid_number）；本人资料与内容只读本地持久数据库，主动刷新才同步远端。
+/// 关注复用登录 session 静默签名；资料远端存储不上链。链上订阅/私信/
 /// 用户码需要的钱包账户 account_id 从已拉取的 profile.account_id（当前绑定账户）取。
 class UserProfilePage extends StatefulWidget {
   const UserProfilePage({
@@ -112,6 +113,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
   Future<SquareSession?>? _sessionFuture;
   bool _sessionResolved = false;
   int _postsRevision = 0;
+  int _profileLoadGeneration = 0;
   late MembershipDisplayDecision _membershipDecision;
   SquareMembershipState? _membershipState;
 
@@ -128,12 +130,16 @@ class _UserProfilePageState extends State<UserProfilePage> {
     _membershipDecision = widget.initialMembershipDecision;
     _membershipState = widget.initialMembershipState;
     _directChat = widget.onOpenDirectChat ?? openDirectChat;
-    _profile = widget.initialProfile;
-    _profileMedia =
-        widget.initialProfileMedia ?? const CitizenProfileMediaSnapshot();
+    _profile = widget.initialProfile?.cidNumber == widget.cidNumber
+        ? widget.initialProfile
+        : null;
+    _profileMedia = _profile == null
+        ? const CitizenProfileMediaSnapshot()
+        : widget.initialProfileMedia ?? const CitizenProfileMediaSnapshot();
     // 「他人视角看的其实是自己」判定需要目标当前绑定账户（profile.account_id），
     // 故在资料加载后（_load）再算；注入了初始资料时先算一次。
     MembershipRevision.instance.listenable.addListener(_onMembershipChanged);
+    CitizenProfileCache.revision.addListener(_onProfileChanged);
   }
 
   @override
@@ -169,7 +175,9 @@ class _UserProfilePageState extends State<UserProfilePage> {
 
   @override
   void dispose() {
+    _profileLoadGeneration++;
     MembershipRevision.instance.listenable.removeListener(_onMembershipChanged);
+    CitizenProfileCache.revision.removeListener(_onProfileChanged);
     super.dispose();
   }
 
@@ -235,57 +243,77 @@ class _UserProfilePageState extends State<UserProfilePage> {
     }
   }
 
-  Future<void> _load() async {
-    // 先渲染缓存（若无注入资料），再后台刷新回刷 + 写回缓存。
-    if (_profile == null) {
-      final cached = await _cache.read(widget.cidNumber);
-      if (cached != null && mounted) {
-        setState(() => _profile = cached);
-        unawaited(_resolveOwnAccount(cached.accountId));
-        unawaited(_loadProfileMedia(cached));
-      }
-    }
-    final session = await _ensureSession();
-    try {
-      // 带 session 拉取 → is_following 反映当前登录者视角。
-      final fresh = await _api.fetchProfile(widget.cidNumber, session: session);
-      if (!mounted) return;
-      setState(() => _profile = fresh);
-      unawaited(_resolveOwnAccount(fresh.accountId));
-      await _cache.write(fresh);
-      unawaited(_loadProfileMedia(fresh, session: session, refresh: true));
-    } on Exception {
-      // 网络/服务异常保留缓存或占位，不覆盖已展示内容。
+  void _onProfileChanged() {
+    if (widget.isSelf &&
+        CitizenProfileCache.revision.value?.cidNumber == widget.cidNumber) {
+      unawaited(_load());
     }
   }
 
-  Future<void> _loadProfileMedia(
-    CitizenProfile profile, {
-    SquareSession? session,
-    bool refresh = false,
-  }) async {
+  /// 本人普通进入和数据通知只读数据库；远端请求集中在主动刷新。
+  Future<void> _load({bool localOnly = false}) async {
+    final generation = ++_profileLoadGeneration;
     try {
-      final cidNumber = profile.cidNumber?.trim() ?? '';
-      if (cidNumber.isEmpty) return;
+      final local = await _cache.read(widget.cidNumber);
+      if (!mounted || generation != _profileLoadGeneration) return;
+      if (local != null && local.cidNumber == widget.cidNumber) {
+        setState(() => _profile = local);
+        await _loadProfileMedia(local);
+        unawaited(_resolveOwnAccount(local.accountId));
+      }
+      if (widget.isSelf || localOnly) return;
+      // 他人公开主页仍按用户本次访问读取远端；不将本人私有副本用于他人页面。
+      final session = await _ensureSession();
+      final fresh = await _api.fetchProfile(widget.cidNumber, session: session);
+      if (!mounted || generation != _profileLoadGeneration) return;
+      await _cache.write(fresh);
+      if (!mounted || generation != _profileLoadGeneration) return;
+      setState(() => _profile = fresh);
+      await _loadProfileMedia(fresh);
+      unawaited(_resolveOwnAccount(fresh.accountId));
+    } catch (_) {
+      if (mounted && _profile == null) _snack('本地资料读取失败，可下拉刷新');
+    }
+  }
+
+  Future<void> _refresh() async {
+    try {
+      final session = await _ensureSession(refresh: true);
+      if (session == null) throw StateError('当前无法建立服务会话');
+      if (widget.isSelf && session.cidNumber != widget.cidNumber) {
+        throw StateError('当前用户已变化');
+      }
+      await _api.refreshProfile(
+        widget.cidNumber,
+        session: session,
+        userInitiated: true,
+        isCurrent: () => mounted,
+      );
+      if (widget.isSelf) {
+        await SquarePostSyncService().sync(
+          session,
+          userInitiated: true,
+          isCurrent: () => mounted,
+        );
+      }
+      if (!mounted) return;
+      await _load(localOnly: true);
+      if (mounted) setState(() => _postsRevision++);
+    } catch (_) {
+      if (mounted) _snack('刷新失败，已保留本地内容');
+    }
+  }
+
+  Future<void> _loadProfileMedia(CitizenProfile profile) async {
+    try {
       final local = await _mediaCache.read(profile);
-      if (mounted && _profile?.updatedAt == profile.updatedAt) {
+      if (mounted &&
+          _profile?.cidNumber == profile.cidNumber &&
+          _profile?.updatedAt == profile.updatedAt) {
         setState(() => _profileMedia = local);
       }
-      if (!refresh || session == null) return;
-      final headers = <String, String>{
-        'authorization': 'Bearer ${session.sessionToken}',
-      };
-      final updated = await _mediaCache.refresh(
-        profile: profile,
-        avatarUrl: _mediaUrl(profile.avatarObjectKey, profile: profile),
-        bannerUrl: _mediaUrl(profile.bannerObjectKey, profile: profile),
-        headers: headers,
-      );
-      if (mounted && _profile?.updatedAt == profile.updatedAt) {
-        setState(() => _profileMedia = updated);
-      }
-    } on Exception {
-      // 公开资料仍可展示；媒体缓存失败只保留当前用户图或中性占位。
+    } catch (_) {
+      /* 读取失败不触发下载，也不丢弃已保存图片。 */
     }
   }
 
@@ -409,15 +437,13 @@ class _UserProfilePageState extends State<UserProfilePage> {
           initialProfile: _profile,
           api: _api,
           cache: _cache,
-          mediaCache: _mediaCache,
           sessionProvider: _sessionProvider,
         ),
       ),
     );
     if (updated == null || !mounted) return;
     setState(() => _profile = updated);
-    await _cache.write(updated);
-    await _loadProfileMedia(updated, session: _session, refresh: true);
+    await _loadProfileMedia(updated);
   }
 
   /// 注销用户（仅本人）：二次确认 → 主钥签名(生物识别) → 服务端硬删 → 清本地 → 回落空态。
@@ -503,7 +529,10 @@ class _UserProfilePageState extends State<UserProfilePage> {
       return;
     }
     final document = await context.read<CitizenSdk>().qr.encodeDocument(
-      CitizenQrContent.userContact(cidNumber: widget.cidNumber, accountId: accountId),
+      CitizenQrContent.userContact(
+        cidNumber: widget.cidNumber,
+        accountId: accountId,
+      ),
     );
     if (!mounted) return;
     Navigator.of(context).push(
@@ -528,8 +557,9 @@ class _UserProfilePageState extends State<UserProfilePage> {
     _directChat(context, peerUserId: peerCidNumber, title: _displayName);
   }
 
-  void _openFollows(FollowsType type) {
-    final session = _session;
+  Future<void> _openFollows(FollowsType type) async {
+    final session = await _ensureSession();
+    if (!mounted) return;
     if (session == null) {
       _snack('需要钱包账户才能浏览关注列表');
       return;
@@ -547,16 +577,14 @@ class _UserProfilePageState extends State<UserProfilePage> {
   }
 
   void _snack(String message) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   /// 公开昵称只取后端 `display_name`；缺失时按 CID 稳定生成本地占位昵称。
   String get _displayName {
-    return ProfilePresentation.forIdentityKey(
-      widget.cidNumber,
-    ).resolveDisplayName(publicName: _profile?.displayName);
+    return ProfilePresentation.forIdentityKey(widget.cidNumber)
+        .resolveDisplayName(publicName: _profile?.displayName);
   }
 
   String get _title => _displayName;
@@ -581,6 +609,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
     if (path != null && File(path).existsSync()) {
       return Image.file(File(path), fit: BoxFit.cover);
     }
+    if (widget.isSelf) return const ColoredBox(color: AppTheme.surfaceMuted);
     final url = _mediaUrl(objectKey);
     if (url == null) return const ColoredBox(color: AppTheme.surfaceMuted);
     return Image.network(
@@ -591,8 +620,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
           syncLoaded || frame != null
           ? child
           : const ColoredBox(color: AppTheme.surfaceMuted),
-      errorBuilder: (_, _, _) =>
-          const ColoredBox(color: AppTheme.surfaceMuted),
+      errorBuilder: (_, _, _) => const ColoredBox(color: AppTheme.surfaceMuted),
     );
   }
 
@@ -648,6 +676,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
           sessionUnavailableMessage: _sessionStatus?.message,
           onSessionExpired: _refreshSessionAfterUnauthorized,
           isSelf: widget.isSelf,
+          onRefresh: _refresh,
           onOpenPost: _openPost,
         );
       case ProfileTab.campaign:
@@ -662,6 +691,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
           sessionUnavailableMessage: _sessionStatus?.message,
           onSessionExpired: _refreshSessionAfterUnauthorized,
           isSelf: widget.isSelf,
+          onRefresh: _refresh,
           onOpenPost: _openPost,
         );
       case ProfileTab.videos:
@@ -678,6 +708,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
           sessionUnavailableMessage: _sessionStatus?.message,
           onSessionExpired: _refreshSessionAfterUnauthorized,
           isSelf: widget.isSelf,
+          onRefresh: _refresh,
           onOpenPost: _openPost,
         );
       case ProfileTab.articles:
@@ -693,6 +724,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
           sessionUnavailableMessage: _sessionStatus?.message,
           onSessionExpired: _refreshSessionAfterUnauthorized,
           isSelf: widget.isSelf,
+          onRefresh: _refresh,
           onOpenPost: _openArticle,
         );
     }
@@ -750,7 +782,9 @@ class _UserProfilePageState extends State<UserProfilePage> {
                     cidNumber: widget.cidNumber,
                     profile: _profile,
                     avatarPath: _profileMedia.avatarPath,
-                    avatarUrl: _mediaUrl(_profile?.avatarObjectKey),
+                    avatarUrl: widget.isSelf
+                        ? null
+                        : _mediaUrl(_profile?.avatarObjectKey),
                     avatarHeaders: _mediaHeaders,
                     confirmedMembershipLevel: _membershipState?.membershipLevel,
                     confirmedMembershipActive: _confirmedMembershipActive,

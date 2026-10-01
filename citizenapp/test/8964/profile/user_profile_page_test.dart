@@ -14,8 +14,9 @@ import 'fake_profile.dart';
 /// 「非本人」（行为与迁移前一致）；避免 instance 触发真链读/真 Isar。
 class _NullMembershipSnapshotService implements SubscriptionService {
   @override
-  Future<MembershipDisplaySnapshot?> readDisplaySnapshot(String cidNumber) async =>
-      null;
+  Future<MembershipDisplaySnapshot?> readDisplaySnapshot(
+    String cidNumber,
+  ) async => null;
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -23,10 +24,10 @@ class _NullMembershipSnapshotService implements SubscriptionService {
 
 Widget _wrap({required bool isSelf}) => MaterialApp(
   home: UserProfilePage(
-    cidNumber: kOwner,
+    cidNumber: sampleProfile().cidNumber!,
     isSelf: isSelf,
     api: FakeProfileApi(sampleProfile()),
-    cache: FakeProfileCache(),
+    cache: FakeProfileCache(sampleProfile()),
     sessionProvider: FakeSessionProvider(fakeSession()),
     subscriptionService: _NullMembershipSnapshotService(),
     viewerAccountLoader: () async => null,
@@ -52,7 +53,7 @@ void main() {
     // 当前资料页统一使用细体左箭头返回，测试与已确认的正式 UI 保持一致。
     expect(find.byIcon(Icons.chevron_left), findsOneWidget);
     expect(find.byIcon(Icons.more_vert), findsOneWidget);
-    expect(find.text('还没有公文'), findsOneWidget);
+    expect(find.text('本地尚未保存此类内容，下拉刷新'), findsOneWidget);
     expect(find.text('还没有帖子'), findsNothing);
     expect(ProfileCategoryTabs.height, 36);
     expect(ProfileCategoryTabs.labelTopPadding, 8);
@@ -100,7 +101,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('还没有竞选内容'), findsOneWidget);
+    expect(find.text('本地尚未保存此类内容，下拉刷新'), findsOneWidget);
   });
 
   testWidgets('builds another user profile without exceptions', (tester) async {
@@ -116,10 +117,10 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: UserProfilePage(
-          cidNumber: kOwner,
+          cidNumber: sampleProfile().cidNumber!,
           isSelf: true,
           api: api,
-          cache: FakeProfileCache(),
+          cache: FakeProfileCache(sampleProfile()),
           sessionProvider: FakeSessionProvider(fakeSession()),
           subscriptionService: _NullMembershipSnapshotService(),
           viewerAccountLoader: () async => null,
@@ -127,14 +128,14 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(api.calls, 1);
+    expect(api.calls, 0);
 
     MembershipRevision.instance.notifyChanged('OTHER-CID');
     await tester.pumpAndSettle();
-    expect(api.calls, 1);
+    expect(api.calls, 0);
 
-    MembershipRevision.instance.notifyChanged(kOwner);
+    MembershipRevision.instance.notifyChanged(sampleProfile().cidNumber!);
     await tester.pumpAndSettle();
-    expect(api.calls, 2);
+    expect(api.calls, 0);
   });
 }

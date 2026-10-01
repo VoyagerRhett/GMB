@@ -6,15 +6,14 @@ internal struct CitizenSDKAssets {
     let lightSyncState: Data
 
     static func load(bundle: Bundle = Bundle(for: CitizenSDKBundleMarker.self)) throws -> CitizenSDKAssets {
-        // The candidate builder projects the canonical root assets into one
-        // `citizenchain` resource directory. It never creates root-level
-        // copies or a second asset source of truth.
+        // 构建器将SDK根下chain三文件原样装入Framework的chain资源目录。
+        // 以下位置对应正式Bundle布局；不读取旧资源目录或建立第二资产真源。
         let roots = [
-            bundle.resourceURL?.appendingPathComponent("citizenchain", isDirectory: true),
-            bundle.resourceURL?.appendingPathComponent("Resources/citizenchain", isDirectory: true),
+            bundle.resourceURL?.appendingPathComponent("chain", isDirectory: true),
+            bundle.resourceURL?.appendingPathComponent("Resources/chain", isDirectory: true),
             bundle.resourceURL?
                 .appendingPathComponent("CitizenSDKResources.bundle", isDirectory: true)
-                .appendingPathComponent("citizenchain", isDirectory: true),
+                .appendingPathComponent("chain", isDirectory: true),
         ].compactMap { $0 }
 
         func read(_ name: String) throws -> Data {

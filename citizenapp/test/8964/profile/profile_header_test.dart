@@ -1,5 +1,7 @@
 import 'dart:typed_data';
+
 import '../../support/fake_citizen_sdk.dart';
+
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter/material.dart';
@@ -31,8 +33,7 @@ class _NullMembershipSnapshotService implements SubscriptionService {
   @override
   Future<MembershipDisplaySnapshot?> readDisplaySnapshot(
     String cidNumber,
-  ) async =>
-      null;
+  ) async => null;
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -51,34 +52,46 @@ Widget _wrap({
   SquareMembershipState? initialMembershipState,
   SubscriptionService? subscriptionService,
 }) {
-  return Provider<CitizenSdk>.value(value: _sdkHarness.sdk, child: MaterialApp(
-    theme: ThemeData(platform: platform),
-    builder: (context, child) => MediaQuery(
-      data: MediaQuery.of(
-        context,
-      ).copyWith(textScaler: textScaler, padding: padding),
-      child: child!,
+  return Provider<CitizenSdk>.value(
+    value: _sdkHarness.sdk,
+    child: MaterialApp(
+      theme: ThemeData(platform: platform),
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(context)
+            .copyWith(textScaler: textScaler, padding: padding),
+        child: child!,
+      ),
+      home: UserProfilePage(
+        cidNumber: _profileCidNumber,
+        isSelf: isSelf,
+        api: api,
+        cache:
+            cache ??
+            FakeProfileCache(
+              isSelf && api is FakeProfileApi ? api.result : null,
+            ),
+        sessionProvider: sessionProvider ?? FakeSessionProvider(fakeSession()),
+        initialMembershipDecision: initialMembershipDecision,
+        initialMembershipState: initialMembershipState,
+        subscriptionService:
+            subscriptionService ?? _NullMembershipSnapshotService(),
+        viewerAccountLoader: () async => null,
+      ),
     ),
-    home: UserProfilePage(
-      cidNumber: _profileCidNumber,
-      isSelf: isSelf,
-      api: api,
-      cache: cache ?? FakeProfileCache(),
-      sessionProvider: sessionProvider ?? FakeSessionProvider(fakeSession()),
-      initialMembershipDecision: initialMembershipDecision,
-      initialMembershipState: initialMembershipState,
-      subscriptionService:
-          subscriptionService ?? _NullMembershipSnapshotService(),
-      viewerAccountLoader: () async => null,
-    ),
-  ));
+  );
 }
 
 void main() {
-  _sdkHarness = TestCitizenSdkHarness(handlers: {
-    // UI导航只需要合成像素；用户码协议编码仍调用当前真实Core。
-    'qrEncode': (_) => [1, 1, Uint8List.fromList([0])],
-  });
+  _sdkHarness = TestCitizenSdkHarness(
+    handlers: {
+      // UI导航只需要合成像素；用户码协议编码仍调用当前真实Core。
+      'qrEncode': (_) => [
+        1,
+        1,
+        Uint8List.fromList([0]),
+      ],
+    },
+  );
   testWidgets('公开昵称、公民号、三项关系和四类内容计数按身份语义展示', (tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(411, 914);
@@ -89,9 +102,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final fallback = ProfilePresentation.forIdentityKey(
-      _profileCidNumber,
-    ).fallbackName;
+    final fallback = ProfilePresentation.forIdentityKey(_profileCidNumber)
+        .fallbackName;
     expect(find.text(fallback), findsWidgets);
     expect(find.text('公民号：$_profileCidNumber'), findsOneWidget);
     expect(find.textContaining('SS58：'), findsNothing);
@@ -212,19 +224,22 @@ void main() {
 
   testWidgets('订阅入口固定在通知左侧且与三图标保持同一行', (tester) async {
     await tester.pumpWidget(
-      Provider<CitizenSdk>.value(value: _sdkHarness.sdk, child: const MaterialApp(
-        home: Scaffold(
-          body: ProfileActionIcons(
-            isSelf: false,
-            isFollowing: false,
-            leading: SizedBox(
-              key: ValueKey<String>('creator-subscribe-entry'),
-              width: 56,
-              height: 34,
+      Provider<CitizenSdk>.value(
+        value: _sdkHarness.sdk,
+        child: const MaterialApp(
+          home: Scaffold(
+            body: ProfileActionIcons(
+              isSelf: false,
+              isFollowing: false,
+              leading: SizedBox(
+                key: ValueKey<String>('creator-subscribe-entry'),
+                width: 56,
+                height: 34,
+              ),
             ),
           ),
         ),
-      )),
+      ),
     );
 
     final subscribe = find.byKey(
@@ -270,7 +285,8 @@ void main() {
         matching: find.byKey(const ValueKey<String>('profile-tab-posts')),
       );
       return (
-        labelTopPadding: tester.getRect(categoryPosts).top -
+        labelTopPadding:
+            tester.getRect(categoryPosts).top -
             tester.getRect(find.byType(ProfileCategoryTabs)).top,
         statsTop: tester.getRect(stats).top,
       );
@@ -317,35 +333,38 @@ void main() {
         addTearDown(tester.view.reset);
 
         await tester.pumpWidget(
-          Provider<CitizenSdk>.value(value: _sdkHarness.sdk, child: MaterialApp(
-            theme: AppTheme.lightTheme.copyWith(platform: platform),
-            builder: (context, child) => MediaQuery(
-              data: MediaQuery.of(context).copyWith(
-                // 真机 iPhone 当前为 Extra Large，Flutter 引擎映射为 19/17。
-                textScaler: platform == TargetPlatform.iOS
-                    ? const TextScaler.linear(19 / 17)
-                    : TextScaler.noScaling,
+          Provider<CitizenSdk>.value(
+            value: _sdkHarness.sdk,
+            child: MaterialApp(
+              theme: AppTheme.lightTheme.copyWith(platform: platform),
+              builder: (context, child) => MediaQuery(
+                data: MediaQuery.of(context).copyWith(
+                  // 真机 iPhone 当前为 Extra Large，Flutter 引擎映射为 19/17。
+                  textScaler: platform == TargetPlatform.iOS
+                      ? const TextScaler.linear(19 / 17)
+                      : TextScaler.noScaling,
+                ),
+                child: child!,
               ),
-              child: child!,
-            ),
-            home: const DefaultTabController(
-              length: 4,
-              child: Scaffold(
-                body: Align(
-                  alignment: Alignment.topCenter,
-                  child: SizedBox(
-                    height: ProfileCategoryTabs.height,
-                    child: ProfileCategoryTabs(
-                      posts: 36,
-                      campaigns: 6,
-                      videos: 4,
-                      articles: 12,
+              home: const DefaultTabController(
+                length: 4,
+                child: Scaffold(
+                  body: Align(
+                    alignment: Alignment.topCenter,
+                    child: SizedBox(
+                      height: ProfileCategoryTabs.height,
+                      child: ProfileCategoryTabs(
+                        posts: 36,
+                        campaigns: 6,
+                        videos: 4,
+                        articles: 12,
+                      ),
                     ),
                   ),
                 ),
               ),
             ),
-          )),
+          ),
         );
         await tester.pumpAndSettle();
 
@@ -557,17 +576,16 @@ void main() {
     expect(badge.style.checked, isTrue);
   });
 
-  testWidgets('cache-first renders the fetched profile and writes cache', (
-    tester,
-  ) async {
+  testWidgets('本人首屏只读持久资料，不拉取或重写远端结果', (tester) async {
     final api = FakeProfileApi(sampleProfile(displayName: '刷新名'));
-    final cache = FakeProfileCache();
+    final cache = FakeProfileCache(sampleProfile(displayName: '本地名'));
     await tester.pumpWidget(_wrap(isSelf: true, api: api, cache: cache));
     await tester.pumpAndSettle();
 
-    expect(api.calls, 1);
-    expect(cache.wrote, isTrue);
-    expect(find.text('刷新名'), findsWidgets);
+    expect(api.calls, 0);
+    expect(cache.wrote, isFalse);
+    expect(find.text('本地名'), findsWidgets);
+    expect(find.text('刷新名'), findsNothing);
   });
 
   testWidgets('following a user optimistically flips the icon', (tester) async {
@@ -664,23 +682,25 @@ void main() {
     String? peer;
     String? chatTitle;
     await tester.pumpWidget(
-      Provider<CitizenSdk>.value(value: _sdkHarness.sdk, child: MaterialApp(
-        home: UserProfilePage(
-          cidNumber: _profileCidNumber,
-          isSelf: false,
-          api: FakeProfileApi(sampleProfile(displayName: '轻节点')),
-          cache: FakeProfileCache(),
-          sessionProvider: FakeSessionProvider(fakeSession()),
-          subscriptionService: _NullMembershipSnapshotService(),
-          viewerAccountLoader: () async => null,
-          onOpenDirectChat: (context,
-              {required peerUserId, required title}) {
-            peer = peerUserId;
-            chatTitle = title;
-            return Future<void>.value();
-          },
+      Provider<CitizenSdk>.value(
+        value: _sdkHarness.sdk,
+        child: MaterialApp(
+          home: UserProfilePage(
+            cidNumber: _profileCidNumber,
+            isSelf: false,
+            api: FakeProfileApi(sampleProfile(displayName: '轻节点')),
+            cache: FakeProfileCache(),
+            sessionProvider: FakeSessionProvider(fakeSession()),
+            subscriptionService: _NullMembershipSnapshotService(),
+            viewerAccountLoader: () async => null,
+            onOpenDirectChat: (context, {required peerUserId, required title}) {
+              peer = peerUserId;
+              chatTitle = title;
+              return Future<void>.value();
+            },
+          ),
         ),
-      )),
+      ),
     );
     await tester.pumpAndSettle();
 
@@ -694,23 +714,25 @@ void main() {
   testWidgets('从他人视角看的是自己账户时私信按钮置灰不触发', (tester) async {
     String? peer;
     await tester.pumpWidget(
-      Provider<CitizenSdk>.value(value: _sdkHarness.sdk, child: MaterialApp(
-        home: UserProfilePage(
-          cidNumber: _profileCidNumber,
-          isSelf: false,
-          api: FakeProfileApi(sampleProfile(displayName: '轻节点')),
-          cache: FakeProfileCache(),
-          sessionProvider: FakeSessionProvider(fakeSession()),
-          subscriptionService: _NullMembershipSnapshotService(),
-          // 浏览者账户 == 主页账户 = 他人视角看自己 → 按钮应置灰。
-          viewerAccountLoader: () async => kOwner,
-          onOpenDirectChat: (context,
-              {required peerUserId, required title}) {
-            peer = peerUserId;
-            return Future<void>.value();
-          },
+      Provider<CitizenSdk>.value(
+        value: _sdkHarness.sdk,
+        child: MaterialApp(
+          home: UserProfilePage(
+            cidNumber: _profileCidNumber,
+            isSelf: false,
+            api: FakeProfileApi(sampleProfile(displayName: '轻节点')),
+            cache: FakeProfileCache(),
+            sessionProvider: FakeSessionProvider(fakeSession()),
+            subscriptionService: _NullMembershipSnapshotService(),
+            // 浏览者账户 == 主页账户 = 他人视角看自己 → 按钮应置灰。
+            viewerAccountLoader: () async => kOwner,
+            onOpenDirectChat: (context, {required peerUserId, required title}) {
+              peer = peerUserId;
+              return Future<void>.value();
+            },
+          ),
         ),
-      )),
+      ),
     );
     await tester.pumpAndSettle();
 

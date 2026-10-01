@@ -159,6 +159,7 @@ enum class Method {
   reconcile_wallet_cleanup,
   sign_wallet_payload,
   derive_application_key,
+  derive_application_keys,
   begin_signing,
   consume_external_signature,
   cancel_signing,
@@ -256,6 +257,7 @@ struct DecodedRequest final {
   std::vector<uint8_t> signature;
   std::vector<uint8_t> application_key_salt;
   std::vector<uint8_t> application_key_info;
+  std::vector<std::vector<uint8_t>> application_key_infos;
   citizensdk_signing_transform_t signing_transform{};
   citizensdk_external_signer_transport_t external_signer_transport{};
   std::vector<uint8_t> signing_domain;

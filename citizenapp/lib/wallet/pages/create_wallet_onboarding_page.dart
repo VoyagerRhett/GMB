@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:citizenapp/log/app_log.dart';
+import 'package:citizenapp/app_log.dart';
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:provider/provider.dart';
 import 'package:citizenapp/wallet/pages/wallet_page.dart' show ImportColdWalletPage;

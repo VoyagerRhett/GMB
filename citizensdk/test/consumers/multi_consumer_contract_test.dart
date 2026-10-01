@@ -3,11 +3,11 @@ import 'dart:typed_data';
 import 'package:citizen_sdk/citizen_sdk.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'citizenapp_fixture/citizenapp_fixture.dart';
+import 'citizenapp_fixture.dart';
 import 'consumer_test_support.dart';
-import 'external_signer/generic_qr_v1_signer.dart';
-import 'reference/reference_consumer.dart';
-import 'third_party_fixture/third_party_fixture.dart';
+import 'generic_qr_v1_signer.dart';
+import 'reference_consumer.dart';
+import 'third_party_fixture.dart';
 
 void main() {
   test('三类消费者共用相同公开端口并提交三种不透明 RuntimeCall', () async {

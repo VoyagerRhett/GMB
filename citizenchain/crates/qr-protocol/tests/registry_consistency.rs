@@ -282,11 +282,11 @@ fn generated_qr_body_validators_are_current() {
             export_qr_bodies_dart().expect("Dart body schema 必须可生成"),
         ),
         (
-            "citizenchain/node/frontend/shared/qr/generated/qrBodies.g.ts",
+            "citizenchain/node/frontend/shared/qr/qrBodies.g.ts",
             export_qr_bodies_typescript().expect("TS body schema 必须可生成"),
         ),
         (
-            "citizenchain/onchina/frontend/core/qr/generated/qrBodies.g.ts",
+            "citizenchain/onchina/frontend/core/qrBodies.g.ts",
             export_qr_bodies_typescript().expect("TS body schema 必须可生成"),
         ),
         (

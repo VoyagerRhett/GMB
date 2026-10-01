@@ -15,7 +15,12 @@ TEST_RUNNER_BUNDLE_ID="ios.citizenapp.UITests.xctrunner"
 BUILD_ROOT="${CITIZENAPP_UI_TEST_WORK_DIR:-${TMPDIR:-/tmp}/citizenapp/ios-ui-test}"
 PROJECT="$APP_ROOT/ios/Runner.xcodeproj"
 DERIVED_DATA="$BUILD_ROOT/DerivedData"
-RESULT_BUNDLE="$BUILD_ROOT/RunnerUITests.xcresult"
+TEST_ONLY="${CITIZENAPP_UI_TEST_ONLY:-}"
+if [[ -n "$TEST_ONLY" && ! "$TEST_ONLY" =~ ^testChatE2E(ReadIdentity|Send|VerifyRestart)$ ]]; then
+  echo 'CITIZENAPP_UI_TEST_ONLY 只能选择已登记的双机 XCTest' >&2
+  exit 1
+fi
+RESULT_BUNDLE="$BUILD_ROOT/RunnerUITests-${TEST_ONLY:-all}-$(date +%s)-$$.xcresult"
 
 python3 - "$APP_ROOT" "$BUILD_ROOT" <<'CHECK_OUTPUTS'
 from pathlib import Path
@@ -30,6 +35,10 @@ CHECK_OUTPUTS
   echo "CitizenApp iOS 工程不存在：$PROJECT" >&2; exit 1
 }
 mkdir -p "$BUILD_ROOT"
+# XCTest 通过同一源码外视图消费扁平 scheme，正式 App 本体不参与构建。
+BUILD_ROOT="$(cd "$BUILD_ROOT" && pwd -P)"
+PROJECT_ROOT="$(node "$SCRIPT_DIR/citizenapp-view.mjs" create --source-root "$APP_ROOT" --work-root "$BUILD_ROOT")"
+PROJECT="$PROJECT_ROOT/ios/Runner.xcodeproj"
 export TMPDIR="$BUILD_ROOT/"
 
 device_fields="$(python3 - <<'SELECT_DEVICE'
@@ -242,13 +251,24 @@ done < <(find "$DERIVED_DATA/Build/Products" -path '*.app/Info.plist' -type f -p
 
 echo "[测试] 启动设备中现有 CitizenApp Release"
 set +e
-xcodebuild test-without-building \
-  -project "$PROJECT" \
-  -scheme "$SCHEME" \
-  -configuration Release \
-  -destination "$destination" \
-  -derivedDataPath "$DERIVED_DATA" \
-  -resultBundlePath "$RESULT_BUNDLE"
+if [[ -n "$TEST_ONLY" ]]; then
+  xcodebuild test-without-building \
+    -project "$PROJECT" \
+    -scheme "$SCHEME" \
+    -configuration Release \
+    -destination "$destination" \
+    -derivedDataPath "$DERIVED_DATA" \
+    -only-testing:"$SCHEME/$SCHEME/$TEST_ONLY" \
+    -resultBundlePath "$RESULT_BUNDLE"
+else
+  xcodebuild test-without-building \
+    -project "$PROJECT" \
+    -scheme "$SCHEME" \
+    -configuration Release \
+    -destination "$destination" \
+    -derivedDataPath "$DERIVED_DATA" \
+    -resultBundlePath "$RESULT_BUNDLE"
+fi
 test_status=$?
 set -e
 

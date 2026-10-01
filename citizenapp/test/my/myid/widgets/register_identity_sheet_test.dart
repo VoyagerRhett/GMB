@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:citizen_sdk/citizen_sdk.dart';
 
-import 'package:citizenapp/citizen/cid/cid_generator.dart';
+import 'package:citizenapp/citizen/cid_generator.dart';
 import 'package:citizenapp/my/myid/widgets/register_identity_sheet.dart';
 CitizenWalletStateAccount _account({int index = 0, String? id}) =>
     CitizenWalletStateAccount(

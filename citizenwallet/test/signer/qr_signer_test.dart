@@ -7,7 +7,7 @@ import 'package:polkadart_keyring/polkadart_keyring.dart';
 import 'package:citizenwallet/qr/bodies/sign_request_body.dart';
 import 'package:citizenwallet/qr/envelope.dart';
 import 'package:citizenwallet/qr/qr_protocols.dart';
-import 'package:citizenwallet/login/login_qr_handler.dart';
+import 'package:citizenwallet/login_qr_handler.dart';
 import 'package:citizenwallet/signer/qr_signer.dart';
 
 String _hexBytes(List<int> bytes) =>

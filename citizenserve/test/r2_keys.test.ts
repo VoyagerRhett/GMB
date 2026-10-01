@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildObjectKeyPlan } from '../src/storage/r2_keys';
+import { buildObjectKeyPlan } from '../src/r2_keys';
 
 describe('R2 object key plan', () => {
   it('keeps the square manifest under the CID-owned post directory', () => {

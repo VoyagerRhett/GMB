@@ -300,6 +300,7 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
             "reconcileWalletCleanup",
             "signWalletPayload",
             "deriveApplicationKey",
+            "deriveApplicationKeys",
             "beginSigning",
             "consumeExternalSignature",
             "cancelSigning",
@@ -383,6 +384,9 @@ final class CitizenSDKFlutterCodecTests: XCTestCase {
         requests["deriveApplicationKey"] = [version, "session-1", sequence, account,
             FlutterStandardTypedData(bytes: Data(repeating: 0, count: 32)),
             FlutterStandardTypedData(bytes: Data([1]))]
+        requests["deriveApplicationKeys"] = [version, "session-1", sequence, account,
+            FlutterStandardTypedData(bytes: Data(repeating: 0, count: 32)),
+            [FlutterStandardTypedData(bytes: Data([1])), FlutterStandardTypedData(bytes: Data([2]))]]
         requests["beginSigning"] = [version, "session-1", sequence, account,
             FlutterStandardTypedData(bytes: Data([1])), "raw",
             FlutterStandardTypedData(bytes: Data()), "none", NSNumber(value: 0), NSNumber(value: 120)]

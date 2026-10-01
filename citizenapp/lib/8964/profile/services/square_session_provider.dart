@@ -48,9 +48,8 @@ class SquareSessionResolution {
 /// 后端会话握手用**当前 CID 的 P-256 硬件设备子钥静默签名**（不读 seed、不弹
 /// 生物识别）换取 session token，由 [SquareApiClient] 内部按 accountId 缓存复用。
 ///
-/// 已有子钥直接静默登录。实际登录被 Worker 明确拒绝为 `device_not_registered` 或
-/// `invalid_signature` 时，底层客户端才鉴权一次登记本机子钥并重试；页面门禁不检查、
-/// 不生成设备子钥。
+/// 已有子钥直接静默登录。查看页面遇到未登记设备只返回明确状态；首次登记
+/// 必须由 [registerCurrentDevice] 的用户动作触发一次钱包鉴权。
 class SquareSessionProvider {
   SquareSessionProvider({
     required AccountSecurityService accountSecurity,
@@ -76,7 +75,16 @@ class SquareSessionProvider {
   ///
   /// **身份主键 = CID 号**：会话 `accountId` 取当前默认账户，P-256 子钥按该 CID
   /// 隔离。冷热账户走同一静默设备会话；只有设备首次登记的 sr25519 证明区分热签/冷签。
-  Future<SquareSession?> ensureSession() async {
+  Future<SquareSession?> ensureSession() =>
+      _ensureSession(registerMissingDevice: false);
+
+  /// 用户明确选择首次登记本机设备后调用；普通查看入口禁止调用。
+  Future<SquareSession?> registerCurrentDevice() =>
+      _ensureSession(registerMissingDevice: true);
+
+  Future<SquareSession?> _ensureSession({
+    required bool registerMissingDevice,
+  }) async {
     final current = await _currentUser.resolve();
     if (current == null || current.accountId.isEmpty) return null;
     final session = await _client.ensureSession(
@@ -91,10 +99,14 @@ class SquareSessionProvider {
         );
         return '0x$raw';
       },
-      onDeviceNotRegistered: (context) async {
-        _requireCurrentAccount(current.accountId, context);
-        await _registerMissingDeviceSubkey(await _bindingForContext(context));
-      },
+      onDeviceNotRegistered: registerMissingDevice
+          ? (context) async {
+              _requireCurrentAccount(current.accountId, context);
+              await _registerMissingDeviceSubkey(
+                await _bindingForContext(context),
+              );
+            }
+          : null,
     );
     await _activateSessionBinding(session);
     return session;

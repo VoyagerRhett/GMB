@@ -145,7 +145,7 @@ void main() {
     final androidBuild = sourceFile('android/app/build.gradle.kts')
         .readAsStringSync();
     final androidEntry = sourceFile(
-      'android/app/src/main/kotlin/com/crcfrcn/citizenwallet/MainActivity.kt',
+      'android/app/src/MainActivity.kt',
     ).readAsStringSync();
     final iosProject = sourceFile('ios/Runner.xcodeproj/project.pbxproj')
         .readAsStringSync();

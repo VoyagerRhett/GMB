@@ -7,7 +7,10 @@
 
 use std::{
     collections::BTreeSet,
-    sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -288,24 +291,24 @@ impl SigningService {
         self.sign_guarded(account_id, message, &|| Ok(())).await
     }
 
-    /// 使用当前热账户秘密执行一次通用 HKDF-SHA256。
-    ///
-    /// salt/info 的业务含义完全属于调用 App；本服务只复用与签名相同的账户归属、
-    /// 设备认证、金库解封、公钥复核和用后清理边界。
-    pub async fn derive_application_key(
+    /// 同一账户金库只认证、解封和复核一次；每项仍使用原有独立 HKDF info。
+    pub async fn derive_application_keys(
         &self,
         account_id: AccountId32,
         salt: [u8; 32],
-        info: Vec<u8>,
+        infos: Vec<Vec<u8>>,
     ) -> Result<SecretBuffer, EngineError> {
-        if info.is_empty() || info.len() > 256 {
+        if infos.is_empty()
+            || infos.len() > 16
+            || infos.iter().any(|info| info.is_empty() || info.len() > 256)
+        {
             return Err(error(
                 ContractErrorCode::InvalidArgument,
-                "应用派生钥 info 必须包含 1..256 字节",
+                "应用派生钥批次必须包含 1..16 个 1..256 字节 info",
             ));
         }
         let salt = Zeroizing::new(salt);
-        let info = Zeroizing::new(info);
+        let infos = Zeroizing::new(infos);
         let _guard = wallet_operation_gate().lock().await;
         require_secure_device(self.vault.as_ref()).await?;
         let (profile, account) = current_account(self.profiles.as_ref(), account_id, None).await?;
@@ -342,15 +345,19 @@ impl SigningService {
             })?;
             extract.update(bytes);
             let prk = Zeroizing::new(extract.finalize().into_bytes().to_vec());
-            let mut expand = Hmac::<Sha256>::new_from_slice(prk.as_slice()).map_err(|_| {
-                error(
-                    ContractErrorCode::Internal,
-                    "无法初始化应用派生钥 HKDF expand",
-                )
-            })?;
-            expand.update(info.as_slice());
-            expand.update(&[1]);
-            Ok(expand.finalize().into_bytes().to_vec())
+            let mut output = Zeroizing::new(Vec::with_capacity(infos.len() * 32));
+            for info in infos.iter() {
+                let mut expand = Hmac::<Sha256>::new_from_slice(prk.as_slice()).map_err(|_| {
+                    error(
+                        ContractErrorCode::Internal,
+                        "无法初始化应用派生钥 HKDF expand",
+                    )
+                })?;
+                expand.update(info.as_slice());
+                expand.update(&[1]);
+                output.extend_from_slice(&expand.finalize().into_bytes());
+            }
+            Ok(std::mem::take(&mut *output))
         })?;
         SecretBuffer::try_new(output).map_err(EngineError::from)
     }
@@ -481,7 +488,10 @@ impl WalletService {
 
     fn require_add_active(&self) -> Result<(), EngineError> {
         if self.add_cancelled.load(Ordering::Acquire) {
-            return Err(error(ContractErrorCode::AuthenticationCancelled, "账户追加已取消"));
+            return Err(error(
+                ContractErrorCode::AuthenticationCancelled,
+                "账户追加已取消",
+            ));
         }
         Ok(())
     }
@@ -1431,7 +1441,9 @@ impl WalletService {
         let sorted_indices: Vec<_> = unique.into_iter().collect();
         // 一次认证覆盖本请求固定的完整序号集合；不打开已有账户秘密。
         self.require_add_active()?;
-        self.vault.authorize_add_accounts(operation_id, profile.wallet_index(), generation).await?;
+        self.vault
+            .authorize_add_accounts(operation_id, profile.wallet_index(), generation)
+            .await?;
         self.require_add_active()?;
         if self.profiles.load().await? != state {
             return Err(conflict("追加认证期间钱包状态已变化"));
@@ -1717,7 +1729,8 @@ impl WalletService {
         claimed: &WalletState,
         pending: Vec<PendingSecret>,
     ) -> Result<(), EngineError> {
-        let plan = claimed.provisioning()
+        let plan = claimed
+            .provisioning()
             .ok_or_else(|| error(ContractErrorCode::Integrity, "provisioning 计划缺失"))?;
         let operation_id = *plan.operation_id();
         // 新钱包只初始化一次；追加计划保留 previous_profile，必须复用原硬件密钥。
@@ -1726,23 +1739,37 @@ impl WalletService {
             if latest.provisioning() != Some(plan) || latest.profile() != claimed.profile() {
                 return Err(conflict("密钥初始化前 provisioning 所有权已变化"));
             }
-            self.vault.ensure_wallet_key(operation_id, plan.wallet_index(), plan.generation()).await?;
+            self.vault
+                .ensure_wallet_key(operation_id, plan.wallet_index(), plan.generation())
+                .await?;
         }
         let adding = plan.previous_profile().is_some();
         let mut saved = Vec::with_capacity(pending.len());
         for pending_secret in pending {
-            if adding { self.require_add_active()?; }
+            if adding {
+                self.require_add_active()?;
+            }
             let secret_ref = pending_secret.secret_ref;
             // 账户身份在加密前由真实派生秘密反证，不能只相信调用方的公开字段。
             let public_key = self.signer.public_key(&pending_secret.secret).await?;
             if public_key.as_bytes() != secret_ref.account_id().as_bytes() {
-                return Err(error(ContractErrorCode::Integrity, "待保存秘密与账户不一致"));
+                return Err(error(
+                    ContractErrorCode::Integrity,
+                    "待保存秘密与账户不一致",
+                ));
             }
-            saved.push((secret_ref, self.persist_secret(operation_id, pending_secret).await?));
+            saved.push((
+                secret_ref,
+                self.persist_secret(operation_id, pending_secret).await?,
+            ));
         }
-        if adding { self.require_add_active()?; }
+        if adding {
+            self.require_add_active()?;
+        }
         self.verify_provisioned(claimed, &saved).await?;
-        if adding { self.require_add_active()?; }
+        if adding {
+            self.require_add_active()?;
+        }
         let latest = self.profiles.load().await?;
         if latest.profile() != claimed.profile()
             || latest.provisioning() != claimed.provisioning()
@@ -1750,7 +1777,9 @@ impl WalletService {
         {
             return Err(conflict("provisioning 完成前公开事实已改变"));
         }
-        if adding { self.require_add_active()?; }
+        if adding {
+            self.require_add_active()?;
+        }
         self.commit_state(
             &latest,
             latest.profile().cloned(),
@@ -1768,7 +1797,8 @@ impl WalletService {
         pending: PendingSecret,
     ) -> Result<citizen_sdk_contracts::EncryptedSecretEnvelope, EngineError> {
         // 封装前后都核对持久所有权；追加不能因复用硬件钥而绕过账户级操作隔离。
-        self.require_secret_write_ownership(operation_id, pending.secret_ref).await?;
+        self.require_secret_write_ownership(operation_id, pending.secret_ref)
+            .await?;
         let envelope = self
             .vault
             .seal(operation_id, pending.secret_ref, pending.secret)
@@ -1840,13 +1870,13 @@ impl WalletService {
         if provisioning_owns || committed_owns {
             Ok(())
         } else {
-            Err(conflict(
-                "provisioning/profile 已不再拥有该秘密引用",
-            ))
+            Err(conflict("provisioning/profile 已不再拥有该秘密引用"))
         }
     }
 
-    async fn verify_provisioned(&self, expected: &WalletState,
+    async fn verify_provisioned(
+        &self,
+        expected: &WalletState,
         saved: &[(SecretRef, citizen_sdk_contracts::EncryptedSecretEnvelope)],
     ) -> Result<(), EngineError> {
         let persisted = self.profiles.load().await?;
@@ -1870,17 +1900,27 @@ impl WalletService {
             ));
         }
         if saved.len() != plan.secret_refs().len() {
-            return Err(error(ContractErrorCode::Integrity, "保存结果数量与计划不一致"));
+            return Err(error(
+                ContractErrorCode::Integrity,
+                "保存结果数量与计划不一致",
+            ));
         }
         for (secret_ref, envelope) in saved {
             if !plan.secret_refs().contains(secret_ref) {
-                return Err(error(ContractErrorCode::Integrity, "保存结果不属于当前计划"));
+                return Err(error(
+                    ContractErrorCode::Integrity,
+                    "保存结果不属于当前计划",
+                ));
             }
             let snapshot = self.encrypted_secrets.load(*secret_ref).await?;
             if !matches!(snapshot.state(), EncryptedSecretBlobState::Sealed {
                 provisioning_operation_id, envelope: observed
-            } if provisioning_operation_id == plan.operation_id() && observed == envelope) {
-                return Err(error(ContractErrorCode::Integrity, "账户密文持久回读不一致"));
+            } if provisioning_operation_id == plan.operation_id() && observed == envelope)
+            {
+                return Err(error(
+                    ContractErrorCode::Integrity,
+                    "账户密文持久回读不一致",
+                ));
             }
             // 新建/导入保持原硬件解封验收；追加已独立授权并核对加密结果和持久字节。
             if plan.previous_profile().is_none() {

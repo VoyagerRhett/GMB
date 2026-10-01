@@ -13,10 +13,10 @@ const settings = readFileSync(new URL('../android/settings.gradle.kts', import.m
 const root = readFileSync(new URL('../android/build.gradle.kts', import.meta.url), 'utf8');
 const application = readFileSync(new URL('../android/app/build.gradle.kts', import.meta.url), 'utf8');
 const properties = readFileSync(new URL('../android/gradle.properties', import.meta.url), 'utf8');
-const wrapper = readFileSync(new URL('../android/gradle/wrapper/gradle-wrapper.properties', import.meta.url), 'utf8');
+const wrapper = readFileSync(new URL('../android/gradle-wrapper.properties', import.meta.url), 'utf8');
 const runner = readFileSync(new URL('../scripts/citizenapp-run.sh', import.meta.url), 'utf8');
 const iosUITestRunner = readFileSync(new URL('../scripts/citizenapp-ios-ui-test.sh', import.meta.url), 'utf8');
-const iosUITests = readFileSync(new URL('../ios/RunnerUITests/RunnerUITests.swift', import.meta.url), 'utf8');
+const iosUITests = readFileSync(new URL('../ios/RunnerUITests.swift', import.meta.url), 'utf8');
 const viewScript = fileURLToPath(new URL('../scripts/citizenapp-view.mjs', import.meta.url));
 const view = readFileSync(viewScript, 'utf8');
 const podfile = readFileSync(new URL('../ios/Podfile', import.meta.url), 'utf8');
@@ -160,7 +160,7 @@ test('Android从真实产品源码根启动Gradle并把可写状态放入外部�
   assert.match(root, /System\.getenv\("CITIZENAPP_BUILD_DIR"\)/u);
   assert.match(root, /System\.getProperty\("java\.io\.tmpdir"\)/u);
   assert.match(application, /import java\.util\.Properties/u);
-  assert.doesNotMatch(application, /java\.util\.Properties\(\)|setSrcDirs\(/u);
+  assert.doesNotMatch(application, /java\.util\.Properties\(\)/u);
   assert.match(application, /compileSdk = 36/u);
   assert.match(application, /ndkVersion = "28\.2\.13676358"/u);
   assert.match(application, /minSdk = 24/u);
@@ -206,7 +206,7 @@ test('Android从真实产品源码根启动Gradle并把可写状态放入外部�
   assert.match(runner, /ANDROID_SDK_HOME\/ndk\/28\.2\.13676358/u);
   assert.match(runner, /-x "\$ANDROID_JAVA_HOME\/bin\/java"/u);
   assert.match(runner, /ANDROID_HOME="\$android_sdk" ANDROID_SDK_ROOT="\$android_sdk" JAVA_HOME="\$java_home" PATH="\$java_home\/bin:\$PATH"/u);
-  assert.match(runner, /GRADLE_EXECUTABLE="\$\{CITIZENAPP_GRADLE:-\$APP_ROOT\/android\/gradlew\}"/u);
+  assert.match(runner, /GRADLE_EXECUTABLE="\$\{CITIZENAPP_GRADLE:-\$CITIZENAPP_PROJECT_ROOT\/android\/gradlew\}"/u);
   assert.match(runner, /Gradle执行器必须是绝对普通可执行文件/u);
   assert.match(runner, /"\$GRADLE_EXECUTABLE"[\s\S]*--project-cache-dir "\$BUILD_WORK_DIR\/gradle-project"/u);
   assert.match(runner, /-Pkotlin[.]project[.]persistent[.]dir="\$CITIZENAPP_FLUTTER_GRADLE_BUILD_DIR\/kotlin-project"/u);
@@ -226,6 +226,34 @@ test('Android从真实产品源码根启动Gradle并把可写状态放入外部�
 test('iOS Pod装配保留调用方工程路径且不把生成状态写回源码', () => {
   assert.match(podfile, /flutter_install_all_ios_pods File\.dirname\(File\.expand_path\(__FILE__\)\)/u);
   assert.doesNotMatch(podfile, /flutter_install_all_ios_pods File\.dirname\(File\.realpath\(__FILE__\)\)/u);
+});
+
+// 执行真实入口的工具检查段，验证平台隔离及 Android 执行器边界。
+test('CitizenApp iOS不依赖Gradle且Android拒绝缺失或链接执行器', () => {
+  const begin = runner.indexOf('  export GRADLE_USER_HOME=');
+  const end = runner.indexOf('  export CP_HOME_DIR=', begin);
+  assert.ok(begin >= 0 && end > begin);
+  const code = runner.slice(begin, end);
+  const work = realpathSync(mkdtempSync(join(tmpdir(), 'citizenapp-gradle-')));
+  try {
+    const executable = join(work, 'gradle');
+    const linked = join(work, 'linked-gradle');
+    writeFileSync(executable, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    symlinkSync(executable, linked);
+    const run = (platform, gradle = '') => spawnSync('/bin/bash', ['-euc', code], {
+      env: { ...process.env, PLATFORM: platform, CITIZENAPP_GRADLE: gradle,
+        CITIZENAPP_PROJECT_ROOT: work, DEPENDENCY_WORK_DIR: work },
+      encoding: 'utf8',
+    });
+    assert.equal(run('ios').status, 0);
+    assert.equal(run('ios', linked).status, 0);
+    for (const invalid of ['', 'relative-gradle', work, linked]) {
+      const rejected = run('android', invalid);
+      assert.notEqual(rejected.status, 0);
+      assert.match(rejected.stderr, /Gradle执行器必须是绝对普通可执行文件/u);
+    }
+    assert.equal(run('android', executable).status, 0);
+  } finally { rmSync(work, { recursive: true }); }
 });
 
 test('CitizenApp直接开发自建源码外视图并只投影当轮Framework', () => {
@@ -248,6 +276,11 @@ test('CitizenApp直接开发自建源码外视图并只投影当轮Framework', (
       '  tatachat_sdk:', '    path: ../../TATA/tatachatsdk',
       '  formal_chat_sdk:', '    path: ../../FORMAL/tatachatsdk', '',
     ].join('\n'));
+    mkdirSync(join(app, 'ios'));
+    for (const scheme of ['Runner', 'RunnerUITests']) {
+      writeFileSync(join(app, 'ios', `${scheme}.xcscheme`), `<Scheme name="${scheme}"/>`);
+    }
+    writeFileSync(join(app, 'android/gradle-wrapper.properties'), 'distributionUrl=https://example.invalid/gradle.zip\n');
     writeFileSync(join(app, 'lib/main.dart'), 'void main() {}\n');
     writeFileSync(join(app, '.dart_tool/forbidden'), 'generated\n');
     writeFileSync(join(app, 'android/settings.gradle'), 'generated by caller\n');
@@ -260,6 +293,17 @@ test('CitizenApp直接开发自建源码外视图并只投影当轮Framework', (
       '--source-root', app, '--work-root', work], { encoding: 'utf8' }).trim();
     assert.equal(project, join(work, 'source-view', app.replace(/^\/+/, '')));
     assert.equal(lstatSync(join(project, 'lib/main.dart')).isSymbolicLink(), true);
+    for (const scheme of ['Runner', 'RunnerUITests']) {
+      assert.equal(realpathSync(join(project, `ios/Runner.xcodeproj/xcshareddata/xcschemes/${scheme}.xcscheme`)),
+        join(app, `ios/${scheme}.xcscheme`));
+    }
+    // 普通本机工程不消费 Wrapper；只有 create-android 从 Flutter 工具原件装配。
+    for (const name of ['gradlew', 'gradlew.bat', 'gradle/wrapper/gradle-wrapper.jar']) {
+      assert.equal(existsSync(join(project, 'android', name)), false);
+    }
+    assert.equal(realpathSync(join(project, 'android/gradle/wrapper/gradle-wrapper.properties')),
+      join(app, 'android/gradle-wrapper.properties'));
+
     assert.equal(lstatSync(join(work, 'source-view', sdk.replace(/^\/+/, ''),
       'pubspec.yaml')).isSymbolicLink(), true);
     assert.equal(lstatSync(join(work, 'source-view', chat.replace(/^\/+/, ''),
@@ -355,4 +399,16 @@ test('iOS Release黑盒UI验收使用主动真机探测且不改变正式App', (
   const walletGateTest = iosUITests.match(/func testWalletGateLaunchesCitizenSdkCreateAndImportWithoutSecretInput\(\) throws \{[\s\S]*?\n  \}/u)?.[0];
   assert.ok(walletGateTest);
   assert.doesNotMatch(walletGateTest, /typeText\(/u);
+});
+
+// 防止 AGP 9 只登记 Java 源集而漏编 Kotlin：APK 可构建成功，但真机找不到 MainActivity。
+test('Android入口及测试显式登记独立Kotlin源集', () => {
+  assert.ok(application.includes('sourceSets.getByName("main").kotlin.directories.apply { clear(); add("src/main") }'));
+  assert.ok(application.includes('sourceSets.getByName("androidTest").kotlin.directories.apply { clear(); add("src/androidTest") }'));
+});
+
+test('Android插件注册表来自本轮外部Flutter工程', () => {
+  const javaSources = application.slice(application.indexOf('sourceSets.getByName("main").java.directories.apply'),
+    application.indexOf('sourceSets.getByName("main").java.directories.apply') + 260);
+  assert.ok(javaSources.includes('add(flutterProductRoot.resolve("android/app/src/main/java").absolutePath)'));
 });

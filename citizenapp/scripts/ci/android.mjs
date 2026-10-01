@@ -39,15 +39,15 @@ export const workflowSteps = Object.freeze({
   },
   "8": {
     "shell": "bash",
-    "source": "set -euo pipefail\nexport CITIZENSDK_WORK_DIR=\"$CI_INCREMENTAL_ROOT/citizensdk-work\"\nexport CITIZENSDK_NATIVE_OUTPUT_DIR=\"$CI_INCREMENTAL_ROOT/citizensdk-output\"\nexport CITIZENSDK_GRADLE=\"$GITHUB_WORKSPACE/citizenapp/android/gradlew\"\nbash citizensdk/scripts/build-native.sh android\n{\n  printf 'CITIZENSDK_ANDROID_CORE_DIR=%s\n' \"$CITIZENSDK_NATIVE_OUTPUT_DIR/android/arm64-v8a\"\n  printf 'CITIZENSDK_ANDROID_BUILD_DIR=%s\n' \"$CI_INCREMENTAL_ROOT/flutter-build/citizensdk-android\"\n  printf 'CITIZENSDK_NATIVE_OUTPUT_DIR=%s\n' \"$CITIZENSDK_NATIVE_OUTPUT_DIR\"\n} >> \"$GITHUB_ENV\"\n"
+    "source": "set -euo pipefail\nwork=\"$RUNNER_TEMP/citizenapp-android-view-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT\"\nmkdir -p \"$work\"\nwork=\"$(cd \"$work\" && pwd -P)\"\nproject=\"$(node \"$GITHUB_WORKSPACE/citizenapp/scripts/citizenapp-view.mjs\" create-android --source-root \"$GITHUB_WORKSPACE/citizenapp\" --work-root \"$work\")\"\nexport CITIZENAPP_PROJECT_ROOT=\"$project\"\nprintf 'CITIZENAPP_PROJECT_ROOT=%s\\n' \"$project\" >> \"$GITHUB_ENV\"\nset -euo pipefail\nexport CITIZENSDK_WORK_DIR=\"$CI_INCREMENTAL_ROOT/citizensdk-work\"\nexport CITIZENSDK_NATIVE_OUTPUT_DIR=\"$CI_INCREMENTAL_ROOT/citizensdk-output\"\nexport CITIZENSDK_GRADLE=\"$CITIZENAPP_PROJECT_ROOT/android/gradlew\"\nbash citizensdk/scripts/build-native.sh android\n{\n  printf 'CITIZENSDK_ANDROID_CORE_DIR=%s\n' \"$CITIZENSDK_NATIVE_OUTPUT_DIR/android/arm64-v8a\"\n  printf 'CITIZENSDK_ANDROID_BUILD_DIR=%s\n' \"$CI_INCREMENTAL_ROOT/flutter-build/citizensdk-android\"\n  printf 'CITIZENSDK_NATIVE_OUTPUT_DIR=%s\n' \"$CITIZENSDK_NATIVE_OUTPUT_DIR\"\n} >> \"$GITHUB_ENV\"\n"
   },
   "9": {
     "shell": "bash",
-    "source": "flutter pub get --enforce-lockfile\n"
+    "source": "set -euo pipefail\nproject=\"$CITIZENAPP_PROJECT_ROOT\"\n# 继续使用原流程已隔离的产物目录，既有签名/验真/上传路径保持同一份产物。\nbuild=\"$(cd \"$GITHUB_WORKSPACE/citizenapp/build\" && pwd -P)\"\nln -s \"$build\" \"$project/build\"\nexport CITIZENAPP_PROJECT_ROOT=\"$project\" CITIZENAPP_BUILD_DIR=\"$build\"\n(cd \"$project\" && flutter pub get --enforce-lockfile)\n{\n  printf 'CITIZENAPP_PROJECT_ROOT=%s\\n' \"$project\"\n  printf 'CITIZENAPP_BUILD_DIR=%s\\n' \"$build\"\n} >> \"$GITHUB_ENV\"\n"
   },
   "10": {
     "shell": "bash",
-    "source": "flutter build apk --release --target-platform android-arm64"
+    "source": "cd \"$CITIZENAPP_PROJECT_ROOT\"\nflutter build apk --release --target-platform android-arm64"
   },
   "11": {
     "shell": "bash",

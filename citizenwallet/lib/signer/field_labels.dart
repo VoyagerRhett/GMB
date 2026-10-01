@@ -8,7 +8,7 @@ import 'dart:typed_data';
 
 import 'package:polkadart_keyring/polkadart_keyring.dart' show Keyring;
 
-import 'package:citizenwallet/chain/chain_constants.dart';
+import 'package:citizenwallet/chain_constants.dart';
 import 'package:citizenwallet/qr/generated/qr_action_registry.g.dart';
 
 /// fields value 转换。

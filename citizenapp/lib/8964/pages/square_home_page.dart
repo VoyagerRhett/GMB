@@ -7,9 +7,9 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
-import 'package:citizenapp/log/app_log.dart';
+import 'package:citizenapp/app_log.dart';
 
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/square_models.dart';
 import 'package:citizenapp/8964/pages/square_article_detail_page.dart';
 import 'package:citizenapp/8964/compose/compose_page.dart';
 import 'package:citizenapp/8964/pages/square_post_detail_page.dart';
@@ -66,6 +66,7 @@ class _SquareHomePageState extends State<SquareHomePage> {
   late Future<List<SquarePost>> _feedFuture;
   int _feedLoadGeneration = 0;
   final List<SquarePost> _localPosts = [];
+  final Set<String> _removedPostIds = {};
 
   /// 最近一次身份加载结果的身份账户与永久 CID，供身份 revision 广播后成对比对。
   String? _identityAddress;
@@ -270,7 +271,6 @@ class _SquareHomePageState extends State<SquareHomePage> {
     );
     if (post == null || !mounted) return;
     setState(() => _localPosts.insert(0, post));
-    await _refreshFeed();
   }
 
   Future<void> _openAuthor(String cidNumber) async {
@@ -297,6 +297,7 @@ class _SquareHomePageState extends State<SquareHomePage> {
     );
     if (result == null || !mounted) return;
     setState(() {
+      _removedPostIds.add(post.postId);
       _localPosts.removeWhere((item) => item.postId == post.postId);
       final replacement = result.replacement;
       if (replacement != null) {
@@ -304,7 +305,6 @@ class _SquareHomePageState extends State<SquareHomePage> {
         _localPosts.insert(0, replacement);
       }
     });
-    await _refreshFeed();
   }
 
   @override
@@ -388,6 +388,47 @@ class _SquareHomePageState extends State<SquareHomePage> {
                               onRegistered: _onRegisteredFromGuide,
                             );
                           }
+                          if (error is SquareApiException &&
+                              (error.errorCode == 'device_not_registered' ||
+                                  error.errorCode == 'invalid_signature')) {
+                            return Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Text('本机设备尚未登记'),
+                                  const SizedBox(height: 12),
+                                  FilledButton(
+                                    key: const ValueKey(
+                                      'square-register-device',
+                                    ),
+                                    onPressed: () async {
+                                      try {
+                                        await (_sessionProvider ??
+                                                context
+                                                    .read<
+                                                      SquareSessionProvider
+                                                    >())
+                                            .registerCurrentDevice();
+                                        if (mounted) {
+                                          setState(() {
+                                            _feedFuture = _beginFeedLoad();
+                                          });
+                                        }
+                                      } on Exception catch (failure) {
+                                        if (!context.mounted) return;
+                                        ScaffoldMessenger.of(
+                                          context,
+                                        ).showSnackBar(
+                                          SnackBar(content: Text('$failure')),
+                                        );
+                                      }
+                                    },
+                                    child: const Text('验证并登记本机设备'),
+                                  ),
+                                ],
+                              ),
+                            );
+                          }
                           final posts = _composeFeed(
                             snapshot.data ?? const <SquarePost>[],
                           );
@@ -449,8 +490,9 @@ class _SquareHomePageState extends State<SquareHomePage> {
 
   Future<List<SquarePost>> _loadFeed(
     SquareFeedKind feedKind,
-    int generation,
-  ) async {
+    int generation, {
+    bool syncSelf = false,
+  }) async {
     SquareSession? session;
     SquareSessionProvider? sessionProvider;
     if (_feedSource is SquareApiClient) {
@@ -460,13 +502,6 @@ class _SquareHomePageState extends State<SquareHomePage> {
       if (session == null) {
         throw const SquareApiException('需要钱包账户才能浏览广场');
       }
-      // 会话和链上当前绑定均已通过后再后台回灌本人副本；不阻塞公共 feed 首屏。
-      // 同步失败只保留本地既有内容，下次启动/刷新继续从未推进的检查点重试。
-      unawaited(
-        _postSyncService.sync(session).catchError((Object error) {
-          AppLog.d('[SquareHomePage] local post sync failed: $error');
-        }),
-      );
     }
     List<SquarePost> posts;
     try {
@@ -492,13 +527,20 @@ class _SquareHomePageState extends State<SquareHomePage> {
     if (generation == _feedLoadGeneration) {
       _feedSessionToken = session?.sessionToken;
     }
+    if (syncSelf && session != null) {
+      await _postSyncService.sync(
+        session,
+        userInitiated: true,
+        isCurrent: () => mounted && generation == _feedLoadGeneration,
+      );
+    }
     return posts;
   }
 
-  Future<List<SquarePost>> _beginFeedLoad() {
+  Future<List<SquarePost>> _beginFeedLoad({bool syncSelf = false}) {
     final generation = ++_feedLoadGeneration;
     final feedKind = _selectedFeed;
-    final future = _loadFeed(feedKind, generation);
+    final future = _loadFeed(feedKind, generation, syncSelf: syncSelf);
     // initState 和分类切换会先创建 Future、随后才由下一帧 FutureBuilder 挂监听。
     // Worker 快速失败时必须立刻观察错误，消除这段未处理时间窗；原 Future
     // 不做转换，页面仍能通过 snapshot.hasError 展示真实前台失败态。
@@ -514,7 +556,7 @@ class _SquareHomePageState extends State<SquareHomePage> {
   }
 
   Future<void> _refreshFeed() async {
-    final next = _beginFeedLoad();
+    final next = _beginFeedLoad(syncSelf: true);
     // Future 赋值表达式本身会返回 Future，必须使用语句块确保 setState 回调
     // 同步返回 void；会员确认后的就地刷新也复用这条安全路径。
     setState(() {
@@ -537,12 +579,26 @@ class _SquareHomePageState extends State<SquareHomePage> {
   /// Worker 拉回的结果。关注流由服务端 `square_posts JOIN square_follows` 过滤，
   /// 直接渲染服务端结果——本地草稿与种子帖不属于关注流，只在其余分类混入。
   List<SquarePost> _composeFeed(List<SquarePost> serverPosts) {
-    final merged = [..._localPosts, ...serverPosts, ...widget.seedPosts];
+    // 写操作已有确定结果，直接更新当前展示，返回页面不再次请求远端。
+    final visibleServer = serverPosts
+        .where((post) => !_removedPostIds.contains(post.postId))
+        .toList();
+    final byId = <String, SquarePost>{};
+    for (final post in [
+      ..._localPosts,
+      ...visibleServer,
+      ...widget.seedPosts,
+    ]) {
+      if (!_removedPostIds.contains(post.postId)) {
+        byId.putIfAbsent(post.postId, () => post);
+      }
+    }
+    final merged = byId.values.toList();
     switch (_selectedFeed) {
       case SquareFeedKind.recommended:
         return merged;
       case SquareFeedKind.following:
-        return serverPosts;
+        return visibleServer;
       case SquareFeedKind.campaign:
         return merged
             .where((post) => post.postCategory == SquarePostCategory.campaign)

@@ -128,7 +128,7 @@ int main() {
   const std::string host_bridge =
       read("/src/citizen_sdk_host_bridge.cc");
   const std::string cpp_api =
-      read("/include/citizen_sdk/citizen_sdk.hpp");
+      read("/citizen_sdk/citizen_sdk.hpp");
   const auto wallet_index_guard =
       host_bridge.find("value.wallet_index == 0");
   const auto secret_index_guard = host_bridge.find(

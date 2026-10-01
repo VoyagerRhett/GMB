@@ -5,7 +5,7 @@ import {
   createR2ObjectUpload,
   publicMediaUrl,
   purgePublicMediaCache,
-} from '../src/media/service';
+} from '../src/media';
 import type { Env } from '../src/types';
 
 describe('R2 media assets', () => {

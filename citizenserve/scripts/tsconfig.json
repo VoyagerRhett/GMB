@@ -10,5 +10,5 @@
     "noEmit": true,
     "allowSyntheticDefaultImports": true
   },
-  "include": ["../src/**/*.ts", "../test/**/*.ts", "vitest.config.ts"]
+  "include": ["../src/**/*.ts", "../test/**/*.ts", "ci/vitest.config.ts", "release/release_manifest.test.ts"]
 }

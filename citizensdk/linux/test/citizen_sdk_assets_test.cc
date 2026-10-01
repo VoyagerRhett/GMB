@@ -27,7 +27,7 @@ int main() {
   using citizen_sdk::linux::HostError;
 
   citizen_sdk::linux::test::TempDirectory temporary("assets");
-  const auto directory = temporary.path() / "citizenchain";
+  const auto directory = temporary.path() / "chain";
   std::filesystem::create_directories(directory);
   write(directory / "manifest.json", "manifest");
   write(directory / "chainspec.json", "chainspec");

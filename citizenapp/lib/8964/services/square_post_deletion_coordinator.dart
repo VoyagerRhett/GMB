@@ -18,11 +18,23 @@ class SquarePostDeletionCoordinator implements SquarePostDeleteCoordinator {
   SquarePostDeletionCoordinator({
     SquarePostDeletionService? remoteDeletion,
     SquareLocalPostDeletionStore? localStore,
-  })  : _remoteDeletion = remoteDeletion ?? SquareApiClient(),
-        _localStore = localStore ?? const SquarePostStore();
+  }) : _remoteDeletion = remoteDeletion ?? SquareApiClient(),
+       _localStore = localStore ?? const SquarePostStore();
 
   final SquarePostDeletionService _remoteDeletion;
   final SquareLocalPostDeletionStore _localStore;
+  static const _journal = SquarePostStore();
+
+  /// 仅显式刷新或用户继续操作时恢复；confirmed只重试本地，不重复访问远端。
+  Future<void> recover(SquareSession session) async {
+    for (final row in await _journal.deletionsToRecover(session.cidNumber)) {
+      await delete(
+        session: session,
+        cidNumber: row.cidNumber,
+        postId: row.postId,
+      );
+    }
+  }
 
   @override
   Future<void> delete({
@@ -38,20 +50,19 @@ class SquarePostDeletionCoordinator implements SquarePostDeleteCoordinator {
       );
     }
 
-    try {
-      await _remoteDeletion.deletePost(
-        session: session,
-        postId: postId,
-      );
-    } on SquareApiException catch (error) {
-      final alreadyAbsent =
-          error.statusCode == 404 && error.errorCode == 'post_not_found';
-      if (!alreadyAbsent) rethrow;
+    await _journal.recordDeletion(cidNumber, postId);
+    final record = await _journal.readDeletion(cidNumber, postId);
+    if (record!.operationState != 'confirmed') {
+      try {
+        await _remoteDeletion.deletePost(session: session, postId: postId);
+      } on SquareApiException catch (error) {
+        final alreadyAbsent =
+            error.statusCode == 404 && error.errorCode == 'post_not_found';
+        if (!alreadyAbsent) rethrow;
+      }
+      await _journal.recordDeletion(cidNumber, postId, confirmed: true);
     }
 
-    await _localStore.delete(
-      cidNumber: cidNumber,
-      postId: postId,
-    );
+    await _localStore.delete(cidNumber: cidNumber, postId: postId);
   }
 }

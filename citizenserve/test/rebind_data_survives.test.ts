@@ -3,7 +3,7 @@ import {
   deleteContactRoute,
   listContactsRoute,
   putContactRoute
-} from '../src/contacts/service';
+} from '../src/contacts';
 import { getMembership } from '../src/membership/service';
 import type { Env, MembershipRow, SessionState } from '../src/types';
 

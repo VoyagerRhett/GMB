@@ -2,9 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image_picker/image_picker.dart';
 
-import 'package:citizenapp/8964/compose/video/video_compose_body.dart';
-import 'package:citizenapp/8964/compose/widgets/compose_media_widgets.dart';
-import 'package:citizenapp/8964/models/square_models.dart';
+import 'package:citizenapp/8964/compose/video_compose_body.dart';
+import 'package:citizenapp/8964/compose/compose_media_widgets.dart';
+import 'package:citizenapp/8964/square_models.dart';
 
 const _video = SquareLocalMediaDraft(
   mediaKind: SquareMediaKind.video,

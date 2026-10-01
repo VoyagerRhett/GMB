@@ -103,6 +103,7 @@ pub enum ResultPayload {
     PreparedTransaction(PreparedTransactionPayload),
     TransactionExecution(TransactionExecutionPayload),
     ApplicationKey(std::sync::Arc<SecretBuffer>),
+    ApplicationKeys(std::sync::Arc<SecretBuffer>),
 }
 
 impl ResultPayload {
@@ -139,6 +140,7 @@ impl ResultPayload {
             Self::PreparedTransaction(_) => CitizenSdkResultKind::PreparedTransaction,
             Self::TransactionExecution(_) => CitizenSdkResultKind::TransactionExecution,
             Self::ApplicationKey(_) => CitizenSdkResultKind::ApplicationKey,
+            Self::ApplicationKeys(_) => CitizenSdkResultKind::ApplicationKeys,
         }
     }
 
@@ -156,6 +158,7 @@ impl ResultPayload {
             | Self::PreparedWallet(_)
             | Self::TransactionHistoryPage(_) => 0,
             Self::ApplicationKey(_) => 32,
+            Self::ApplicationKeys(keys) => keys.with_secret(|bytes| bytes.len() as u64),
             Self::PreparedTransaction(_) => 0,
             Self::TransactionExecution(TransactionExecutionPayload::Completed(_)) => 0,
             Self::TransactionExecution(TransactionExecutionPayload::ExternalPending(pending)) => {

@@ -6,7 +6,7 @@ use citizen_sdk_smoldot_provider::{
     ProviderLifecycle, SmoldotProviderConfig, SmoldotVerifiedChainClient,
 };
 
-const CHAIN_SPEC: &str = include_str!("../../../../assets/citizenchain/chainspec.json");
+const CHAIN_SPEC: &str = include_str!("../../../../chain/chainspec.json");
 const INVALID_CHAIN_SPEC: &str =
     r#"{"name":"CitizenChain","id":"citizenchain","protocolId":"citizenchain"}"#;
 
@@ -41,7 +41,7 @@ fn live_runtime_context_reuses_verified_exact_block() {
         let mut spec: serde_json::Value = require_ok(serde_json::from_str(CHAIN_SPEC), "chainspec");
         spec["lightSyncState"] = require_ok(
             serde_json::from_str(include_str!(
-                "../../../../assets/citizenchain/light_sync_state.json"
+                "../../../../chain/light_sync_state.json"
             )),
             "checkpoint",
         );
@@ -142,7 +142,7 @@ fn live_nonce_queries_reuse_pinned_runtime_without_transaction_submission() {
         let mut spec: serde_json::Value = require_ok(serde_json::from_str(CHAIN_SPEC), "chainspec");
         spec["lightSyncState"] = require_ok(
             serde_json::from_str(include_str!(
-                "../../../../assets/citizenchain/light_sync_state.json"
+                "../../../../chain/light_sync_state.json"
             )),
             "light sync state",
         );
@@ -218,7 +218,7 @@ fn nonce_without_proof_never_returns_a_cached_or_fabricated_value() {
     spec["bootNodes"] = serde_json::json!([]);
     spec["lightSyncState"] = require_ok(
         serde_json::from_str(include_str!(
-            "../../../../assets/citizenchain/light_sync_state.json"
+            "../../../../chain/light_sync_state.json"
         )),
         "light sync state",
     );
@@ -288,7 +288,7 @@ fn live_chain_status_observation_without_transaction_submission() {
     let mut spec: serde_json::Value = require_ok(serde_json::from_str(CHAIN_SPEC), "chainspec");
     spec["lightSyncState"] = require_ok(
         serde_json::from_str(include_str!(
-            "../../../../assets/citizenchain/light_sync_state.json"
+            "../../../../chain/light_sync_state.json"
         )),
         "light sync state",
     );
@@ -362,7 +362,7 @@ fn live_idle_chain_rejects_inherent_without_a_new_block() {
     let mut spec: serde_json::Value = require_ok(serde_json::from_str(CHAIN_SPEC), "chainspec");
     spec["lightSyncState"] = require_ok(
         serde_json::from_str(include_str!(
-            "../../../../assets/citizenchain/light_sync_state.json"
+            "../../../../chain/light_sync_state.json"
         )),
         "light sync state",
     );
@@ -464,7 +464,7 @@ fn real_smoldot_subscription_drops_and_drains_without_peers() {
     let mut spec: serde_json::Value = serde_json::from_str(CHAIN_SPEC).unwrap();
     spec["bootNodes"] = serde_json::json!([]);
     spec["lightSyncState"] = serde_json::from_str(include_str!(
-        "../../../../assets/citizenchain/light_sync_state.json"
+        "../../../../chain/light_sync_state.json"
     ))
     .unwrap();
     let provider = SmoldotVerifiedChainClient::new(

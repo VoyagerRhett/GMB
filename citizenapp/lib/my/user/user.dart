@@ -6,7 +6,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:citizenapp/log/app_log.dart';
+import 'package:citizenapp/app_log.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:local_auth/local_auth.dart';
@@ -28,7 +28,6 @@ import 'package:citizenapp/my/membership/membership_page.dart';
 import 'package:citizenapp/my/membership/membership_revision.dart';
 import 'package:citizenapp/my/membership/subscription_service.dart';
 import 'package:citizenapp/my/myid/myid_page.dart';
-import 'package:citizenapp/my/myid/register_identity_flow.dart';
 import 'package:citizenapp/isar/user_isar.dart';
 import 'package:citizenapp/security/app_lock_service.dart';
 import 'package:citizenapp/security/pin_input_page.dart';
@@ -87,10 +86,6 @@ class _ProfilePageState extends State<MyTab> {
   CitizenProfile? _publicProfile;
   CitizenProfileMediaSnapshot _publicProfileMedia =
       const CitizenProfileMediaSnapshot();
-  SquareSession? _profileSession;
-
-  /// 每个 MyTab 生命周期同一 CID 最多后台刷新一次；反复进入页面只读缓存。
-  String? _profileRefreshCid;
 
   /// 默认钱包的会员购买态（档位色 + 对勾）；best-effort，读失败为 null。
   late final SubscriptionService _subscriptionService;
@@ -258,7 +253,7 @@ class _ProfilePageState extends State<MyTab> {
     if (_dependenciesReady) _loadState(refreshRemote: false);
   }
 
-  Future<void> _loadState({bool refreshRemote = true}) async {
+  Future<void> _loadState({bool refreshRemote = false}) async {
     final generation = ++_loadGeneration;
     final defaultWallet = (await _wallet.getState().result).defaultAccount;
     // CID 是快照归属主键；当前绑定账户只负责链读和签名。
@@ -297,10 +292,8 @@ class _ProfilePageState extends State<MyTab> {
       if (identityChanged) {
         _publicProfile = null;
         _publicProfileMedia = const CitizenProfileMediaSnapshot();
-        _profileSession = null;
         _membership = null;
         _membershipDecision = MembershipDisplayDecision.inactiveConfirmed;
-        _profileRefreshCid = null;
       }
     });
     // 会员展示快照与本地资料一样先回刷；它只决定徽章和创作者入口首帧，任何
@@ -310,7 +303,7 @@ class _ProfilePageState extends State<MyTab> {
     }
     // 公开资料与会员态均非阻塞加载：昵称/头像先用缓存或稳定占位渲染。
     if (refreshRemote) {
-      unawaited(_refreshRemoteState(generation));
+      await _refreshRemoteState(generation);
     } else if (identityCidNumber.isNotEmpty) {
       unawaited(_reloadCachedPublicProfile(identityCidNumber, generation));
     }
@@ -340,8 +333,11 @@ class _ProfilePageState extends State<MyTab> {
     final SquareSession? session;
     try {
       session = await _sessionProvider.ensureSession();
-    } on Exception catch (e) {
-      AppLog.d('profile session load failed: $e');
+    } catch (_) {
+      if (mounted && generation == _loadGeneration) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('刷新失败，已保留本地资料')));
+      }
       return;
     }
     if (session == null ||
@@ -350,9 +346,15 @@ class _ProfilePageState extends State<MyTab> {
       return;
     }
 
-    _profileSession = session;
-
-    await _loadPublicProfile(session, generation);
+    try {
+      await _loadPublicProfile(session, generation);
+    } catch (_) {
+      if (mounted && generation == _loadGeneration) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('刷新失败，已保留本地资料')));
+      }
+      return;
+    }
 
     try {
       // 身份会话只通过统一会员服务读取一次 CitizenServe；其它页面复用同一缓存。
@@ -371,112 +373,57 @@ class _ProfilePageState extends State<MyTab> {
     }
   }
 
-  /// 缓存立即回刷；同一页面生命周期、同一 CID 只后台请求一次。
+  /// 仅用户下拉刷新时读取远端；完整持久化后页面重新读取本地。
   Future<void> _loadPublicProfile(SquareSession session, int generation) async {
-    final cidNumber = session.cidNumber.trim();
-    if (cidNumber.isEmpty) return;
-    try {
-      final cached = await _profileCache.read(cidNumber);
-      if (cached != null && mounted && generation == _loadGeneration) {
-        setState(() => _publicProfile = cached);
-        unawaited(
-          _loadPublicProfileMedia(
-            cached,
-            session: session,
-            generation: generation,
-          ),
-        );
-      }
-    } on Exception catch (e) {
-      AppLog.d('public profile cache load failed: $e');
-    }
-
-    if (_profileRefreshCid == cidNumber) return;
-    _profileRefreshCid = cidNumber;
-    try {
-      final fresh = await _profileApi.fetchProfile(cidNumber, session: session);
-      await _profileCache.write(fresh);
-      if (!mounted || generation != _loadGeneration) return;
-      setState(() => _publicProfile = fresh);
-      unawaited(
-        _loadPublicProfileMedia(
-          fresh,
-          session: session,
-          generation: generation,
-          refresh: true,
-        ),
-      );
-    } on Exception catch (e) {
-      AppLog.d('public profile refresh failed: $e');
-    }
+    await _profileApi.refreshProfile(
+      session.cidNumber,
+      session: session,
+      userInitiated: true,
+      isCurrent: () =>
+          mounted &&
+          generation == _loadGeneration &&
+          session.cidNumber == _identityCidNumber,
+    );
+    await _reloadCachedPublicProfile(session.cidNumber, generation);
   }
 
   Future<void> _reloadCachedPublicProfile(
     String cidNumber,
     int generation,
   ) async {
-    final profile = await _profileCache.read(cidNumber);
+    final CitizenProfile? profile;
+    try {
+      profile = await _profileCache.read(cidNumber);
+    } catch (_) {
+      // 本地读取失败保留当前显示，不能以隐式联网掩盖数据库错误。
+      return;
+    }
     if (profile == null ||
+        profile.cidNumber != cidNumber ||
         !mounted ||
         generation != _loadGeneration ||
         cidNumber != _identityCidNumber) {
       return;
     }
     setState(() => _publicProfile = profile);
-    await _loadPublicProfileMedia(
-      profile,
-      session: _profileSession,
-      generation: generation,
-    );
+    await _loadPublicProfileMedia(profile, generation: generation);
   }
 
   Future<void> _loadPublicProfileMedia(
     CitizenProfile profile, {
-    required SquareSession? session,
     required int generation,
-    bool refresh = false,
   }) async {
     try {
       final local = await _profileMediaCache.read(profile);
-      if (!mounted ||
-          generation != _loadGeneration ||
-          _publicProfile?.updatedAt != profile.updatedAt) {
-        return;
+      if (mounted &&
+          generation == _loadGeneration &&
+          _publicProfile?.cidNumber == profile.cidNumber &&
+          _publicProfile?.updatedAt == profile.updatedAt) {
+        setState(() => _publicProfileMedia = local);
       }
-      setState(() => _publicProfileMedia = local);
-      if (!refresh || session == null) return;
-      final headers = <String, String>{
-        'authorization': 'Bearer ${session.sessionToken}',
-      };
-      final updated = await _profileMediaCache.refresh(
-        profile: profile,
-        avatarUrl: _publicMediaUrl(profile.avatarObjectKey, profile),
-        bannerUrl: _publicMediaUrl(profile.bannerObjectKey, profile),
-        headers: headers,
-      );
-      if (!mounted ||
-          generation != _loadGeneration ||
-          _publicProfile?.updatedAt != profile.updatedAt) {
-        return;
-      }
-      setState(() => _publicProfileMedia = updated);
-    } on Exception {
-      // 资料真源已存在；文件缓存异常时保留现有用户图或中性占位。
+    } catch (_) {
+      /* 读取失败保留既有显示，不发起下载。 */
     }
-  }
-
-  String? _publicMediaUrl(String? objectKey, CitizenProfile profile) {
-    final normalized = objectKey?.trim() ?? '';
-    return normalized.isEmpty
-        ? null
-        : _profileApi.mediaUrl(normalized, updatedAt: profile.updatedAt);
-  }
-
-  Map<String, String>? get _publicMediaHeaders {
-    final session = _profileSession;
-    return session == null
-        ? null
-        : <String, String>{'authorization': 'Bearer ${session.sessionToken}'};
   }
 
   Future<void> _openContacts() async {
@@ -485,36 +432,42 @@ class _ProfilePageState extends State<MyTab> {
     await _loadState();
   }
 
-  /// 本人主页与本人用户码共用当前默认账户的本机/Cloudflare 用户上下文。
-  Future<CurrentUser?> _resolveOwnedIdentity() async {
+  /// 展示入口只读取当前账户的本地身份；此结果不用于写操作授权。
+  /// 与页头一致，优先采用该账户已验真的持久快照，再读取本地绑定。
+  Future<({String accountId, String cidNumber})?>
+  _resolveOwnedIdentity() async {
     final address = _communicationAccountId;
     if (address.isEmpty) {
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('请先在「我的 → 我的钱包」添加钱包账户')));
       return null;
     }
-    CurrentUser? identity;
     try {
-      identity = await _currentUserContext.resolve();
-      if (identity != null && !identity.isRegistered) {
-        await _sessionProvider.ensureSession();
-        identity = await _currentUserContext.resolve();
+      final identity = await _currentUserContext.resolve();
+      if (identity == null) return null;
+      final saved = await _badgeSnapshotStore.readForAccountId(
+        identity.accountId,
+      );
+      if (!mounted || identity.accountId != _communicationAccountId) {
+        return null;
       }
-    } on Exception {
+      final cidNumber =
+          (saved?.verified == true
+                  ? saved?.identity?.cidNumber ?? ''
+                  : identity.cidNumber)
+              .trim();
+      if (cidNumber.isEmpty) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('本地尚未保存公民号，请主动刷新身份')));
+        return null;
+      }
+      return (accountId: identity.accountId, cidNumber: cidNumber);
+    } catch (_) {
       if (!mounted) return null;
       ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('暂时无法验证身份，请稍后重试')));
+          .showSnackBar(const SnackBar(content: Text('本地用户资料读取失败，请重试')));
       return null;
     }
-    if (!mounted) return null;
-    final cidNumber = identity?.cidNumber.trim() ?? '';
-    if (cidNumber.isEmpty) {
-      // 未注册：就地弹全 App 统一注册面板；占号成功后回刷本页。
-      final registered = await startCidRegistrationFlow(context);
-      if (registered && mounted) await _loadState();
-      return null;
-    }
-    return identity;
   }
 
   Future<void> _openMyProfile() async {
@@ -528,6 +481,9 @@ class _ProfilePageState extends State<MyTab> {
           cidNumber: cidNumber,
           isSelf: true,
           initialProfile: _publicProfile,
+          initialProfileMedia: _publicProfileMedia,
+          api: _profileApi,
+          sessionProvider: _sessionProvider,
           cache: _profileCache,
           mediaCache: _profileMediaCache,
           subscriptionService: _subscriptionService,
@@ -590,13 +546,8 @@ class _ProfilePageState extends State<MyTab> {
         children: [
           ProfileAvatar(
             imagePath: _publicProfileMedia.avatarPath,
-            imageUrl: _publicProfile == null
-                ? null
-                : _publicMediaUrl(
-                    _publicProfile!.avatarObjectKey,
-                    _publicProfile!,
-                  ),
-            imageHeaders: _publicMediaHeaders,
+            imageUrl: null,
+
             userImageSet:
                 _publicProfile?.avatarObjectKey?.trim().isNotEmpty == true,
             // 与用户主页统一为 80 逻辑像素；主页的 4px 边框会让默认徽章视觉上多
@@ -854,236 +805,243 @@ class _ProfilePageState extends State<MyTab> {
         statusBarColor: Colors.transparent,
       ),
       child: Scaffold(
-        body: ListView(
-          padding: EdgeInsets.zero,
-          children: [
-            SizedBox(
-              height: headerHeight,
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  GestureDetector(
-                    onTap: _openMyProfile,
-                    child: _HeaderBackground(
-                      path: _publicProfileMedia.bannerPath,
-                      imageUrl: _publicProfile == null
-                          ? null
-                          : _publicMediaUrl(
-                              _publicProfile!.bannerObjectKey,
-                              _publicProfile!,
-                            ),
-                      imageHeaders: _publicMediaHeaders,
-                      userImageSet:
-                          _publicProfile?.bannerObjectKey?.trim().isNotEmpty ==
-                          true,
-                      height: headerHeight,
-                      seed: _identityCidNumber.isEmpty
-                          ? _communicationAccountId
-                          : _identityCidNumber,
+        body: RefreshIndicator(
+          onRefresh: () => _loadState(refreshRemote: true),
+          child: ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: EdgeInsets.zero,
+            children: [
+              SizedBox(
+                height: headerHeight,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    GestureDetector(
+                      key: const ValueKey('my-profile-background'),
+                      onTap: _openMyProfile,
+                      child: _HeaderBackground(
+                        path: _publicProfileMedia.bannerPath,
+
+                        userImageSet:
+                            _publicProfile?.bannerObjectKey
+                                ?.trim()
+                                .isNotEmpty ==
+                            true,
+                        height: headerHeight,
+                        seed: _identityCidNumber.isEmpty
+                            ? _communicationAccountId
+                            : _identityCidNumber,
+                      ),
                     ),
-                  ),
-                  // 用户可选任意明暗的背景图；状态栏区域固定叠加暗色渐隐，保证白色
-                  // 时间、信号和电池图标不会落在浅色天空或高光区域后失去对比度。
-                  Positioned(
-                    top: 0,
-                    left: 0,
-                    right: 0,
-                    height: topPadding + 72,
-                    child: const IgnorePointer(
-                      child: DecoratedBox(
-                        key: ValueKey('my-header-status-bar-scrim'),
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            begin: Alignment.topCenter,
-                            end: Alignment.bottomCenter,
-                            colors: [Color(0x66000000), Color(0x00000000)],
+                    // 用户可选任意明暗的背景图；状态栏区域固定叠加暗色渐隐，保证白色
+                    // 时间、信号和电池图标不会落在浅色天空或高光区域后失去对比度。
+                    Positioned(
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      height: topPadding + 72,
+                      child: const IgnorePointer(
+                        child: DecoratedBox(
+                          key: ValueKey('my-header-status-bar-scrim'),
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [Color(0x66000000), Color(0x00000000)],
+                            ),
                           ),
                         ),
                       ),
                     ),
-                  ),
-                  Positioned(
-                    top: topPadding + 10,
-                    left: 0,
-                    right: 0,
-                    child: Center(child: Text('我的', style: myTitleStyle)),
-                  ),
-                  Positioned(
-                    // 整个点击区随可见二维码下移；不能只挪图标造成点击位置错位。
-                    // 右边距使其中心与下方资料卡右箭头严格垂直对齐。
-                    top: userCodeButtonTop,
-                    right: AppLayout.scaled(context, 24),
-                    child: SizedBox(
-                      width: userCodeButtonSize,
-                      height: userCodeButtonSize,
-                      child: IconButton(
-                        key: const ValueKey('my-header-user-code-button'),
-                        tooltip: '我的用户码',
-                        padding: EdgeInsets.zero,
-                        onPressed: _openMyUserCode,
-                        icon: Icon(
-                          Icons.qr_code_2_rounded,
-                          size: userCodeIconSize,
-                          color: Colors.white,
-                          shadows: [
-                            Shadow(
-                              color: const Color(0x80000000),
-                              blurRadius: AppLayout.scaled(context, 10),
-                              offset: Offset(0, AppLayout.scaledValue(2)),
-                            ),
-                          ],
+                    Positioned(
+                      top: topPadding + 10,
+                      left: 0,
+                      right: 0,
+                      child: Center(child: Text('我的', style: myTitleStyle)),
+                    ),
+                    Positioned(
+                      // 整个点击区随可见二维码下移；不能只挪图标造成点击位置错位。
+                      // 右边距使其中心与下方资料卡右箭头严格垂直对齐。
+                      top: userCodeButtonTop,
+                      right: AppLayout.scaled(context, 24),
+                      child: SizedBox(
+                        width: userCodeButtonSize,
+                        height: userCodeButtonSize,
+                        child: IconButton(
+                          key: const ValueKey('my-header-user-code-button'),
+                          tooltip: '我的用户码',
+                          padding: EdgeInsets.zero,
+                          onPressed: _openMyUserCode,
+                          icon: Icon(
+                            Icons.qr_code_2_rounded,
+                            size: userCodeIconSize,
+                            color: Colors.white,
+                            shadows: [
+                              Shadow(
+                                color: const Color(0x80000000),
+                                blurRadius: AppLayout.scaled(context, 10),
+                                offset: Offset(0, AppLayout.scaledValue(2)),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  Positioned(
-                    left: AppLayout.scaled(context, 16),
-                    right: AppLayout.scaled(context, 16),
-                    bottom: AppLayout.scaled(context, 22),
-                    child: _buildProfileCard(),
-                  ),
-                ],
-              ),
-            ),
-            SizedBox(height: AppLayout.scaled(context, 12)),
-            Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: AppLayout.scaled(context, 16),
-              ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: _buildPrimaryEntry(
-                      leading: SvgPicture.asset(
-                        'assets/icons/wallet.svg',
-                        width: AppLayout.scaled(context, 24),
-                        height: AppLayout.scaled(context, 24),
-                        colorFilter: const ColorFilter.mode(
-                          AppTheme.primary,
-                          BlendMode.srcIn,
-                        ),
-                      ),
-                      title: '钱包',
-                      subtitle: '管理账户',
-                      onTap: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(builder: (_) => const WalletTab()),
-                        );
-                      },
-                    ),
-                  ),
-                  SizedBox(width: AppLayout.scaled(context, 10)),
-                  Expanded(
-                    child: _buildPrimaryEntry(
-                      leading: Icon(
-                        Icons.badge_outlined,
-                        color: AppTheme.primary,
-                        size: AppLayout.scaled(context, 24),
-                      ),
-                      title: '身份',
-                      subtitle: '注册与查看',
-                      onTap: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(builder: (_) => const MyIdPage()),
-                        );
-                      },
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 22, 20, 10),
-              child: Text(
-                '个人服务',
-                style: TextStyle(
-                  color: AppTheme.textPrimary,
-                  fontSize: AppLayout.scaled(context, 17),
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ),
-            Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: AppLayout.scaled(context, 16),
-              ),
-              child: Container(
-                decoration: AppTheme.cardDecoration(radius: AppTheme.radiusLg),
-                child: Column(
-                  children: [
-                    _buildServiceEntry(
-                      leading: Icon(
-                        Icons.edit_outlined,
-                        color: AppTheme.primary,
-                        size: AppLayout.scaled(context, 22),
-                      ),
-                      title: '创作者',
-                      onTap: _openCreator,
-                    ),
-                    Divider(
-                      height: 1,
-                      indent: AppLayout.scaled(context, 62),
-                      endIndent: AppLayout.scaled(context, 14),
-                    ),
-                    _buildServiceEntry(
-                      leading: SvgPicture.asset(
-                        'assets/icons/contact-round.svg',
-                        width: AppLayout.scaled(context, 22),
-                        height: AppLayout.scaled(context, 22),
-                        colorFilter: const ColorFilter.mode(
-                          AppTheme.primary,
-                          BlendMode.srcIn,
-                        ),
-                      ),
-                      title: '通讯录',
-                      onTap: _openContacts,
-                    ),
-                    Divider(
-                      height: 1,
-                      indent: AppLayout.scaled(context, 62),
-                      endIndent: AppLayout.scaled(context, 14),
-                    ),
-                    _buildServiceEntry(
-                      leading: Icon(
-                        Icons.workspace_premium_outlined,
-                        color: AppTheme.primary,
-                        size: AppLayout.scaled(context, 22),
-                      ),
-                      title: '会员｜订阅',
-                      onTap: _openMembership,
+                    Positioned(
+                      left: AppLayout.scaled(context, 16),
+                      right: AppLayout.scaled(context, 16),
+                      bottom: AppLayout.scaled(context, 22),
+                      child: _buildProfileCard(),
                     ),
                   ],
                 ),
               ),
-            ),
-            SizedBox(height: AppLayout.scaled(context, 16)),
-            Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: AppLayout.scaled(context, 16),
-              ),
-              child: Container(
-                decoration: AppTheme.cardDecoration(radius: AppTheme.radiusLg),
-                child: _buildServiceEntry(
-                  leading: UpdateDotBadge(
-                    show: widget.showSettingsUpdateDot,
-                    dotKey: const Key('settings-entry-update-dot'),
-                    child: Icon(
-                      Icons.settings_outlined,
-                      color: AppTheme.textSecondary,
-                      size: AppLayout.scaled(context, 22),
+              SizedBox(height: AppLayout.scaled(context, 12)),
+              Padding(
+                padding: EdgeInsets.symmetric(
+                  horizontal: AppLayout.scaled(context, 16),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: _buildPrimaryEntry(
+                        leading: SvgPicture.asset(
+                          'assets/icons/wallet.svg',
+                          width: AppLayout.scaled(context, 24),
+                          height: AppLayout.scaled(context, 24),
+                          colorFilter: const ColorFilter.mode(
+                            AppTheme.primary,
+                            BlendMode.srcIn,
+                          ),
+                        ),
+                        title: '钱包',
+                        subtitle: '管理账户',
+                        onTap: () {
+                          Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => const WalletTab(),
+                            ),
+                          );
+                        },
+                      ),
                     ),
-                  ),
-                  title: '设置',
-                  onTap: () {
-                    Navigator.of(context).push(
-                      MaterialPageRoute(builder: (_) => const SettingsPage()),
-                    );
-                  },
+                    SizedBox(width: AppLayout.scaled(context, 10)),
+                    Expanded(
+                      child: _buildPrimaryEntry(
+                        leading: Icon(
+                          Icons.badge_outlined,
+                          color: AppTheme.primary,
+                          size: AppLayout.scaled(context, 24),
+                        ),
+                        title: '身份',
+                        subtitle: '注册与查看',
+                        onTap: () {
+                          Navigator.of(context).push(
+                            MaterialPageRoute(builder: (_) => const MyIdPage()),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ),
-            SizedBox(height: AppLayout.scaled(context, 32)),
-          ],
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 22, 20, 10),
+                child: Text(
+                  '个人服务',
+                  style: TextStyle(
+                    color: AppTheme.textPrimary,
+                    fontSize: AppLayout.scaled(context, 17),
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              Padding(
+                padding: EdgeInsets.symmetric(
+                  horizontal: AppLayout.scaled(context, 16),
+                ),
+                child: Container(
+                  decoration: AppTheme.cardDecoration(
+                    radius: AppTheme.radiusLg,
+                  ),
+                  child: Column(
+                    children: [
+                      _buildServiceEntry(
+                        leading: Icon(
+                          Icons.edit_outlined,
+                          color: AppTheme.primary,
+                          size: AppLayout.scaled(context, 22),
+                        ),
+                        title: '创作者',
+                        onTap: _openCreator,
+                      ),
+                      Divider(
+                        height: 1,
+                        indent: AppLayout.scaled(context, 62),
+                        endIndent: AppLayout.scaled(context, 14),
+                      ),
+                      _buildServiceEntry(
+                        leading: SvgPicture.asset(
+                          'assets/icons/contact-round.svg',
+                          width: AppLayout.scaled(context, 22),
+                          height: AppLayout.scaled(context, 22),
+                          colorFilter: const ColorFilter.mode(
+                            AppTheme.primary,
+                            BlendMode.srcIn,
+                          ),
+                        ),
+                        title: '通讯录',
+                        onTap: _openContacts,
+                      ),
+                      Divider(
+                        height: 1,
+                        indent: AppLayout.scaled(context, 62),
+                        endIndent: AppLayout.scaled(context, 14),
+                      ),
+                      _buildServiceEntry(
+                        leading: Icon(
+                          Icons.workspace_premium_outlined,
+                          color: AppTheme.primary,
+                          size: AppLayout.scaled(context, 22),
+                        ),
+                        title: '会员｜订阅',
+                        onTap: _openMembership,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              SizedBox(height: AppLayout.scaled(context, 16)),
+              Padding(
+                padding: EdgeInsets.symmetric(
+                  horizontal: AppLayout.scaled(context, 16),
+                ),
+                child: Container(
+                  decoration: AppTheme.cardDecoration(
+                    radius: AppTheme.radiusLg,
+                  ),
+                  child: _buildServiceEntry(
+                    leading: UpdateDotBadge(
+                      show: widget.showSettingsUpdateDot,
+                      dotKey: const Key('settings-entry-update-dot'),
+                      child: Icon(
+                        Icons.settings_outlined,
+                        color: AppTheme.textSecondary,
+                        size: AppLayout.scaled(context, 22),
+                      ),
+                    ),
+                    title: '设置',
+                    onTap: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(builder: (_) => const SettingsPage()),
+                      );
+                    },
+                  ),
+                ),
+              ),
+              SizedBox(height: AppLayout.scaled(context, 32)),
+            ],
+          ),
         ),
       ),
     );
@@ -1093,16 +1051,12 @@ class _ProfilePageState extends State<MyTab> {
 class _HeaderBackground extends StatelessWidget {
   const _HeaderBackground({
     required this.path,
-    required this.imageUrl,
-    required this.imageHeaders,
     required this.userImageSet,
     required this.height,
     required this.seed,
   });
 
   final String? path;
-  final String? imageUrl;
-  final Map<String, String>? imageHeaders;
   final bool userImageSet;
   final double height;
   final String seed;
@@ -1116,18 +1070,6 @@ class _HeaderBackground extends StatelessWidget {
     final Widget background;
     if (validImage) {
       background = Image.file(file, fit: BoxFit.cover);
-    } else if (userImageSet && imageUrl?.trim().isNotEmpty == true) {
-      background = Image.network(
-        imageUrl!,
-        headers: imageHeaders,
-        fit: BoxFit.cover,
-        frameBuilder: (context, child, frame, syncLoaded) =>
-            syncLoaded || frame != null
-            ? child
-            : const ColoredBox(color: AppTheme.surfaceMuted),
-        errorBuilder: (_, _, _) =>
-            const ColoredBox(color: AppTheme.surfaceMuted),
-      );
     } else if (userImageSet) {
       background = const ColoredBox(color: AppTheme.surfaceMuted);
     } else {

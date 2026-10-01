@@ -12,11 +12,14 @@ import 'package:citizenapp/my/creator/creator_service.dart';
 import 'package:citizenapp/my/creator/models/creator_overview.dart';
 import 'package:citizenapp/my/creator/models/creator_plan.dart';
 import 'package:citizenapp/my/myid/current_user_context.dart';
+import 'package:citizenapp/my/myid/citizen_identity_chain_reader.dart';
 import 'package:citizenapp/my/myid/identity_badge_snapshot_store.dart';
 import 'package:citizenapp/my/membership/membership_revision.dart';
 import 'package:citizenapp/my/membership/subscription_service.dart';
 import 'package:citizenapp/my/user/user.dart';
 import 'package:citizenapp/8964/profile/user_qr_page.dart';
+import 'package:citizenapp/8964/profile/user_profile_page.dart';
+import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:citizenapp/8964/profile/models/citizen_profile.dart';
 import 'package:citizenapp/8964/profile/services/citizen_profile_cache.dart';
 import 'package:citizenapp/8964/profile/widgets/profile_avatar.dart';
@@ -28,7 +31,23 @@ import 'package:citizenapp/ui/identity_badge.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import '../8964/profile/fake_profile.dart';
+import '../8964/profile/fake_profile.dart' hide sampleProfile;
+import '../8964/profile/fake_profile.dart' as fixtures;
+
+CitizenProfile sampleProfile({
+  String displayName = '轻节点',
+  String? avatarKey,
+  String? bannerKey,
+}) => CitizenProfile.fromJson(
+  fixtures
+      .sampleProfile(
+        displayName: displayName,
+        avatarKey: avatarKey,
+        bannerKey: bannerKey,
+      )
+      .toJson()
+    ..['cid_number'] = _cidNumber,
+);
 
 late TestCitizenSdkHarness _sdkHarness;
 
@@ -95,6 +114,46 @@ class _FakeWallet implements CitizenSdkWallet {
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _UnboundLocalUser extends _CachedIdentityCache {
+  @override
+  Future<CurrentUser?> resolve() async =>
+      CurrentUser(account: _testWallet, binding: null);
+}
+
+class _VerifiedLocalBadgeStore extends _FakeIdentityBadgeSnapshotStore {
+  @override
+  Future<IdentityBadgeSnapshot?> readForAccountId(String accountId) async =>
+      IdentityBadgeSnapshot(
+        cidNumber: _cidNumber,
+        identityLevel: 'visitor',
+        updatedAtMillis: 1,
+        accountId: accountId,
+        verified: true,
+        identity: CitizenIdentityChainSnapshot(
+          cidNumber: _cidNumber,
+          accountId: Uint8List.fromList(List.filled(32, 0xaa)),
+          bindingRevision: 1,
+          votingIdentity: null,
+        ),
+      );
+}
+
+class _ForbiddenSessionProvider extends FakeSessionProvider {
+  _ForbiddenSessionProvider() : super(null);
+  int calls = 0;
+  @override
+  Future<SquareSession?> ensureSession() async {
+    calls++;
+    throw StateError('普通进入不得建立远端会话');
+  }
+
+  @override
+  Future<SquareSessionResolution> resolveSession({bool refresh = false}) async {
+    calls++;
+    throw StateError('普通进入不得验证远端身份');
+  }
 }
 
 class _FakeIdentityBadgeSnapshotStore extends IdentityBadgeSnapshotStore {
@@ -260,6 +319,47 @@ void main() {
       ],
     },
   );
+  testWidgets('本地验真CID无需绑定会话即可点背景进入本人主页，分类和返回不联网', (tester) async {
+    final session = _ForbiddenSessionProvider();
+    final api = FakeProfileApi(
+      sampleProfile(),
+      throwOnProfile: true,
+      throwOnAuthorPosts: true,
+    );
+    await tester.pumpWidget(
+      Provider<CitizenSdk>.value(
+        value: _sdkHarness.sdk,
+        child: MaterialApp(
+          home: MyTab(
+            wallet: _FakeWallet(_testWallet),
+            currentUserContext: _UnboundLocalUser(),
+            badgeSnapshotStore: _VerifiedLocalBadgeStore(),
+            profileCache: FakeProfileCache(sampleProfile()),
+            profileApi: api,
+            sessionProvider: session,
+            subscriptionService: _ConfirmedMembershipSnapshotService(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final background = find.byKey(const ValueKey('my-profile-background'));
+    await tester.tapAt(tester.getTopLeft(background) + const Offset(20, 100));
+    await tester.pumpAndSettle();
+    expect(find.byType(UserProfilePage), findsOneWidget);
+    for (final tab in ['campaign', 'videos', 'articles', 'posts']) {
+      await tester.tap(find.byKey(ValueKey('profile-tab-$tab')));
+      await tester.pumpAndSettle();
+    }
+    await tester.tap(find.byIcon(Icons.chevron_left).first);
+    await tester.pumpAndSettle();
+    expect(find.byType(UserProfilePage), findsNothing);
+    expect(session.calls, 0);
+    expect(api.calls, 0);
+    expect(api.authorPostCalls, 0);
+    expect(api.localPostCalls, greaterThan(0));
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
   testWidgets('我的页面只读徽章快照且不启动轻节点', (tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(411, 914);
@@ -276,6 +376,7 @@ void main() {
             wallet: _FakeWallet(wallet),
             currentUserContext: _CachedIdentityCache(),
             badgeSnapshotStore: snapshotStore,
+            profileCache: FakeProfileCache(sampleProfile()),
             sessionProvider: FakeSessionProvider(fakeSession()),
             subscriptionService: _ConfirmedMembershipSnapshotService(),
           ),
@@ -375,16 +476,16 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
-    expect(find.text('公开昵称'), findsOneWidget);
+    expect(find.text('缓存昵称'), findsOneWidget);
     expect(find.text('不得公开的钱包名'), findsNothing);
-    expect(profileApi.calls, 1);
-    expect(membershipService.authorizeCalls, 1);
+    expect(profileApi.calls, 0);
+    expect(membershipService.authorizeCalls, 0);
     expect(squareApi.membershipCalls, 0);
 
     MembershipRevision.instance.notifyChanged(_cidNumber);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
-    expect(membershipService.authorizeCalls, 1);
+    expect(membershipService.authorizeCalls, 0);
 
     await tester.pumpWidget(const SizedBox.shrink());
   });

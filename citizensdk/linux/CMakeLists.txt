@@ -14,7 +14,7 @@ set_property(CACHE CITIZENSDK_PLATFORM PROPERTY STRINGS LinuxARM LinuxAMD)
 set(CITIZENSDK_CORE_LIBRARY "" CACHE FILEPATH "Absolute path to the matching libcitizensdk.so")
 set(CITIZENSDK_CORE_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/../include" CACHE PATH "Directory containing citizensdk.h")
 set(CITIZENSDK_INTERNAL_INCLUDE_DIR "" CACHE PATH "本轮构建生成的 SDK 私有声明目录；不安装")
-set(CITIZENSDK_ASSET_DIR "${CMAKE_CURRENT_LIST_DIR}/../assets/citizenchain" CACHE PATH "Canonical CitizenChain asset directory")
+set(CITIZENSDK_ASSET_DIR "${CMAKE_CURRENT_LIST_DIR}/../chain" CACHE PATH "Canonical CitizenChain asset directory")
 set(CITIZENSDK_SQLITE_INCLUDE_DIR "" CACHE PATH "Pinned SQLite include directory")
 set(CITIZENSDK_OPENSSL_INCLUDE_DIR "" CACHE PATH "Pinned OpenSSL include directory")
 set(CITIZENSDK_TSS2_INCLUDE_DIR "" CACHE PATH "Pinned TPM2-TSS include directory")
@@ -131,7 +131,7 @@ target_compile_definitions(citizensdk_host PRIVATE
 )
 target_include_directories(citizensdk_host
   PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}>
     $<BUILD_INTERFACE:${CITIZENSDK_CORE_INCLUDE_DIR}>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   PRIVATE
@@ -191,14 +191,14 @@ install(FILES
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
 )
 # 注册头仅由 Flutter generated registrant 使用，原生 C/C++ 安装不依赖 Flutter。
-install(DIRECTORY include/citizen_sdk DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+install(DIRECTORY citizen_sdk DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
   PATTERN "citizen_sdk_plugin.h" EXCLUDE
 )
 install(FILES
   "${CITIZENSDK_ASSET_DIR}/manifest.json"
   "${CITIZENSDK_ASSET_DIR}/chainspec.json"
   "${CITIZENSDK_ASSET_DIR}/light_sync_state.json"
-  DESTINATION "${CMAKE_INSTALL_DATADIR}/citizensdk/citizenchain"
+  DESTINATION "${CMAKE_INSTALL_DATADIR}/citizensdk/chain"
 )
 
 set(CITIZENSDK_PACKAGE_INSTALL_DIR

@@ -31,8 +31,15 @@ CHECK_OUTPUTS
 mkdir -p "$CITIZENAPP_TEST_WORK_DIR"
 # Flutter分析、测试、.dart_tool与build全部在源码外工程视图运行；源码文件保持
 # 唯一真源且只读投影，测试不得再向CitizenApp根生成build或临时配置。
-FLUTTER_ROOT="$(node "$VIEW_SCRIPT" create \
-  --source-root "$CITIZENAPP_DIR" --work-root "$CITIZENAPP_TEST_WORK_DIR")"
+if [[ -n "${CITIZENAPP_TEST_PROJECT_ROOT:-}" ]]; then
+  FLUTTER_ROOT="$(node "$VIEW_SCRIPT" verify \
+    --source-root "$CITIZENAPP_DIR" --work-root "$CITIZENAPP_TEST_WORK_DIR")"
+  [[ "$FLUTTER_ROOT" == "$CITIZENAPP_TEST_PROJECT_ROOT" ]] \
+    || { echo '错误: CI测试视图与本轮工作根不一致' >&2; exit 1; }
+else
+  FLUTTER_ROOT="$(node "$VIEW_SCRIPT" create \
+    --source-root "$CITIZENAPP_DIR" --work-root "$CITIZENAPP_TEST_WORK_DIR")"
+fi
 [[ "$FLUTTER_ROOT" == "$CITIZENAPP_TEST_WORK_DIR/source-view/"* \
   && -f "$FLUTTER_ROOT/pubspec.yaml" ]] \
   || { echo '错误: CitizenApp测试工程视图无效' >&2; exit 1; }

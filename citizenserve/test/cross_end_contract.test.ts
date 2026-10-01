@@ -46,7 +46,7 @@ describe("Cloudflare Workers Paid 成本硬边界", () => {
   // Paid 套餐把三个高频对账任务合并到同一五分钟 Cron，但各任务仍必须保留自身批次硬顶。
   const wrangler = readFileSync(join(import.meta.dirname, "../scripts/wrangler.toml"), "utf8");
   const worker = readFileSync(join(import.meta.dirname, "../src/index.ts"), "utf8");
-  const media = readFileSync(join(import.meta.dirname, "../src/media/service.ts"), "utf8");
+  const media = readFileSync(join(import.meta.dirname, "../src/media.ts"), "utf8");
   const cleanup = readFileSync(
     join(import.meta.dirname, "../src/membership/expiration_cleanup.ts"),
     "utf8",
