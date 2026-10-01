@@ -526,7 +526,7 @@ class _ProfilePageState extends State<MyTab> {
   }
 
   void _openCreator() {
-    // MyTab 已持有 CID 与会员展示态，直接作为下一路由首帧；创作者页后台复核真态。
+    // MyTab 已持有 CID 与会员展示态，直接作为下一路由首帧；创作者页只补读本地快照。
     Navigator.of(context).push<void>(
       MaterialPageRoute(
         builder: (_) => CreatorPage(

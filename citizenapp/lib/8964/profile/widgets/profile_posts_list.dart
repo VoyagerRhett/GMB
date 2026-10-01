@@ -430,7 +430,10 @@ class _ProfilePostsTabState extends State<ProfilePostsTab> {
       }
     }
     if (entries.isEmpty) {
-      return [_message(widget.emptyLabel)];
+      // 本人列表只读本地副本，缺少视频不能推断远端没有视频。
+      return [
+        _message(widget.isSelf ? '本地尚未保存此类内容，下拉刷新' : widget.emptyLabel),
+      ];
     }
     return [
       SliverPadding(

@@ -270,6 +270,12 @@ final class RunnerUITests: XCTestCase {
         XCTAssertTrue(tab.waitForExistence(timeout: 5), "缺少主页分类")
         tab.tap()
         XCTAssertFalse(app.staticTexts["暂时无法验证身份，请稍后重试"].exists)
+        if label == "视频" {
+          XCTAssertFalse(app.staticTexts["还没有视频"].exists,
+            "本人本地视频空态不能推断远端不存在")
+          NSLog("OWN_PROFILE_UI stage=video local_empty=%d",
+            app.staticTexts["本地尚未保存此类内容，下拉刷新"].exists ? 1 : 0)
+        }
       }
       // 主页显式使用无tooltip的SliverAppBar leading图标；读取实际可点按钮边框定位左上角。
       // 不假定它有“返回”文字，也不使用个人昵称或正文作为定位条件。
@@ -1423,15 +1429,22 @@ final class RunnerUITests: XCTestCase {
         ["我的创作者会员", "去订阅平台会员"]
       )
     ).firstMatch
+    let immediate = creatorSurface.waitForExistence(timeout: 1)
+    // 只记录固定页面标记，区分入口未打开与Flutter组合语义，不输出账户或页面正文。
+    let combinedSurface = app.descendants(matching: .any).matching(NSPredicate(
+      format: "label CONTAINS %@ OR label CONTAINS %@", "我的创作者会员", "去订阅平台会员")).firstMatch
+    NSLog("CREATOR_UI immediate_exact=%d combined=%d refresh=%d my_header=%d",
+      immediate ? 1 : 0, combinedSurface.exists ? 1 : 0,
+      app.buttons["刷新"].exists ? 1 : 0, app.buttons["我的用户码"].exists ? 1 : 0)
     XCTAssertTrue(
-      creatorSurface.waitForExistence(timeout: 1),
+      immediate,
       "创作者页没有在 1 秒内显示本地会员或非会员结构"
     )
     XCTAssertFalse(app.staticTexts["正在连接聊天服务"].exists)
     XCTAssertFalse(app.staticTexts["同步中"].exists)
     XCTAssertFalse(app.staticTexts["状态同步中"].exists)
     XCTAssertFalse(app.staticTexts["正在同步会员档"].exists)
-    attachScreenshot(app, name: "CitizenApp-创作者首帧")
+    // 此验收只保留固定布尔结果，不保存真实账户页面截图。
   }
 
   private func attachScreenshot(_ app: XCUIApplication, name: String) {

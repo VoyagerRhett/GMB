@@ -25,8 +25,8 @@ import 'package:citizenapp/ui/app_layout.dart';
 
 /// 「我的 → 创作者」：管理自己的创作者会员（档位 / 收入概览）。
 ///
-/// 首帧直接使用「我的」页传入的 CitizenServe 会员缓存；创作者档位只在后台
-/// 刷新读模型。档位名称和价格都由链上保存；整次保存只产生一次
+/// 首帧使用「我的」页会员展示态，随后只读本地持久化档位；快照过期或缺失
+/// 不触发远端请求。主动刷新及写入动作才验真。整次保存只产生一次
 /// `set_creator_plans` 账户签名，展示快照不参与授权。
 class CreatorPage extends StatefulWidget {
   const CreatorPage({
@@ -111,7 +111,7 @@ class _CreatorPageState extends State<CreatorPage> {
 
   /// 注册可能发生在任意常驻页；finalized 身份广播后，本页必须原地退出注册引导。
   void _onIdentityChanged() {
-    if (mounted) unawaited(_bootstrap(useInitialCid: false, force: true));
+    if (mounted) unawaited(_bootstrap(useInitialCid: false));
   }
 
   /// 会员动作确认后只刷新同一永久 CID；广播本身不直接授予页面能力。
@@ -121,10 +121,9 @@ class _CreatorPageState extends State<CreatorPage> {
     unawaited(_refresh(forceVisibleError: false));
   }
 
-  /// 先提交本地展示态，再决定是否后台刷新；任何远端 Future 都不在首帧关键路径。
+  /// 普通进入和身份切换只读本地；快照时间不构成自动联网理由。
   Future<void> _bootstrap({
     required bool useInitialCid,
-    bool force = false,
   }) async {
     final generation = ++_loadGeneration;
     try {
@@ -166,11 +165,6 @@ class _CreatorPageState extends State<CreatorPage> {
         });
       }
 
-      final fresh =
-          snapshot?.isFresh(DateTime.now().millisecondsSinceEpoch) == true;
-      if (force || !fresh) {
-        unawaited(_refresh(generation: generation, forceVisibleError: false));
-      }
     } on Exception catch (e) {
       if (!mounted || generation != _loadGeneration) return;
       setState(() {
@@ -180,10 +174,9 @@ class _CreatorPageState extends State<CreatorPage> {
   }
 
   Future<void> _refresh({
-    int? generation,
     required bool forceVisibleError,
   }) async {
-    final owner = generation ?? ++_loadGeneration;
+    final owner = ++_loadGeneration;
     final cidNumber = _cidNumber;
     if (cidNumber.isEmpty) return;
     try {
@@ -216,7 +209,18 @@ class _CreatorPageState extends State<CreatorPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('创作者')),
+      appBar: AppBar(
+        title: const Text('创作者'),
+        actions: [
+          // 无会员展示态也必须能由用户主动更新，不能依赖进入时自动联网。
+          if (!_unregistered)
+            IconButton(
+              tooltip: '刷新',
+              onPressed: () => _refresh(forceVisibleError: true),
+              icon: const Icon(Icons.refresh),
+            ),
+        ],
+      ),
       body: _body(),
     );
   }
@@ -227,7 +231,7 @@ class _CreatorPageState extends State<CreatorPage> {
     if (_unregistered) {
       content = IdentityRegisterGuide(
         description: '注册后即可开通创作者会员。',
-        onRegistered: () => _bootstrap(useInitialCid: false, force: true),
+        onRegistered: () => _bootstrap(useInitialCid: false),
       );
     } else if (data == null && _error != null) {
       content = _loadFailed(_error!);
@@ -239,7 +243,12 @@ class _CreatorPageState extends State<CreatorPage> {
         resolved: false,
       );
     } else if (data.gated) {
-      content = CreatorGateView(onOpenMembership: _openMembership);
+      content = Column(
+        children: [
+          if (_error != null) _inlineError(_error!),
+          Expanded(child: CreatorGateView(onOpenMembership: _openMembership)),
+        ],
+      );
     } else {
       content = _activeView(data.plan!, data.overview!);
     }
@@ -540,6 +549,7 @@ class _CreatorPageState extends State<CreatorPage> {
     await Navigator.of(
       context,
     ).push(MaterialPageRoute(builder: (_) => const MembershipPage()));
-    if (mounted) await _refresh(forceVisibleError: false);
+    // 仅浏览会员页再返回不代表用户请求刷新；实际会员动作已有独立广播。
+    if (mounted) await _bootstrap(useInitialCid: false);
   }
 }

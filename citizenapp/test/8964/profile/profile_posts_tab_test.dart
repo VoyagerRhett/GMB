@@ -458,4 +458,19 @@ void main() {
     expect(find.text('Worker 最新展示'), findsNothing);
     expect(find.text('本地旧展示'), findsOneWidget);
   });
+
+  for (final isSelf in [true, false]) {
+    testWidgets('视频空态区分本人本地副本与他人远端列表：$isSelf', (tester) async {
+      final api = FakeProfileApi(sampleProfile());
+      await tester.pumpWidget(_page(api, isSelf: isSelf));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey<String>('profile-tab-videos')));
+      await tester.pumpAndSettle();
+      expect(
+        find.text(isSelf ? '本地尚未保存此类内容，下拉刷新' : '还没有视频'),
+        findsOneWidget,
+      );
+      if (isSelf) expect(api.authorPostCalls, 0);
+    });
+  }
 }

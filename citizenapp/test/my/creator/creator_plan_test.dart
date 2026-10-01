@@ -9,9 +9,13 @@ import 'package:flutter_test/flutter_test.dart';
 
 class _PendingCreatorService implements CreatorService {
   final Completer<CreatorPageData> completer = Completer<CreatorPageData>();
+  int loadCalls = 0;
 
   @override
-  Future<CreatorPageData> load({String? expectedCidNumber}) => completer.future;
+  Future<CreatorPageData> load({String? expectedCidNumber}) {
+    loadCalls++;
+    return completer.future;
+  }
 
   @override
   Future<CreatorDisplaySnapshot?> readDisplaySnapshot(String cidNumber) async =>
@@ -21,7 +25,7 @@ class _PendingCreatorService implements CreatorService {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-/// 后台刷新失败不能清掉已经提交的首帧展示态。
+/// 主动刷新失败不能清掉已显示的本地数据。
 class _FailingCreatorService implements CreatorService {
   int loadCalls = 0;
 
@@ -52,7 +56,7 @@ class _SnapshotCreatorService extends _PendingCreatorService {
 void main() {
   const cidNumber = 'CN220-CTZN2-100000001-2026';
 
-  testWidgets('无会员首帧直接显示订阅门禁且不等待后台刷新', (tester) async {
+  testWidgets('无会员缺失快照直接显示门禁且不自动联网', (tester) async {
     final service = _PendingCreatorService();
     await tester.pumpWidget(
       MaterialApp(
@@ -71,11 +75,15 @@ void main() {
     expect(find.textContaining('同步'), findsNothing);
     expect(find.byType(LinearProgressIndicator), findsNothing);
     expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(service.loadCalls, 0);
+    await tester.tap(find.byTooltip('刷新'));
+    await tester.pump();
+    expect(service.loadCalls, 1);
 
     service.completer.complete(CreatorPageData.gated());
   });
 
-  testWidgets('有会员首帧直接显示创作者页且不等待后台刷新', (tester) async {
+  testWidgets('有会员缺失快照直接显示创作者页且不自动联网', (tester) async {
     final service = _PendingCreatorService();
     await tester.pumpWidget(
       MaterialApp(
@@ -90,6 +98,7 @@ void main() {
 
     expect(find.text('我的创作者会员'), findsOneWidget);
     expect(find.text('已开通'), findsOneWidget);
+    expect(service.loadCalls, 0);
     expect(find.textContaining('同步'), findsNothing);
     expect(find.byType(LinearProgressIndicator), findsNothing);
     expect(find.byType(CircularProgressIndicator), findsNothing);
@@ -209,7 +218,7 @@ void main() {
     expect(active.isFresh(nowMs), isFalse);
   });
 
-  testWidgets('后台刷新失败保留有会员首帧且不插入等待或错误页', (tester) async {
+  testWidgets('缺失快照不自动联网，主动刷新失败保留本地展示', (tester) async {
     final service = _FailingCreatorService();
     await tester.pumpWidget(
       MaterialApp(
@@ -222,15 +231,20 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(service.loadCalls, 1);
+    expect(service.loadCalls, 0);
     expect(find.text('重试'), findsNothing);
     expect(find.text('已开通'), findsOneWidget);
     expect(find.textContaining('同步'), findsNothing);
     expect(find.textContaining('设备子钥签名校验失败'), findsNothing);
+    await tester.tap(find.byTooltip('刷新'));
+    await tester.pumpAndSettle();
+    expect(service.loadCalls, 1);
+    expect(find.text('已开通'), findsOneWidget);
+    expect(find.textContaining('设备子钥签名校验失败'), findsOneWidget);
   });
 
-  testWidgets('本地创作者快照先于未完成远端请求显示真实档位', (tester) async {
-    final nowMs = DateTime.now().millisecondsSinceEpoch;
+  testWidgets('过期本地快照仍显示真实档位且不自动联网', (tester) async {
+    const nowMs = 1;
     final service = _SnapshotCreatorService(
       CreatorDisplaySnapshot(
         cidNumber: cidNumber,
@@ -271,5 +285,6 @@ void main() {
     expect(find.text('本地会员档'), findsOneWidget);
     expect(find.text('7'), findsOneWidget);
     expect(find.textContaining('同步'), findsNothing);
+    expect(service.loadCalls, 0);
   });
 }

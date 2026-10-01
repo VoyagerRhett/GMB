@@ -38,8 +38,8 @@ class CreatorPageData {
 /// 创作者页本地展示快照。
 ///
 /// 快照只决定首帧展示，不授予会员权益，也不允许绕过保存动作中的 CitizenServe 鉴权。
-/// CID 是快照唯一归属主键；会员态与创作者数据分别记录成功读取时间，便于页面只在
-/// 数据过期时后台刷新，而不是每次进页面都等待网络和链。
+/// CID 是快照唯一归属主键；会员态与创作者数据分别记录成功读取时间。
+/// 时间戳只描述数据年龄，普通进入不得因过期或缺失自动联网。
 class CreatorDisplaySnapshot {
   const CreatorDisplaySnapshot({
     required this.cidNumber,
@@ -195,7 +195,7 @@ class CreatorService {
     );
   }
 
-  /// 后台刷新：平台会员只读 CitizenServe 统一缓存，创作者档位仍读取其 finalized 链状态。
+  /// 主动刷新或会员动作确认后的读取：会员与档位读取 CitizenServe finalized 投影。
   ///
   /// 页面首帧不等待本方法；[expectedCidNumber] 防止旧会话结果写入新身份页面。
   Future<CreatorPageData> load({String? expectedCidNumber}) async {
