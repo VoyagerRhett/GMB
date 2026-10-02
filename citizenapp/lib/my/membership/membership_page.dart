@@ -1,3 +1,5 @@
+import 'package:citizenapp/my/myid/current_user_context.dart';
+
 import 'dart:async';
 
 import 'package:citizen_sdk/citizen_sdk.dart';
@@ -36,15 +38,18 @@ class MembershipPage extends StatefulWidget {
     SquareSessionProvider? sessionProvider,
     SubscriptionService? subscriptionService,
     FinalizedIdentityResolver? identityResolver,
+    CurrentUserContext? currentUserContext,
   }) : _chainService = chainService,
        _sessionProvider = sessionProvider,
        _subscriptionService = subscriptionService,
-       _identityResolver = identityResolver;
+       _identityResolver = identityResolver,
+       _currentUserContext = currentUserContext;
 
   final SquareChainService? _chainService;
   final SquareSessionProvider? _sessionProvider;
   final SubscriptionService? _subscriptionService;
   final FinalizedIdentityResolver? _identityResolver;
+  final CurrentUserContext? _currentUserContext;
 
   @override
   State<MembershipPage> createState() => _MembershipPageState();
@@ -56,6 +61,7 @@ class _MembershipPageState extends State<MembershipPage>
   late final SquareSessionProvider _sessionProvider;
   late final SubscriptionService _subscriptionService;
   late final FinalizedIdentityResolver _identityResolver;
+  CurrentUserContext? _currentUserContext;
   AccountSecurityService? _accountSecurity;
   bool _dependenciesReady = false;
   late final AnimationController _snapController;
@@ -67,7 +73,7 @@ class _MembershipPageState extends State<MembershipPage>
   bool _refreshing = false;
   bool _identityReloadPending = false;
 
-  /// 首载失败说明(仅页面尚无可展示数据、且**确属真故障**时置位):三张静态卡按本页
+  /// 会话或刷新失败说明（已有本地会员快照时也显示）:三张静态卡按本页
   /// 设计永远保留,失败原因用顶部横幅补充,绝不整页替换成错误页。
   ///
   /// **未注册不走这里**——它是合法状态不是故障,见 [_unregistered]。
@@ -122,10 +128,13 @@ class _MembershipPageState extends State<MembershipPage>
       _sessionProvider = injectedSession;
       _subscriptionService = injectedSubscription;
       _identityResolver = injectedIdentity;
+      _currentUserContext = widget._currentUserContext;
       _dependenciesReady = true;
       unawaited(_load());
       return;
     }
+    _currentUserContext =
+        widget._currentUserContext ?? context.read<CurrentUserContext>();
     final sdk = context.read<CitizenSdk>();
     _chainService =
         widget._chainService ??
@@ -234,20 +243,49 @@ class _MembershipPageState extends State<MembershipPage>
     setState(() {
       _refreshing = true;
       _loadFailure = null;
+      _sessionStatus = null;
     });
     Object? refreshError;
+    var localIdentityResolved = false;
     try {
+      // 本地显示先按当前默认账户/CID读取；鉴权不可用不能阻止已有快照展示。
+      final localUser = await _currentUserContext?.resolve();
+      localIdentityResolved = true;
+      final localCid = localUser?.cidNumber;
+      if (_currentUserContext != null) {
+        final local = localCid == null || localCid.isEmpty
+            ? null
+            : await _subscriptionService.readDisplaySnapshot(localCid);
+        if (!mounted) return;
+        _applyViewData(
+          _MembershipViewData(
+            accountId: localUser?.accountId ?? '',
+            cidNumber: localCid ?? '',
+            state: local == null
+                ? _staticMembershipState
+                : _withStaticPlans(local.state),
+            prices: local?.prices ?? const <String, int>{},
+            subscriptionReady: false,
+          ),
+        );
+      }
       // 普通会员展示直接建立 Cloudflare 会话。首次安装没有本机绑定时由登录挑战
       // 的 finalized 用户投影恢复；不得以本机缓存未命中武断判未注册或额外启动节点。
       final resolution = await _sessionProvider.resolveSession();
       _sessionStatus = resolution.status;
       final session = resolution.session;
       if (session == null) {
-        if (resolution.status == SquareSessionStatus.identityUnbound) {
+        if (resolution.status == SquareSessionStatus.identityUnbound &&
+            (localCid == null || localCid.isEmpty)) {
           await _enterUnregistered(forceRefresh: forceRefresh);
         } else {
           _unregistered = false;
-          _loadFailure = resolution.message;
+          _loadFailure =
+              resolution.status == SquareSessionStatus.identityUnbound &&
+                  localCid != null &&
+                  localCid.isNotEmpty
+              ? SquareSessionStatus.identityUnavailable.message
+              : resolution.message;
           await _loadPublicPrices(forceRefresh: forceRefresh);
         }
         return;
@@ -350,8 +388,21 @@ class _MembershipPageState extends State<MembershipPage>
       );
     } on Object catch (error) {
       refreshError = error;
-      if (_data.accountId.isEmpty) {
-        _loadFailure = '会员数据加载失败，请点右上刷新重试';
+      _unregistered = false;
+      _sessionStatus = null;
+      _loadFailure = '会员数据加载失败，请点右上刷新重试';
+      if (mounted) {
+        final currentKnown =
+            _currentUserContext == null || localIdentityResolved;
+        _applyViewData(
+          _MembershipViewData(
+            accountId: currentKnown ? _data.accountId : '',
+            cidNumber: currentKnown ? _data.cidNumber : '',
+            state: currentKnown ? _data.state : _staticMembershipState,
+            prices: _data.prices,
+            subscriptionReady: false,
+          ),
+        );
       }
     } finally {
       if (mounted) setState(() => _refreshing = false);
@@ -361,9 +412,8 @@ class _MembershipPageState extends State<MembershipPage>
       }
     }
     if (forceRefresh && refreshError != null && mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('会员动态数据刷新失败：$refreshError')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('会员动态数据刷新失败：$refreshError')));
     }
   }
 
@@ -387,9 +437,8 @@ class _MembershipPageState extends State<MembershipPage>
     if (_busy) return;
     if (_data.accountId.isEmpty) {
       final message = _sessionStatus?.message ?? '会员状态尚未就绪，请稍后重试';
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(message)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
       return;
     }
     // 未注册 CID:就地弹全 App 统一注册面板;占号成功后订阅由用户重新发起。
@@ -442,15 +491,13 @@ class _MembershipPageState extends State<MembershipPage>
       await _load();
       if (!mounted) return;
       if (_subscriptionService.mirrorSyncPending) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('链上订阅已生效，会员权益正在同步')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('链上订阅已生效，会员权益正在同步')));
       }
     } on SubscriptionException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(e.message)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.message)));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -570,10 +617,7 @@ class _MembershipPageState extends State<MembershipPage>
     return Column(
       children: [
         // 未注册时**绝不出现**失败/重试横幅:没注册不是加载失败,重试也不会变。
-        if (!_unregistered &&
-            _loadFailure != null &&
-            data.accountId.isEmpty &&
-            !_refreshing)
+        if (!_unregistered && _loadFailure != null && !_refreshing)
           _LoadFailureBanner(
             key: const ValueKey('membership-load-failure-banner'),
             message: _loadFailure!,

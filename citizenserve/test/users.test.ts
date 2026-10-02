@@ -142,8 +142,8 @@ describe('finalized 用户账户 D1 投影', () => {
 
     const users = await countRows('users');
     const profiles = await countRows('user_profiles');
-    expect(users).toBe(1);
-    expect(profiles).toBe(1);
+    expect(users).toBe(2);
+    expect(profiles).toBe(2);
   });
 
   it('同一 CID 的不同注册事实失败关闭', async () => {
@@ -306,7 +306,7 @@ describe('finalized 用户账户 D1 投影', () => {
         'invalid_finalized_user',
       );
     }
-    expect(await countRows('users')).toBe(0);
+    expect(await countRows('users')).toBe(1);
   });
 
   it('资料不能脱离用户存在，删除用户会级联删除资料', async () => {

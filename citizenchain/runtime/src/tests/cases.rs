@@ -396,7 +396,34 @@ fn runtime_version_and_block_types_are_sane() {
     let _opaque_block_id: opaque::BlockId = generic::BlockId::Number(0);
     let _runtime_block_id: BlockId = generic::BlockId::Number(0);
 }
+
+/// benchmark 模式使用既有回调桩，必须返回 Ignored 且不执行生产发行。
+#[cfg(feature = "runtime-benchmarks")]
+#[test]
+fn joint_vote_benchmark_callback_ignores_execution_without_mutating_issuance() {
+    new_test_ext().execute_with(|| {
+        let proposal_id = 999_999u64;
+        resolution_issuance::pallet::VotingProposalCount::<Runtime>::put(1u32);
+        let issued_before = resolution_issuance::pallet::TotalIssued::<Runtime>::get();
+
+        assert!(matches!(
+            RuntimeJointVoteResultCallback::on_joint_vote_finalized(proposal_id, true),
+            Ok(votingengine::ProposalExecutionOutcome::Ignored)
+        ));
+        assert_eq!(
+            resolution_issuance::pallet::VotingProposalCount::<Runtime>::get(),
+            1u32
+        );
+        assert_eq!(
+            resolution_issuance::pallet::TotalIssued::<Runtime>::get(),
+            issued_before
+        );
+        assert!(resolution_issuance::pallet::Executed::<Runtime>::get(proposal_id).is_none());
+    });
+}
+
 // 簇 2:装配集成测试(18 个用例)
+#[cfg(not(feature = "runtime-benchmarks"))]
 #[test]
 fn joint_vote_callback_routes_to_resolution_issuance_and_executes() {
     use codec::Encode;
@@ -1153,6 +1180,7 @@ fn pow_digest_author_finds_pow_engine_author() {
     assert_eq!(found, Some(expected_account));
 }
 
+#[cfg(not(feature = "runtime-benchmarks"))]
 #[test]
 fn joint_vote_callback_missing_proposal_and_runtime_upgrade_route() {
     new_test_ext().execute_with(|| {

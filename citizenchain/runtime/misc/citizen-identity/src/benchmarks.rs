@@ -17,12 +17,13 @@ use sp_runtime::traits::Zero;
 use crate::{
     pallet::{
         AccountIdByCid, BindingRevisionByCid, CidByAccountId, CidRegistry, Config,
-        PopulationMaintenanceFault, PopulationReadyDate, VotingIdentityByCid,
+        PopulationMaintenanceFault, PopulationReadyDate, VotingEligibilityVersionCount,
+        VotingIdentityByCid,
     },
     AreaCodeBound, BenchmarkHelper, Call, CandidateIdentityPayload, CidNumberBound,
     CidOccupyAuthorization, CidRebindAuthorization, CidRecord, CidRecordStatus,
-    CitizenIdentityAuthority, CitizenSex, CitizenStatus, FamilyName, GivenName, Pallet,
-    RoleCodeBound, VotingIdentityPayload, MAX_CID_AUTHORIZATION_LIFETIME_SECS,
+    CitizenIdentityAuthority, CitizenIdentityAuthorization, CitizenSex, CitizenStatus, FamilyName,
+    GivenName, Pallet, RoleCodeBound, VotingIdentityPayload, MAX_CID_AUTHORIZATION_LIFETIME_SECS,
 };
 
 const BENCHMARK_TIMESTAMP_MILLIS: u64 = 1_800_000_000_000;
@@ -87,6 +88,30 @@ fn signature<T: Config>(
 ) -> crate::pallet::SignatureOf<T> {
     let message = primitives::sign::signing_message(op_tag, &payload.encode());
     T::BenchmarkHelper::sign(signer, &message)
+}
+
+/// 身份基准与生产接口共用完整授权载荷，按链上当前身份版本和有效时间签名。
+fn identity_signature<T: Config>(
+    signer: &sp_core::sr25519::Public,
+    cid_number: &CidNumberBound,
+    payload: &(impl Encode + Clone),
+) -> (u64, u64, crate::pallet::SignatureOf<T>) {
+    let expected_identity_version = VotingEligibilityVersionCount::<T>::get(cid_number);
+    let expires_at = <T::TimeProvider as frame_support::traits::UnixTime>::now()
+        .as_secs()
+        .saturating_add(MAX_CID_AUTHORIZATION_LIFETIME_SECS);
+    let authorization = CitizenIdentityAuthorization {
+        genesis_hash: genesis_hash::<T>(),
+        payload: payload.clone(),
+        expected_identity_version,
+        expires_at,
+    };
+    let signature = signature::<T>(
+        signer,
+        primitives::sign::OP_SIGN_CITIZEN_IDENTITY,
+        &authorization,
+    );
+    (expected_identity_version, expires_at, signature)
 }
 
 fn voting_payload<T: Config>(
@@ -179,12 +204,15 @@ fn register<T: Config>(
     payload: VotingIdentityPayload<T::AccountId>,
     signer: &sp_core::sr25519::Public,
 ) {
-    let signature = signature::<T>(signer, primitives::sign::OP_SIGN_CITIZEN_IDENTITY, &payload);
+    let (expected_identity_version, expires_at, signature) =
+        identity_signature::<T>(signer, &payload.cid_number, &payload);
     Pallet::<T>::register_voting_identity(
         RawOrigin::Signed(authority.0.clone()).into(),
         authority.1.clone(),
         authority.2.clone(),
         payload,
+        expected_identity_version,
+        expires_at,
         signature,
     )
     .expect("benchmark voting identity registration must succeed");
@@ -200,11 +228,8 @@ mod benchmarks {
         PopulationReadyDate::<T>::put(today);
         let (authority, payload, signer) = setup_registration::<T>(1, today, 20991231);
         let cid_number = payload.cid_number.clone();
-        let signature = signature::<T>(
-            &signer,
-            primitives::sign::OP_SIGN_CITIZEN_IDENTITY,
-            &payload,
-        );
+        let (expected_identity_version, expires_at, signature) =
+            identity_signature::<T>(&signer, &payload.cid_number, &payload);
 
         #[extrinsic_call]
         _(
@@ -212,6 +237,8 @@ mod benchmarks {
             authority.1,
             authority.2,
             payload,
+            expected_identity_version,
+            expires_at,
             signature,
         );
 
@@ -226,11 +253,8 @@ mod benchmarks {
         register::<T>(&authority, voting.clone(), &signer);
         let payload = candidate_payload::<T>(voting);
         let cid_number = payload.voting.cid_number.clone();
-        let signature = signature::<T>(
-            &signer,
-            primitives::sign::OP_SIGN_CITIZEN_IDENTITY,
-            &payload,
-        );
+        let (expected_identity_version, expires_at, signature) =
+            identity_signature::<T>(&signer, &payload.voting.cid_number, &payload);
 
         #[extrinsic_call]
         _(
@@ -238,6 +262,8 @@ mod benchmarks {
             authority.1,
             authority.2,
             payload,
+            expected_identity_version,
+            expires_at,
             signature,
         );
 
@@ -255,11 +281,8 @@ mod benchmarks {
         let mut payload = initial;
         payload.residence_town_code = b"ZS01002".to_vec().try_into().expect("town code fits");
         let cid_number = payload.cid_number.clone();
-        let signature = signature::<T>(
-            &signer,
-            primitives::sign::OP_SIGN_CITIZEN_IDENTITY,
-            &payload,
-        );
+        let (expected_identity_version, expires_at, signature) =
+            identity_signature::<T>(&signer, &payload.cid_number, &payload);
 
         #[extrinsic_call]
         _(
@@ -267,6 +290,8 @@ mod benchmarks {
             authority.1,
             authority.2,
             payload,
+            expected_identity_version,
+            expires_at,
             signature,
         );
 
@@ -280,16 +305,15 @@ mod benchmarks {
         let (authority, voting, signer) = setup_registration::<T>(4, today, 20991231);
         register::<T>(&authority, voting.clone(), &signer);
         let initial = candidate_payload::<T>(voting);
-        let initial_signature = signature::<T>(
-            &signer,
-            primitives::sign::OP_SIGN_CITIZEN_IDENTITY,
-            &initial,
-        );
+        let (expected_identity_version, expires_at, initial_signature) =
+            identity_signature::<T>(&signer, &initial.voting.cid_number, &initial);
         Pallet::<T>::upgrade_to_candidate_identity(
             RawOrigin::Signed(authority.0.clone()).into(),
             authority.1.clone(),
             authority.2.clone(),
             initial.clone(),
+            expected_identity_version,
+            expires_at,
             initial_signature,
         )
         .expect("benchmark candidate upgrade must succeed");
@@ -297,11 +321,8 @@ mod benchmarks {
         payload.voting.residence_town_code =
             b"ZS01002".to_vec().try_into().expect("town code fits");
         let cid_number = payload.voting.cid_number.clone();
-        let signature = signature::<T>(
-            &signer,
-            primitives::sign::OP_SIGN_CITIZEN_IDENTITY,
-            &payload,
-        );
+        let (expected_identity_version, expires_at, signature) =
+            identity_signature::<T>(&signer, &payload.voting.cid_number, &payload);
 
         #[extrinsic_call]
         _(
@@ -309,6 +330,8 @@ mod benchmarks {
             authority.1,
             authority.2,
             payload,
+            expected_identity_version,
+            expires_at,
             signature,
         );
 
@@ -325,16 +348,15 @@ mod benchmarks {
         let cid_number = voting.cid_number.clone();
         register::<T>(&authority, voting.clone(), &signer);
         let candidate = candidate_payload::<T>(voting);
-        let signature = signature::<T>(
-            &signer,
-            primitives::sign::OP_SIGN_CITIZEN_IDENTITY,
-            &candidate,
-        );
+        let (expected_identity_version, expires_at, signature) =
+            identity_signature::<T>(&signer, &candidate.voting.cid_number, &candidate);
         Pallet::<T>::upgrade_to_candidate_identity(
             RawOrigin::Signed(authority.0.clone()).into(),
             authority.1.clone(),
             authority.2.clone(),
             candidate,
+            expected_identity_version,
+            expires_at,
             signature,
         )
         .expect("benchmark candidate upgrade must succeed");

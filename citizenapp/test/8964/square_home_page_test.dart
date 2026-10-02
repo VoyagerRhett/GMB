@@ -1027,4 +1027,19 @@ void main() {
     expect(find.text('注册'), findsOneWidget);
     expect(find.text('广场内容加载失败'), findsNothing);
   });
+  testWidgets('已有身份但生产投影未绑定时不显示注册按钮', (tester) async {
+    await tester.pumpWidget(
+      _wrap(
+        SquareHomePage(
+          identityService: const _StaticComposeIdentityService(),
+          feedSource: _FakeSquareApiClient(),
+          sessionProvider: _CidNotBoundSessionProvider(),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('身份同步中，请稍后重试'), findsOneWidget);
+    expect(find.text('注册'), findsNothing);
+  });
 }

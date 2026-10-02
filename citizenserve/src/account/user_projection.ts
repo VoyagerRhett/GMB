@@ -164,6 +164,13 @@ export async function reconcileFinalizedUserProjection(
     );
   }
 
+  // 创世没有注册事件；已有游标也必须核验基线身份，不能只在首次初始化扫描。
+  await reconcileGenesisUsers(env, {
+    block_number: finalizedNumber,
+    block_hash: finalizedHash,
+    chain_timestamp: await deps.readChainTimestampAtBlock(env, finalizedHash),
+  }, deps);
+
   const lastBlock = Math.min(
     finalizedNumber,
     cursor.finalized_block_number + USER_PROJECTION_BLOCK_BATCH,
@@ -244,8 +251,12 @@ export async function inspectUserProjectionHealth(
       };
     }
     if (cursorNumber === finalizedNumber && cursor.finalized_block_hash === finalizedHash) {
+      const unverifiedGenesis = await env.DB.prepare(
+        `SELECT cid_number FROM users WHERE registration_finalized_block_number = 0
+          AND (identity_finalized_block_number = 0 OR identity_finalized_block_number < ?) LIMIT 1`,
+      ).bind(finalizedNumber).first();
       return {
-        identity_projection_status: 'ready',
+        identity_projection_status: unverifiedGenesis ? 'pending' : 'ready',
         finalized_block_number: finalizedNumber,
         cursor_block_number: cursorNumber,
       };
@@ -421,6 +432,58 @@ async function projectCanonicalBlock(
     projected_user_count: projectedUsers,
     revoked_user_count: revokedUsers,
   };
+}
+
+/// 创世候选仅来自最终schema中的第0块登记；当前绑定与有效性仍以finalized链为真源。
+async function reconcileGenesisUsers(
+  env: Env, point: FinalizedBlockPoint, deps: UserProjectionDeps,
+): Promise<void> {
+  const rows = await env.DB.prepare(
+    'SELECT cid_number, registration_finalized_block_hash FROM users WHERE registration_finalized_block_number = 0',
+  ).all<{ cid_number: string; registration_finalized_block_hash: string }>();
+  const seeds = rows.results ?? [];
+  if (seeds.length === 0) return;
+  const genesisHash = await deps.fetchCanonicalBlockHash(env, 0);
+  if (seeds.some((row) => row.registration_finalized_block_hash !== genesisHash)) {
+    throw new HttpError(409, 'user_projection_genesis_mismatch', '创世身份不属于当前链');
+  }
+  const states = await deps.fetchChainCidProjectionStatesAtBlock(
+    env, seeds.map((row) => row.cid_number), point.block_hash, point.chain_timestamp,
+  );
+  for (const seed of seeds) {
+    const state = states.get(seed.cid_number);
+    if (!state || state.registered_block_number !== 0) {
+      throw new HttpError(409, 'user_projection_state_missing', '创世身份缺少finalized登记状态');
+    }
+    if (state.cid_record_status === 'Revoked') {
+      await deps.purgeIdentity(env, seed.cid_number);
+      continue;
+    }
+    if (!state.account_id) {
+      throw new HttpError(409, 'user_projection_binding_missing', '创世身份缺少有效绑定');
+    }
+    const current = await readUserByCidNumber(env, seed.cid_number);
+    if (!current || state.binding_revision < current.binding_revision ||
+        (state.binding_revision === current.binding_revision && state.account_id !== current.account_id)) {
+      throw new HttpError(409, 'user_projection_binding_conflict', '创世身份绑定与finalized状态矛盾');
+    }
+    // 同版本保持原换绑锚点；只有真正的新绑定版本才推进绑定轴。
+    if (state.binding_revision > current.binding_revision) {
+      await updateUserFromFinalizedBinding(env, {
+        cid_number: seed.cid_number, account_id: state.account_id,
+        binding_revision: state.binding_revision,
+        binding_finalized_block_number: point.block_number,
+        binding_finalized_block_hash: point.block_hash,
+        binding_updated_at: point.chain_timestamp,
+      });
+    }
+    await updateUserFromFinalizedIdentity(env, {
+      cid_number: seed.cid_number, identity_level: state.identity_level,
+      identity_finalized_block_number: point.block_number,
+      identity_finalized_block_hash: point.block_hash,
+      identity_updated_at: point.chain_timestamp,
+    });
+  }
 }
 
 async function registrationAnchor(

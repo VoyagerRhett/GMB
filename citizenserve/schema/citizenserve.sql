@@ -44,6 +44,19 @@ CREATE TABLE IF NOT EXISTS users (
   identity_updated_at INTEGER NOT NULL CHECK(identity_updated_at >= registered_at)
 );
 
+-- 正式创世身份是本最终基线的一部分；只写缺失CID，不回退后续绑定或身份状态。
+-- AccountId与创世锚点均为已核验的公开链数据，不承载任何钱包秘密。
+INSERT INTO users (
+  cid_number, account_id, binding_revision, identity_level,
+  registration_finalized_block_number, registration_finalized_block_hash,
+  binding_finalized_block_number, binding_finalized_block_hash,
+  identity_finalized_block_number, identity_finalized_block_hash,
+  registered_at, binding_updated_at, identity_updated_at
+) VALUES (
+  'CN220-CTZN2-198805200-2026', '0x0cb1d05c0c9c7f05679b60d6f24c7e5719a3985264e41c5e899d4822dca4b06b', 1, 'visitor',
+  0, '0x18847a5dfd263272f2e7727836fe6582f8c4463ff48609df7b96d5e4d9dd24dd', 0, '0x18847a5dfd263272f2e7727836fe6582f8c4463ff48609df7b96d5e4d9dd24dd', 0, '0x18847a5dfd263272f2e7727836fe6582f8c4463ff48609df7b96d5e4d9dd24dd', 0, 0, 0
+) ON CONFLICT(cid_number) DO NOTHING;
+
 -- 目标边界：用户结构化公开资料归属 users；R2 只保存头像、背景等媒体对象。
 CREATE TABLE IF NOT EXISTS user_profiles (
   cid_number TEXT PRIMARY KEY REFERENCES users(cid_number) ON DELETE CASCADE,
@@ -71,6 +84,11 @@ CREATE TABLE IF NOT EXISTS user_profiles (
   CHECK((avatar_object_key IS NULL) = (avatar_content_hash IS NULL)),
   CHECK((banner_object_key IS NULL) = (banner_content_hash IS NULL))
 );
+
+-- 创世公开资料只建立缺失的默认行，重复初始化保留用户已编辑资料。
+INSERT INTO user_profiles (cid_number)
+SELECT cid_number FROM users WHERE registration_finalized_block_number = 0
+ON CONFLICT(cid_number) DO NOTHING;
 
 -- finalized 用户投影只按该单例游标向前扫描；整块处理成功后才允许推进。
 CREATE TABLE IF NOT EXISTS user_projection_cursor (

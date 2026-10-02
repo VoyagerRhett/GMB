@@ -181,6 +181,14 @@ interface class AccountSecurityService {
       accountId: accountId,
     );
     await _rejectSameAccountRevisionChange(binding);
+    final previous = await _bindingStore.readForCid(binding.cidNumber);
+    if (previous != null &&
+        previous.genesisHash == binding.genesisHash &&
+        previous.accountId == binding.accountId &&
+        previous.bindingRevision == binding.bindingRevision) {
+      // 同一会话反复进入页面不能广播身份变化，否则监听者再次登录形成循环。
+      return;
+    }
     await _bindingStore.activate(binding);
     notifyIdentityBindingChanged();
   }
@@ -202,15 +210,18 @@ interface class AccountSecurityService {
     if (requests.isEmpty) {
       throw ArgumentError('私有数据用途列表不能为空');
     }
-    // 查看聊天或通讯录只允许静默读取。首次派生属于单独的授权动作，不能由
-    // 缺失密文或损坏密文触发钱包私钥金库的生物识别。
-    if (!await _hasDeviceDataKeyBlobs(binding, requests)) {
-      throw const AccountSecurityException('设备用途钥尚未准备，请先完成用途钥授权');
+    // 正常只静默解封；缺失或硬件钥永久失效时在同一绑定内恢复原用途钥。
+    // 钱包授权由SDK执行，取消、设备暂不可用或插件缺失不得循环重试。
+    if (await _blobStore.read(_deviceDataKeyRecoveryName(binding)) != null ||
+        !await _hasDeviceDataKeyBlobs(binding, requests)) {
+      await ensureDeviceDataKeysForBinding(binding);
     }
     try {
       return await _openDeviceDataKeys(binding, requests);
     } on DeviceDataKeyVaultException catch (error) {
-      throw AccountSecurityException('设备用途钥无法静默读取，请重新授权准备：${error.message}');
+      if (error.code != 'keyPermanentlyInvalidated') rethrow;
+      await ensureDeviceDataKeysForBinding(binding, rebuildAll: true);
+      return _openDeviceDataKeys(binding, requests);
     }
   }
 
@@ -239,11 +250,13 @@ interface class AccountSecurityService {
     if (existing != null) return existing;
     late final Future<void> created;
     created = _ensureDeviceDataKeysForBinding(binding, rebuildAll: rebuildAll)
-        .whenComplete(() {
+        .then((_) {
           if (identical(_dataKeyFlights[key], created)) {
             _dataKeyFlights.remove(key);
           }
         });
+    // 失败结论继续由同一绑定的调用者共享；切页、恢复前台和后台同步不得
+    // 把取消或失败当作下一次自动认证的机会。重启才重新读取持久恢复状态。
     _dataKeyFlights[key] = created;
     return created;
   }
@@ -252,36 +265,66 @@ interface class AccountSecurityService {
     AccountDataBinding binding, {
     required bool rebuildAll,
   }) async {
+    final generation = revision.value;
     await _rejectSameAccountRevisionChange(binding);
     final account = await _account(binding.accountId);
     if (account == null) {
       throw const AccountSecurityException('CID 当前绑定账户不在本机钱包中');
     }
-    final requests = rebuildAll
+    final hardwareExists = await _deviceDataKeyVault.contains(
+      account.walletIndex,
+    );
+    final recoveryName = _deviceDataKeyRecoveryName(binding);
+    final recoveryPending = await _blobStore.read(recoveryName) != null;
+    final recoverAll = rebuildAll || !hardwareExists || recoveryPending;
+    final requests = recoverAll
         ? _deviceDataKeyRequests
         : await _missingDeviceDataKeyRequests(binding);
     if (requests.isEmpty) return;
+    // 硬件重建中途失败也保留恢复事实；重启后不能把新硬件钥误当成旧密文可读。
+    if (recoverAll) {
+      await _recordDeviceKeyMaterialIndex(account.walletIndex, binding);
+      await _blobStore.write(recoveryName, 'true');
+    }
     final keys = await _deriveOrProvide(account, binding, requests);
+    final previous = <String, String?>{};
+    final sealed = <String, String>{};
     final written = <String>[];
     try {
+      // 全部派生和封装成功后才替换持久密文；失败恢复旧值，不删除用户资料。
       for (var index = 0; index < requests.length; index += 1) {
         final request = requests[index];
         final key = keys[index];
         final name = _deviceDataKeyBlobName(binding, request);
-        final blob = await _deviceDataKeyVault.seal(
+        previous[name] = await _blobStore.read(name);
+        sealed[name] = await _deviceDataKeyVault.seal(
           walletIndex: account.walletIndex,
           plaintext: key,
           aad: _deviceDataKeyAad(binding, account.walletIndex, request),
         );
-        await _blobStore.write(name, blob);
-        written.add(name);
         key.fillRange(0, key.length, 0);
+      }
+      if (revision.value != generation) {
+        throw const AccountSecurityException('用途钥恢复期间身份已变化');
+      }
+      for (final entry in sealed.entries) {
+        await _blobStore.write(entry.key, entry.value);
+        written.add(entry.key);
+        if (revision.value != generation) {
+          throw const AccountSecurityException('用途钥恢复期间身份已变化');
+        }
       }
       await _bindingStore.activate(binding);
       await _recordDeviceKeyMaterialIndex(account.walletIndex, binding);
-    } catch (_) {
-      for (final name in written) {
-        await _blobStore.delete(name);
+      await _blobStore.delete(recoveryName);
+    } catch (error) {
+      for (final name in written.reversed) {
+        final old = previous[name];
+        if (old == null) {
+          await _blobStore.delete(name);
+        } else {
+          await _blobStore.write(name, old);
+        }
       }
       rethrow;
     } finally {
@@ -548,13 +591,24 @@ interface class AccountSecurityService {
   /// AppLock 全量擦除使用：删除全部已登记 CID 的 P-256 子钥、用途钥密文与当前
   /// SDK 目录可证明的设备数据钥。旧钱包数据库不参与扫描、迁移或回退。
   Future<void> wipeAllDeviceMaterial(Iterable<int> walletIndexes) async {
+    final indexes = walletIndexes.toSet();
     final bindings = await _bindingStore.readAll();
+    // 首次恢复取消也会登记公开索引；全量擦除必须覆盖尚未激活的恢复状态。
+    for (final index in indexes) {
+      for (final binding in await _readDeviceKeyMaterialIndex(
+        _deviceKeyMaterialIndexName(index),
+      )) {
+        if (!bindings.any((item) => _flightKey(item) == _flightKey(binding))) {
+          bindings.add(binding);
+        }
+      }
+    }
     for (final binding in bindings) {
       await _deleteDeviceKeyMaterial(binding);
       await _deviceSubkey.delete(binding.cidNumber);
       await _bindingStore.clearForCid(binding.cidNumber);
     }
-    for (final index in walletIndexes.toSet()) {
+    for (final index in indexes) {
       await _deviceDataKeyVault.delete(index);
       await _blobStore.delete(_deviceKeyMaterialIndexName(index));
     }
@@ -618,6 +672,12 @@ interface class AccountSecurityService {
 
   static String _flightKey(AccountDataBinding binding) =>
       '${binding.genesisHash}|${binding.cidNumber}|${binding.accountId}';
+
+  static String _deviceDataKeyRecoveryName(AccountDataBinding binding) =>
+      'device_data_key_recovery_pending_'
+      '${Uri.encodeComponent(binding.genesisHash)}_'
+      '${Uri.encodeComponent(binding.cidNumber)}_'
+      '${binding.bindingRevision}_${binding.accountId}';
 
   static String _deviceDataKeyBlobName(
     AccountDataBinding binding,
@@ -702,6 +762,11 @@ interface class AccountSecurityService {
   }
 
   Future<void> _deleteDeviceKeyMaterial(AccountDataBinding binding) async {
+    final recoveryName = _deviceDataKeyRecoveryName(binding);
+    await _blobStore.delete(recoveryName);
+    if (await _blobStore.read(recoveryName) != null) {
+      throw const AccountSecurityException('设备用途钥恢复状态仍存在');
+    }
     for (final request in _deviceDataKeyRequests) {
       final name = _deviceDataKeyBlobName(binding, request);
       await _blobStore.delete(name);

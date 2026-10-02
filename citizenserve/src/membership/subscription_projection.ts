@@ -149,7 +149,7 @@ async function projectCanonicalBlock(
     deps.readSubscriptionsAtBlock(env, relationList, blockHash),
     deps.readCreatorPlansBatchAtBlock(env, creatorList, blockHash),
     deps.fetchChainAccountIdsByCidAtBlock(env, identityCidNumbers, blockHash),
-    readProjectedCidNumbers(env, identityCidNumbers),
+    readProjectedCidNumbers(env, identityCidNumbers, blockNumber),
   ]);
   const point = { blockNumber, blockHash, verifiedAt: nowMs(), lastTxHash: null };
 
@@ -212,13 +212,14 @@ async function projectCanonicalBlock(
   return { projectedSubscriptions: relationList.length, projectedCreators: creatorList.length };
 }
 
-async function readProjectedCidNumbers(env: Env, cidNumbers: string[]): Promise<Set<string>> {
+async function readProjectedCidNumbers(env: Env, cidNumbers: string[], blockNumber: number): Promise<Set<string>> {
   const distinct = [...new Set(cidNumbers)];
   if (distinct.length === 0) return new Set();
   const placeholders = distinct.map(() => '?').join(', ');
   const result = await env.DB.prepare(
-    `SELECT cid_number FROM users WHERE cid_number IN (${placeholders})`,
-  ).bind(...distinct).all<{ cid_number: string }>();
+    `SELECT cid_number FROM users WHERE cid_number IN (${placeholders})
+       AND (registration_finalized_block_number <> 0 OR (identity_finalized_block_number > 0 AND identity_finalized_block_number >= ?))`,
+  ).bind(...distinct, blockNumber).all<{ cid_number: string }>();
   return new Set((result.results ?? []).map((row) => row.cid_number));
 }
 

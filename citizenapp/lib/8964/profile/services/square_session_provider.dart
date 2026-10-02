@@ -264,7 +264,7 @@ class SquareSessionProvider {
       bindingRevision: binding.bindingRevision,
       accountId: binding.accountId,
     );
-    _currentUser.invalidate();
+    // 真正绑定变化已由 revision 使缓存失效；同绑定登录不得取消其它页面的在途读取。
   }
 
   static void _requireCurrentAccount(

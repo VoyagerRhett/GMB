@@ -1,3 +1,7 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:citizenapp/8964/profile/services/square_session_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -34,7 +38,108 @@ Widget _wrap({required bool isSelf}) => MaterialApp(
   ),
 );
 
+class _PendingRefreshSession extends FakeSessionProvider {
+  _PendingRefreshSession() : super(fakeSession());
+  final completion = Completer<SquareSessionResolution>();
+  int calls = 0;
+  @override
+  Future<SquareSessionResolution> resolveSession({bool refresh = false}) {
+    if (!refresh) return super.resolveSession();
+    calls++;
+    return completion.future;
+  }
+}
+
+class _UnavailableSession extends FakeSessionProvider {
+  _UnavailableSession(this.status) : super(null);
+  final SquareSessionStatus status;
+  @override
+  Future<SquareSessionResolution> resolveSession({
+    bool refresh = false,
+  }) async => SquareSessionResolution(status);
+}
+
 void main() {
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    testWidgets('${platform.name}空内容下拉显示完整进度，服务失败仍重读本地', (tester) async {
+      debugDefaultTargetPlatformOverride = platform;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.view.physicalSize = const Size(1080, 2400);
+      tester.view.devicePixelRatio = 2.625;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final api = FakeProfileApi(sampleProfile());
+      final provider = _PendingRefreshSession();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: UserProfilePage(
+            cidNumber: sampleProfile().cidNumber!,
+            isSelf: true,
+            api: api,
+            cache: FakeProfileCache(sampleProfile()),
+            sessionProvider: provider,
+            subscriptionService: _NullMembershipSnapshotService(),
+            viewerAccountLoader: () async => null,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final before = api.localPostCalls;
+      await tester.drag(find.text('暂无公文内容，请在广场发布'), const Offset(0, 380));
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(provider.calls, 1);
+      expect(
+        find.byKey(const ValueKey('profile-refresh-progress')),
+        findsOneWidget,
+      );
+      expect(api.localPostCalls, greaterThan(before));
+      provider.completion.complete(
+        const SquareSessionResolution(SquareSessionStatus.networkUnavailable),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('profile-refresh-progress')),
+        findsNothing,
+      );
+      expect(find.text('内容加载失败，请下拉刷新'), findsAtLeastNWidgets(1));
+      expect(find.text('需要钱包账户才能浏览关注列表'), findsNothing);
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
+
+  for (final status in [
+    SquareSessionStatus.noWallet,
+    SquareSessionStatus.networkUnavailable,
+    SquareSessionStatus.identityUnavailable,
+    SquareSessionStatus.deviceUnavailable,
+  ]) {
+    testWidgets('关注列表保留真实会话状态：${status.name}', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: UserProfilePage(
+            cidNumber: fakeSession().cidNumber,
+            isSelf: true,
+            api: FakeProfileApi(sampleProfile()),
+            cache: FakeProfileCache(sampleProfile()),
+            sessionProvider: _UnavailableSession(status),
+            subscriptionService: _NullMembershipSnapshotService(),
+            viewerAccountLoader: () async => null,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.textContaining(' 关注').first);
+      await tester.pumpAndSettle();
+      if (status == SquareSessionStatus.noWallet) {
+        expect(find.text('需要钱包账户才能浏览关注列表'), findsOneWidget);
+      } else {
+        expect(find.text(status.message), findsWidgets);
+        expect(find.text('需要钱包账户才能浏览关注列表'), findsNothing);
+      }
+    });
+  }
+
   testWidgets('renders 4 counted category tabs without a photo tab', (
     tester,
   ) async {
@@ -53,7 +158,7 @@ void main() {
     // 当前资料页统一使用细体左箭头返回，测试与已确认的正式 UI 保持一致。
     expect(find.byIcon(Icons.chevron_left), findsOneWidget);
     expect(find.byIcon(Icons.more_vert), findsOneWidget);
-    expect(find.text('本地尚未保存此类内容，下拉刷新'), findsOneWidget);
+    expect(find.text('暂无公文内容，请在广场发布'), findsOneWidget);
     expect(find.text('还没有帖子'), findsNothing);
     expect(ProfileCategoryTabs.height, 36);
     expect(ProfileCategoryTabs.labelTopPadding, 8);
@@ -101,7 +206,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('本地尚未保存此类内容，下拉刷新'), findsOneWidget);
+    expect(find.text('暂无竞选内容，请在广场发布'), findsOneWidget);
   });
 
   testWidgets('builds another user profile without exceptions', (tester) async {

@@ -25,9 +25,14 @@ async function runIndependentScheduledJobs(
   jobs: ReadonlyArray<ScheduledJob>,
 ): Promise<void> {
   const results = await Promise.allSettled(jobs.map((job) => job.run()));
-  const failed = results.flatMap((result, index) =>
-    result.status === 'rejected' ? [jobs[index].name] : []
-  );
+  const failed = results.flatMap((result, index) => {
+    if (result.status !== 'rejected') return [];
+    // 只保留稳定错误码，不输出异常正文、链账户、请求内容或底层凭据。
+    const raw = result.reason?.code ?? result.reason?.error_code;
+    const code = typeof raw === 'string' && /^[a-zA-Z][a-zA-Z0-9_]{0,79}$/.test(raw)
+      ? raw : 'unexpected_error';
+    return [jobs[index].name + ':' + code];
+  });
   if (failed.length > 0) {
     throw new Error('[scheduled-' + label + '] failed jobs: ' + failed.join(','));
   }

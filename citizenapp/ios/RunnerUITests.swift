@@ -373,6 +373,11 @@ final class RunnerUITests: XCTestCase {
     } else {
       attachScreenshot(app, name: "CitizenApp-聊天页")
     }
+    XCTAssertFalse(app.staticTexts["聊天暂时无法使用，请稍后重试"].exists,
+        "已有身份的正式包必须实际打开聊天，不能以加载消失当作成功")
+    XCTAssertFalse(app.buttons["验证并准备聊天与通讯录密钥"].exists,
+        "聊天页面不得增加用途钥准备按钮")
+
   }
 
   /// 双真机验收的身份读取只取页面公开公民号，不访问钱包、数据库或密钥。

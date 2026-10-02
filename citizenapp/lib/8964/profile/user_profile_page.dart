@@ -113,6 +113,8 @@ class _UserProfilePageState extends State<UserProfilePage> {
   Future<SquareSession?>? _sessionFuture;
   bool _sessionResolved = false;
   int _postsRevision = 0;
+  bool _refreshing = false;
+  bool _contentRefreshFailed = false;
   int _profileLoadGeneration = 0;
   late MembershipDisplayDecision _membershipDecision;
   SquareMembershipState? _membershipState;
@@ -272,35 +274,60 @@ class _UserProfilePageState extends State<UserProfilePage> {
       await _loadProfileMedia(fresh);
       unawaited(_resolveOwnAccount(fresh.accountId));
     } catch (_) {
-      if (mounted && _profile == null) _snack('本地资料读取失败，可下拉刷新');
+      if (mounted && _profile == null) _snack('内容加载失败，请下拉刷新');
     }
   }
 
+  /// 主动刷新同时覆盖本地读取和远端同步；页面拥有完整操作状态，不随Tab重建消失。
   Future<void> _refresh() async {
+    if (_refreshing) return;
+    setState(() {
+      _refreshing = true;
+      _contentRefreshFailed = false;
+      _postsRevision++;
+    });
     try {
+      // 服务不可用也必须先重读本地；本人普通进入依旧只读本地，不隐式同步。
+      await _load(localOnly: true);
       final session = await _ensureSession(refresh: true);
       if (session == null) throw StateError('当前无法建立服务会话');
       if (widget.isSelf && session.cidNumber != widget.cidNumber) {
         throw StateError('当前用户已变化');
       }
-      await _api.refreshProfile(
-        widget.cidNumber,
-        session: session,
-        userInitiated: true,
-        isCurrent: () => mounted,
-      );
-      if (widget.isSelf) {
-        await SquarePostSyncService().sync(
-          session,
-          userInitiated: true,
-          isCurrent: () => mounted,
-        );
-      }
-      if (!mounted) return;
+      bool current() =>
+          mounted &&
+          _session?.cidNumber == session.cidNumber &&
+          _session?.accountId == session.accountId &&
+          _session?.bindingRevision == session.bindingRevision;
+      await Future.wait<void>([
+        _api
+            .refreshProfile(
+              widget.cidNumber,
+              session: session,
+              userInitiated: true,
+              isCurrent: current,
+            )
+            .then<void>((_) {}),
+        if (widget.isSelf)
+          SquarePostSyncService().sync(
+            session,
+            userInitiated: true,
+            isCurrent: current,
+          ),
+      ]);
+      if (!current()) return;
       await _load(localOnly: true);
-      if (mounted) setState(() => _postsRevision++);
+      if (mounted) {
+        setState(() => _postsRevision++);
+        _snack('刷新完成');
+      }
     } catch (_) {
-      if (mounted) _snack('刷新失败，已保留本地内容');
+      if (mounted) {
+        setState(() => _contentRefreshFailed = true);
+        _snack('内容加载失败，请下拉刷新');
+      }
+    } finally {
+      if (mounted) setState(() => _refreshing = false);
     }
   }
 
@@ -561,7 +588,11 @@ class _UserProfilePageState extends State<UserProfilePage> {
     final session = await _ensureSession();
     if (!mounted) return;
     if (session == null) {
-      _snack('需要钱包账户才能浏览关注列表');
+      _snack(
+        _sessionStatus == SquareSessionStatus.noWallet
+            ? '需要钱包账户才能浏览关注列表'
+            : _sessionStatus?.message ?? '公民服务暂时不可用，请稍后重试',
+      );
       return;
     }
     Navigator.of(context).push(
@@ -670,13 +701,12 @@ class _UserProfilePageState extends State<UserProfilePage> {
           api: _api,
           category: SquarePostCategory.normal,
           postType: SquarePostType.document,
-          emptyLabel: '还没有公文',
+          emptyLabel: '暂无公文内容，请在广场发布',
           session: session,
           sessionReady: _sessionResolved,
-          sessionUnavailableMessage: _sessionStatus?.message,
           onSessionExpired: _refreshSessionAfterUnauthorized,
           isSelf: widget.isSelf,
-          onRefresh: _refresh,
+          refreshFailed: _contentRefreshFailed,
           onOpenPost: _openPost,
         );
       case ProfileTab.campaign:
@@ -685,13 +715,12 @@ class _UserProfilePageState extends State<UserProfilePage> {
           cidNumber: widget.cidNumber,
           api: _api,
           category: SquarePostCategory.campaign,
-          emptyLabel: '还没有竞选内容',
+          emptyLabel: '暂无竞选内容，请在广场发布',
           session: session,
           sessionReady: _sessionResolved,
-          sessionUnavailableMessage: _sessionStatus?.message,
           onSessionExpired: _refreshSessionAfterUnauthorized,
           isSelf: widget.isSelf,
-          onRefresh: _refresh,
+          refreshFailed: _contentRefreshFailed,
           onOpenPost: _openPost,
         );
       case ProfileTab.videos:
@@ -702,13 +731,12 @@ class _UserProfilePageState extends State<UserProfilePage> {
           category: SquarePostCategory.normal,
           postType: SquarePostType.video,
           mediaKind: SquareMediaKind.video,
-          emptyLabel: '还没有视频',
+          emptyLabel: '暂无视频内容，请在广场发布',
           session: session,
           sessionReady: _sessionResolved,
-          sessionUnavailableMessage: _sessionStatus?.message,
           onSessionExpired: _refreshSessionAfterUnauthorized,
           isSelf: widget.isSelf,
-          onRefresh: _refresh,
+          refreshFailed: _contentRefreshFailed,
           onOpenPost: _openPost,
         );
       case ProfileTab.articles:
@@ -718,13 +746,12 @@ class _UserProfilePageState extends State<UserProfilePage> {
           api: _api,
           category: SquarePostCategory.normal,
           postType: SquarePostType.article,
-          emptyLabel: '还没有文章',
+          emptyLabel: '暂无文章内容，请在广场发布',
           session: session,
           sessionReady: _sessionResolved,
-          sessionUnavailableMessage: _sessionStatus?.message,
           onSessionExpired: _refreshSessionAfterUnauthorized,
           isSelf: widget.isSelf,
-          onRefresh: _refresh,
+          refreshFailed: _contentRefreshFailed,
           onOpenPost: _openArticle,
         );
     }
@@ -739,84 +766,112 @@ class _UserProfilePageState extends State<UserProfilePage> {
     return DefaultTabController(
       length: ProfileTab.values.length,
       child: Scaffold(
-        body: NestedScrollView(
-          headerSliverBuilder: (context, innerBoxIsScrolled) => [
-            SliverOverlapAbsorber(
-              handle: NestedScrollView.sliverOverlapAbsorberHandleFor(context),
-              sliver: SliverAppBar(
-                pinned: true,
-                expandedHeight: expandedHeight,
-                // 品牌色只作为所有图片均失败时的最底层兜底；完全折叠态由
-                // CollapsibleHeader 明确绘制真实背景，不再依赖透明 Material 透出页面。
-                backgroundColor: AppTheme.primaryDark,
-                surfaceTintColor: Colors.transparent,
-                scrolledUnderElevation: 0,
-                foregroundColor: Colors.white,
-                elevation: 0,
-                leading: IconButton(
-                  icon: const Icon(Icons.chevron_left),
-                  // 背景图明暗不定：加半透明深色圆形底衬保证白色返回箭头始终可读。
-                  style: IconButton.styleFrom(
-                    backgroundColor: Colors.black.withValues(alpha: 0.32),
-                    foregroundColor: Colors.white,
-                  ),
-                  onPressed: () => Navigator.of(context).maybePop(),
-                ),
-                actions: [
-                  ProfileKebabMenu(
-                    isSelf: widget.isSelf,
-                    onUserCode: _openUserCode,
-                    onEditProfile: _openEditProfile,
-                    onDeleteAccount: _openDeleteAccount,
-                  ),
-                ],
-                // 展开头图和固定折叠头图各自明确渲染；不能再以透明背景替代真实图片。
-                flexibleSpace: CollapsibleHeader(
-                  expandedHeight: expandedHeight,
-                  bannerHeight: _bannerHeight,
-                  bottomHeight: ProfileCategoryTabs.height,
-                  collapsedTitle: _title,
-                  banner: _bannerWidget(),
-                  collapsedBanner: _bannerWidget(),
-                  foreground: ProfileHeaderCard(
-                    cidNumber: widget.cidNumber,
-                    profile: _profile,
-                    avatarPath: _profileMedia.avatarPath,
-                    avatarUrl: widget.isSelf
-                        ? null
-                        : _mediaUrl(_profile?.avatarObjectKey),
-                    avatarHeaders: _mediaHeaders,
-                    confirmedMembershipLevel: _membershipState?.membershipLevel,
-                    confirmedMembershipActive: _confirmedMembershipActive,
-                    onFollowing: () => _openFollows(FollowsType.following),
-                    onFollowers: () => _openFollows(FollowsType.followers),
-                    onMutualFollowing: () =>
-                        _openFollows(FollowsType.mutualFollowing),
-                    actions: ProfileActionIcons(
-                      isSelf: widget.isSelf,
-                      isFollowing: _profile?.isFollowing ?? false,
-                      isNotifying: _profile?.isNotifying ?? false,
-                      // 他人视角看的是自己账户时置灰（不能关注/私信/通知自己）。
-                      enabled: !_isOwnAccount,
-                      // 有有效创作者计划时在通知左侧就地出现；不存在时完全不占位。
-                      leading: _creatorSubscribeButton(),
-                      onNotify: _toggleNotify,
-                      onChat: _openChatWithUser,
-                      onToggleFollow: _toggleFollow,
+        body: RefreshIndicator(
+          onRefresh: _refresh,
+          // 外层与当前内层的纵向通知均由页面接收，刷新图标绘制在头图之上。
+          notificationPredicate: (notification) =>
+              notification.metrics.axis == Axis.vertical &&
+              notification.depth <= 2,
+          child: Stack(
+            children: [
+              NestedScrollView(
+                headerSliverBuilder: (context, innerBoxIsScrolled) => [
+                  SliverOverlapAbsorber(
+                    handle: NestedScrollView.sliverOverlapAbsorberHandleFor(
+                      context,
+                    ),
+                    sliver: SliverAppBar(
+                      pinned: true,
+                      expandedHeight: expandedHeight,
+                      // 品牌色只作为所有图片均失败时的最底层兜底；完全折叠态由
+                      // CollapsibleHeader 明确绘制真实背景，不再依赖透明 Material 透出页面。
+                      backgroundColor: AppTheme.primaryDark,
+                      surfaceTintColor: Colors.transparent,
+                      scrolledUnderElevation: 0,
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      leading: IconButton(
+                        icon: const Icon(Icons.chevron_left),
+                        // 背景图明暗不定：加半透明深色圆形底衬保证白色返回箭头始终可读。
+                        style: IconButton.styleFrom(
+                          backgroundColor: Colors.black.withValues(alpha: 0.32),
+                          foregroundColor: Colors.white,
+                        ),
+                        onPressed: () => Navigator.of(context).maybePop(),
+                      ),
+                      actions: [
+                        ProfileKebabMenu(
+                          isSelf: widget.isSelf,
+                          onUserCode: _openUserCode,
+                          onEditProfile: _openEditProfile,
+                          onDeleteAccount: _openDeleteAccount,
+                        ),
+                      ],
+                      // 展开头图和固定折叠头图各自明确渲染；不能再以透明背景替代真实图片。
+                      flexibleSpace: CollapsibleHeader(
+                        expandedHeight: expandedHeight,
+                        bannerHeight: _bannerHeight,
+                        bottomHeight: ProfileCategoryTabs.height,
+                        collapsedTitle: _title,
+                        banner: _bannerWidget(),
+                        collapsedBanner: _bannerWidget(),
+                        foreground: ProfileHeaderCard(
+                          cidNumber: widget.cidNumber,
+                          profile: _profile,
+                          avatarPath: _profileMedia.avatarPath,
+                          avatarUrl: widget.isSelf
+                              ? null
+                              : _mediaUrl(_profile?.avatarObjectKey),
+                          avatarHeaders: _mediaHeaders,
+                          confirmedMembershipLevel:
+                              _membershipState?.membershipLevel,
+                          confirmedMembershipActive: _confirmedMembershipActive,
+                          onFollowing: () =>
+                              _openFollows(FollowsType.following),
+                          onFollowers: () =>
+                              _openFollows(FollowsType.followers),
+                          onMutualFollowing: () =>
+                              _openFollows(FollowsType.mutualFollowing),
+                          actions: ProfileActionIcons(
+                            isSelf: widget.isSelf,
+                            isFollowing: _profile?.isFollowing ?? false,
+                            isNotifying: _profile?.isNotifying ?? false,
+                            // 他人视角看的是自己账户时置灰（不能关注/私信/通知自己）。
+                            enabled: !_isOwnAccount,
+                            // 有有效创作者计划时在通知左侧就地出现；不存在时完全不占位。
+                            leading: _creatorSubscribeButton(),
+                            onNotify: _toggleNotify,
+                            onChat: _openChatWithUser,
+                            onToggleFollow: _toggleFollow,
+                          ),
+                        ),
+                      ),
+                      bottom: ProfileCategoryTabs(
+                        posts: _profile?.posts ?? 0,
+                        campaigns: _profile?.campaigns ?? 0,
+                        videos: _profile?.videos ?? 0,
+                        articles: _profile?.articles ?? 0,
+                      ),
                     ),
                   ),
-                ),
-                bottom: ProfileCategoryTabs(
-                  posts: _profile?.posts ?? 0,
-                  campaigns: _profile?.campaigns ?? 0,
-                  videos: _profile?.videos ?? 0,
-                  articles: _profile?.articles ?? 0,
+                ],
+                body: TabBarView(
+                  children: [
+                    for (final tab in ProfileTab.values) _tabBody(tab),
+                  ],
                 ),
               ),
-            ),
-          ],
-          body: TabBarView(
-            children: [for (final tab in ProfileTab.values) _tabBody(tab)],
+              if (_refreshing)
+                Positioned(
+                  top: MediaQuery.paddingOf(context).top,
+                  left: 0,
+                  right: 0,
+                  child: const LinearProgressIndicator(
+                    key: ValueKey('profile-refresh-progress'),
+                    semanticsLabel: '正在刷新内容',
+                  ),
+                ),
+            ],
           ),
         ),
       ),

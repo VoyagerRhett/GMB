@@ -86,7 +86,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
   }
 
-  testWidgets('本地用途钥缺失只显示明确授权入口，不在读取时重复认证', (tester) async {
+  testWidgets('用途钥恢复失败显示可重试错误，不增加准备按钮', (tester) async {
     const accountId =
         '0x1111111111111111111111111111111111111111111111111111111111111111';
     await tester.pumpWidget(
@@ -102,11 +102,9 @@ void main() {
       ),
     );
     await tester.pump(const Duration(milliseconds: 100));
-    expect(
-      find.byKey(const ValueKey('chat-prepare-data-keys')),
-      findsOneWidget,
-    );
-    expect(find.text('聊天与通讯录密钥需要首次授权准备'), findsWidgets);
+    expect(find.byKey(const ValueKey('chat-prepare-data-keys')), findsNothing);
+    expect(find.text('验证并准备聊天与通讯录密钥'), findsNothing);
+    expect(find.text('聊天暂时无法使用，请稍后重试'), findsWidgets);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 

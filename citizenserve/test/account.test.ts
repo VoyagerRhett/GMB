@@ -11,7 +11,7 @@ import { createTestMiniflare } from './miniflare';
 
 const ACCOUNT_ID = `0x${'11'.repeat(32)}`;
 const BLOCK_HASH = `0x${'aa'.repeat(32)}`;
-const CID_NUMBER = 'CN220-CTZN2-198805200-2026';
+const CID_NUMBER = 'CN220-CTZN2-198805202-2026';
 const SCHEMA_SQL = readFileSync(
   resolve(process.cwd(), 'schema/citizenserve.sql'),
   'utf8',
@@ -43,8 +43,8 @@ describe('finalized CID 注销清理', () => {
     const result = await purgeIdentity(env, CID_NUMBER);
 
     expect(result.deleted_r2_objects).toBe(2);
-    expect(await rowCount(env, 'users')).toBe(0);
-    expect(await rowCount(env, 'user_profiles')).toBe(0);
+    expect(await rowCount(env, 'users')).toBe(1);
+    expect(await rowCount(env, 'user_profiles')).toBe(1);
     expect(await env.SQUARE_PRIVATE.get(`profile/${CID_NUMBER}/avatar`)).toBeNull();
     expect(await env.SQUARE_PRIVATE.get(`profile/${CID_NUMBER}/banner`)).toBeNull();
   });
@@ -64,7 +64,7 @@ describe('finalized CID 注销清理', () => {
 
     expect(result.deleted_r2_objects).toBe(1);
     expect(await env.SQUARE_PRIVATE.get(manifestKey)).toBeNull();
-    expect(await rowCount(env, 'users')).toBe(0);
+    expect(await rowCount(env, 'users')).toBe(1);
   });
 });
 

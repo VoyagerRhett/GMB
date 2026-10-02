@@ -11,7 +11,7 @@ import {
   reconcileFinalizedUserProjection,
   type UserProjectionDeps,
 } from '../src/account/user_projection';
-import { readUserByCidNumber, readUserProfile } from '../src/account/user_repository';
+import { readUserByAccountId, readUserByCidNumber, readUserProfile } from '../src/account/user_repository';
 import { decodeCitizenIdentityEvents } from '../src/chain/citizen_identity_event';
 import type { ChainCidProjectionState } from '../src/chain/identity';
 import { bytesToHex, concatBytes, hexToBytes, scaleCompact, u64Le } from '../src/shared/signing_message';
@@ -21,7 +21,7 @@ import { createTestMiniflare } from './miniflare';
 const ACCOUNT_A = `0x${'11'.repeat(32)}`;
 const ACCOUNT_B = `0x${'22'.repeat(32)}`;
 const REGISTRAR_CID = 'CN220-CREG2-100000001-2026';
-const CID_NUMBER = 'CN220-CTZN2-198805200-2026';
+const CID_NUMBER = 'CN220-CTZN2-198805202-2026';
 const SCHEMA_SQL = readFileSync(
   resolve(process.cwd(), 'schema/citizenserve.sql'),
   'utf8',
@@ -78,11 +78,63 @@ describe('finalized 用户投影', () => {
     });
     env = await miniflare.getBindings<Env>();
     await applySchema(env);
-    chain = new ChainFixture();
+    const genesis = await env.DB.prepare(
+      'SELECT * FROM users WHERE registration_finalized_block_number = 0',
+    ).first<import('../src/types').UserRow>();
+    if (!genesis) throw new Error('schema缺少创世身份');
+    chain = new ChainFixture(genesis);
   });
 
   afterEach(async () => {
     await miniflare.dispose();
+  });
+
+  it('最终schema直接含创世身份，未核验时不能登录；已有游标也补齐验证', async () => {
+    expect(await readUserByCidNumber(env, chain.genesis.cid_number)).toMatchObject({
+      registration_finalized_block_number: 0, binding_revision: 1,
+    });
+    expect(await readUserByAccountId(env, chain.genesis.account_id)).toBeNull();
+    await env.DB.prepare(`INSERT INTO user_projection_cursor VALUES (1, 0, ?, 0)`)
+      .bind(chain.hash(0)).run();
+    expect(await readUserByAccountId(env, chain.genesis.account_id)).toBeNull();
+    expect((await inspectUserProjectionHealth(env, chain.deps({ finalizedBlockNumber: 0 }))).identity_projection_status).toBe('pending');
+    await env.DB.prepare('DELETE FROM user_projection_cursor').run();
+    await env.DB.prepare(`INSERT INTO user_projection_cursor VALUES (1, 3, ?, 0)`)
+      .bind(chain.hash(3)).run();
+    expect((await inspectUserProjectionHealth(env, chain.deps())).identity_projection_status).toBe('pending');
+    const result = await reconcileFinalizedUserProjection(env, chain.deps());
+    expect(result.processed_block_count).toBe(0);
+    expect(await readUserByAccountId(env, chain.genesis.account_id)).toMatchObject({
+      binding_finalized_block_number: 0, identity_finalized_block_number: 3,
+    });
+    expect((await inspectUserProjectionHealth(env, chain.deps())).identity_projection_status).toBe('ready');
+  });
+
+  it('重复初始化保留已更新绑定与资料；撤销身份不得因基线重放重新获得授权', async () => {
+    const nextAccount = `0x${'33'.repeat(32)}`;
+    chain.genesisState = { ...chain.genesisState, account_id: nextAccount, binding_revision: 2 };
+    await reconcileFinalizedUserProjection(env, chain.deps());
+    await env.DB.prepare('UPDATE user_profiles SET bio = ? WHERE cid_number = ?')
+      .bind('保留资料', chain.genesis.cid_number).run();
+    await applySchema(env);
+    expect(await readUserByCidNumber(env, chain.genesis.cid_number)).toMatchObject({
+      account_id: nextAccount, binding_revision: 2,
+    });
+    expect(await readUserProfile(env, chain.genesis.cid_number)).toMatchObject({ bio: '保留资料' });
+    chain.genesisState = { ...chain.genesisState, cid_record_status: 'Revoked', revoked_block_number: 3 };
+    await reconcileFinalizedUserProjection(env, chain.deps());
+    expect(await readUserByAccountId(env, nextAccount)).toBeNull();
+    await applySchema(env);
+    expect(await readUserByAccountId(env, chain.genesis.account_id)).toBeNull();
+    await reconcileFinalizedUserProjection(env, chain.deps());
+    expect(await readUserByCidNumber(env, chain.genesis.cid_number)).toBeNull();
+  });
+
+  it('拒绝错误创世链锚点，失败不推进游标', async () => {
+    chain.hashes.set(0, `0x${'aa'.repeat(32)}`);
+    await expect(reconcileFinalizedUserProjection(env, chain.deps()))
+      .rejects.toMatchObject({ code: 'user_projection_genesis_mismatch' });
+    expect(await cursor()).toMatchObject({ finalized_block_number: 0 });
   });
 
   it('按精确区块完成注册、换绑、身份升级和 finalized 撤销', async () => {
@@ -231,7 +283,15 @@ class ChainFixture {
   readonly timestamps = new Map<string, number>();
   failedEventBlock: number | null = null;
 
-  constructor() {
+  genesisState: ChainCidProjectionState;
+  constructor(readonly genesis: import('../src/types').UserRow) {
+    this.hashes.set(0, genesis.registration_finalized_block_hash);
+    this.genesisState = {
+      cid_number: genesis.cid_number, cid_record_status: 'Active',
+      account_id: genesis.account_id, binding_revision: genesis.binding_revision,
+      identity_level: genesis.identity_level, registered_block_number: 0,
+      revoked_block_number: null,
+    };
     this.events.set(this.hash(1), systemEvents([
       // 注册局事件本身没有 account_id；投影必须从同区块 AccountIdByCid 取值。
       eventRecord(5, concatBytes(cid(CID_NUMBER), cid(REGISTRAR_CID), u64Le(1))),
@@ -297,6 +357,7 @@ class ChainFixture {
         const blockNumber = reverse.get(blockHash);
         return new Map(cidNumbers.map((cidNumber) => [
           cidNumber,
+          cidNumber === this.genesis.cid_number ? this.genesisState :
           cidNumber === CID_NUMBER && blockNumber !== undefined
             ? this.states.get(this.stateKey(blockNumber)) ?? null
             : null,

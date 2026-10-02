@@ -383,6 +383,10 @@ class _SquareHomePageState extends State<SquareHomePage> {
                           final error = snapshot.error;
                           if (error is SquareApiException &&
                               error.errorCode == 'cid_not_bound') {
+                            // 当前本地身份已存在时，服务端缺项只能显示同步状态。
+                            if (_identityCidNumber?.isNotEmpty == true) {
+                              return const Center(child: Text('身份同步中，请稍后重试'));
+                            }
                             return IdentityRegisterGuide(
                               description: '注册后即可浏览广场、发布内容。',
                               onRegistered: _onRegisteredFromGuide,

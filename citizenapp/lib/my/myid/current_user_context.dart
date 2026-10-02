@@ -29,9 +29,9 @@ interface class CurrentUserContext {
     required CitizenSdkWallet wallet,
     required AccountSecurityService accountSecurity,
     CurrentUserBindingReader? bindingReader,
-  })  : _wallet = wallet,
-        _accountSecurity = accountSecurity,
-        _bindingReader = bindingReader;
+  }) : _wallet = wallet,
+       _accountSecurity = accountSecurity,
+       _bindingReader = bindingReader;
 
   final CitizenSdkWallet _wallet;
   final AccountSecurityService _accountSecurity;
@@ -65,15 +65,20 @@ interface class CurrentUserContext {
   Future<CurrentUser?> _resolveFresh(int revision, int generation) async {
     final account = (await _wallet.getState().result).defaultAccount;
     if (account == null) return null;
-    final binding = await (_bindingReader?.call(account.accountId) ??
-        _accountSecurity.readAccountDataBindingForAccountId(account.accountId));
+    final binding =
+        await (_bindingReader?.call(account.accountId) ??
+            _accountSecurity.readAccountDataBindingForAccountId(
+              account.accountId,
+            ));
     final current = CurrentUser(account: account, binding: binding);
     if (_generation == generation &&
         _accountSecurity.revision.value == revision) {
       _cached = current;
       _cachedRevision = revision;
+      return current;
     }
-    return current;
+    // 迟到快照不能展示或授权；这是重试异常，不能把已有钱包误判为未注册。
+    throw const AccountSecurityException('当前用户已变化，请重试');
   }
 
   void invalidate() {

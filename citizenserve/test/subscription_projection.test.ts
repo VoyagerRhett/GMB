@@ -13,7 +13,7 @@ import { bytesToHex, concatBytes, hexToBytes, scaleCompact, u64Le } from '../src
 import type { Env, SubscriptionProjectionCursorRow } from '../src/types';
 import { createTestMiniflare } from './miniflare';
 
-const SUBSCRIBER_CID = 'CN220-CTZN2-198805200-2026';
+const SUBSCRIBER_CID = 'CN220-CTZN2-198805202-2026';
 const CREATOR_CID = 'CN220-CTZN2-198805201-2026';
 const ACCOUNT = `0x${'11'.repeat(32)}`;
 const SCHEMA_SQL = readFileSync(resolve(process.cwd(), 'schema/citizenserve.sql'), 'utf8');

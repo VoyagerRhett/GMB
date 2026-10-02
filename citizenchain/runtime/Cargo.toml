@@ -34,6 +34,8 @@ frame-try-runtime = { optional = true, workspace = true }
 pallet-assets = { workspace = true }
 pallet-balances = { workspace = true }
 pallet-grandpa = { workspace = true }
+# 与工作空间固定的SDK提交统一，本步接入编译依赖。
+pallet-revive = { workspace = true }
 pallet-timestamp = { workspace = true }
 pallet-transaction-payment = { workspace = true }
 
@@ -110,6 +112,7 @@ std = [
 	"pallet-assets/std",
 	"pallet-balances/std",
 	"pallet-grandpa/std",
+	"pallet-revive/std",
 	"provincialbank-interest/std",
 	"fullnode-issuance/std",
 	"citizen-issuance/std",
@@ -209,6 +212,7 @@ try-runtime = [
 	"pallet-assets/try-runtime",
 	"pallet-balances/try-runtime",
 	"pallet-grandpa/try-runtime",
+	"pallet-revive/try-runtime",
 	"pallet-timestamp/try-runtime",
 	"pallet-transaction-payment/try-runtime",
 	"provincialbank-interest/try-runtime",

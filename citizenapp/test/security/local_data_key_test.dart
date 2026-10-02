@@ -47,6 +47,8 @@ final class _DerivingWallet implements CitizenSdkWallet, CitizenSdkWalletBatch {
 
   final Uint8List _secret;
   int batchCalls = 0;
+  Future<void> Function()? duringBatch;
+  Object? batchError;
   CitizenWalletState? state;
 
   @override
@@ -72,6 +74,8 @@ final class _DerivingWallet implements CitizenSdkWallet, CitizenSdkWalletBatch {
     required List<Uint8List> infos,
   }) => testCitizenOperation(() async {
     batchCalls++;
+    await duringBatch?.call();
+    if (batchError != null) throw batchError!;
     return infos
         .map(
           (info) => Uint8List.fromList(
@@ -87,6 +91,27 @@ final class _DerivingWallet implements CitizenSdkWallet, CitizenSdkWalletBatch {
 
 final class _MemoryDeviceVault extends DeviceDataKeyVault {
   int sealCalls = 0;
+  bool available = true;
+  int? failSealAt;
+  Object? openError;
+  final Map<String, Uint8List> values = {};
+  @override
+  Future<bool> contains(int walletIndex) async => available;
+  @override
+  Future<Uint8List> open({
+    required int walletIndex,
+    required String blob,
+    required Uint8List aad,
+  }) async {
+    if (openError != null) throw openError!;
+    if (!available) {
+      throw const DeviceDataKeyVaultException(
+        '测试硬件钥失效',
+        code: 'keyPermanentlyInvalidated',
+      );
+    }
+    return Uint8List.fromList(values[blob]!);
+  }
 
   @override
   Future<String> seal({
@@ -97,7 +122,13 @@ final class _MemoryDeviceVault extends DeviceDataKeyVault {
     expect(plaintext, hasLength(32));
     expect(aad, isNotEmpty);
     sealCalls++;
-    return 'test-sealed-$sealCalls';
+    if (sealCalls == failSealAt) {
+      throw const DeviceDataKeyVaultException('测试封装失败');
+    }
+    available = true;
+    final blob = 'test-sealed-$sealCalls';
+    values[blob] = Uint8List.fromList(plaintext);
+    return blob;
   }
 }
 
@@ -456,7 +487,7 @@ void main() {
   });
 
   group('当前钱包账户用途子钥', () {
-    test('首次准备全部缺失用途只请求一次批量认证，重复准备静默复用密文', () async {
+    test('缺失与失效用途钥自动恢复，并发恢复只请求一次认证', () async {
       final wallet = _DerivingWallet(firstSecret);
       wallet.state = CitizenWalletState(
         revision: BigInt.one,
@@ -477,7 +508,7 @@ void main() {
         cleanupPending: false,
       );
       final store = _MemoryStore(), deviceVault = _MemoryDeviceVault();
-      final service = AccountSecurityService(
+      AccountSecurityService makeService() => AccountSecurityService(
         wallet: wallet,
         signing: _CleanupSigning(),
         blobStore: store,
@@ -500,21 +531,166 @@ void main() {
           required requests,
         }) async => throw StateError('不应冷派生'),
       );
+      final service = makeService();
       try {
-        // 聊天和通讯录读取缺钥只报告需要显式授权；查看本身不得触发派生。
+        Future<void> activate() => service.activateAccountDataBinding(
+          genesisHash: firstBinding.genesisHash,
+          cidNumber: firstBinding.cidNumber,
+          bindingRevision: firstBinding.bindingRevision,
+          accountId: firstBinding.accountId,
+        );
+        await activate();
+        final unchangedRevision = service.revision.value;
+        // 模拟本人认证期间其它页面登录完成；同绑定激活不能取消本次恢复并再次认证。
+        wallet.duringBatch = activate;
+        final original = await service.readDataKeysForBinding(
+          firstBinding,
+          const <DataKeyRequest>[
+            (purpose: LocalKeyPurpose.chat, context: null),
+          ],
+        );
+        expect(original.single, hasLength(32));
+        expect(service.revision.value, unchangedRevision);
+        wallet.duringBatch = null;
+        final ordinaryReads = await service.readDataKeysForBinding(
+          firstBinding,
+          const <DataKeyRequest>[
+            (purpose: LocalKeyPurpose.contactsLocal, context: null),
+            (purpose: LocalKeyPurpose.contactsCloud, context: 'encryption'),
+            (purpose: LocalKeyPurpose.contactsCloud, context: 'index'),
+            (purpose: LocalKeyPurpose.chatIndex, context: null),
+            (purpose: LocalKeyPurpose.mls, context: null),
+            (purpose: LocalKeyPurpose.attachment, context: null),
+          ],
+        );
+        for (final key in ordinaryReads) {
+          key.fillRange(0, key.length, 0);
+        }
+        expect(wallet.batchCalls, 1);
+        await service.ensureDeviceDataKeysForBinding(firstBinding);
+        expect(wallet.batchCalls, 1);
+        expect(deviceVault.sealCalls, 7);
+        await service.ensureDeviceDataKeysForBinding(firstBinding);
+        expect(wallet.batchCalls, 1);
+        expect(deviceVault.sealCalls, 7);
+        deviceVault.available = false;
+        final recovered = await Future.wait(
+          List.generate(
+            3,
+            (_) => service.readDataKeysForBinding(
+              firstBinding,
+              const <DataKeyRequest>[
+                (purpose: LocalKeyPurpose.chat, context: null),
+              ],
+            ),
+          ),
+        );
+        expect(wallet.batchCalls, 2);
+        expect(deviceVault.sealCalls, 14);
+        for (final keys in recovered) {
+          expect(keys.single, original.single);
+          keys.single.fillRange(0, keys.single.length, 0);
+        }
+        final retained = Map<String, String>.from(store.entries);
+        deviceVault.openError = const DeviceDataKeyVaultException('测试临时读取失败');
         await expectLater(
-          service.readDataKeysForBinding(firstBinding, const <DataKeyRequest>[
+          service.readDataKeysForBinding(firstBinding, const [
             (purpose: LocalKeyPurpose.chat, context: null),
           ]),
-          throwsA(isA<AccountSecurityException>()),
+          throwsA(isA<DeviceDataKeyVaultException>()),
         );
-        expect(wallet.batchCalls, 0);
-        await service.ensureDeviceDataKeysForBinding(firstBinding);
-        expect(wallet.batchCalls, 1);
-        expect(deviceVault.sealCalls, 7);
-        await service.ensureDeviceDataKeysForBinding(firstBinding);
-        expect(wallet.batchCalls, 1);
-        expect(deviceVault.sealCalls, 7);
+        expect(wallet.batchCalls, 2);
+        expect(
+          Map<String, String>.fromEntries(
+            store.entries.entries.where(
+              (entry) =>
+                  !entry.key.startsWith('device_data_key_recovery_pending_'),
+            ),
+          ),
+          retained,
+        );
+        deviceVault.openError = null;
+        deviceVault.available = false;
+        wallet.batchError = const CitizenSdkException(
+          code: CitizenSdkErrorCode.authenticationCancelled,
+          message: '测试取消授权',
+        );
+        await expectLater(
+          service.readDataKeysForBinding(firstBinding, const [
+            (purpose: LocalKeyPurpose.chat, context: null),
+          ]),
+          throwsA(isA<AccountDataKeyException>()),
+        );
+        expect(wallet.batchCalls, 3);
+        expect(
+          Map<String, String>.fromEntries(
+            store.entries.entries.where(
+              (entry) =>
+                  !entry.key.startsWith('device_data_key_recovery_pending_'),
+            ),
+          ),
+          retained,
+        );
+        wallet.batchError = null;
+        // 本人取消后其它页面读取相同绑定也共享失败，不重新打开钱包认证。
+        await expectLater(
+          service.readDataKeysForBinding(firstBinding, const [
+            (purpose: LocalKeyPurpose.mls, context: null),
+          ]),
+          throwsA(isA<AccountDataKeyException>()),
+        );
+        expect(wallet.batchCalls, 3);
+        deviceVault.failSealAt = deviceVault.sealCalls + 2;
+        final sealFailureService = makeService();
+        await expectLater(
+          sealFailureService.readDataKeysForBinding(firstBinding, const [
+            (purpose: LocalKeyPurpose.chat, context: null),
+          ]),
+          throwsA(isA<DeviceDataKeyVaultException>()),
+        );
+        expect(wallet.batchCalls, 4);
+        expect(
+          Map<String, String>.fromEntries(
+            store.entries.entries.where(
+              (entry) =>
+                  !entry.key.startsWith('device_data_key_recovery_pending_'),
+            ),
+          ),
+          retained,
+        );
+        expect(
+          store.entries.keys.where(
+            (key) => key.startsWith('device_data_key_recovery_pending_'),
+          ),
+          hasLength(1),
+        );
+        deviceVault.failSealAt = null;
+        await expectLater(
+          sealFailureService.readDataKeysForBinding(firstBinding, const [
+            (purpose: LocalKeyPurpose.contactsLocal, context: null),
+          ]),
+          throwsA(isA<DeviceDataKeyVaultException>()),
+        );
+        expect(wallet.batchCalls, 4);
+        sealFailureService.dispose();
+        // 此时硬件已存在但旧密文仍不可读；持久恢复状态驱动下一次完整恢复。
+        expect(deviceVault.available, isTrue);
+        final restartedService = makeService();
+        final retry = await restartedService.readDataKeysForBinding(
+          firstBinding,
+          const [(purpose: LocalKeyPurpose.chat, context: null)],
+        );
+        restartedService.dispose();
+        expect(retry.single, original.single);
+        expect(wallet.batchCalls, 5);
+        expect(
+          store.entries.keys.where(
+            (key) => key.startsWith('device_data_key_recovery_pending_'),
+          ),
+          isEmpty,
+        );
+        retry.single.fillRange(0, retry.single.length, 0);
+        original.single.fillRange(0, original.single.length, 0);
       } finally {
         service.dispose();
       }

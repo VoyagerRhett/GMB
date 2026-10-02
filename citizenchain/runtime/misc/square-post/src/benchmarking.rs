@@ -13,6 +13,8 @@ use crate::{
 };
 use frame_benchmarking::v2::*;
 use frame_system::RawOrigin;
+// 基准也用于 no_std WASM，沿用本模块的 sp_std 显式导入 Vec 与 vec! 宏。
+use sp_std::{vec, vec::Vec};
 
 #[benchmarks]
 mod benchmarks {

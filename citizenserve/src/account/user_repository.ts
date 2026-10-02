@@ -64,6 +64,7 @@ export async function readUserByAccountId(
   env: Env,
   accountId: string,
 ): Promise<UserRow | null> {
+  // 创世基线未经投影核验前不得作为登录身份返回；普通用户继续采用既有事件投影。
   const account = assertAccountId(accountId);
   return env.DB.prepare(
     `SELECT cid_number, account_id, binding_revision, identity_level,
@@ -72,7 +73,11 @@ export async function readUserByAccountId(
             identity_finalized_block_number, identity_finalized_block_hash,
             registered_at, binding_updated_at, identity_updated_at
        FROM users
-      WHERE account_id = ?`,
+      WHERE account_id = ?
+        AND (registration_finalized_block_number <> 0 OR (
+          identity_finalized_block_number > 0 AND identity_finalized_block_number >= (
+            SELECT finalized_block_number FROM user_projection_cursor WHERE cursor_id = 1
+          )))`,
   ).bind(account).first<UserRow>();
 }
 

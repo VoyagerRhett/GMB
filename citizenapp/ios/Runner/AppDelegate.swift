@@ -20,9 +20,6 @@ import UserNotifications
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    // Chat 数据、MLS 状态和附件只允许留在设备。启动时先建立独立目录并写入
-    // NSURLIsExcludedFromBackupKey，避免 iCloud Backup 把端到端内容复制到云端。
-    try? excludeChatDataFromBackup()
     let result = super.application(application, didFinishLaunchingWithOptions: launchOptions)
 
     NotificationCenter.default.addObserver(
@@ -41,43 +38,7 @@ import UserNotifications
     return result
   }
 
-  /// 把 Chat 文件域和独立 Isar 文件排除出 iCloud Backup。
-  ///
-  /// 只匹配固定 `Documents/chat` 与 `tatachat_sdk_chat*`，不接受 Flutter 传入路径，
-  /// 避免业务层借该通道改变其它目录的备份属性。
-  private func excludeChatDataFromBackup() throws {
-    guard let documents = FileManager.default.urls(
-      for: .documentDirectory,
-      in: .userDomainMask
-    ).first else {
-      throw CocoaError(.fileNoSuchFile)
-    }
-    var chatDirectory = documents.appendingPathComponent("chat", isDirectory: true)
-    try FileManager.default.createDirectory(
-      at: chatDirectory,
-      withIntermediateDirectories: true
-    )
-    var values = URLResourceValues()
-    values.isExcludedFromBackup = true
-    try chatDirectory.setResourceValues(values)
 
-    guard let applicationSupport = FileManager.default.urls(
-      for: .applicationSupportDirectory,
-      in: .userDomainMask
-    ).first else {
-      throw CocoaError(.fileNoSuchFile)
-    }
-    let files = try FileManager.default.contentsOfDirectory(
-      at: applicationSupport,
-      includingPropertiesForKeys: nil
-    )
-    for file in files where file.lastPathComponent.hasPrefix("tatachat_sdk_chat") {
-      var fileValues = URLResourceValues()
-      fileValues.isExcludedFromBackup = true
-      var mutableFile = file
-      try mutableFile.setResourceValues(fileValues)
-    }
-  }
 
   /// 非 Scene 生命周期下接收钱包回跳。WalletConnect 的响应继续走 Relay，本 URL 只负责
   /// 把仍持有 WebView provider 会话的 CitizenApp 拉回前台，不能再推一张 Flutter 路由。
@@ -127,20 +88,6 @@ import UserNotifications
         result(nil)
       case "isDeviceRooted":
         result(AppDelegate.checkJailbreak())
-      case "excludeChatDataFromBackup":
-        do {
-          try self?.excludeChatDataFromBackup()
-          result(nil)
-        } catch {
-          // 不回传文件路径或底层错误；Dart 侧按失败关闭处理 Chat 数据库。
-          result(
-            FlutterError(
-              code: "CHAT_BACKUP_EXCLUSION_FAILED",
-              message: "无法保护本机聊天数据",
-              details: nil
-            )
-          )
-        }
       default:
         result(FlutterMethodNotImplemented)
       }

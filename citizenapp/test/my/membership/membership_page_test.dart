@@ -15,6 +15,8 @@ import 'package:citizenapp/my/membership/membership_page.dart';
 import 'package:citizenapp/my/membership/membership_revision.dart';
 import 'package:citizenapp/my/membership/subscription_service.dart';
 import 'package:citizenapp/my/myid/citizen_identity_chain_reader.dart';
+import 'package:citizenapp/my/myid/current_user_context.dart';
+import 'package:citizenapp/security/local_data_key.dart';
 import 'package:citizenapp/my/myid/finalized_identity_resolver.dart';
 import 'package:citizenapp/ui/app_theme.dart';
 import 'package:citizenapp/ui/identity_badge.dart';
@@ -267,6 +269,7 @@ Future<void> _pump(
   SubscriptionService? service,
   SquareSessionProvider? sessionProvider,
   SquareChainService? chainService,
+  CurrentUserContext? currentUserContext,
 }) async {
   final effectiveService = service ?? _RecordingSubscriptionService();
   if (effectiveService is _RecordingSubscriptionService) {
@@ -279,6 +282,7 @@ Future<void> _pump(
         sessionProvider: sessionProvider ?? _FakeSessionProvider(),
         subscriptionService: effectiveService,
         identityResolver: _RegisteredFinalizedIdentity(),
+        currentUserContext: currentUserContext,
       ),
     ),
   );
@@ -294,6 +298,29 @@ Finder _frontButton(String label) => find.descendant(
   of: find.byKey(const ValueKey('membership-front-card')),
   matching: find.widgetWithText(FilledButton, label),
 );
+
+class _CachedCurrentUser implements CurrentUserContext {
+  @override
+  Future<CurrentUser?> resolve() async => CurrentUser(
+    account: _identityAccount,
+    binding: const AccountDataBinding(
+      genesisHash:
+          '0x1111111111111111111111111111111111111111111111111111111111111111',
+      cidNumber: 'CN220-CTZN2-198805200-2026',
+      accountId: _identityAccountId,
+      bindingRevision: 1,
+    ),
+  );
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _UnavailableCurrentUser implements CurrentUserContext {
+  @override
+  Future<CurrentUser?> resolve() async => throw StateError('测试当前账户不可用');
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
 
 class _RegisteredFinalizedIdentity implements FinalizedIdentityResolver {
   @override
@@ -314,13 +341,15 @@ class _RegisteredFinalizedIdentity implements FinalizedIdentityResolver {
 
 class _FakeWallet implements CitizenSdkWallet {
   @override
-  CitizenSdkOperation<CitizenWalletState> getState() => testCitizenOperation(() async => CitizenWalletState(
-    initializationState: CitizenWalletInitializationState.ready,
-    cleanupPending: false,
-    revision: BigInt.one,
-    hotProfile: null,
-    accounts: [_identityAccount],
-  ));
+  CitizenSdkOperation<CitizenWalletState> getState() => testCitizenOperation(
+    () async => CitizenWalletState(
+      initializationState: CitizenWalletInitializationState.ready,
+      cleanupPending: false,
+      revision: BigInt.one,
+      hotProfile: null,
+      accounts: [_identityAccount],
+    ),
+  );
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -541,6 +570,56 @@ void main() {
     pendingSession.complete(null);
     await tester.pumpAndSettle();
     expect(find.text('请先添加钱包账户'), findsNWidgets(4));
+  });
+
+  testWidgets('已有本地会员时会话未绑定仍显示会员和同步说明，不授权订阅', (tester) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final service = _RecordingSubscriptionService()
+      ..cachedSnapshot = MembershipDisplaySnapshot(
+        state: _state(
+          active: true,
+          subscriptionActive: true,
+          membershipLevel: 'democracy',
+        ),
+        prices: const {'democracy': 99900},
+        subscriptionFetchedAtMs: now,
+        pricesFetchedAtMs: now,
+      );
+    await _pump(
+      tester,
+      _state(),
+      service: service,
+      sessionProvider: _CidNotBoundSessionProvider(),
+      currentUserContext: _CachedCurrentUser(),
+    );
+    expect(find.text('当前会员'), findsOneWidget);
+    expect(find.text('当前钱包身份尚未同步或绑定，请稍后重试'), findsOneWidget);
+    expect(service.authorizationCount, 0);
+    expect(find.text('注册用户'), findsNothing);
+  });
+
+  testWidgets('当前账户无法读取时不把旧会员缓存当作当前账户展示', (tester) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final service = _RecordingSubscriptionService()
+      ..cachedSnapshot = MembershipDisplaySnapshot(
+        state: _state(
+          active: true,
+          subscriptionActive: true,
+          membershipLevel: 'democracy',
+        ),
+        prices: const {'democracy': 99900},
+        subscriptionFetchedAtMs: now,
+        pricesFetchedAtMs: now,
+      );
+    await _pump(
+      tester,
+      _state(),
+      service: service,
+      currentUserContext: _UnavailableCurrentUser(),
+    );
+    expect(find.text('当前会员'), findsNothing);
+    expect(find.text('会员数据加载失败，请点右上刷新重试'), findsOneWidget);
+    expect(service.authorizationCount, 0);
   });
 
   testWidgets('有效缓存直接展示且身份会话只鉴权一次并且不重复读取价格', (tester) async {

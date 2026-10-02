@@ -321,7 +321,7 @@ void main() {
     await tester.pumpWidget(_page(FakeProfileApi(sampleProfile())));
     await tester.pumpAndSettle();
 
-    expect(find.text('还没有公文'), findsOneWidget);
+    expect(find.text('暂无公文内容，请在广场发布'), findsOneWidget);
   });
 
   testWidgets('本人主页只读本地正文，缺失媒体不推断云端删除', (tester) async {
@@ -342,7 +342,7 @@ void main() {
 
     expect(find.text('本机保留的正文'), findsOneWidget);
     expect(find.text('本地尚未保存媒体'), findsOneWidget);
-    expect(find.text('加载失败，下拉重试'), findsNothing);
+    expect(find.text('内容加载失败，请下拉刷新'), findsNothing);
   });
 
   testWidgets('本人主页无法建立会话时仍从 CID 本地副本展示正文', (tester) async {
@@ -364,7 +364,7 @@ void main() {
     expect(api.localPostCalls, 1);
     expect(find.text('本机保留的正文'), findsOneWidget);
     expect(find.text('本地尚未保存媒体'), findsOneWidget);
-    expect(find.text('加载失败，下拉重试'), findsNothing);
+    expect(find.text('内容加载失败，请下拉刷新'), findsNothing);
     expect(find.byType(CircularProgressIndicator), findsNothing);
   });
 
@@ -381,8 +381,8 @@ void main() {
     expect(api.localPostCalls, 0);
     expect(api.authorPostCalls, 0);
     expect(find.text('本机保留的正文'), findsNothing);
-    expect(find.text('加载失败，下拉重试'), findsNothing);
-    expect(find.text('请先添加钱包账户'), findsOneWidget);
+    expect(find.text('内容加载失败，请下拉刷新'), findsOneWidget);
+    expect(find.text('请先添加钱包账户'), findsNothing);
     expect(find.text('需要钱包账户才能浏览主页'), findsNothing);
   });
 
@@ -399,7 +399,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('当前钱包身份尚未同步或绑定，请稍后重试'), findsOneWidget);
+    expect(find.text('内容加载失败，请下拉刷新'), findsOneWidget);
     expect(find.text('请先添加钱包账户'), findsNothing);
     expect(find.text('需要钱包账户才能浏览主页'), findsNothing);
   });
@@ -417,7 +417,7 @@ void main() {
 
     expect(provider.calls, 1);
     expect(api.authorPostCalls, 0);
-    expect(find.text('加载失败，下拉重试'), findsNothing);
+    expect(find.text('内容加载失败，请下拉刷新'), findsNothing);
 
     provider.completer.complete(fakeSession());
     await tester.pumpAndSettle();
@@ -441,7 +441,7 @@ void main() {
     expect(api.authorPostCalls, 2);
     expect(api.authorPostSessions.last?.sessionToken, 'fresh-token');
     expect(find.text('刷新会话后出现'), findsOneWidget);
-    expect(find.text('加载失败，下拉重试'), findsNothing);
+    expect(find.text('内容加载失败，请下拉刷新'), findsNothing);
   });
 
   testWidgets('本人页面普通进入不调用Worker覆盖本地展示', (tester) async {
@@ -464,12 +464,11 @@ void main() {
       final api = FakeProfileApi(sampleProfile());
       await tester.pumpWidget(_page(api, isSelf: isSelf));
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey<String>('profile-tab-videos')));
-      await tester.pumpAndSettle();
-      expect(
-        find.text(isSelf ? '本地尚未保存此类内容，下拉刷新' : '还没有视频'),
-        findsOneWidget,
+      await tester.tap(
+        find.byKey(const ValueKey<String>('profile-tab-videos')),
       );
+      await tester.pumpAndSettle();
+      expect(find.text('暂无视频内容，请在广场发布'), findsOneWidget);
       if (isSelf) expect(api.authorPostCalls, 0);
     });
   }

@@ -26,14 +26,13 @@ class ProfilePostsTab extends StatefulWidget {
     required this.emptyLabel,
     required this.session,
     required this.sessionReady,
-    this.sessionUnavailableMessage,
     required this.isSelf,
     this.onSessionExpired,
     this.category,
     this.postType,
     this.mediaKind,
     this.onOpenPost,
-    this.onRefresh,
+    this.refreshFailed = false,
   });
 
   /// 作者身份主键 cid_number（按 cid 分页拉该身份的帖子）。
@@ -51,13 +50,12 @@ class ProfilePostsTab extends StatefulWidget {
   /// true + null 表示本次确实没有可用钱包会话。
   final bool sessionReady;
 
-  /// 上层解析出的真实失败原因；为空只用于极短的未决窗口，不推断本地钱包事实。
-  final String? sessionUnavailableMessage;
-
   /// Worker 明确返回 401 时由上层清理缓存并重新握手；每个请求最多调用一次。
   final Future<SquareSession?> Function()? onSessionExpired;
   final bool isSelf;
-  final Future<void> Function()? onRefresh;
+
+  /// 页面远端刷新失败不伪装成正常空列表。
+  final bool refreshFailed;
   final SquarePostCategory? category;
   final SquarePostType? postType;
   final SquareMediaKind? mediaKind;
@@ -160,7 +158,7 @@ class _ProfilePostsTabState extends State<ProfilePostsTab> {
           setState(() => _failedFirst = true);
           if (_posts.isNotEmpty) {
             ScaffoldMessenger.of(context)
-                .showSnackBar(const SnackBar(content: Text('本地读取失败，已保留当前内容')));
+                .showSnackBar(const SnackBar(content: Text('内容加载失败，请下拉刷新')));
           }
         }
       }
@@ -316,38 +314,28 @@ class _ProfilePostsTabState extends State<ProfilePostsTab> {
 
   @override
   Widget build(BuildContext context) {
-    return RefreshIndicator(
-      onRefresh: () async {
-        if (widget.onRefresh != null) {
-          // 上层提交后通过revision重建内容，避免同一次下拉再读一轮。
-          await widget.onRefresh!();
-        } else if (mounted) {
-          await _loadFirst();
-        }
-      },
-      child: NotificationListener<ScrollNotification>(
-        onNotification: _onScroll,
-        child: CustomScrollView(
-          key: PageStorageKey<String>(
-            '${widget.category?.name ?? 'all'}:'
-            '${widget.postType?.name ?? 'all'}:'
-            '${widget.mediaKind?.name ?? 'posts'}',
-          ),
-          physics: const AlwaysScrollableScrollPhysics(),
-          slivers: [
-            SliverOverlapInjector(
-              handle: NestedScrollView.sliverOverlapAbsorberHandleFor(context),
-            ),
-            if (_loading)
-              SliverToBoxAdapter(
-                child: LinearProgressIndicator(
-                  key: const ValueKey('profile-posts-load-progress'),
-                  minHeight: AppLayout.scaled(context, 2),
-                ),
-              ),
-            ..._contentSlivers(),
-          ],
+    return NotificationListener<ScrollNotification>(
+      onNotification: _onScroll,
+      child: CustomScrollView(
+        key: PageStorageKey<String>(
+          '${widget.category?.name ?? 'all'}:'
+          '${widget.postType?.name ?? 'all'}:'
+          '${widget.mediaKind?.name ?? 'posts'}',
         ),
+        physics: const AlwaysScrollableScrollPhysics(),
+        slivers: [
+          SliverOverlapInjector(
+            handle: NestedScrollView.sliverOverlapAbsorberHandleFor(context),
+          ),
+          if (_loading)
+            SliverToBoxAdapter(
+              child: LinearProgressIndicator(
+                key: const ValueKey('profile-posts-load-progress'),
+                minHeight: AppLayout.scaled(context, 2),
+              ),
+            ),
+          ..._contentSlivers(),
+        ],
       ),
     );
   }
@@ -356,17 +344,17 @@ class _ProfilePostsTabState extends State<ProfilePostsTab> {
     if (_loading && _posts.isEmpty) {
       return [_message('正在读取内容')];
     }
-    if (_failedFirst && _posts.isEmpty) {
-      return [_message('加载失败，下拉重试')];
+    if ((_failedFirst || widget.refreshFailed) && _posts.isEmpty) {
+      return [_message('内容加载失败，请下拉刷新')];
     }
     if (_sessionUnavailable && _posts.isEmpty) {
-      return [_message(widget.sessionUnavailableMessage ?? '公民服务暂时不可用，请稍后重试')];
+      return [_message('内容加载失败，请下拉刷新')];
     }
     if (widget.mediaKind != null) {
       return _mediaSlivers();
     }
     if (_posts.isEmpty) {
-      return [_message(widget.isSelf ? '本地尚未保存此类内容，下拉刷新' : widget.emptyLabel)];
+      return [_message(widget.emptyLabel)];
     }
     return [
       SliverPadding(
@@ -431,9 +419,7 @@ class _ProfilePostsTabState extends State<ProfilePostsTab> {
     }
     if (entries.isEmpty) {
       // 本人列表只读本地副本，缺少视频不能推断远端没有视频。
-      return [
-        _message(widget.isSelf ? '本地尚未保存此类内容，下拉刷新' : widget.emptyLabel),
-      ];
+      return [_message(widget.emptyLabel)];
     }
     return [
       SliverPadding(

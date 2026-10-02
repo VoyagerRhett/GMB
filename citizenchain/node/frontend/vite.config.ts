@@ -1,11 +1,11 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type UserConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const host = process.env.TAURI_DEV_HOST;
 
-export default defineConfig(() => {
+export default defineConfig((): UserConfig => {
   return {
   plugins: [react()],
   build: {
